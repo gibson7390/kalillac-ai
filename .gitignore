@@ -1,0 +1,73 @@
+﻿# =========================
+# Kalillac AI
+# Repository safety rules
+# =========================
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend generated files
+node_modules/
+dist/
+build/
+.vite/
+.cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating system junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Local databases / dumps
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+
+# Server backups / historical working copies
+*.bak
+*.bak-*
+*.pre-*
+*.orig
+*.tmp
+*~
+backups/
+
+# Credentials / private runtime material
+credentials/
+secrets/
+
+# Temporary files
+tmp/
+temp/
