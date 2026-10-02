@@ -6,8 +6,8 @@ from kalillac_db.config import DatabaseConfig
 
 
 def test_lazy_engine_is_published_atomically(monkeypatch):
-    db_engine._ENGINE = None
-    db_engine._SESSION_FACTORY = None
+    monkeypatch.setattr(db_engine, "_ENGINE", None)
+    monkeypatch.setattr(db_engine, "_SESSION_FACTORY", None)
 
     config = DatabaseConfig(
         host="127.0.0.1",
