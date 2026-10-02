@@ -17,6 +17,9 @@ from kalillac_routing.runtime_facts import (
     RuntimeConfig,
     build_runtime_facts,
 )
+from kalillac_routing.source_policy import (
+    get_authoritative_search_domains,
+)
 from kalillac_routing.tool_contract import OPENAI_TOOLS
 
 MAX_MEMORY = 50
@@ -8636,8 +8639,20 @@ def _run_v31_native_tool_chat(
 
         query = call.arguments["query"]
 
-        domains = get_search_domain_filters(
+        # A user-specified public domain always takes precedence.
+        # Otherwise, apply the narrow first-party source policy after
+        # Luna has already decided that search is needed.
+        explicit_domains = get_search_domain_filters(
             message
+        )
+
+        domains = (
+            explicit_domains
+            if explicit_domains
+            else get_authoritative_search_domains(
+                message,
+                query,
+            )
         )
 
         status, results = run_web_search(
