@@ -1648,6 +1648,70 @@ KALILLAC_SELF_KNOWLEDGE = {
         ),
     ],
 
+    # Planned product direction. Nothing in this section exists today unless
+    # it says so; no launch dates, prices, or plan names are established.
+    "product_roadmap": [
+        (
+            "Private Session is Kalillac's current mode and remains the "
+            "default: ephemeral, no account required, temporary server-side "
+            "RAM session state, no persistent user-facing chat history."
+        ),
+        (
+            "PLANNED, NOT LAUNCHED: Kalillac plans an optional Saved Mode "
+            "for users who deliberately choose to keep persistent chats. "
+            "Saved Mode does not exist today, and no launch date is "
+            "established."
+        ),
+        (
+            "Private Session is intended to remain ephemeral and available "
+            "after Saved Mode arrives; Saved Mode is an opt-in alternative, "
+            "not a replacement."
+        ),
+        (
+            "A Kalillac account provides identity, billing, entitlements, "
+            "and future ownership of saved chats."
+        ),
+        (
+            "Having an account does NOT automatically make conversations "
+            "persistent. A signed-in or paying user may still use Private "
+            "Session."
+        ),
+        (
+            "Saved Mode (keeping chosen chats) is separate from persistent "
+            "cross-chat memory. Persistent memory is not part of Saved "
+            "Mode; if it is ever added, it would be a separate opt-in "
+            "capability."
+        ),
+    ],
+
+    "commercial_direction": [
+        (
+            "Kalillac's established commercial direction is: anonymous free "
+            "access without an account + an optional account-based paid "
+            "tier + business/API plans later."
+        ),
+        (
+            "In that direction the account handles recurring billing, "
+            "entitlement recovery, subscription management, refunds and "
+            "support, and ownership of the paid plan."
+        ),
+        (
+            "Billing identity is separate from chat persistence: paying "
+            "does not turn on Saved Mode or memory."
+        ),
+        (
+            "Private tokens, license keys, anonymous subscription "
+            "credentials, browser-held entitlement tokens, and prepaid-token "
+            "or credit systems are NOT Kalillac's chosen commercial "
+            "architecture. Discuss them only when clearly labeled as "
+            "alternatives, never as Kalillac's plan."
+        ),
+        (
+            "No pricing, plan names, usage limits, or launch dates for paid "
+            "plans, accounts, or business/API plans are established."
+        ),
+    ],
+
     "network": [
         (
             "The browser connects to kalillac.com over public HTTPS through "
@@ -1891,6 +1955,8 @@ def render_kalillac_facts():
         ("MODEL-BACKED PATH - IN ORDER", a["model_path"]),
         ("SESSION STATE", a["session_state"]),
         ("PROVIDERS AND LIMITS", a["providers_and_limits"]),
+        ("PRODUCT ROADMAP - PLANNED, NOT LAUNCHED UNLESS STATED", a["product_roadmap"]),
+        ("COMMERCIAL DIRECTION", a["commercial_direction"]),
         ("NOT ESTABLISHED - DO NOT INFER", a["not_established"]),
     ]
 
@@ -1911,6 +1977,55 @@ def render_kalillac_facts():
     )
 
     return "\n".join(lines)
+
+
+KALILLAC_PRODUCT_ROADMAP_RULES = [
+    "Present Saved Mode, accounts, and paid plans as planned direction, "
+    "never as features that exist today, and never invent a launch date.",
+    "If asked whether temporary/private sessions will change: Private "
+    "Session is intended to stay ephemeral and remain the default, while an "
+    "optional Saved Mode is planned for users who choose persistent chats.",
+    "Keep accounts, Saved Mode, and persistent memory distinct; none "
+    "implies another.",
+    "When discussing how Kalillac makes money, state the established "
+    "commercial direction as Kalillac's plan. Other models may be "
+    "mentioned only when explicitly labeled as alternatives that are not "
+    "Kalillac's chosen architecture.",
+]
+
+
+def render_kalillac_product_roadmap():
+    """Authoritative roadmap/commercial facts plus how to use them."""
+    a = KALILLAC_SELF_KNOWLEDGE
+
+    lines = ["KALILLAC PRODUCT ROADMAP - AUTHORITATIVE:"]
+    lines.extend(f"- {item}" for item in a["product_roadmap"])
+    lines.append("")
+    lines.append("KALILLAC COMMERCIAL DIRECTION - AUTHORITATIVE:")
+    lines.extend(f"- {item}" for item in a["commercial_direction"])
+    lines.append("")
+    lines.append("ROADMAP RULES:")
+    lines.extend(f"- {rule}" for rule in KALILLAC_PRODUCT_ROADMAP_RULES)
+
+    return "\n".join(lines)
+
+
+# Kalillac product topics that need roadmap grounding even when the message
+# does not name Kalillac ("what does temporary session mean?" followed by
+# "is that going to change?").
+KALILLAC_PRODUCT_TOPIC_RE = re.compile(
+    r"\b(?:(?:temporary|private|ephemeral) sessions?|saved (?:mode|chats?)"
+    r"|chat history|persistent (?:chats?|memory|history|conversations?)"
+    r"|monetiz\w*|monetis\w*|monitiz\w*|make money|profitab\w*"
+    r"|paid (?:tier|plan|version|access|entitlements?)|entitlements?"
+    r"|free tier|premium tier)\b"
+)
+
+
+def mentions_kalillac_product_topic(message):
+    return bool(
+        KALILLAC_PRODUCT_TOPIC_RE.search(normalize_for_router(message))
+    )
 
 
 def render_kalillac_code_reference_facts():
@@ -4790,6 +4905,25 @@ def get_recent_conversation_context(history, limit=4):
     return "\n\n".join(turns)
 
 
+# A fence opens and closes only at the start of a line, so ``` inside a
+# string literal (code that handles fenced model output) is not a boundary.
+# An unclosed fence runs to the end of the reply.
+CODE_FENCE_BLOCK_RE = re.compile(
+    r"(^[ \t]*```[^\n]*\n.*?(?:^[ \t]*```[ \t]*$|\Z))",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _map_outside_code_fences(text, transform):
+    """Apply transform only to the parts of text outside fenced code."""
+    parts = CODE_FENCE_BLOCK_RE.split(str(text))
+
+    return "".join(
+        part if index % 2 else transform(part)
+        for index, part in enumerate(parts)
+    )
+
+
 def clean_ai_reply(reply):
     cleaned = str(reply)
     pre_context_cleanup = cleaned
@@ -4820,8 +4954,14 @@ def clean_ai_reply(reply):
         r"\bbased on what you asked\b",
     ]
 
-    for fragment in bad_fragments:
-        cleaned = re.sub(fragment, "", cleaned, flags=re.IGNORECASE)
+    def remove_bad_fragments(text):
+        for fragment in bad_fragments:
+            text = re.sub(fragment, "", text, flags=re.IGNORECASE)
+        return text
+
+    # Prose boilerplate removal must never edit code: in a fenced block,
+    # removing "chunk" turns `for chunk in stream:` into invalid Python.
+    cleaned = _map_outside_code_fences(cleaned, remove_bad_fragments)
 
     # Context/boilerplate cleanup may shorten a response, but it must never
     # erase an otherwise non-empty model answer. If the whole response matched
@@ -4911,6 +5051,18 @@ def unwrap_accidental_prose_fence(reply, route):
 
 def extract_fenced_code(reply):
     text = str(reply).strip()
+
+    # Prefer fences that open and close on their own lines, so ``` inside
+    # the code itself (for example in a string literal) does not cut it off.
+    match = re.search(
+        r"^[ \t]*```(?:html|css|javascript|js|python|py|bash|json|svg"
+        r"|markdown)?[ \t]*\n(.*?)\n[ \t]*```[ \t]*$",
+        text,
+        re.DOTALL | re.IGNORECASE | re.MULTILINE,
+    )
+
+    if match:
+        return match.group(1).strip()
 
     match = re.search(
         r"```(?:html|css|javascript|js|python|bash|json|svg|markdown)?\s*(.*?)```",
@@ -5413,8 +5565,43 @@ def python_code_quality_errors(code):
     return list(dict.fromkeys(errors))
 
 
+# A Kalillac-reference program is illustrative NEW code. It does not have to
+# hardcode Kalillac's model ids: abstracting the provider call or reading ids
+# from configuration is legitimate. What it must never do is state a model id
+# or provider order that contradicts the verified configuration.
+MODEL_ID_CONSTANT_RE = re.compile(
+    r"^(?:openai/|@cf/openai/)?gpt-[a-z0-9][a-z0-9.\-]*$",
+    re.IGNORECASE,
+)
+
+
+def _verified_model_chain():
+    return [
+        OPENAI_MODEL,
+        GROQ_MODEL,
+        CLOUDFLARE_MODEL,
+        FALLBACK_GROQ_MODEL,
+    ]
+
+
+def _first_chain_model_in(node, chain):
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Constant)
+            and isinstance(child.value, str)
+            and child.value in chain
+        ):
+            return child.value
+
+    return None
+
+
 def kalillac_python_fidelity_errors(code):
-    """Validate verified Kalillac facts in Kalillac-reference Python."""
+    """Reject Kalillac-reference Python that contradicts verified facts.
+
+    Absence of a model id is not an error; a wrong, shortened, or
+    out-of-order model id is.
+    """
 
     source = str(code or "").strip()
 
@@ -5428,54 +5615,60 @@ def kalillac_python_fidelity_errors(code):
         return []
 
     errors = []
+    chain = _verified_model_chain()
 
-    primary = "gpt-5.6-luna"
-    groq_fallback = "openai/gpt-oss-120b"
-    final_fallback = "openai/gpt-oss-20b"
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and MODEL_ID_CONSTANT_RE.match(node.value.strip())
+        ):
+            continue
 
-    wrong_groq_fallback = "gpt-oss-120b"
-    wrong_final_fallback = "gpt-oss-20b"
+        model_id = node.value.strip()
 
-    string_constants = [
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-    ]
+        if model_id in chain:
+            continue
 
-    if primary not in string_constants:
-        errors.append(
-            "Verified primary model must appear exactly as "
-            "gpt-5.6-luna."
-        )
+        if model_id in {"gpt-oss-120b", "gpt-oss-20b"}:
+            errors.append(
+                f"Short model id {model_id} is not the verified Kalillac "
+                f"model id; use openai/{model_id}."
+            )
+        else:
+            errors.append(
+                f"Model id {model_id} is not in Kalillac's verified "
+                f"configuration ({' -> '.join(chain)})."
+            )
 
-    if groq_fallback not in string_constants:
-        errors.append(
-            "Verified Groq fallback model must appear exactly as "
-            "openai/gpt-oss-120b."
-        )
+    # Any literal sequence naming two or more chain models must keep the
+    # verified order: OpenAI primary -> Groq -> Cloudflare -> final Groq.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            elements = node.elts
+        elif isinstance(node, ast.Dict):
+            elements = node.values
+        else:
+            continue
 
-    if final_fallback not in string_constants:
-        errors.append(
-            "Verified final Groq fallback model must appear exactly as "
-            "openai/gpt-oss-20b."
-        )
+        named = [
+            model
+            for model in (
+                _first_chain_model_in(element, chain)
+                for element in elements
+            )
+            if model is not None
+        ]
 
-    if wrong_groq_fallback in string_constants:
-        errors.append(
-            "Short Groq fallback model id gpt-oss-120b is not the "
-            "verified Kalillac model id."
-        )
+        positions = [chain.index(model) for model in named]
 
-    if wrong_final_fallback in string_constants:
-        errors.append(
-            "Short final fallback model id gpt-oss-20b is not the "
-            "verified Kalillac model id."
-        )
+        if len(positions) >= 2 and positions != sorted(positions):
+            errors.append(
+                "Provider chain order contradicts the verified order: "
+                + " -> ".join(chain)
+                + "."
+            )
 
-    # The current verified provider chain is:
-    # OpenAI GPT-5.6 Luna -> Groq GPT-OSS-120B ->
-    # Cloudflare Workers AI GPT-OSS-120B -> Groq GPT-OSS-20B.
     # Provider-specific exception mechanics are implementation details and
     # must not be rewritten into the obsolete RateLimitError-only design.
 
@@ -7807,6 +8000,29 @@ def build_messages(message, history, route, memory):
         else ""
     )
 
+    product_topic_active = (
+        mentions_kalillac_product_topic(message)
+        or any(
+            mentions_kalillac_product_topic(user_message)
+            for user_message in recent_user_messages
+        )
+    )
+
+    if self_topic_active:
+        # The facts block already carries the roadmap and commercial
+        # sections; add the rules for using them.
+        kalillac_facts_block += "ROADMAP RULES:\n" + "".join(
+            f"- {rule}\n" for rule in KALILLAC_PRODUCT_ROADMAP_RULES
+        )
+    elif product_topic_active:
+        kalillac_facts_block = (
+            "\n\n"
+            + render_kalillac_product_roadmap()
+            + "\n- Use this block only when the current question concerns "
+              "Kalillac's sessions, accounts, saved chats, memory, pricing, "
+              "or business model.\n"
+        )
+
     log(f"[Router] route={route!r} | message={str(message)[:80]!r}")
 
     if route == "debug":
@@ -7946,6 +8162,9 @@ CONTEXT RESOLUTION RULES:
 - Do not let conversation context override authoritative Kalillac facts when the user really is asking about Kalillac.
 
 {render_kalillac_facts()}
+
+ROADMAP RULES:
+{chr(10).join(f"- {rule}" for rule in KALILLAC_PRODUCT_ROADMAP_RULES)}
 
 RULES:
 - Treat the established facts above as authoritative for current Kalillac AI.
@@ -8289,6 +8508,7 @@ REFERENCE RULES:
 - Never use eval() or exec() for arithmetic, expression parsing, or request handling; use explicit parsing/allowlisted operations.
 - Temporary server-side session state must be bounded with explicit capacity/eviction, never an unbounded global dictionary. Do not call Kalillac's temporary state a cache or claim refresh/tab/browser/session end erases it.
 - Use only response fields needed by the NEW implementation; do not imply Kalillac uses that schema.
+- Model ids are optional in the code: abstracting the provider call or reading ids from configuration is fine. Any model id the code does name must be exactly one of {OPENAI_MODEL}, {GROQ_MODEL}, {CLOUDFLARE_MODEL}, {FALLBACK_GROQ_MODEL}, and any fallback sequence must keep that order.
 """
 
         code_text = normalize_for_router(message)
@@ -8751,6 +8971,12 @@ KALILLAC RUNTIME:
 - Do not claim that a particular provider handled a completed response unless
   the runtime facts explicitly say per-message provider metadata is available.
 
+KALILLAC PRODUCT ROADMAP:
+- For Kalillac's sessions, accounts, saved chats, memory, future plans,
+  pricing, monetization, or business model, the KALILLAC PRODUCT ROADMAP and
+  KALILLAC COMMERCIAL DIRECTION blocks below are authoritative. Do not
+  substitute a commercial design of your own as Kalillac's plan.
+
 SOURCES:
 - Never generate a Sources section yourself.
 - Kalillac application code owns source rendering and appends source links
@@ -8806,6 +9032,13 @@ def _v31_runtime_facts():
     facts = build_runtime_facts(config)
 
     facts["routing_mode"] = "transitional_v31"
+
+    facts["product_roadmap"] = list(
+        KALILLAC_SELF_KNOWLEDGE["product_roadmap"]
+    )
+    facts["commercial_direction"] = list(
+        KALILLAC_SELF_KNOWLEDGE["commercial_direction"]
+    )
 
     facts["request_handling"] = {
         "legacy_classifier_gate": True,
@@ -8954,6 +9187,8 @@ def _run_v31_native_tool_chat(
         + current_date
         + "\n\n"
         + V31_NATIVE_TOOL_POLICY
+        + "\n\n"
+        + render_kalillac_product_roadmap()
     )
 
     def call_model(input_items):
