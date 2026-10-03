@@ -17,7 +17,9 @@ if str(CANDIDATE_DIR) not in sys.path:
 
 
 from kalillac_routing.openai_tool_loop import (
+    CONTINUATION_INSTRUCTION,
     ToolLoopError,
+    response_incomplete_reason,
     run_tool_loop,
 )
 from kalillac_routing.tool_contract import (
@@ -403,4 +405,175 @@ def test_missing_final_text_is_rejected():
             ],
             call_model=call_model,
             execute_tool=execute_tool,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Incomplete Responses API results
+# ---------------------------------------------------------------------------
+
+
+def incomplete(text, reason="max_output_tokens"):
+    return {
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason},
+        "output": [message(text)],
+    }
+
+
+def completed(text):
+    return {
+        "status": "completed",
+        "output": [message(text)],
+    }
+
+
+def no_tools(_call):
+    raise AssertionError("Tool executor must not run.")
+
+
+USER_INPUT = [{"role": "user", "content": "write a long answer"}]
+
+
+def test_response_incomplete_reason():
+    assert response_incomplete_reason(completed("x")) is None
+    assert response_incomplete_reason({"output": []}) is None
+    assert (
+        response_incomplete_reason(incomplete("x"))
+        == "max_output_tokens"
+    )
+    assert (
+        response_incomplete_reason({"status": "incomplete", "output": []})
+        == "unknown"
+    )
+
+
+def test_token_cutoff_gets_one_continuation_that_completes():
+    model_inputs = []
+    responses = [
+        incomplete("The answer starts here and"),
+        completed(" finishes here."),
+    ]
+
+    def call_model(items):
+        model_inputs.append(items)
+        return responses.pop(0)
+
+    result = run_tool_loop(
+        user_message="write a long answer",
+        initial_input=USER_INPUT,
+        call_model=call_model,
+        execute_tool=no_tools,
+    )
+
+    assert result.text == "The answer starts here and finishes here."
+    assert result.incomplete is False
+    assert result.incomplete_reason is None
+    assert result.model_calls == 2
+
+    continuation_input = model_inputs[1]
+    assert continuation_input[-1] == {
+        "role": "user",
+        "content": CONTINUATION_INSTRUCTION,
+    }
+    # The cut-off output is replayed before the continuation request.
+    assert continuation_input[-2]["type"] == "message"
+
+
+def test_token_cutoff_still_incomplete_after_continuation_is_typed():
+    calls = []
+
+    def call_model(items):
+        calls.append(items)
+        return incomplete("part one" if len(calls) == 1 else " part two")
+
+    result = run_tool_loop(
+        user_message="write a long answer",
+        initial_input=USER_INPUT,
+        call_model=call_model,
+        execute_tool=no_tools,
+    )
+
+    # Bounded: exactly one continuation attempt.
+    assert len(calls) == 2
+    assert result.text == "part one part two"
+    assert result.incomplete is True
+    assert result.incomplete_reason == "max_output_tokens"
+
+
+def test_non_token_incomplete_reason_is_not_continued():
+    calls = []
+
+    def call_model(items):
+        calls.append(items)
+        return incomplete("Partial", reason="content_filter")
+
+    result = run_tool_loop(
+        user_message="write a long answer",
+        initial_input=USER_INPUT,
+        call_model=call_model,
+        execute_tool=no_tools,
+    )
+
+    assert len(calls) == 1
+    assert result.incomplete is True
+    assert result.incomplete_reason == "content_filter"
+
+
+def test_continuations_can_be_disabled():
+    calls = []
+
+    def call_model(items):
+        calls.append(items)
+        return incomplete("Partial")
+
+    result = run_tool_loop(
+        user_message="write a long answer",
+        initial_input=USER_INPUT,
+        call_model=call_model,
+        execute_tool=no_tools,
+        max_continuations=0,
+    )
+
+    assert len(calls) == 1
+    assert result.incomplete is True
+
+
+def test_incomplete_response_with_tool_call_never_executes_tool():
+    def call_model(_items):
+        return {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                function_call(
+                    "call_1",
+                    "search_web",
+                    '{"query": "trunc',
+                ),
+            ],
+        }
+
+    with pytest.raises(ToolLoopError, match="incomplete during tool"):
+        run_tool_loop(
+            user_message="search for something",
+            initial_input=USER_INPUT,
+            call_model=call_model,
+            execute_tool=no_tools,
+        )
+
+
+def test_incomplete_response_without_visible_text_is_an_error():
+    def call_model(_items):
+        return {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "reasoning", "id": "r1"}],
+        }
+
+    with pytest.raises(ToolLoopError, match="without visible output text"):
+        run_tool_loop(
+            user_message="write a long answer",
+            initial_input=USER_INPUT,
+            call_model=call_model,
+            execute_tool=no_tools,
         )

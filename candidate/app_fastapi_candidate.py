@@ -12,7 +12,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from groq import RateLimitError
 
-from kalillac_routing.openai_tool_loop import run_tool_loop
+from kalillac_routing.openai_tool_loop import (
+    CONTINUATION_INSTRUCTION,
+    OUTPUT_TOKEN_LIMIT_REASON,
+    response_incomplete_reason,
+    run_tool_loop,
+)
 from kalillac_routing.runtime_facts import (
     RuntimeConfig,
     build_runtime_facts,
@@ -226,9 +231,11 @@ def _invoke_openai(messages, max_tokens=None):
             "OPENAI_API_KEY is not configured."
         )
 
+    input_items = _cloudflare_message_payload(messages)
+
     payload = {
         "model": OPENAI_MODEL,
-        "input": _cloudflare_message_payload(messages),
+        "input": input_items,
         "store": False,
         "reasoning": {
             "effort": OPENAI_REASONING_EFFORT,
@@ -240,6 +247,61 @@ def _invoke_openai(messages, max_tokens=None):
         ),
     }
 
+    data = _post_openai_responses(payload)
+    text = _openai_output_text(data)
+    incomplete_reason = response_incomplete_reason(data)
+
+    # One bounded continuation for an output-token cutoff. The request
+    # keeps the same output cap; the cutoff is never treated as complete.
+    if incomplete_reason == OUTPUT_TOKEN_LIMIT_REASON:
+        print(
+            "WARN: OPENAI_RESPONSE_INCOMPLETE "
+            f"{incomplete_reason}; attempting one continuation"
+        )
+
+        # Reasoning can consume the whole cap before any visible text;
+        # then there is no partial answer to replay.
+        replayed_partial = (
+            [{"role": "assistant", "content": text}]
+            if text.strip()
+            else []
+        )
+
+        continuation_payload = dict(payload)
+        continuation_payload["input"] = input_items + replayed_partial + [
+            {"role": "user", "content": CONTINUATION_INSTRUCTION},
+        ]
+
+        try:
+            continuation = _post_openai_responses(
+                continuation_payload
+            )
+        except Exception as continuation_error:
+            print(
+                "WARN: OPENAI_CONTINUATION_FAILED "
+                f"{type(continuation_error).__name__}"
+            )
+        else:
+            text += _openai_output_text(continuation)
+            incomplete_reason = response_incomplete_reason(
+                continuation
+            )
+
+    if incomplete_reason is not None:
+        print(
+            "WARN: OPENAI_RESPONSE_STILL_INCOMPLETE "
+            f"{incomplete_reason}"
+        )
+
+    return SimpleNamespace(
+        content=text.strip(),
+        incomplete=incomplete_reason is not None,
+        incomplete_reason=incomplete_reason,
+    )
+
+
+def _post_openai_responses(payload, timeout=90):
+    """POST one Responses API request and return the decoded JSON body."""
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(payload).encode(),
@@ -252,10 +314,13 @@ def _invoke_openai(messages, max_tokens=None):
 
     with urllib.request.urlopen(
         request,
-        timeout=90,
+        timeout=timeout,
     ) as response:
-        data = json.loads(response.read().decode())
+        return json.loads(response.read().decode())
 
+
+def _openai_output_text(data):
+    """Unstripped visible text, so a continuation joins at the cut point."""
     output_text = []
 
     for item in data.get("output") or []:
@@ -268,9 +333,65 @@ def _invoke_openai(messages, max_tokens=None):
                 if text:
                     output_text.append(text)
 
-    return SimpleNamespace(
-        content="\n".join(output_text).strip()
-    )
+    return "\n".join(output_text)
+
+
+def is_incomplete_model_response(response):
+    """True when a provider response is known to be cut off."""
+    return bool(getattr(response, "incomplete", False))
+
+
+INCOMPLETE_RESPONSE_NOTICE = (
+    "*This response was cut off before it finished because it reached "
+    "the output length limit. Say \"continue\" to get the rest.*"
+)
+
+
+UNVALIDATED_CODE_NOTICE = (
+    "*This partial code has not passed Kalillac's code validation. "
+    "Do not run it as-is.*"
+)
+
+
+def mark_incomplete_reply(reply, unvalidated_code=False):
+    """Append the visible cut-off notice, closing an open code fence so
+    the notice renders as text rather than inside the code block.
+
+    unvalidated_code adds an explicit statement that the partial code
+    skipped the validation complete code must pass.
+    """
+    text = str(reply).rstrip()
+
+    if text.count("```") % 2 == 1:
+        text += "\n```"
+
+    if unvalidated_code:
+        text += f"\n\n{UNVALIDATED_CODE_NOTICE}"
+
+    return f"{text}\n\n{INCOMPLETE_RESPONSE_NOTICE}"
+
+
+def has_incomplete_notice(reply):
+    return str(reply).rstrip().endswith(INCOMPLETE_RESPONSE_NOTICE)
+
+
+def strip_incomplete_notice(reply):
+    """Restore a stored cut-off answer to the point where it stopped:
+    remove the notice and the fence mark_incomplete_reply closed."""
+    text = str(reply).rstrip()
+
+    if not has_incomplete_notice(text):
+        return text
+
+    text = text[: -len(INCOMPLETE_RESPONSE_NOTICE)].rstrip()
+
+    if text.endswith(UNVALIDATED_CODE_NOTICE):
+        text = text[: -len(UNVALIDATED_CODE_NOTICE)].rstrip()
+
+    if text.endswith("\n```"):
+        text = text[: -len("\n```")]
+
+    return text
 
 
 def _invoke_cloudflare(messages, max_tokens=None):
@@ -1374,7 +1495,7 @@ CODE RULES:
 - When writing multiple files, label each file clearly before its code block.
 - Do not add explanations after code unless the user asks for an explanation.
 - For web UI requests, such as login pages, landing pages, dashboards, or websites, produce complete, polished, premium-quality interfaces.
-- For vague website requests like "make me an HTML page", default to a complete polished landing page about Kalillac AI.
+- For vague website requests like "make me an HTML page", default to a complete polished landing page about Kalillac AI, unless the user asks for basic, simple, minimal, barebones, starter, plain, or snippet code; that explicit scope always wins.
 - If the user specifies a topic, business, brand, product, or purpose, build the page around that topic.
 - Every complete webpage must include semantic HTML structure, responsive layout, strong visual hierarchy, polished typography, CSS styling, a hero section, main body sections, clear CTA elements, and a footer.
 - Never return a bare tutorial page with only a heading and paragraph for a website request.
@@ -2848,10 +2969,44 @@ SK_DIAGRAM_SHAPE = re.compile(
     r"|visualise|visual|topology|map out)\b"
 )
 
-SK_DIAGRAM_SUBJECT = re.compile(
-    r"\b(architecture|backend|back end|request flow|data flow|system"
-    r"|pipeline|internals|routing|behind the scenes|works|work|flow"
-    r"|kalillac)\b"
+# The fixed diagram depicts Kalillac's architecture, so it fires only when
+# the thing being diagrammed IS that architecture. The architecture term
+# must head the diagram's object ("a diagram of your backend", "an ASCII of
+# how Kalillac works") or directly name the diagram ("kalillac architecture
+# diagram"). Merely mentioning Kalillac elsewhere in the sentence ("a diagram
+# of the blueprint to turn kalillac ai into a profitable product") leaves the
+# request model-generated with its conversation context.
+_SK_ARCHITECTURE_OBJECT = (
+    r"(?:(?:system |software |technical )?architecture|backend|back end"
+    r"|request flow|request pipeline|data flow|internals|internal design"
+    r"|system design|routing|router|request handling|tech stack"
+    r"|how (?:kalillac(?: ai)?|you|it) (?:actually |really )?"
+    r"(?:works?|handles? (?:a )?(?:request|message)s?)"
+    r"|what happens (?:behind the scenes|when i send))"
+)
+
+_SK_DIAGRAM_OBJECT_LEAD = (
+    r"(?:\s+(?:an?|the|me|us|simple|quick|full|complete|detailed|text"
+    r"|ascii|basic))*"
+    r"(?:\s+(?:art|diagram|chart|flowchart|flow chart|map|picture"
+    r"|drawing|sketch|visual|visualization|overview|version|representation))?"
+    r"(?:\s+(?:of|showing|for|that shows|depicting|explaining"
+    r"|illustrating))?"
+    r"(?:\s+(?:exactly|precisely|just))?"
+    r"(?:\s+(?:the|your|its|kalillac(?: ai)?(?:['’]s)?))*"
+    r"\s+"
+)
+
+SK_DIAGRAM_OF_ARCHITECTURE = re.compile(
+    SK_DIAGRAM_SHAPE.pattern
+    + _SK_DIAGRAM_OBJECT_LEAD
+    + _SK_ARCHITECTURE_OBJECT
+    + r"\b"
+)
+
+SK_ARCHITECTURE_NAMED_DIAGRAM = re.compile(
+    r"\b" + _SK_ARCHITECTURE_OBJECT
+    + r"\s+(?:ascii\s+)?(?:diagram|flowchart|flow chart|map|chart)\b"
 )
 
 
@@ -2863,8 +3018,8 @@ def is_architecture_diagram_request(message):
     text = normalize_for_router(message)
 
     return bool(
-        SK_DIAGRAM_SHAPE.search(text)
-        and SK_DIAGRAM_SUBJECT.search(text)
+        SK_DIAGRAM_OF_ARCHITECTURE.search(text)
+        or SK_ARCHITECTURE_NAMED_DIAGRAM.search(text)
     )
 
 
@@ -4774,6 +4929,67 @@ def is_html_output(text):
     return "<!doctype html" in lowered or "<html" in lowered
 
 
+# A scope word counts only when it describes the requested code/page/example
+# itself ("very basic html code", "a minimal landing page", "barebones
+# starter template"), not a detail inside it ("a landing page with a simple
+# color scheme", "a plain background").
+_MINIMAL_SCOPE_WORD = (
+    r"(?:(?:very|really|super|extremely|as)\s+)?"
+    r"(?:basic|simple|minimal|minimalist|barebones|bare[- ]bones"
+    r"|starter|plain)"
+)
+
+_CODE_LANGUAGE = r"(?:html5?|css|javascript|js|python|php|react|vanilla)"
+
+_REQUESTED_ARTIFACT = (
+    r"(?:code|page|webpage|web page|website|site|landing page|homepage"
+    r"|home page|example|template|boilerplate|skeleton|starter|snippet"
+    r"|file|document|markup|layout|version|demo|program|script|app"
+    r"|form|component)"
+)
+
+MINIMAL_CODE_SCOPE_RE = re.compile(
+    # "<scope word> [language/kind modifiers] <artifact>"
+    r"\b" + _MINIMAL_SCOPE_WORD
+    + r"(?:\s+(?:" + _CODE_LANGUAGE + r"|static|web|single[- ]file))*"
+    + r"\s+" + _REQUESTED_ARTIFACT + r"\b"
+    # "<scope word> <language>" at the end of the request: "make basic html"
+    + r"|\b" + _MINIMAL_SCOPE_WORD + r"\s+" + _CODE_LANGUAGE
+    + r"\s*(?:please\s*)?[.!?]*$"
+    # A singular code snippet: "an html snippet", "just a snippet".
+    + r"|\b(?:a|an|the|just a|only a)\s+(?:" + _CODE_LANGUAGE
+    + r"\s+|code\s+)?snippet\b(?!s)"
+    # Whole-request scope instructions: "keep it simple".
+    + r"|\b(?:keep|make)\s+(?:it|the code|the page)\s+"
+    + _MINIMAL_SCOPE_WORD + r"\b"
+    + r"|\bas\s+(?:simple|minimal|basic)\s+as\s+possible\b"
+)
+
+
+def requests_minimal_code_scope(message):
+    """True when the user explicitly limits the scope of the requested code.
+
+    This explicit scope overrides Kalillac's polished landing-page default.
+    """
+    return bool(
+        MINIMAL_CODE_SCOPE_RE.search(normalize_for_router(message))
+    )
+
+
+MINIMAL_UI_CODE_RULES = """
+If the request is HTML/CSS/JavaScript UI code:
+
+USER-SCOPE RULES — the user explicitly asked for basic, simple, minimal, barebones, starter, plain, or snippet code:
+- Honor that scope exactly. Return only what the request needs.
+- Do not produce a polished landing page, dashboard, or marketing site.
+- Do not add a navbar, hero, CTA, feature sections, footer, decorative effects, or media queries unless the user asked for them.
+- Do not default the page topic to Kalillac AI.
+- Add CSS only if it is genuinely needed, and keep it short.
+- Do not add JavaScript unless the request needs actual interactive behavior.
+- Do not use placeholder images like src="#" or inert href="#" links.
+"""
+
+
 def html_quality_errors(html, full_page=True):
     errors = []
     text = str(html)
@@ -4785,7 +5001,7 @@ def html_quality_errors(html, full_page=True):
     if "<html" not in lowered or "</html>" not in lowered:
         errors.append("Missing complete <html> document structure.")
 
-    if "<style" not in lowered or "</style>" not in lowered:
+    if full_page and ("<style" not in lowered or "</style>" not in lowered):
         errors.append("Missing internal CSS inside a <style> tag.")
 
     if "@tailwind" in lowered or "@apply" in lowered or "@layer" in lowered:
@@ -4873,25 +5089,31 @@ def html_quality_errors(html, full_page=True):
             )
             break
 
-    if "overflow-x: hidden" not in lowered:
-        errors.append("Missing overflow-x: hidden protection on body or layout.")
-
-    if "@media" not in lowered:
-        errors.append("Missing responsive media queries.")
-
     if re.search(r"font-size\s*:\s*(7|8|9|10)\dpx", lowered):
         errors.append("Uses oversized typography that may overflow.")
 
-    required_sections = [
-        ("nav", "<nav"),
-        ("hero", "hero"),
-        ("cta", "cta"),
-        ("footer", "<footer"),
-    ]
+    # Landing-page structure and responsive polish are requirements of a
+    # full page only. A basic or snippet-scoped document is not defective
+    # for lacking them.
+    if full_page:
+        if "overflow-x: hidden" not in lowered:
+            errors.append(
+                "Missing overflow-x: hidden protection on body or layout."
+            )
 
-    for section_name, marker in required_sections:
-        if marker not in lowered:
-            errors.append(f"Missing required section: {section_name}.")
+        if "@media" not in lowered:
+            errors.append("Missing responsive media queries.")
+
+        required_sections = [
+            ("nav", "<nav"),
+            ("hero", "hero"),
+            ("cta", "cta"),
+            ("footer", "<footer"),
+        ]
+
+        for section_name, marker in required_sections:
+            if marker not in lowered:
+                errors.append(f"Missing required section: {section_name}.")
 
     generic_phrases = [
         "welcome to our landing page",
@@ -4998,7 +5220,20 @@ def repair_html_output(
     bad_html,
     errors,
     grounding_context="",
+    full_page=True,
 ):
+    scope_override = (
+        ""
+        if full_page
+        else """
+USER-SCOPE OVERRIDE — HIGHEST PRIORITY:
+- The user did not ask for a full landing page, or explicitly asked for basic/simple/minimal code.
+- Fix only the listed quality failures. Keep the document as small as the user's request.
+- Do not add navigation, hero, CTA, footer, extra sections, media queries, decorative styling, or JavaScript that the user did not ask for.
+- This override takes precedence over the premium-design requirements below.
+"""
+    )
+
     repair_prompt = f"""
 You are Kalillac AI's elite UI engineering specialist.
 
@@ -5006,7 +5241,7 @@ The previous HTML output failed quality standards.
 
 Original user request:
 {original_request}
-
+{scope_override}
 BUSINESS / USER GROUNDING CONTEXT:
 {grounding_context if grounding_context else "(none supplied)"}
 
@@ -5087,6 +5322,11 @@ No explanations, no comments, no extra text.
         ],
         max_tokens=CODE_RESPONSE_TOKENS,
     )
+
+    # A cut-off repair is a failed repair; the caller then keeps the
+    # pre-repair document instead of returning a partial page.
+    if is_incomplete_model_response(response):
+        return ""
 
     repaired = extract_response_text(response.content)
     return extract_fenced_code(repaired)
@@ -5242,6 +5482,14 @@ def kalillac_python_fidelity_errors(code):
     return list(dict.fromkeys(errors))
 
 
+def is_kalillac_python_reference(message, reply):
+    """Python output that must pass Kalillac's AST safety/fidelity gate."""
+    return bool(
+        is_kalillac_code_reference_request(message)
+        and is_python_code_output(message, reply)
+    )
+
+
 def repair_python_output(message, code, errors):
     """Repair a Kalillac-reference Python response using a compact prompt."""
 
@@ -5294,6 +5542,12 @@ REPAIR RULES:
         max_tokens=CODE_RESPONSE_TOKENS,
     )
 
+    # A cut-off repair is a failed repair: return the unrepaired code so
+    # the caller's final safety check blocks it rather than passing a
+    # partial program.
+    if is_incomplete_model_response(response):
+        return code
+
     repaired = extract_response_text(response.content)
 
     return extract_fenced_code(repaired)
@@ -5304,16 +5558,22 @@ def enforce_code_quality(
     reply,
     route,
     html_grounding_context="",
+    incomplete=False,
 ):
     if route not in {"code", "revision"}:
         return reply
 
     code = extract_fenced_code(reply)
 
-    kalillac_python_reference = bool(
-        is_kalillac_code_reference_request(message)
-        and is_python_code_output(message, reply)
-    )
+    kalillac_python_reference = is_kalillac_python_reference(message, reply)
+
+    # Cut-off Python cannot be validated: the AST checks need complete code,
+    # and a same-cap repair would only be cut off again. It is returned
+    # unvalidated; the caller labels it as cut off AND unvalidated. It never
+    # enters the complete-code validation path below.
+    if kalillac_python_reference and incomplete:
+        log("KALILLAC PYTHON INCOMPLETE: not validated")
+        return reply
 
     if kalillac_python_reference:
         python_errors = list(
@@ -5369,8 +5629,17 @@ def enforce_code_quality(
     if not is_html_output(code):
         return reply
 
+    # A cut-off document is an output-budget failure, not a quality
+    # failure; repairing it would rewrite a partial page at the same cap.
+    if incomplete:
+        log("HTML OUTPUT INCOMPLETE: skipping repair passes")
+        return reply
+
     text = normalize_for_router(message)
-    is_full_page_request = any(
+
+    # An explicit basic/simple/minimal request is never held to the
+    # full-page landing-page structure.
+    is_full_page_request = not requests_minimal_code_scope(message) and any(
         kw in text
         for kw in [
             "landing page",
@@ -5438,6 +5707,7 @@ def enforce_code_quality(
         code,
         errors,
         grounding_context=html_grounding_context,
+        full_page=is_full_page_request,
     )
 
     repaired_code = extract_fenced_code(repaired)
@@ -5806,6 +6076,11 @@ def get_recent_code_answers(history, limit=4):
 def previous_code_answer_looks_incomplete(answer):
     """Return True only when a previous code answer has strong evidence
     that generation ended before the code itself was complete."""
+    if has_incomplete_notice(answer):
+        return previous_answer_looks_like_code(
+            strip_incomplete_notice(answer)
+        )
+
     text = str(answer).rstrip()
 
     if not text or not previous_answer_looks_like_code(text):
@@ -7779,7 +8054,9 @@ Rules:
 """
 
     elif route == "code_continuation":
-        previous_incomplete_code = get_last_assistant_message(history)
+        previous_incomplete_code = strip_incomplete_notice(
+            get_last_assistant_message(history)
+        )
 
         prompt = f"""
 You are Kalillac AI.
@@ -8123,6 +8400,11 @@ UI QUALITY FLOOR:
 - Do not make the page longer merely to consume the token budget.
 """
         )
+
+        # Explicit basic/simple/minimal scope replaces the polished UI rules
+        # entirely so the prompt carries no contradictory landing-page default.
+        if ui_code_rules and requests_minimal_code_scope(message):
+            ui_code_rules = MINIMAL_UI_CODE_RULES
 
         prompt = f"""
 You are Kalillac AI.
@@ -8501,23 +8783,8 @@ def _invoke_openai_native_tools(input_items, instructions):
         "max_output_tokens": MAX_RESPONSE_TOKENS,
     }
 
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    with urllib.request.urlopen(
-        request,
-        timeout=90,
-    ) as response:
-        return json.loads(
-            response.read().decode()
-        )
+    # status/incomplete_details are inspected by run_tool_loop.
+    return _post_openai_responses(payload)
 
 
 def _v31_runtime_facts():
@@ -8789,6 +9056,7 @@ def _run_v31_native_tool_chat(
         execute_tool=execute_tool,
         max_tool_rounds=3,
         max_tool_calls=4,
+        max_continuations=1,
     )
 
     reply = clean_ai_reply(
@@ -8802,6 +9070,13 @@ def _run_v31_native_tool_chat(
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].rstrip()
+
+    if result.incomplete:
+        print(
+            "WARN: V31_NATIVE_RESPONSE_INCOMPLETE "
+            f"{result.incomplete_reason}"
+        )
+        reply = mark_incomplete_reply(reply)
 
     if not search_results:
         return reply
@@ -9220,6 +9495,9 @@ Rules:
             reply = clean_ai_reply(reply)
             reply = unwrap_accidental_prose_fence(reply, route)
 
+            if is_incomplete_model_response(response):
+                reply = mark_incomplete_reply(reply)
+
             sources = "\n".join(
                 f"- [{item['title']}]({item['url']})" for item in results
             )
@@ -9282,13 +9560,31 @@ Rules:
                 + str(message)
             )
 
+        response_incomplete = is_incomplete_model_response(response)
+
+        # Cut-off Kalillac-reference Python skips the AST gate, so it must be
+        # labeled as unvalidated rather than presented as passing it.
+        unvalidated_code = (
+            response_incomplete
+            and route in {"code", "revision"}
+            and is_kalillac_python_reference(message, reply)
+        )
+
         reply = enforce_code_quality(
             message,
             reply,
             route,
             html_grounding_context=html_grounding_context,
+            incomplete=response_incomplete,
         )
         reply = unwrap_accidental_prose_fence(reply, route)
+
+        if response_incomplete:
+            log("MODEL RESPONSE INCOMPLETE: notice appended")
+            reply = mark_incomplete_reply(
+                reply,
+                unvalidated_code=unvalidated_code,
+            )
 
         log("MEMORY WRITTEN: no")
         log("===== END ROUTE LOG =====\n")

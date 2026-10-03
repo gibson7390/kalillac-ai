@@ -23,13 +23,56 @@ class ToolLoopError(RuntimeError):
     """Raised when the model/tool loop violates Kalillac's control contract."""
 
 
+# Responses API incomplete_details.reason for an output-token cutoff.
+OUTPUT_TOKEN_LIMIT_REASON = "max_output_tokens"
+
+# The only continuation instruction Kalillac sends after an output-token
+# cutoff. The partial answer is replayed as assistant output before it.
+CONTINUATION_INSTRUCTION = (
+    "Your previous response was cut off because it reached the output "
+    "length limit. Continue exactly where it stopped. Do not repeat any "
+    "earlier text, do not restart, and do not add a preamble."
+)
+
+
+def response_incomplete_reason(
+    response: Mapping[str, Any],
+) -> str | None:
+    """Return why a Responses API result is incomplete, or None.
+
+    A response whose status is "incomplete" is never a normal completed
+    answer, even when it carries visible text.
+    """
+
+    if response.get("status") != "incomplete":
+        return None
+
+    details = response.get("incomplete_details")
+
+    if isinstance(details, Mapping):
+        reason = details.get("reason")
+
+        if isinstance(reason, str) and reason:
+            return reason
+
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class ToolLoopResult:
-    """Completed native-tool turn."""
+    """Native-tool turn result.
+
+    incomplete is True when the visible text is still cut off after the
+    bounded continuation attempt; incomplete_reason carries the provider's
+    reason so callers can surface it instead of presenting broken output
+    as a finished answer.
+    """
 
     text: str
     model_calls: int
     tool_calls: tuple[ValidatedToolCall, ...]
+    incomplete: bool = False
+    incomplete_reason: str | None = None
 
 
 ModelCaller = Callable[
@@ -71,6 +114,15 @@ def extract_output_text(
 ) -> str:
     """Extract assistant-visible text from Responses API output items."""
 
+    return _raw_output_text(response).strip()
+
+
+def _raw_output_text(
+    response: Mapping[str, Any],
+) -> str:
+    """Visible text without stripping, so a continuation can be joined
+    exactly at the point where the previous output stopped."""
+
     pieces = []
 
     for item in _response_output(response):
@@ -94,7 +146,7 @@ def extract_output_text(
             if isinstance(text, str) and text:
                 pieces.append(text)
 
-    return "\n".join(pieces).strip()
+    return "\n".join(pieces)
 
 
 def _serialize_tool_result(result: Any) -> str:
@@ -121,6 +173,7 @@ def run_tool_loop(
     execute_tool: ToolExecutor,
     max_tool_rounds: int = 3,
     max_tool_calls: int = 4,
+    max_continuations: int = 1,
 ) -> ToolLoopResult:
     """Run one stateless model/tool turn.
 
@@ -136,6 +189,10 @@ def run_tool_loop(
           -> final visible text
 
     Limits prevent an accidental or adversarial infinite tool loop.
+
+    A final answer cut off by the output-token limit gets at most
+    max_continuations continuation calls. If it is still incomplete, the
+    result is returned with incomplete=True rather than as a finished answer.
     """
 
     if max_tool_rounds < 0:
@@ -148,6 +205,11 @@ def run_tool_loop(
             "max_tool_calls must be zero or greater."
         )
 
+    if max_continuations < 0:
+        raise ValueError(
+            "max_continuations must be zero or greater."
+        )
+
     input_items = [
         deepcopy(dict(item))
         for item in initial_input
@@ -156,6 +218,8 @@ def run_tool_loop(
     validated_history: list[ValidatedToolCall] = []
     tool_rounds = 0
     model_calls = 0
+    continuations = 0
+    partial_text = ""
 
     while True:
         model_calls += 1
@@ -170,6 +234,7 @@ def run_tool_loop(
             )
 
         output = _response_output(response)
+        incomplete_reason = response_incomplete_reason(response)
 
         function_calls = [
             item
@@ -177,8 +242,38 @@ def run_tool_loop(
             if item.get("type") == "function_call"
         ]
 
+        if function_calls and incomplete_reason is not None:
+            # A cut-off response may carry truncated tool arguments.
+            # Never execute tools requested by an incomplete response.
+            raise ToolLoopError(
+                "Model response was incomplete during tool selection "
+                f"({incomplete_reason})."
+            )
+
         if not function_calls:
-            text = extract_output_text(response)
+            partial_text += _raw_output_text(response)
+
+            if (
+                incomplete_reason == OUTPUT_TOKEN_LIMIT_REASON
+                and continuations < max_continuations
+            ):
+                continuations += 1
+
+                # With store=False, replay the cut-off output before
+                # asking for the remainder, as with tool continuation.
+                input_items.extend(
+                    deepcopy(output)
+                )
+                input_items.append(
+                    {
+                        "role": "user",
+                        "content": CONTINUATION_INSTRUCTION,
+                    }
+                )
+
+                continue
+
+            text = partial_text.strip()
 
             if not text:
                 raise ToolLoopError(
@@ -189,6 +284,13 @@ def run_tool_loop(
                 text=text,
                 model_calls=model_calls,
                 tool_calls=tuple(validated_history),
+                incomplete=incomplete_reason is not None,
+                incomplete_reason=incomplete_reason,
+            )
+
+        if partial_text:
+            raise ToolLoopError(
+                "Model requested a tool while continuing a cut-off answer."
             )
 
         if tool_rounds >= max_tool_rounds:
