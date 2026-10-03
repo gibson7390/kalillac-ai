@@ -6,6 +6,9 @@
    - Model output is parsed by the locally vendored marked, then sanitized by
      the locally vendored DOMPurify BEFORE it touches innerHTML.
    - No analytics, no tracking, no remote fonts, no CDN.
+   - Every /api/chat call resolves to one result object (see postChat).
+     Failures are mapped by machine-readable code first, HTTP status second,
+     and a safe generic message last. A failure is never an assistant turn.
    ========================================================================== */
 (function () {
   "use strict";
@@ -21,6 +24,15 @@
      the current message is never duplicated and Retry cannot desynchronize
      what the UI shows from what the backend receives. */
   var TURNS = [];
+
+  /* PENDING holds the single most recent exchange that did NOT complete
+     (network failure, server error, Stop). It is never part of TURNS, so it
+     is never sent as history. Shape:
+       { text, history, userRow, shell, restored }
+     history  = the exact history snapshot the failed request used
+     restored = the text this code put back into the composer, or null if the
+                composer already held other text and was left untouched */
+  var PENDING = null;
 
   var conversation = document.getElementById("conversation");
   var thread = document.getElementById("thread");
@@ -332,9 +344,8 @@
 
     var bubble = document.createElement("div");
     bubble.className = "bubble";
-    // User text is NEVER rendered as HTML.
-    bubble.style.whiteSpace = "pre-wrap";
-    bubble.style.overflowWrap = "anywhere";
+    // User text is NEVER rendered as HTML. Line-break and wrapping rules
+    // live in app.css (.msg-user .bubble).
     bubble.textContent = text;
 
     row.appendChild(bubble);
@@ -374,22 +385,30 @@
   }
 
   function renderAssistantText(shell, text) {
-    var protectedMath = protectMathForMarkdown(text);
+    try {
+      var protectedMath = protectMathForMarkdown(text);
 
-    // Markdown-generated HTML is sanitized before entering the DOM.
-    shell.body.innerHTML = renderMarkdownSafe(protectedMath.text);
+      // Markdown-generated HTML is sanitized before entering the DOM.
+      shell.body.innerHTML = renderMarkdownSafe(protectedMath.text);
 
-    // Restore only text, never unsanitized HTML, then let trusted local KaTeX
-    // render supported mathematics.
-    restoreMathPlaceholders(
-      shell.body,
-      protectedMath.items,
-      protectedMath.prefix
-    );
-    renderMathSafe(shell.body);
+      // Restore only text, never unsanitized HTML, then let trusted local
+      // KaTeX render supported mathematics.
+      restoreMathPlaceholders(
+        shell.body,
+        protectedMath.items,
+        protectedMath.prefix
+      );
+      renderMathSafe(shell.body);
 
-    wrapTables(shell.body);
-    hardenLinks(shell.body);
+      wrapTables(shell.body);
+      hardenLinks(shell.body);
+    } catch (e) {
+      /* A rendering failure (for example DOMPurify failing to load) must not
+         discard a valid answer or be reported as a network error. Show the
+         reply as plain text. textContent never interprets HTML. */
+      shell.body.textContent = String(text == null ? "" : text);
+      shell.body.classList.add("md-plain");
+    }
   }
 
   function showNote(shell, message, kind) {
@@ -501,7 +520,8 @@
 
   // ---- history payload -----------------------------------------------------
   /* Derived from completed TURNS only. The current message is sent separately
-     as `message`, so it is never present twice. */
+     as `message`, so it is never present twice. Failed or stopped exchanges
+     never enter TURNS, so they are never part of history. */
   function buildHistory() {
     var out = [];
     for (var i = 0; i < TURNS.length; i++) {
@@ -511,9 +531,291 @@
     return out;
   }
 
+  // ---- API client ------------------------------------------------------------
+  /* Every /api/chat call resolves (never rejects) to exactly one of:
+
+       { ok: true,  reply: string, sessionId: string|null }
+       { ok: false, status: number, code: string|null, retryAfter: number|null }
+
+     status 0 means no HTTP response was received.
+     code is the server's machine-readable error code when the body carries
+     one. Otherwise it is a client-side code ("stopped", "network_error",
+     "invalid_response") or null, in which case the HTTP status decides.
+     The body is read as text first, so HTML or plain-text proxy error pages
+     (Nginx 502/504, Cloudflare pages) are handled without a JSON exception. */
+  function readErrorCode(data) {
+    if (!data || typeof data !== "object") return null;
+    if (typeof data.error === "string" && data.error) return data.error;
+    // Also accept { error: { code: "..." } } so a richer backend error body
+    // does not require another frontend redesign.
+    if (data.error && typeof data.error === "object" &&
+        typeof data.error.code === "string" && data.error.code) {
+      return data.error.code;
+    }
+    return null;
+  }
+
+  function readRetryAfter(res) {
+    var raw = res.headers ? res.headers.get("Retry-After") : null;
+    if (!raw) return null;
+    var seconds = Number(raw);
+    // Only the delta-seconds form is used; the HTTP-date form is ignored.
+    return isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds) : null;
+  }
+
+  function postChat(payload, signal) {
+    // Same-origin: the frontend is served at /app/ and the API at /api/, so no
+    // CORS is involved and no credentials/cookies are sent.
+    return fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: signal
+    })
+      .then(function (res) {
+        return res.text().then(function (body) {
+          var data = null;
+          try {
+            data = body ? JSON.parse(body) : null;
+          } catch (e) {
+            data = null;
+          }
+
+          if (res.ok) {
+            if (data && typeof data.reply === "string") {
+              return {
+                ok: true,
+                reply: data.reply,
+                sessionId: typeof data.session_id === "string" && data.session_id
+                  ? data.session_id
+                  : null
+              };
+            }
+            return { ok: false, status: res.status, code: "invalid_response", retryAfter: null };
+          }
+
+          return {
+            ok: false,
+            status: res.status,
+            code: readErrorCode(data),
+            retryAfter: readRetryAfter(res)
+          };
+        });
+      })
+      .catch(function (err) {
+        if (err && err.name === "AbortError") {
+          return { ok: false, status: 0, code: "stopped", retryAfter: null };
+        }
+        return { ok: false, status: 0, code: "network_error", retryAfter: null };
+      });
+  }
+
+  // ---- failure descriptions ---------------------------------------------------
+  /* Code-first mapping. kind selects the note style; retry says whether
+     resending the same prompt can reasonably succeed. New server codes are
+     added here and nowhere else. */
+  var ERRORS = {
+    stopped: {
+      kind: "notice", retry: true, capacity: false,
+      text: "Stopped. This reply will not be shown. Kalillac's server may still finish processing the request."
+    },
+    network_error: {
+      kind: "error", retry: true, capacity: false,
+      text: "Couldn't reach Kalillac. Check your connection and try again."
+    },
+    invalid_response: {
+      kind: "error", retry: true, capacity: false,
+      text: "Kalillac sent a response this page couldn't read. Try again."
+    },
+    empty_message: {
+      kind: "error", retry: false, capacity: false,
+      text: "Type a message first."
+    },
+    message_too_long: {
+      kind: "error", retry: false, capacity: false,
+      text: "That message is too long. Shorten it and send again."
+    },
+    history_too_long: {
+      kind: "error", retry: false, capacity: false,
+      text: "This conversation has reached its length limit. Copy anything you want to keep, then reload the page to start a new session."
+    },
+    invalid_request: {
+      kind: "error", retry: false, capacity: false,
+      text: "Kalillac couldn't process that request."
+    },
+    invalid_json: {
+      kind: "error", retry: false, capacity: false,
+      text: "Kalillac couldn't process that request."
+    },
+    invalid_body: {
+      kind: "error", retry: false, capacity: false,
+      text: "Kalillac couldn't process that request."
+    },
+    busy: {
+      kind: "error", retry: true, capacity: true,
+      text: "Kalillac is at capacity right now. Try again in a moment."
+    },
+    provider_unavailable: {
+      kind: "error", retry: true, capacity: false,
+      text: "Kalillac's AI provider is temporarily unavailable. Try again shortly."
+    },
+    provider_timeout: {
+      kind: "error", retry: true, capacity: false,
+      text: "The AI provider took too long to respond. Try again."
+    },
+    internal_error: {
+      kind: "error", retry: true, capacity: false,
+      text: "Something went wrong on Kalillac's side. Try again."
+    }
+  };
+
+  // Used only when the response carried no readable code at all.
+  var STATUS_ERRORS = {
+    request_rejected: {
+      kind: "error", retry: false, capacity: false,
+      text: "Kalillac couldn't accept that request."
+    },
+    too_large: {
+      kind: "error", retry: false, capacity: false,
+      text: "This request is too large for Kalillac to accept. Shorten the message, or reload the page to start a new session."
+    },
+    timed_out: {
+      kind: "error", retry: true, capacity: false,
+      text: "Kalillac took too long to respond. Try again."
+    },
+    unavailable: {
+      kind: "error", retry: true, capacity: false,
+      text: "Kalillac is temporarily unavailable. Try again shortly."
+    }
+  };
+
+  // An unrecognized code is never guessed from its HTTP status. A 429 with a
+  // new code must not be shown as "at capacity" by an older cached app.js.
+  var GENERIC_ERROR = {
+    kind: "error", retry: true, capacity: false,
+    text: "Kalillac couldn't complete that request. Try again."
+  };
+
+  function statusError(status) {
+    if (status === 413) return STATUS_ERRORS.too_large;
+    if (status === 400 || status === 422) return STATUS_ERRORS.request_rejected;
+    if (status === 408 || status === 504) return STATUS_ERRORS.timed_out;
+    if (status === 429) return ERRORS.busy;
+    if (status === 502 || status === 503) return STATUS_ERRORS.unavailable;
+    if (status >= 500) return ERRORS.internal_error;
+    return GENERIC_ERROR;
+  }
+
+  function describeFailure(result) {
+    var entry;
+    if (result.code) {
+      entry = Object.prototype.hasOwnProperty.call(ERRORS, result.code)
+        ? ERRORS[result.code]
+        : GENERIC_ERROR;
+    } else {
+      entry = statusError(result.status);
+    }
+
+    var text = entry.text;
+    if (entry.capacity && result.retryAfter && result.retryAfter > 1) {
+      text = "Kalillac is at capacity right now. Try again in about " +
+             result.retryAfter + " seconds.";
+    }
+    return { kind: entry.kind, retry: entry.retry, text: text };
+  }
+
+  // ---- failed-exchange handling ---------------------------------------------
+  function setRowFlag(userRow, label) {
+    var flag = userRow.querySelector(".msg-flag");
+    if (!flag) {
+      flag = document.createElement("div");
+      flag.className = "msg-flag";
+      userRow.appendChild(flag);
+    }
+    flag.textContent = label;
+    userRow.classList.add("is-unanswered");
+  }
+
+  function clearRowFlag(userRow) {
+    var flag = userRow.querySelector(".msg-flag");
+    if (flag && flag.parentNode) flag.parentNode.removeChild(flag);
+    userRow.classList.remove("is-unanswered");
+  }
+
+  /* Put the prompt back into the composer only when the composer is empty.
+     Text the user typed in the meantime is never overwritten. Returns the
+     restored text, or null when nothing was restored. */
+  function restorePrompt(text) {
+    if (input.value.trim().length > 0) return null;
+    input.value = text;
+    autoGrow();
+    syncSendEnabled();
+    return text;
+  }
+
+  // Remove userRow and every node after it from the thread.
+  function removeFrom(userRow) {
+    var node = userRow;
+    while (node) {
+      var next = node.nextSibling;
+      if (node.parentNode === thread) thread.removeChild(node);
+      node = next;
+    }
+  }
+
+  function addFailureActions(shell) {
+    var bar = document.createElement("div");
+    bar.className = "msg-actions is-visible";
+
+    var retryBtn = document.createElement("button");
+    retryBtn.type = "button";
+    retryBtn.className = "msg-action";
+    retryBtn.setAttribute("aria-label", "Retry this message");
+    retryBtn.innerHTML = ICON_RETRY + "<span>Retry</span>";
+    retryBtn.addEventListener("click", retryFailed);
+
+    bar.appendChild(retryBtn);
+    shell.row.appendChild(bar);
+    return bar;
+  }
+
+  function failTurn(result, text, history, shell, userRow) {
+    var info = describeFailure(result);
+    showNote(shell, info.text, info.kind);
+    setRowFlag(userRow, result.code === "stopped" ? "Stopped" : "Not answered");
+
+    PENDING = {
+      text: text,
+      history: history,
+      userRow: userRow,
+      shell: shell,
+      restored: restorePrompt(text)
+    };
+
+    if (info.retry) addFailureActions(shell);
+    scrollToBottom();
+  }
+
+  function commitReply(result, text, shell, userRow) {
+    if (result.sessionId) SESSION_ID = result.sessionId;
+    renderAssistantText(shell, result.reply);
+
+    // Commit the completed exchange only now.
+    var index = TURNS.length;
+    TURNS.push({
+      user: text,
+      assistant: result.reply,
+      userRow: userRow,
+      row: shell.row
+    });
+    addActions(shell, index);
+    scrollToBottom();
+  }
+
   // ---- core request --------------------------------------------------------
   /* history is captured BEFORE the request so a retry replays the exact
-     conversation state that preceded the turn being regenerated. */
+     conversation state that preceded the turn being regenerated.
+     Resolves true on a committed reply, false otherwise. Never rejects. */
   function requestReply(text, history, shell, userRow) {
     setBusy(true);
     setThinking(shell);
@@ -526,81 +828,34 @@
       session_id: SESSION_ID
     };
 
-    // Same-origin: the frontend is served at /app/ and the API at /api/, so no
-    // CORS is involved and no credentials/cookies are sent.
-    return fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    })
-      .then(function (res) {
-        return res.json().catch(function () { return {}; })
-          .then(function (data) {
-            return { ok: res.ok, status: res.status, data: data };
-          });
-      })
-      .then(function (r) {
-        if (r.ok && r.data && typeof r.data.reply === "string") {
-          if (r.data.session_id) SESSION_ID = r.data.session_id;
-          renderAssistantText(shell, r.data.reply);
+    /* NOTE on Stop: /api/chat is a non-streaming call. Aborting cancels the
+       browser request only. It does not guarantee that queued or running
+       server-side model work stops; the server may finish and discard it. */
+    return postChat(payload, controller.signal).then(function (result) {
+      controller = null;
+      setBusy(false);
 
-          // Commit the completed exchange only now.
-          var index = TURNS.length;
-          TURNS.push({
-            user: text,
-            assistant: r.data.reply,
-            userRow: userRow,
-            row: shell.row
-          });
-          addActions(shell, index);
-          scrollToBottom();
-          return true;
-        }
-        showNote(shell, mapError(r.status, r.data && r.data.error), "error");
-        return false;
-      })
-      .catch(function (err) {
-        if (err && err.name === "AbortError") {
-          /* Cancelled by the user. The browser request is aborted immediately.
-             NOTE: /api/chat is a non-streaming provider call, so aborting the
-             browser request does not guarantee the upstream model computation
-             stops at that instant; the server may still finish generating and
-             discard the result. This is an honest description of the current
-             backend, not a claim of upstream cancellation. */
-          showNote(shell, "Stopped.", "notice");
-          // No turn is recorded, so history stays consistent for the next send.
-          return false;
-        }
-        showNote(shell,
-          "Kalillac couldn't reach the server. Check your connection and try again.",
-          "error");
-        return false;
-      })
-      .then(function (result) {
-        controller = null;
-        setBusy(false);
-        return result;
-      });
-  }
+      if (result.ok) {
+        commitReply(result, text, shell, userRow);
+        return true;
+      }
 
-  function mapError(status, code) {
-    if (code === "empty_message") return "Please type a message.";
-    if (code === "message_too_long")
-      return "That message is too long. Please shorten it and try again.";
-    if (code === "history_too_long")
-      return "This conversation is very long. Reload the page to start a fresh session.";
-    if (code === "model_provider_unavailable" && status === 503)
-      return "Kalillac's AI model provider is temporarily unavailable. Please try again shortly.";
-    if (code === "busy" || status === 429)
-      return "Kalillac is handling several requests right now. Please try again in a moment.";
-    return "Something went wrong on Kalillac's end. Please try again.";
+      failTurn(result, text, history, shell, userRow);
+      return false;
+    });
   }
 
   // ---- send ----------------------------------------------------------------
   function send() {
     var text = input.value.trim();
     if (!text || inFlight) return;
+
+    /* A new message supersedes an earlier unanswered one. That exchange was
+       never in TURNS, so removing it keeps the screen and history in step. */
+    if (PENDING) {
+      removeFrom(PENDING.userRow);
+      PENDING = null;
+    }
 
     // Snapshot history BEFORE this turn: prior completed exchanges only.
     var history = buildHistory();
@@ -613,6 +868,40 @@
     stickToBottom = true;
     var shell = addAssistantShell();
     requestReply(text, history, shell, userRow).then(function () {
+      if (!inFlight) input.focus();
+    });
+  }
+
+  /* Retry for an exchange that failed or was stopped. Reuses the original
+     user row and the exact history snapshot that request used. Nothing is
+     added to TURNS unless the retry succeeds. */
+  function retryFailed() {
+    if (inFlight || !PENDING) return;
+
+    var p = PENDING;
+    PENDING = null;
+
+    // Remove the restored copy from the composer only if the user has not
+    // changed it; otherwise the same prompt would sit there twice.
+    if (p.restored !== null && input.value === p.restored) {
+      input.value = "";
+      autoGrow();
+      syncSendEnabled();
+    }
+
+    clearRowFlag(p.userRow);
+
+    // Drop the failed assistant row (and anything after the user row).
+    var node = p.userRow.nextSibling;
+    while (node) {
+      var next = node.nextSibling;
+      thread.removeChild(node);
+      node = next;
+    }
+
+    stickToBottom = true;
+    var shell = addAssistantShell();
+    requestReply(p.text, p.history, shell, p.userRow).then(function () {
       if (!inFlight) input.focus();
     });
   }
@@ -636,6 +925,9 @@
       thread.removeChild(node);
       node = next;
     }
+
+    // Any unanswered exchange was after this turn and is now gone.
+    PENDING = null;
 
     TURNS.length = index;
 
