@@ -11,6 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from .tool_contract import (
@@ -31,8 +32,93 @@ OUTPUT_TOKEN_LIMIT_REASON = "max_output_tokens"
 CONTINUATION_INSTRUCTION = (
     "Your previous response was cut off because it reached the output "
     "length limit. Continue exactly where it stopped. Do not repeat any "
-    "earlier text, do not restart, and do not add a preamble."
+    "earlier text, do not restart, and do not add a preamble. If it stopped "
+    "inside a code block, do not open a new code fence: continue the code "
+    "from the exact character where it stopped, and close the original code "
+    "block once the code is complete."
 )
+
+
+# A fence marker that opens a code block at the start of a continuation.
+_LEADING_FENCE_RE = re.compile(r"\A[ \t]*\r?\n?[ \t]*```[^\n`]*\n")
+
+# Fence markers counted only at line starts, so ``` inside code does not count.
+_LINE_FENCE_RE = re.compile(r"(?m)^[ \t]*```")
+
+# Shortest repeated text treated as an overlap rather than a coincidence.
+MIN_CONTINUATION_OVERLAP = 8
+
+# How far back an overlap may reach into the partial output.
+MAX_CONTINUATION_OVERLAP = 6000
+
+
+def _suffix_prefix_overlap(partial: str, continuation: str) -> int:
+    """Length of the longest suffix of partial that starts continuation."""
+
+    if len(continuation) < MIN_CONTINUATION_OVERLAP:
+        return 0
+
+    window_start = max(0, len(partial) - MAX_CONTINUATION_OVERLAP)
+    probe = continuation[:MIN_CONTINUATION_OVERLAP]
+    position = partial.find(probe, window_start)
+
+    # The earliest matching position is the longest overlap.
+    while position != -1:
+        tail = partial[position:]
+
+        if continuation.startswith(tail):
+            return len(tail)
+
+        position = partial.find(probe, position + 1)
+
+    return 0
+
+
+def stitch_continuation(partial: str, continuation: str) -> str:
+    """Join a cut-off answer and its continuation without duplication.
+
+    A continuation model often re-opens a code fence (the task prompt
+    demands one fenced block) and restarts the interrupted line or the
+    whole file. Blind concatenation then nests fences and duplicates code,
+    which breaks parsing. This removes, in order:
+    - a fence opener at the start of the continuation when the partial
+      answer is still inside an open fence;
+    - text the continuation repeats from the end of the partial answer;
+    - a full restart of the code block, which replaces the partial code.
+    """
+
+    if not partial:
+        return continuation
+
+    if not continuation:
+        return partial
+
+    inside_fence = len(_LINE_FENCE_RE.findall(partial)) % 2 == 1
+
+    if inside_fence:
+        continuation = _LEADING_FENCE_RE.sub("", continuation, count=1)
+
+    overlap = _suffix_prefix_overlap(partial, continuation)
+
+    if overlap:
+        return partial + continuation[overlap:]
+
+    if inside_fence:
+        # Restart from the top of the code block: the continuation starts
+        # with the first code line of the partial block.
+        fence_match = list(_LINE_FENCE_RE.finditer(partial))[-1]
+        body_start = partial.find("\n", fence_match.end())
+
+        if body_start != -1:
+            first_line = partial[body_start + 1:].split("\n", 1)[0]
+
+            if (
+                len(first_line.strip()) >= MIN_CONTINUATION_OVERLAP
+                and continuation.lstrip("\n").startswith(first_line)
+            ):
+                return partial[: body_start + 1] + continuation.lstrip("\n")
+
+    return partial + continuation
 
 
 def response_incomplete_reason(
@@ -251,7 +337,10 @@ def run_tool_loop(
             )
 
         if not function_calls:
-            partial_text += _raw_output_text(response)
+            partial_text = stitch_continuation(
+                partial_text,
+                _raw_output_text(response),
+            )
 
             if (
                 incomplete_reason == OUTPUT_TOKEN_LIMIT_REASON

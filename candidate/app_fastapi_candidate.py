@@ -17,6 +17,7 @@ from kalillac_routing.openai_tool_loop import (
     OUTPUT_TOKEN_LIMIT_REASON,
     response_incomplete_reason,
     run_tool_loop,
+    stitch_continuation,
 )
 from kalillac_routing.runtime_facts import (
     RuntimeConfig,
@@ -32,7 +33,13 @@ MAX_SESSIONS = 200
 MAX_INPUT_CHARS = 4000
 MAX_RESPONSE_TOKENS = 1600
 SELF_KNOWLEDGE_RESPONSE_TOKENS = 2000
-CODE_RESPONSE_TOKENS = 4000
+# Code/revision generation and code repair only; every other route keeps
+# MAX_RESPONSE_TOKENS. The cap also covers reasoning tokens, and a
+# substantial single file (a full router or landing page) exceeded 4000 in
+# live staging, forcing the riskier continuation path. 6000 lets such files
+# finish in one call while staying well inside the 90-second per-request
+# timeout; one bounded continuation still covers anything longer.
+CODE_RESPONSE_TOKENS = 6000
 CODE_CONTINUATION_RESPONSE_TOKENS = 2400
 
 # Web search (Tavily) limits — conserve the free allowance.
@@ -282,7 +289,10 @@ def _invoke_openai(messages, max_tokens=None):
                 f"{type(continuation_error).__name__}"
             )
         else:
-            text += _openai_output_text(continuation)
+            text = stitch_continuation(
+                text,
+                _openai_output_text(continuation),
+            )
             incomplete_reason = response_incomplete_reason(
                 continuation
             )
@@ -8509,6 +8519,12 @@ REFERENCE RULES:
 - Temporary server-side session state must be bounded with explicit capacity/eviction, never an unbounded global dictionary. Do not call Kalillac's temporary state a cache or claim refresh/tab/browser/session end erases it.
 - Use only response fields needed by the NEW implementation; do not imply Kalillac uses that schema.
 - Model ids are optional in the code: abstracting the provider call or reading ids from configuration is fine. Any model id the code does name must be exactly one of {OPENAI_MODEL}, {GROQ_MODEL}, {CLOUDFLARE_MODEL}, {FALLBACK_GROQ_MODEL}, and any fallback sequence must keep that order.
+
+VERIFIED VALUES VS EXAMPLE VALUES:
+- The only verified numeric limit supplied here is live search: {SESSION_SEARCH_LIMIT} searches per rolling {SESSION_SEARCH_WINDOW}-second window per session. Use exactly that if the code includes a search limit.
+- Kalillac's temporary session state has no verified time-based TTL or expiry duration; entries may remain until capacity eviction or service restart. Do not present any TTL as Kalillac behavior.
+- Every other capacity, TTL, timeout, size, or retry value in the NEW code (for example a session capacity) is an example implementation choice. Mark each one with a comment such as `# Example value, not a verified Kalillac setting`.
+- Do not describe the code as Kalillac's actual configuration, or as built "only" from verified architecture, when it contains example values.
 """
 
         code_text = normalize_for_router(message)
