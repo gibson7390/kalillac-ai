@@ -2761,7 +2761,7 @@ CODE_BUILD_WITH_LANGUAGE_RE = re.compile(
     r"^(?:(?:please\s+)"
     r"|(?:(?:can|could|would|will) you (?:please )?)"
     r"|(?:i (?:want|need) you to\s+))*"
-    r"(?:build|make|create|write|generate|code|clone|recreate|replicate|copy)\b"
+    r"(?:build|make|create|write|generate|produce|code|clone|recreate|replicate|copy)\b"
     r"[^.?!\n]{0,180}"
     r"\b(?:python|javascript|typescript|java|c\+\+|c#|ruby|go|rust|php"
     r"|html|css|sql|bash|shell|fastapi|flask|django|node(?:\.js)?|react)\b"
@@ -3125,8 +3125,8 @@ def is_code_generation_intent(message):
     # phrase. Without this guard, wording such as "build options, page size"
     # falsely matched "build ... page" and routed factual questions to code.
     generation_pattern = (
-        r"\b(write|create|generate|build|make|give me)\b.{0,50}"
-        r"\b(code|script|function|program|example|page|website|table|form"
+        r"\b(write|create|generate|build|make|produce|give me)\b.{0,50}"
+        r"\b(code|script|function|program|example|page|website|table|form|router|backend|api"
         r"|component|app|dashboard|landing page|ui|interface)\b"
     )
 
@@ -3159,7 +3159,7 @@ def is_code_generation_intent(message):
         return True
 
     if not writing_request and re.search(
-        r"\b(write|create|generate|build|make)\b\s+(me\s+)?(a\s+|an\s+|some\s+)?"
+        r"\b(write|create|generate|build|make|produce)\b\s+(me\s+)?(a\s+|an\s+|some\s+)?"
         r"(python|javascript|typescript|html|css|bash|sql|java)\b",
         text,
     ):
@@ -3192,6 +3192,8 @@ def is_kalillac_code_reference_request(message):
             r"|model\w*\s+after"
             r"|based\s+on"
             r"|similar\s+to"
+            r"|for"
+            r"|fit(?:s|ting)?"
             r")\s+kalillac(?:\s+ai)?\b",
             text,
         )
@@ -3204,6 +3206,7 @@ def is_kalillac_code_reference_request(message):
             r"|create"
             r"|make"
             r"|generate"
+            r"|produce"
             r"|implement"
             r"|develop"
             r"|write"
@@ -8042,6 +8045,11 @@ REFERENCE RULES:
             else """
 If the request is a UI/webpage/landing page/login page/signup page/dashboard:
 
+USER-SCOPE OVERRIDE:
+- If the user explicitly asks for basic, very basic, simple, minimal, barebones, starter, or plain code, honor that scope.
+- Do not expand a basic/minimal request into a polished landing page, dashboard, marketing site, multiple sections, decorative effects, or unnecessary JavaScript.
+- This explicit user scope overrides the polish/default-layout rules below.
+
 MANDATORY UI RULES:
 - Return a complete single-file HTML document from <!DOCTYPE html> to </html>.
 - Prefer vanilla HTML + internal CSS inside a <style> tag unless the user specifically asks for Tailwind.
@@ -8422,6 +8430,7 @@ V31 NATIVE TOOL POLICY:
 You may answer directly or request one of the supplied tools.
 
 WEB SEARCH:
+- A capability question such as "can you web search?" asks whether Kalillac has the capability. Answer that question directly. Do not turn a capability question by itself into a request to search.
 - Use search_web only when the user explicitly requests a meaningful
   public-web search, or when the answer genuinely requires current or
   externally verified public information.
@@ -8444,6 +8453,8 @@ WEB SEARCH:
   than inventing an answer.
 
 KALILLAC RUNTIME:
+- For questions about Kalillac's current architecture, router, routing behavior, request flow, native tools, or provider behavior, request get_kalillac_runtime_facts before answering. Do not reconstruct Kalillac's architecture from generic AI patterns.
+- Name Kalillac's creator only when the CURRENT USER QUESTION specifically asks who created, built, developed, or founded Kalillac. Do not volunteer the creator in a general description of Kalillac.
 - Use get_kalillac_runtime_facts for Kalillac's own configured models,
   providers, search provider, limits, routing, memory behavior, or runtime
   architecture.
@@ -8525,7 +8536,69 @@ def _v31_runtime_facts():
         web_search_provider="Tavily",
     )
 
-    return build_runtime_facts(config)
+    facts = build_runtime_facts(config)
+
+    facts["routing_mode"] = "transitional_v31"
+
+    facts["request_handling"] = {
+        "legacy_classifier_gate": True,
+        "native_tool_routes": sorted(V31_NATIVE_TOOL_ROUTES),
+        "application_controlled_paths": [
+            "deterministic calculator handling",
+            "session-memory writes and reads",
+            "file-unavailable handling",
+            "other deterministic hard controls",
+        ],
+        "native_tool_path": {
+            "model_provider": "OpenAI",
+            "model": OPENAI_MODEL,
+            "tools": [
+                "search_web",
+                "get_kalillac_runtime_facts",
+            ],
+            "model_may_answer_directly": True,
+        },
+        "native_search_flow": [
+            "GPT-5.6 Luna decides whether search_web is needed",
+            "application validates the tool request",
+            "application enforces search limits",
+            "application calls Tavily",
+            "Tavily results return to Luna as untrusted data",
+            "Luna generates the answer",
+            "application owns final source-link rendering",
+        ],
+        "native_path_failure_behavior": (
+            "If the experimental V31 native-tool path raises an exception, "
+            "chat continues through the existing legacy pipeline."
+        ),
+        "legacy_pipeline_provider_chain": [
+            {
+                "provider": "OpenAI",
+                "model": OPENAI_MODEL,
+            },
+            {
+                "provider": "Groq",
+                "model": GROQ_MODEL,
+            },
+            {
+                "provider": "Cloudflare Workers AI",
+                "model": CLOUDFLARE_MODEL,
+            },
+            {
+                "provider": "Groq",
+                "model": FALLBACK_GROQ_MODEL,
+            },
+        ],
+        "important_distinction": (
+            "The V31 native-tool path calls OpenAI directly. "
+            "The four-stage provider chain belongs to the legacy pipeline "
+            "that remains available during the transition; do not describe "
+            "every native-tool request as automatically traversing all four "
+            "providers."
+        ),
+    }
+
+    return facts
 
 
 def _v31_input_items(message, history):
