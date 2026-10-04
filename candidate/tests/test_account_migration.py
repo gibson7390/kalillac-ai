@@ -52,7 +52,10 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0002_account_entitlements"]
+    assert script.get_heads() == ["0003_account_usage_daily"]
+    assert script.get_revision("0003_account_usage_daily").down_revision == (
+        "0002_account_entitlements"
+    )
     assert script.get_revision("0002_account_entitlements").down_revision == (
         "0001_account_tables"
     )
@@ -89,7 +92,12 @@ def test_upgrade_matches_models_and_downgrade_removes_tables():
     engine.dispose()
 
 
-ACCOUNT_TABLES = ("users", "account_sessions", "account_entitlements")
+ACCOUNT_TABLES = (
+    "users",
+    "account_sessions",
+    "account_entitlements",
+    "account_usage_daily",
+)
 
 
 def _expected_grants(role: str) -> list[str]:
@@ -627,3 +635,123 @@ def test_entitlement_migration_staging_owner_role(monkeypatch):
     migration_roles.assume_migration_owner(connection)
 
     assert connection.statements == [f"SET ROLE {STAGING_OWNER}"]
+
+
+# --- 0003: aggregate daily usage ---------------------------------------------------
+
+
+USAGE_ONLY = "0002_account_entitlements:0003_account_usage_daily"
+
+
+def test_usage_migration_steps_up_and_down_preserving_accounts():
+    from sqlalchemy import text
+
+    engine = make_sqlite_engine()
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "0002_account_entitlements")
+        connection.execute(
+            text(
+                "INSERT INTO kalillac.users (id, email, password_hash) "
+                "VALUES ('00000000000000000000000000000003', "
+                "'u@example.com', 'hash')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO kalillac.account_entitlements (user_id, tier) "
+                "VALUES ('00000000000000000000000000000003', 'paid')"
+            )
+        )
+
+        command.upgrade(_config(connection=connection), "head")
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert "account_usage_daily" in tables
+
+        # No backfill: usage starts empty.
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM kalillac.account_usage_daily")
+        ).scalar() == 0
+
+        command.downgrade(
+            _config(connection=connection),
+            "0002_account_entitlements",
+        )
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert "account_usage_daily" not in tables
+        assert {"users", "account_sessions", "account_entitlements"} <= tables
+
+        # Accounts and entitlements survive the downgrade unchanged.
+        assert connection.execute(
+            text("SELECT tier FROM kalillac.account_entitlements")
+        ).scalar() == "paid"
+
+    engine.dispose()
+
+
+def test_usage_postgresql_ddl():
+    sql = _render_postgresql_upgrade(USAGE_ONLY)
+
+    assert "CREATE TABLE kalillac.account_usage_daily" in sql
+    assert "user_id UUID NOT NULL" in sql
+    assert "usage_date DATE NOT NULL" in sql
+    for counter in ("successful_chats", "request_chars", "response_chars"):
+        assert f"{counter} BIGINT DEFAULT 0 NOT NULL" in sql
+        assert (
+            f"CONSTRAINT ck_account_usage_daily_{counter}_non_negative "
+            f"CHECK ({counter} >= 0)"
+        ) in sql
+    assert (
+        "CONSTRAINT pk_account_usage_daily PRIMARY KEY (user_id, usage_date)"
+    ) in sql
+    assert (
+        "CONSTRAINT fk_account_usage_daily_user_id_users FOREIGN KEY(user_id) "
+        "REFERENCES kalillac.users (id) ON DELETE CASCADE"
+    ) in sql
+
+    # Only the usage table; no backfill, schema, or content columns.
+    assert sql.count("CREATE TABLE kalillac.") == 1
+    assert "INSERT INTO kalillac.account_usage_daily" not in sql
+    assert "CREATE SCHEMA" not in sql
+    for forbidden in ("message", "history", "reply", "session_id", "query", "tier"):
+        assert forbidden not in sql.lower(), forbidden
+
+
+@pytest.mark.parametrize(
+    "app_role_setting, expected_role",
+    [(None, "kalillac_app"), (STAGING_APP, STAGING_APP)],
+)
+def test_usage_migration_grants_only_dml_on_its_table(
+    monkeypatch,
+    app_role_setting,
+    expected_role,
+):
+    if app_role_setting:
+        monkeypatch.setenv(migration_roles.APP_ROLE_ENV, app_role_setting)
+
+    sql = _render_postgresql_upgrade(USAGE_ONLY)
+
+    assert _grant_lines(sql) == [
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        f"kalillac.account_usage_daily TO {expected_role};"
+    ]
+    assert "alembic_version TO" not in sql
+    assert not re.search(r"\bON\s+SCHEMA\b", sql, re.IGNORECASE)
+    assert not re.search(r"GRANT\s+CREATE", sql, re.IGNORECASE)
+
+    for forbidden in (
+        "ALTER DEFAULT PRIVILEGES",
+        "OWNER TO",
+        "SUPERUSER",
+        "CREATE ROLE",
+        "ALTER ROLE",
+        "REVOKE",
+    ):
+        assert forbidden not in sql.upper(), forbidden
+
+
+def test_usage_migration_invalid_app_role_is_rejected(monkeypatch):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, "bad role")
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        _render_postgresql_upgrade(USAGE_ONLY)

@@ -11521,7 +11521,8 @@ api = FastAPI(title="Kalillac AI API", docs_url=None, redoc_url=None, openapi_ur
 
 # Optional account endpoints (/api/account/*). Off unless explicitly enabled;
 # when off, nothing account-related is imported. Accounts are identity only:
-# /api/chat never reads the account cookie and no conversation is persisted.
+# no conversation is persisted. /api/chat reads the account cookie only when
+# usage metering (below) is also enabled, and then only for numeric totals.
 if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
     "1", "true", "yes", "on",
 }:
@@ -11545,9 +11546,37 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
             f"(missing: {_missing.name})."
         ) from _missing
 
-    from kalillac_accounts.router import build_account_router
+    from kalillac_accounts.router import (
+        build_account_router,
+        load_account_settings,
+    )
 
-    api.include_router(build_account_router())
+    _account_settings = load_account_settings()
+    api.include_router(build_account_router(settings=_account_settings))
+
+
+# Optional aggregate usage metering. Off unless explicitly enabled; when off,
+# /api/chat never inspects the account cookie, no usage database call occurs,
+# and /api/account/usage does not exist. When on, it is the single deliberate
+# place /api/chat reads the account cookie, and only to add numeric totals
+# for a signed-in account. No conversation content is ever persisted.
+_usage_meter = None
+
+if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        raise RuntimeError(
+            "KALILLAC_USAGE_METERING_ENABLED requires "
+            "KALILLAC_ACCOUNTS_ENABLED and KALILLAC_DB_ENABLED."
+        )
+
+    from kalillac_accounts.usage import UsageMeter, build_usage_router
+
+    _usage_meter = UsageMeter(settings=_account_settings)
+    api.include_router(build_usage_router(settings=_account_settings))
 
 
 @api.get("/api/health")
@@ -11598,6 +11627,17 @@ async def api_chat(request: _FastAPIRequest):
         # Explicit rejection. The alternative -- silently truncating -- would
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
+
+    # Usage metering only: decide once, at acceptance and before any chat
+    # resource is taken, which signed-in account (if any) this request
+    # belongs to. Placed before admission so no await separates the
+    # admission check from its bookkeeping below. A failed lookup means
+    # anonymous; it never blocks chat.
+    meter = _usage_meter
+    meter_user_id = None
+
+    if meter is not None:
+        meter_user_id = await meter.resolve_request_account(request)
 
     global _chat_waiting
 
@@ -11682,7 +11722,21 @@ async def api_chat(request: _FastAPIRequest):
                 entry.lock.release()
             _session_lock_unref(sid, entry)
 
-    return JSONResponse(content={"reply": reply, "session_id": out_sid})
+    response = JSONResponse(content={"reply": reply, "session_id": out_sid})
+
+    # Aggregate metering only on this normal 200 path, after every chat
+    # resource above is released, and only for a request that was signed in
+    # at acceptance. The task carries just the account id, date, and counts;
+    # it runs once the response is sent and never sees conversation text.
+    if meter is not None and meter_user_id is not None:
+        response.background = meter.background_for_chat(
+            meter_user_id,
+            req.message,
+            history,
+            reply,
+        )
+
+    return response
 
 
 # NOTE: There is intentionally no __main__/uvicorn.run() block here. The

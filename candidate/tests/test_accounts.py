@@ -309,6 +309,7 @@ def test_account_schema_holds_identity_only():
         "kalillac.users",
         "kalillac.account_sessions",
         "kalillac.account_entitlements",
+        "kalillac.account_usage_daily",
     }
 
     # Identity and sign-in tables carry no plan, billing, or conversation
@@ -326,7 +327,8 @@ def test_account_schema_holds_identity_only():
     ):
         assert not any(forbidden in column for column in columns), forbidden
 
-    # Nothing anywhere stores conversations, memory, or billing ids.
+    # Nothing anywhere stores conversation content, memory, or billing ids.
+    # (Aggregate counters such as successful_chats are numbers, not content.)
     all_columns = {
         column.name
         for table in Base.metadata.tables.values()
@@ -334,9 +336,9 @@ def test_account_schema_holds_identity_only():
     }
 
     for forbidden in (
-        "conversation", "message", "history", "chat", "memory",
-        "transcript", "price", "stripe", "customer", "subscription",
-        "usage",
+        "conversation", "message", "history", "memory", "transcript",
+        "prompt", "query", "content", "text", "session_id", "reply",
+        "price", "stripe", "customer", "subscription",
     ):
         assert not any(forbidden in column for column in all_columns), forbidden
 
@@ -352,7 +354,12 @@ def test_account_creation_creates_no_conversation_state(client, db):
     with db() as session:
         tables = set(inspect(session.connection()).get_table_names("kalillac"))
 
-    assert tables == {"users", "account_sessions", "account_entitlements"}
+    assert tables == {
+        "users",
+        "account_sessions",
+        "account_entitlements",
+        "account_usage_daily",
+    }
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
 
