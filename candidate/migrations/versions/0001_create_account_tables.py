@@ -13,6 +13,8 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
+from kalillac_db.migration_roles import migration_app_role
+
 
 revision = "0001_account_tables"
 down_revision = None
@@ -21,10 +23,10 @@ depends_on = None
 
 SCHEMA = "kalillac"
 
-# Runtime login role. It receives table DML only: no schema CREATE, no
-# ownership, and nothing on alembic_version. Grants are explicit per table;
-# there are deliberately no default privileges.
-APP_ROLE = "kalillac_app"
+# The runtime role (KALILLAC_MIGRATION_APP_ROLE, default kalillac_app)
+# receives table DML only: no schema CREATE, no ownership, and nothing on
+# alembic_version. Grants are explicit per table; there are deliberately no
+# default privileges.
 APP_TABLE_PRIVILEGES = "SELECT, INSERT, UPDATE, DELETE"
 
 
@@ -94,10 +96,13 @@ def upgrade() -> None:
 
     # Roles exist only on PostgreSQL; SQLite test databases have none.
     if op.get_context().dialect.name == "postgresql":
+        # Validated identifier; an invalid name aborts the migration.
+        app_role = migration_app_role()
+
         for table in ("users", "account_sessions"):
             op.execute(
                 f"GRANT {APP_TABLE_PRIVILEGES} ON TABLE {SCHEMA}.{table} "
-                f"TO {APP_ROLE}"
+                f"TO {app_role}"
             )
 
 

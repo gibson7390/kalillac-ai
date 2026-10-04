@@ -30,6 +30,13 @@ from account_test_db import make_sqlite_engine
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _default_role_environment(monkeypatch):
+    # Every test starts from the production defaults unless it overrides.
+    monkeypatch.delenv(migration_roles.OWNER_ROLE_ENV, raising=False)
+    monkeypatch.delenv(migration_roles.APP_ROLE_ENV, raising=False)
+
+
 def _config(**attributes) -> Config:
     config = Config(str(CANDIDATE_DIR / "alembic.ini"))
     config.set_main_option(
@@ -261,3 +268,146 @@ def test_sqlite_migration_issues_no_grants():
 
     assert statements
     assert not any("GRANT" in statement.upper() for statement in statements)
+
+
+# --- environment-specific migration roles ------------------------------------
+
+
+STAGING_OWNER = "kalillac_staging_owner"
+STAGING_APP = "kalillac_staging_app"
+
+INVALID_ROLE_NAMES = [
+    "kalillac_app; DROP TABLE kalillac.users",
+    "kalillac_app TO PUBLIC",
+    'kalillac"app',
+    "Kalillac_App",
+    "1kalillac",
+    "kalillac-app",
+    "kalillac.app",
+    "a" * 64,
+]
+
+
+def _grant_lines(sql):
+    return [
+        line.strip()
+        for line in sql.splitlines()
+        if re.match(r"\s*GRANT\b", line, re.IGNORECASE)
+    ]
+
+
+def test_defaults_set_role_kalillac_owner():
+    connection = _FakeConnection("postgresql")
+
+    migration_roles.assume_migration_owner(connection)
+
+    assert migration_roles.migration_owner_role() == "kalillac_owner"
+    assert connection.statements == ["SET ROLE kalillac_owner"]
+
+
+def test_defaults_grant_dml_to_kalillac_app():
+    assert _grant_lines(_render_postgresql_upgrade()) == [
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.users "
+        "TO kalillac_app;",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        "kalillac.account_sessions TO kalillac_app;",
+    ]
+
+
+def test_blank_settings_mean_defaults(monkeypatch):
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, "  ")
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, "")
+
+    assert migration_roles.migration_owner_role() == "kalillac_owner"
+    assert migration_roles.migration_app_role() == "kalillac_app"
+
+
+def test_staging_override_sets_role_staging_owner(monkeypatch):
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, STAGING_OWNER)
+    connection = _FakeConnection("postgresql")
+
+    migration_roles.assume_migration_owner(connection)
+
+    assert connection.statements == [f"SET ROLE {STAGING_OWNER}"]
+
+
+def test_staging_override_grants_dml_to_staging_app(monkeypatch):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, STAGING_APP)
+
+    sql = _render_postgresql_upgrade()
+
+    assert _grant_lines(sql) == [
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.users "
+        f"TO {STAGING_APP};",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        f"kalillac.account_sessions TO {STAGING_APP};",
+    ]
+    assert "kalillac_app;" not in sql
+    # The schema name does not change per environment.
+    assert "CREATE TABLE kalillac.users" in sql
+    assert "CREATE TABLE kalillac.alembic_version" in sql
+
+
+@pytest.mark.parametrize("invalid", INVALID_ROLE_NAMES)
+def test_invalid_owner_role_is_rejected(monkeypatch, invalid):
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, invalid)
+    connection = _FakeConnection("postgresql")
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        migration_roles.assume_migration_owner(connection)
+
+    # Nothing reached the database, and there was no fallback.
+    assert connection.statements == []
+
+
+@pytest.mark.parametrize("invalid", INVALID_ROLE_NAMES)
+def test_invalid_app_role_is_rejected(monkeypatch, invalid):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, invalid)
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        _render_postgresql_upgrade()
+
+
+def test_invalid_owner_role_aborts_online_migration_before_any_ddl(monkeypatch):
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, "bad role")
+    attempted = []
+
+    def postgres_like_owner_switch(connection):
+        attempted.append(1)
+        # Validate exactly as the PostgreSQL path does.
+        migration_roles.migration_owner_role()
+
+    monkeypatch.setattr(
+        migration_roles,
+        "assume_migration_owner",
+        postgres_like_owner_switch,
+    )
+    engine = make_sqlite_engine()
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        with engine.begin() as connection:
+            command.upgrade(_config(connection=connection), "head")
+
+    with engine.connect() as connection:
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+
+    engine.dispose()
+
+    assert attempted == [1]
+    assert "users" not in tables
+
+
+def test_sqlite_unaffected_by_role_settings(monkeypatch):
+    # Invalid names are only validated where roles exist (PostgreSQL), so a
+    # SQLite migration neither sets a role nor grants, whatever the settings.
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, "not valid!")
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, "not valid!")
+    engine = make_sqlite_engine()
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "head")
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+
+    engine.dispose()
+
+    assert {"users", "account_sessions", "alembic_version"} <= tables
