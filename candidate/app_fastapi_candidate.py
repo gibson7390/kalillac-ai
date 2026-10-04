@@ -11579,6 +11579,41 @@ if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
     api.include_router(build_usage_router(settings=_account_settings))
 
 
+# Optional Stripe billing (Checkout, Customer Portal, verified webhooks). Off
+# unless explicitly enabled; when off, neither billing code nor the stripe
+# package is imported. Billing never touches /api/chat, Private Session, or
+# usage metering, and only verified webhooks change entitlement.
+if os.getenv("KALILLAC_BILLING_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        raise RuntimeError(
+            "KALILLAC_BILLING_ENABLED requires "
+            "KALILLAC_ACCOUNTS_ENABLED and KALILLAC_DB_ENABLED."
+        )
+
+    try:
+        import stripe as _stripe  # noqa: F401
+    except ImportError as _missing:
+        raise RuntimeError(
+            "KALILLAC_BILLING_ENABLED requires the billing dependencies; "
+            "install requirements-billing.txt (missing: stripe)."
+        ) from _missing
+
+    from kalillac_billing.config import load_billing_config
+    from kalillac_billing.router import build_billing_router
+
+    # Raises BillingConfigError naming the bad setting (never its value).
+    api.include_router(
+        build_billing_router(
+            config=load_billing_config(),
+            settings=_account_settings,
+        )
+    )
+
+
 @api.get("/api/health")
 def health():
     # Minimal, leaks nothing: no version internals, env, keys, prompt, or state.

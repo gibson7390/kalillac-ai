@@ -52,7 +52,10 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0003_account_usage_daily"]
+    assert script.get_heads() == ["0004_account_billing"]
+    assert script.get_revision("0004_account_billing").down_revision == (
+        "0003_account_usage_daily"
+    )
     assert script.get_revision("0003_account_usage_daily").down_revision == (
         "0002_account_entitlements"
     )
@@ -97,6 +100,8 @@ ACCOUNT_TABLES = (
     "account_sessions",
     "account_entitlements",
     "account_usage_daily",
+    "account_billing",
+    "stripe_webhook_events",
 )
 
 
@@ -755,3 +760,154 @@ def test_usage_migration_invalid_app_role_is_rejected(monkeypatch):
 
     with pytest.raises(migration_roles.InvalidRoleName):
         _render_postgresql_upgrade(USAGE_ONLY)
+
+
+# --- 0004: Stripe billing linkage and webhook idempotency -------------------------
+
+
+BILLING_ONLY = "0003_account_usage_daily:0004_account_billing"
+
+
+def test_billing_migration_steps_up_and_down_preserving_accounts():
+    from sqlalchemy import text
+
+    engine = make_sqlite_engine()
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "0003_account_usage_daily")
+        connection.execute(
+            text(
+                "INSERT INTO kalillac.users (id, email, password_hash) "
+                "VALUES ('00000000000000000000000000000004', "
+                "'b@example.com', 'hash')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO kalillac.account_usage_daily "
+                "(user_id, usage_date, successful_chats) "
+                "VALUES ('00000000000000000000000000000004', '2026-10-01', 3)"
+            )
+        )
+
+        command.upgrade(_config(connection=connection), "head")
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert {"account_billing", "stripe_webhook_events"} <= tables
+
+        # No backfill.
+        for table in ("account_billing", "stripe_webhook_events"):
+            assert connection.execute(
+                text(f"SELECT COUNT(*) FROM kalillac.{table}")
+            ).scalar() == 0
+
+        command.downgrade(
+            _config(connection=connection),
+            "0003_account_usage_daily",
+        )
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert not {"account_billing", "stripe_webhook_events"} & tables
+
+        # Accounts, entitlements, and usage survive the downgrade.
+        assert {"users", "account_entitlements", "account_usage_daily"} <= tables
+        assert connection.execute(
+            text("SELECT successful_chats FROM kalillac.account_usage_daily")
+        ).scalar() == 3
+
+    engine.dispose()
+
+
+def test_billing_postgresql_ddl():
+    sql = _render_postgresql_upgrade(BILLING_ONLY)
+
+    assert "CREATE TABLE kalillac.account_billing" in sql
+    assert "CREATE TABLE kalillac.stripe_webhook_events" in sql
+    assert "cancel_at_period_end BOOLEAN DEFAULT false NOT NULL" in sql
+    assert "current_period_end TIMESTAMP WITH TIME ZONE" in sql
+    assert "CONSTRAINT pk_account_billing PRIMARY KEY (user_id)" in sql
+    assert (
+        "CONSTRAINT fk_account_billing_user_id_users FOREIGN KEY(user_id) "
+        "REFERENCES kalillac.users (id) ON DELETE CASCADE"
+    ) in sql
+    assert (
+        "CONSTRAINT uq_account_billing_stripe_customer_id "
+        "UNIQUE (stripe_customer_id)"
+    ) in sql
+    assert (
+        "CONSTRAINT uq_account_billing_stripe_subscription_id "
+        "UNIQUE (stripe_subscription_id)"
+    ) in sql
+    assert (
+        "CONSTRAINT pk_stripe_webhook_events PRIMARY KEY (event_id)"
+    ) in sql
+
+    # Server-generated pending-Checkout state.
+    assert "checkout_attempt_id UUID" in sql
+    assert "checkout_customer_id VARCHAR(255)" in sql
+    assert "checkout_attempt_created_at TIMESTAMP WITH TIME ZONE" in sql
+    assert "checkout_price_id VARCHAR(255)" in sql
+    assert "checkout_success_url VARCHAR(2048)" in sql
+    assert "checkout_cancel_url VARCHAR(2048)" in sql
+    assert "stripe_checkout_session_id VARCHAR(255)" in sql
+    assert "checkout_session_expires_at TIMESTAMP WITH TIME ZONE" in sql
+    assert (
+        "CONSTRAINT uq_account_billing_stripe_checkout_session_id "
+        "UNIQUE (stripe_checkout_session_id)"
+    ) in sql
+
+    # Only these two tables; no backfill, schema, payload, or payment columns.
+    assert sql.count("CREATE TABLE kalillac.") == 2
+    assert "INSERT INTO kalillac.account_billing" not in sql
+    assert "CREATE SCHEMA" not in sql
+    for forbidden in ("payload", "card", "payment", "invoice", "amount", "secret"):
+        assert forbidden not in sql.lower(), forbidden
+
+
+@pytest.mark.parametrize(
+    "app_role_setting, expected_role",
+    [(None, "kalillac_app"), (STAGING_APP, STAGING_APP)],
+)
+def test_billing_migration_grants_only_dml_on_its_tables(
+    monkeypatch,
+    app_role_setting,
+    expected_role,
+):
+    if app_role_setting:
+        monkeypatch.setenv(migration_roles.APP_ROLE_ENV, app_role_setting)
+
+    sql = _render_postgresql_upgrade(BILLING_ONLY)
+
+    assert _grant_lines(sql) == [
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        f"kalillac.account_billing TO {expected_role};",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        f"kalillac.stripe_webhook_events TO {expected_role};",
+    ]
+    assert "alembic_version TO" not in sql
+    assert not re.search(r"\bON\s+SCHEMA\b", sql, re.IGNORECASE)
+    assert not re.search(r"GRANT\s+CREATE", sql, re.IGNORECASE)
+
+    for forbidden in (
+        "ALTER DEFAULT PRIVILEGES",
+        "OWNER TO",
+        "SUPERUSER",
+        "CREATE ROLE",
+        "ALTER ROLE",
+        "REVOKE",
+    ):
+        assert forbidden not in sql.upper(), forbidden
+
+
+def test_billing_migration_invalid_app_role_is_rejected(monkeypatch):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, "bad role")
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        _render_postgresql_upgrade(BILLING_ONLY)
+
+
+def test_billing_migration_staging_owner_role(monkeypatch):
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, STAGING_OWNER)
+    connection = _FakeConnection("postgresql")
+
+    migration_roles.assume_migration_owner(connection)
+
+    assert connection.statements == [f"SET ROLE {STAGING_OWNER}"]

@@ -305,11 +305,14 @@ def test_logout_without_session_is_idempotent(client):
 
 
 def test_account_schema_holds_identity_only():
+    billing_tables = {"kalillac.account_billing", "kalillac.stripe_webhook_events"}
+
     assert set(Base.metadata.tables) == {
         "kalillac.users",
         "kalillac.account_sessions",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
+        *billing_tables,
     }
 
     # Identity and sign-in tables carry no plan, billing, or conversation
@@ -327,7 +330,7 @@ def test_account_schema_holds_identity_only():
     ):
         assert not any(forbidden in column for column in columns), forbidden
 
-    # Nothing anywhere stores conversation content, memory, or billing ids.
+    # Nothing anywhere stores conversation content or memory.
     # (Aggregate counters such as successful_chats are numbers, not content.)
     all_columns = {
         column.name
@@ -337,8 +340,32 @@ def test_account_schema_holds_identity_only():
 
     for forbidden in (
         "conversation", "message", "history", "memory", "transcript",
-        "prompt", "query", "content", "text", "session_id", "reply",
-        "price", "stripe", "customer", "subscription",
+        "prompt", "query", "content", "text", "reply", "chat_session",
+    ):
+        assert not any(forbidden in column for column in all_columns), forbidden
+
+    # The temporary chat session id is never stored. (A Stripe Checkout
+    # Session id, stripe_checkout_session_id, is billing data, not chat.)
+    assert "session_id" not in all_columns
+
+    # Billing references live only in the billing tables.
+    non_billing_columns = {
+        column.name
+        for name, table in Base.metadata.tables.items()
+        if name not in billing_tables
+        for column in table.columns
+    }
+
+    for forbidden in ("price", "stripe", "customer", "subscription"):
+        assert not any(
+            forbidden in column for column in non_billing_columns
+        ), forbidden
+
+    # And no table stores payment instruments, invoices, amounts, payloads,
+    # or secrets.
+    for forbidden in (
+        "card", "payment", "invoice", "amount", "cents", "currency",
+        "payload", "raw", "secret", "bank", "iban", "cvc", "last4",
     ):
         assert not any(forbidden in column for column in all_columns), forbidden
 
@@ -359,6 +386,8 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "account_sessions",
         "account_entitlements",
         "account_usage_daily",
+        "account_billing",
+        "stripe_webhook_events",
     }
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
