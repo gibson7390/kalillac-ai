@@ -6,11 +6,11 @@ from contextlib import contextmanager
 from threading import Lock
 from typing import Iterator
 
-from sqlalchemy import URL, create_engine
+from sqlalchemy import URL, create_engine, make_url
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .config import load_database_config
+from .config import load_database_config, load_database_url
 
 
 _ENGINE: Engine | None = None
@@ -31,9 +31,10 @@ def get_engine() -> Engine | None:
     global _ENGINE
     global _SESSION_FACTORY
 
-    config = load_database_config()
+    database_url = load_database_url()
+    config = None if database_url else load_database_config()
 
-    if config is None:
+    if database_url is None and config is None:
         return None
 
     if _ENGINE is not None and _SESSION_FACTORY is not None:
@@ -41,14 +42,17 @@ def get_engine() -> Engine | None:
 
     with _ENGINE_LOCK:
         if _ENGINE is None or _SESSION_FACTORY is None:
-            url = URL.create(
-                drivername="postgresql+psycopg",
-                username=config.user,
-                password=config.password,
-                host=config.host,
-                port=config.port,
-                database=config.database,
-            )
+            if database_url is not None:
+                url = make_url(database_url)
+            else:
+                url = URL.create(
+                    drivername="postgresql+psycopg",
+                    username=config.user,
+                    password=config.password,
+                    host=config.host,
+                    port=config.port,
+                    database=config.database,
+                )
 
             new_engine = create_engine(
                 url,
@@ -101,3 +105,12 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+def get_session_factory() -> sessionmaker[Session] | None:
+    """Return the session factory, or None when DB support is disabled."""
+
+    if get_engine() is None:
+        return None
+
+    return _SESSION_FACTORY

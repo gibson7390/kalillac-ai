@@ -11519,6 +11519,37 @@ def _release_chat_resources(sem, sid, entry):
 api = FastAPI(title="Kalillac AI API", docs_url=None, redoc_url=None, openapi_url=None)
 
 
+# Optional account endpoints (/api/account/*). Off unless explicitly enabled;
+# when off, nothing account-related is imported. Accounts are identity only:
+# /api/chat never reads the account cookie and no conversation is persisted.
+if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    from kalillac_db.config import database_enabled as _database_enabled
+
+    if not _database_enabled():
+        raise RuntimeError(
+            "KALILLAC_ACCOUNTS_ENABLED requires KALILLAC_DB_ENABLED."
+        )
+
+    # The account stack is not in requirements-production-lock.txt; refuse
+    # to start with a clear message rather than fail on the first login.
+    try:
+        import argon2 as _argon2  # noqa: F401
+        import psycopg as _psycopg  # noqa: F401
+        import sqlalchemy as _sqlalchemy  # noqa: F401
+    except ImportError as _missing:
+        raise RuntimeError(
+            "KALILLAC_ACCOUNTS_ENABLED requires the database dependencies; "
+            "install requirements-database.txt "
+            f"(missing: {_missing.name})."
+        ) from _missing
+
+    from kalillac_accounts.router import build_account_router
+
+    api.include_router(build_account_router())
+
+
 @api.get("/api/health")
 def health():
     # Minimal, leaks nothing: no version internals, env, keys, prompt, or state.
