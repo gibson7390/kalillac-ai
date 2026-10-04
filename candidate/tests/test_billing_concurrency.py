@@ -31,9 +31,13 @@ import kalillac_billing.service as service
 from kalillac_billing.gateway import BillingProviderError
 from kalillac_billing.service import (
     CHECKOUT_RETRY_WINDOW,
+    PAID_STATUSES,
+    REPLACEABLE_SUBSCRIPTION_STATUSES,
+    ReconciliationConflict,
     checkout_idempotency_key,
     process_webhook,
     start_checkout,
+    tier_for_subscription,
 )
 from kalillac_db.models import (
     AccountBilling,
@@ -1043,3 +1047,396 @@ def test_errors_cannot_clear_an_unresolved_earlier_outcome(memory_db, gateway):
     assert {c["idempotency_key"] for c in gateway.checkout_calls} == {
         checkout_idempotency_key(user_id, attempt)
     }
+
+
+# --- subscription replacement vs. entitlement ------------------------------------------
+
+
+PAYING = ["active", "trialing", "past_due"]
+BLOCKING = ["incomplete", "unpaid", "paused", None, "some_future_status"]
+TERMINAL = ["canceled", "incomplete_expired"]
+
+
+def _set_subscription(factory, user_id, status, subscription_id="sub_old"):
+    with factory() as session, session.begin():
+        billing = get_or_create_billing(session, user_id)
+        billing.stripe_subscription_id = subscription_id
+        billing.subscription_status = status
+
+
+def test_replacement_policy_constants():
+    assert PAID_STATUSES == frozenset(PAYING)
+    assert REPLACEABLE_SUBSCRIPTION_STATUSES == frozenset(TERMINAL)
+
+
+@pytest.mark.parametrize("status", BLOCKING)
+def test_blocked_subscription_without_session_never_creates_checkout(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    _set_subscription(memory_db, user_id, status)
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    assert result.outcome == "subscription_unresolved"
+    assert result.url is None
+    assert gateway.checkout_calls == []
+    assert _billing(memory_db, user_id).checkout_attempt_id is None
+
+
+@pytest.mark.parametrize("status", BLOCKING)
+def test_blocked_subscription_keeps_reusing_the_open_original_session(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    first = _checkout(user_id, gateway, memory_db)
+    # The original purchase produced a subscription that is not yet paying.
+    _set_subscription(memory_db, user_id, status)
+
+    second = _checkout(user_id, gateway, memory_db)
+
+    assert second.outcome == "url"
+    assert second.url == first.url
+    assert len(gateway.checkout_calls) == 1
+    assert len(gateway.sessions_by_key) == 1
+
+
+@pytest.mark.parametrize("status", BLOCKING)
+def test_blocked_subscription_with_completed_session_holds(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    _checkout(user_id, gateway, memory_db)
+    gateway.set_checkout_status("cs_test_1", "complete", subscription_id="sub_old")
+    _set_subscription(memory_db, user_id, status)
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    # Not paying is not proof the subscription ended: no replacement.
+    assert result.outcome == "billing_processing"
+    assert len(gateway.checkout_calls) == 1
+    assert _billing(memory_db, user_id).stripe_checkout_session_id == "cs_test_1"
+
+
+@pytest.mark.parametrize("status", BLOCKING)
+def test_blocked_subscription_with_expired_session_does_not_create_another(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    _checkout(user_id, gateway, memory_db)
+    gateway.set_checkout_status("cs_test_1", "expired")
+    _set_subscription(memory_db, user_id, status)
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    assert result.outcome == "subscription_unresolved"
+    assert len(gateway.checkout_calls) == 1
+    assert len(gateway.sessions_by_key) == 1
+
+
+@pytest.mark.parametrize("status", TERMINAL)
+def test_terminal_subscription_without_session_permits_new_checkout(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    _set_subscription(memory_db, user_id, status)
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    assert result.outcome == "url"
+    assert len(gateway.checkout_calls) == 1
+
+
+@pytest.mark.parametrize("status", TERMINAL)
+def test_terminal_subscription_with_completed_session_permits_replacement(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    _checkout(user_id, gateway, memory_db)
+    gateway.set_checkout_status("cs_test_1", "complete", subscription_id="sub_old")
+    _set_subscription(memory_db, user_id, status)
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    assert result.outcome == "url"
+    assert result.url == "https://checkout.stripe.com/c/pay/cs_test_2"
+    assert len(gateway.sessions_by_key) == 2
+
+
+@pytest.mark.parametrize("status", TERMINAL)
+def test_terminal_subscription_with_open_session_reuses_it(
+    memory_db, gateway, status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    first = _checkout(user_id, gateway, memory_db)
+    _set_subscription(memory_db, user_id, status)
+
+    assert _checkout(user_id, gateway, memory_db).url == first.url
+    assert len(gateway.checkout_calls) == 1
+
+
+@pytest.mark.parametrize("stored_session", [False, True])
+@pytest.mark.parametrize("status", PAYING)
+def test_paying_subscription_is_already_subscribed(
+    memory_db, gateway, status, stored_session
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    if stored_session:
+        _checkout(user_id, gateway, memory_db)
+    calls_before = len(gateway.checkout_calls)
+    _set_subscription(memory_db, user_id, status)
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    assert result.outcome == "already_subscribed"
+    assert len(gateway.checkout_calls) == calls_before
+    assert gateway.checkout_retrievals == []
+
+
+def test_completed_session_for_a_different_terminal_subscription_holds(
+    memory_db, gateway
+):
+    # The completed session's subscription is not the reconciled one, so its
+    # outcome is still unknown locally: hold rather than replace.
+    user_id = _add_user(memory_db, "a@example.com")
+    _checkout(user_id, gateway, memory_db)
+    gateway.set_checkout_status("cs_test_1", "complete", subscription_id="sub_new")
+    _set_subscription(memory_db, user_id, "canceled", subscription_id="sub_old")
+
+    result = _checkout(user_id, gateway, memory_db)
+
+    assert result.outcome == "billing_processing"
+    assert len(gateway.checkout_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "status, tier",
+    [
+        ("active", "paid"),
+        ("trialing", "paid"),
+        ("past_due", "paid"),
+        ("incomplete", "free"),
+        ("incomplete_expired", "free"),
+        ("canceled", "free"),
+        ("unpaid", "free"),
+        ("paused", "free"),
+        ("some_future_status", "free"),
+        (None, "free"),
+    ],
+)
+def test_entitlement_mapping_is_unchanged(status, tier):
+    assert tier_for_subscription(_subscription(None, status=status), PAID_PRICE) == tier
+
+
+# --- webhook linkage: delayed and conflicting subscriptions -----------------------------
+
+
+NONTERMINAL_NONPAYING = ["incomplete", "unpaid", "paused"]
+
+
+def _sub(user_id, subscription_id, status):
+    return _subscription(
+        user_id, subscription_id=subscription_id, customer_id="cus_1", status=status
+    )
+
+
+def _event(factory, gateway, event_id, user_id, subscription_id,
+           event_type="customer.subscription.updated"):
+    return _deliver(
+        factory, gateway, event_id, event_type,
+        user=user_id, subscription=subscription_id, customer="cus_1",
+    )
+
+
+def _account_state(factory, user_id):
+    """Everything a reconciliation could change, for before/after checks."""
+
+    with factory() as session:
+        billing = session.get(AccountBilling, user_id)
+        entitlement = session.get(AccountEntitlement, user_id)
+
+        return {
+            "billing": None if billing is None else {
+                column.name: getattr(billing, column.name)
+                for column in AccountBilling.__table__.columns
+            },
+            "entitlement": {
+                column.name: getattr(entitlement, column.name)
+                for column in AccountEntitlement.__table__.columns
+            },
+        }
+
+
+def _cancel_a_then_link_b(factory, gateway, user_id, b_status, with_checkout):
+    """Subscription A ends; a later purchase links subscription B."""
+
+    gateway.subscriptions["sub_A"] = _sub(user_id, "sub_A", "active")
+    _event(factory, gateway, "evt_A_active", user_id, "sub_A",
+           "customer.subscription.created")
+    gateway.subscriptions["sub_A"] = _sub(user_id, "sub_A", "canceled")
+    _event(factory, gateway, "evt_A_canceled", user_id, "sub_A",
+           "customer.subscription.deleted")
+
+    if with_checkout:
+        # The new purchase: a Checkout attempt whose session completed into
+        # subscription B, which is not paying yet.
+        _checkout(user_id, gateway, factory)
+        gateway.set_checkout_status("cs_test_1", "complete", subscription_id="sub_B")
+
+    gateway.subscriptions["sub_B"] = _sub(user_id, "sub_B", b_status)
+    assert _event(factory, gateway, "evt_B", user_id, "sub_B",
+                  "customer.subscription.created") == "processed"
+
+
+@pytest.mark.parametrize("with_checkout", [True, False])
+@pytest.mark.parametrize("b_status", NONTERMINAL_NONPAYING)
+def test_delayed_event_for_canceled_a_preserves_nonterminal_b(
+    memory_db, gateway, b_status, with_checkout
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    _cancel_a_then_link_b(memory_db, gateway, user_id, b_status, with_checkout)
+
+    before = _account_state(memory_db, user_id)
+    assert before["billing"]["stripe_subscription_id"] == "sub_B"
+    assert before["billing"]["subscription_status"] == b_status
+    events_before = _count(memory_db, StripeWebhookEvent)
+
+    # A delayed event for A arrives; Stripe's current state for A: canceled.
+    result = _event(memory_db, gateway, "evt_A_late", user_id, "sub_A")
+
+    assert result == "ignored_historical"
+    assert gateway.retrieve_calls[-1] == "sub_A"
+    # Linkage, entitlement, and the pending Checkout are exactly unchanged.
+    assert _account_state(memory_db, user_id) == before
+    # Acknowledged: recorded so Stripe stops retrying it.
+    assert _count(memory_db, StripeWebhookEvent) == events_before + 1
+
+    # And another Checkout is still blocked, with no new session.
+    calls_before = len(gateway.checkout_calls)
+    outcome = _checkout(user_id, gateway, memory_db).outcome
+
+    assert outcome == (
+        "billing_processing" if with_checkout else "subscription_unresolved"
+    )
+    assert len(gateway.checkout_calls) == calls_before
+    if with_checkout:
+        assert before["billing"]["checkout_attempt_id"] is not None
+        assert before["billing"]["stripe_checkout_session_id"] == "cs_test_1"
+
+
+@pytest.mark.parametrize("local_status", [None, "some_future_status"])
+def test_missing_or_unknown_local_status_is_treated_as_nonterminal(
+    memory_db, gateway, local_status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    gateway.subscriptions["sub_B"] = _sub(user_id, "sub_B", "incomplete")
+    _event(memory_db, gateway, "evt_B", user_id, "sub_B")
+    _set_subscription(memory_db, user_id, local_status, subscription_id="sub_B")
+    before = _account_state(memory_db, user_id)
+
+    # A terminal older subscription cannot displace it...
+    gateway.subscriptions["sub_A"] = _sub(user_id, "sub_A", "canceled")
+    assert _event(memory_db, gateway, "evt_A", user_id, "sub_A") == (
+        "ignored_historical"
+    )
+    assert _account_state(memory_db, user_id) == before
+
+    # ...and a nonterminal different one is a conflict, not a replacement.
+    gateway.subscriptions["sub_C"] = _sub(user_id, "sub_C", "active")
+    with pytest.raises(ReconciliationConflict):
+        _event(memory_db, gateway, "evt_C", user_id, "sub_C")
+
+    assert _account_state(memory_db, user_id) == before
+
+
+@pytest.mark.parametrize(
+    "linked_status, incoming_status",
+    [
+        ("incomplete", "active"),
+        ("unpaid", "incomplete"),
+        ("paused", "trialing"),
+        ("active", "active"),
+        ("past_due", "unpaid"),
+        ("incomplete", None),
+        ("active", "some_future_status"),
+    ],
+)
+def test_two_different_nonterminal_subscriptions_conflict(
+    memory_db, gateway, linked_status, incoming_status
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    gateway.subscriptions["sub_B"] = _sub(user_id, "sub_B", linked_status)
+    _event(memory_db, gateway, "evt_B", user_id, "sub_B")
+    before = _account_state(memory_db, user_id)
+    events_before = _count(memory_db, StripeWebhookEvent)
+
+    gateway.subscriptions["sub_C"] = _sub(user_id, "sub_C", incoming_status)
+
+    for _ in range(2):
+        # Neither chosen; never marked reconciled, so redelivery conflicts again.
+        with pytest.raises(ReconciliationConflict):
+            _event(memory_db, gateway, "evt_C", user_id, "sub_C")
+
+        assert _account_state(memory_db, user_id) == before
+        assert _count(memory_db, StripeWebhookEvent) == events_before
+
+
+def test_same_subscription_updates_normally(memory_db, gateway):
+    user_id = _add_user(memory_db, "a@example.com")
+    _checkout(user_id, gateway, memory_db)
+
+    for event_id, status, tier in (
+        ("evt_1", "incomplete", "free"),
+        ("evt_2", "active", "paid"),
+        ("evt_3", "past_due", "paid"),
+        ("evt_4", "unpaid", "free"),
+        ("evt_5", "canceled", "free"),
+    ):
+        gateway.subscriptions["sub_B"] = _sub(user_id, "sub_B", status)
+
+        assert _event(memory_db, gateway, event_id, user_id, "sub_B") == "processed"
+        assert _billing(memory_db, user_id).subscription_status == status
+
+        with memory_db() as session:
+            assert session.get(AccountEntitlement, user_id).tier == tier
+
+    # Becoming paid cleared the pending Checkout attempt along the way.
+    assert _billing(memory_db, user_id).checkout_attempt_id is None
+
+
+@pytest.mark.parametrize("terminal", ["canceled", "incomplete_expired"])
+@pytest.mark.parametrize("new_status, tier", [("active", "paid"), ("incomplete", "free")])
+def test_new_subscription_replaces_a_terminal_one(
+    memory_db, gateway, terminal, new_status, tier
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    gateway.subscriptions["sub_A"] = _sub(user_id, "sub_A", terminal)
+    _event(memory_db, gateway, "evt_A", user_id, "sub_A")
+
+    gateway.subscriptions["sub_B"] = _sub(user_id, "sub_B", new_status)
+
+    assert _event(memory_db, gateway, "evt_B", user_id, "sub_B") == "processed"
+
+    billing = _billing(memory_db, user_id)
+    assert billing.stripe_subscription_id == "sub_B"
+    assert billing.subscription_status == new_status
+
+    with memory_db() as session:
+        assert session.get(AccountEntitlement, user_id).tier == tier
+
+
+def test_delayed_terminal_event_does_not_downgrade_paying_subscription(
+    memory_db, gateway
+):
+    user_id = _add_user(memory_db, "a@example.com")
+    gateway.subscriptions["sub_A"] = _sub(user_id, "sub_A", "canceled")
+    _event(memory_db, gateway, "evt_A", user_id, "sub_A")
+    gateway.subscriptions["sub_B"] = _sub(user_id, "sub_B", "active")
+    _event(memory_db, gateway, "evt_B", user_id, "sub_B")
+    before = _account_state(memory_db, user_id)
+
+    assert _event(memory_db, gateway, "evt_A_late", user_id, "sub_A") == (
+        "ignored_historical"
+    )
+    assert _account_state(memory_db, user_id) == before
+    assert before["entitlement"]["tier"] == "paid"

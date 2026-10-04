@@ -6,20 +6,31 @@ attempts and webhook reconciliations for the same account therefore
 serialize; different accounts never block each other.
 
 Checkout (start_checkout):
-1. Under the lock: refuse if already paying; otherwise reuse the stored
-   Checkout Session, or reuse the pending attempt, or persist a new
-   server-generated checkout_attempt_id together with a snapshot of the
-   current Stripe customer (checkout_customer_id). Commit.
+1. Under the lock:
+   - a paying subscription (active, trialing, past_due) -> already_subscribed;
+   - a stored Checkout Session -> re-read it from Stripe (below);
+   - a known subscription not explicitly terminal (incomplete, unpaid,
+     paused, or a missing/unknown status) -> subscription_unresolved; only
+     canceled or incomplete_expired may be replaced by a new purchase;
+   - a pending attempt -> retried only within CHECKOUT_RETRY_WINDOW of its
+     persisted creation time, otherwise held as billing_processing;
+   - otherwise persist a new server-generated checkout_attempt_id with its
+     UTC creation time and every attempt-specific Checkout parameter
+     (customer, Price, success and cancel URLs). Commit.
 2. Create the Stripe Checkout Session with idempotency key
    "kalillac-checkout-<user_id>-<checkout_attempt_id>" and the attempt's
-   snapshotted customer. Concurrent requests sharing the attempt, and
-   retries after a crash between creation and step 3, send the identical
-   key and parameters and get the same Stripe session back.
-3. Under the lock: store the session id/expiry on that same attempt.
-A stored session is re-read from Stripe: open -> reuse its URL; complete
-but not yet reconciled -> billing_processing; expired -> new attempt.
-Only a provider error proving the request never ran discards an attempt;
-an idempotency conflict or unknown outcome keeps it for the next retry.
+   pinned parameters. Concurrent requests sharing the attempt, and retries
+   after a crash between creation and step 3, send the identical key and
+   parameters and get the same Stripe session back.
+3. Under the lock: store the session id/expiry on that same attempt. A
+   retried create's response is Stripe's saved original, so its session is
+   re-read before any URL is returned.
+A stored session is re-read from Stripe: open -> reuse its URL; complete ->
+billing_processing unless already reconciled into an explicitly terminal
+subscription; expired -> replaced through the guarded path; anything else
+-> held. No provider error ever discards an attempt: a failure does not
+prove an earlier request under the key produced no session, so the next
+request retries the same key with the same parameters.
 
 Webhook (process_webhook):
 1. Verify the Stripe signature (failure -> 400 upstream); ignore irrelevant
@@ -31,6 +42,12 @@ Webhook (process_webhook):
    Event arrival order is never trusted, and two events for one account
    cannot commit snapshots out of order. Any failure rolls everything back
    and leaves the event unrecorded so Stripe retries.
+4. Linkage: the same subscription updates normally, and a new subscription
+   replaces the linked one only once the linked one is explicitly terminal.
+   A different, terminal subscription arriving while a nonterminal one is
+   linked is a delayed historical event: recorded, nothing changed. Two
+   different nonterminal subscriptions are a conflict: rolled back, left
+   unrecorded, and surfaced as non-2xx. Entitlement never decides linkage.
 
 Access policy: paid while Stripe reports active, trialing, or past_due
 (dunning) for the configured paid Price; free for every other status,
@@ -83,6 +100,14 @@ RELEVANT_EVENT_TYPES = frozenset(
 
 PAID_STATUSES = frozenset({"active", "trialing", "past_due"})
 
+# Checkout replacement is a separate question from entitlement. A known
+# subscription may be replaced by a new Checkout only once Stripe reports it
+# explicitly terminal. Every other non-paying state (incomplete, unpaid,
+# paused) and any missing or unknown status can still become, or already
+# is, a live subscription, so it blocks a second one. Not being paid is
+# never treated as proof that a subscription ended.
+REPLACEABLE_SUBSCRIPTION_STATUSES = frozenset({"canceled", "incomplete_expired"})
+
 ENTITLEMENT_SOURCE = "stripe"
 
 
@@ -114,7 +139,7 @@ def _parse_user_id(value: str | None) -> uuid.UUID | None:
 
 @dataclass(frozen=True)
 class CheckoutResult:
-    """url | already_subscribed | billing_processing"""
+    """url | already_subscribed | billing_processing | subscription_unresolved"""
 
     outcome: str
     url: str | None = None
@@ -150,7 +175,7 @@ class CheckoutParams:
 
 @dataclass(frozen=True)
 class _CheckoutPlan:
-    """subscribed | existing (reuse session_id) | unresolved | create"""
+    """subscribed | existing (reuse session_id) | unresolved | blocked | create"""
 
     action: str
     session_id: str | None = None
@@ -174,6 +199,16 @@ def _locked(session_factory: sessionmaker[Session], user_id: uuid.UUID, work):
         return work(get_or_create_billing(session, user_id))
 
 
+def _subscription_replaceable(billing: AccountBilling) -> bool:
+    """True when no known subscription exists, or Stripe has reported the
+    known one explicitly terminal. Missing or unknown status blocks."""
+
+    if billing.stripe_subscription_id is None:
+        return True
+
+    return billing.subscription_status in REPLACEABLE_SUBSCRIPTION_STATUSES
+
+
 def _retry_window_open(created_at: datetime | None, now: datetime) -> bool:
     # A missing timestamp cannot be proven inside the window: hold it.
     return created_at is not None and now - _as_utc(created_at) < CHECKOUT_RETRY_WINDOW
@@ -189,11 +224,18 @@ def _plan_checkout(
         if is_paying_status(billing.subscription_status):
             return _CheckoutPlan("subscribed")
 
+        # A stored session is always re-read first, so an open session that
+        # completes the original purchase keeps being reused.
         if billing.stripe_checkout_session_id:
             return _CheckoutPlan(
                 "existing",
                 session_id=billing.stripe_checkout_session_id,
             )
+
+        # A known subscription that Stripe has not reported as explicitly
+        # terminal blocks any new subscription Checkout.
+        if not _subscription_replaceable(billing):
+            return _CheckoutPlan("blocked")
 
         new_attempt = billing.checkout_attempt_id is None
 
@@ -284,6 +326,9 @@ def start_checkout(
         if plan.action == "unresolved":
             return CheckoutResult("billing_processing")
 
+        if plan.action == "blocked":
+            return CheckoutResult("subscription_unresolved")
+
         if plan.action == "existing":
             # A known session: act on its actual Stripe state.
             current = gateway.retrieve_checkout_session(plan.session_id)
@@ -293,13 +338,16 @@ def start_checkout(
 
             if current.status == "complete":
                 def reconciled(billing: AccountBilling) -> bool:
-                    # Already reconciled into a subscription that has since
-                    # ended: the old session is spent, start fresh.
+                    # Already reconciled into a subscription that Stripe has
+                    # reported explicitly terminal: the old session is spent,
+                    # start fresh. Any other state (paying, incomplete,
+                    # unpaid, paused, missing, unknown) keeps the hold.
                     done = bool(
                         current.subscription_id
                         and billing.stripe_subscription_id
                         == current.subscription_id
-                        and not is_paying_status(billing.subscription_status)
+                        and billing.subscription_status
+                        in REPLACEABLE_SUBSCRIPTION_STATUSES
                     )
                     if done:
                         _discard_session(plan.session_id)(billing)
@@ -359,7 +407,7 @@ def start_checkout(
 
 @dataclass(frozen=True)
 class WebhookOutcome:
-    """ignored | duplicate | processed | unmatched"""
+    """ignored | duplicate | processed | unmatched | ignored_historical"""
 
     result: str
 
@@ -415,19 +463,48 @@ def _belongs_elsewhere(
     )
 
 
-def _supersedes_local(existing, state: SubscriptionState) -> bool:
-    """One paid subscription per account: a different, non-paying
-    subscription never overwrites a currently paying one."""
+class ReconciliationConflict(Exception):
+    """Two different nonterminal subscriptions claim one account.
+
+    Raised inside the reconciliation transaction so nothing is written and
+    the event stays unrecorded: the conflict is surfaced (non-2xx, Stripe
+    keeps retrying) rather than silently resolved. Carries no details.
+    """
+
+
+def _is_terminal(status: str | None) -> bool:
+    return status in REPLACEABLE_SUBSCRIPTION_STATUSES
+
+
+def _linkage_decision(existing, state: SubscriptionState) -> str:
+    """How a reconciled subscription relates to the account's linked one.
+
+    - "apply": nothing linked yet, the same subscription (ordinary update),
+      or the linked one is explicitly terminal (legitimate replacement);
+    - "ignore": a different subscription that is itself explicitly terminal
+      while the linked one is not: a delayed historical event that must not
+      disturb the current subscription;
+    - "conflict": a different subscription that is not explicitly terminal
+      while the linked one is not either. Neither is chosen.
+
+    Only canceled/incomplete_expired count as terminal; paying, incomplete,
+    unpaid, paused, and missing or unknown statuses are all nonterminal.
+    Entitlement (free vs paid) plays no part in this decision.
+    """
 
     if existing is None or existing.stripe_subscription_id in (
         None,
         state.subscription_id,
     ):
-        return True
+        return "apply"
 
-    return is_paying_status(state.status) or not is_paying_status(
-        existing.subscription_status
-    )
+    if _is_terminal(existing.subscription_status):
+        return "apply"
+
+    if _is_terminal(state.status):
+        return "ignore"
+
+    return "conflict"
 
 
 def _unmatched(session: Session, event: WebhookEvent) -> WebhookOutcome:
@@ -481,9 +558,19 @@ def process_webhook(
             if _belongs_elsewhere(session, user_id, state):
                 return _unmatched(session, event)
 
-            existing = get_billing(session, user_id)
+            decision = _linkage_decision(get_billing(session, user_id), state)
 
-            if _supersedes_local(existing, state):
+            if decision == "conflict":
+                # Roll back and leave the event unrecorded; nothing changes.
+                raise ReconciliationConflict()
+
+            if decision == "ignore":
+                # A delayed terminal event for an older subscription: keep
+                # the current linkage, entitlement, and pending Checkout.
+                record_webhook_event(session, event.event_id, event.event_type)
+                return WebhookOutcome("ignored_historical")
+
+            if decision == "apply":
                 billing = upsert_billing_state(
                     session,
                     user_id,
