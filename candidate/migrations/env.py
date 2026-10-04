@@ -9,6 +9,7 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import URL, create_engine, pool
 
+from kalillac_db import migration_roles
 from kalillac_db.config import (
     DatabaseConfigError,
     load_database_config,
@@ -74,16 +75,23 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _migrate(connection) -> None:
+    _configure(connection=connection)
+
+    with context.begin_transaction():
+        # Inside the migration transaction: on PostgreSQL the login role
+        # assumes kalillac_owner so migrated objects are owner-owned. A
+        # failed SET ROLE aborts the migration.
+        migration_roles.assume_migration_owner(connection)
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
     # Tests pass an existing connection.
     connection = config.attributes.get("connection")
 
     if connection is not None:
-        _configure(connection=connection)
-
-        with context.begin_transaction():
-            context.run_migrations()
-
+        _migrate(connection)
         return
 
     engine = create_engine(
@@ -93,10 +101,7 @@ def run_migrations_online() -> None:
     )
 
     with engine.connect() as connection:
-        _configure(connection=connection)
-
-        with context.begin_transaction():
-            context.run_migrations()
+        _migrate(connection)
 
 
 if context.is_offline_mode():

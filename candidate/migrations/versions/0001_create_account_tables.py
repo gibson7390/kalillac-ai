@@ -21,6 +21,12 @@ depends_on = None
 
 SCHEMA = "kalillac"
 
+# Runtime login role. It receives table DML only: no schema CREATE, no
+# ownership, and nothing on alembic_version. Grants are explicit per table;
+# there are deliberately no default privileges.
+APP_ROLE = "kalillac_app"
+APP_TABLE_PRIVILEGES = "SELECT, INSERT, UPDATE, DELETE"
+
 
 def upgrade() -> None:
     op.create_table(
@@ -85,6 +91,14 @@ def upgrade() -> None:
         unique=False,
         schema=SCHEMA,
     )
+
+    # Roles exist only on PostgreSQL; SQLite test databases have none.
+    if op.get_context().dialect.name == "postgresql":
+        for table in ("users", "account_sessions"):
+            op.execute(
+                f"GRANT {APP_TABLE_PRIVILEGES} ON TABLE {SCHEMA}.{table} "
+                f"TO {APP_ROLE}"
+            )
 
 
 def downgrade() -> None:
