@@ -34,6 +34,12 @@ from kalillac_db.repositories.accounts import (
     revoke_account_session,
     set_password_hash,
 )
+from kalillac_db.repositories.entitlements import (
+    create_default_entitlement,
+    get_entitlement,
+)
+
+from .entitlements import effective_entitlement
 
 from .passwords import (
     MAX_PASSWORD_LENGTH,
@@ -228,7 +234,11 @@ def build_account_router(
         password_hash = await run_in_threadpool(hash_password, password)
 
         def work(session: Session) -> dict[str, Any]:
-            return _user_json(create_user(session, email, password_hash))
+            # One transaction: the user and its free entitlement are created
+            # together or not at all.
+            user = create_user(session, email, password_hash)
+            create_default_entitlement(session, user.id)
+            return _user_json(user)
 
         try:
             payload = await run_in_threadpool(run_in_transaction, work)
@@ -359,6 +369,39 @@ def build_account_router(
         def work(session: Session) -> dict[str, Any] | None:
             user = get_signed_in_user(session, token_hash, checked_at)
             return _user_json(user) if user else None
+
+        payload = await run_in_threadpool(run_in_transaction, work)
+
+        if payload is None:
+            return _error(401, "not_authenticated")
+
+        return JSONResponse(
+            content=payload,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # Read-only by design: no HTTP route can change a tier. Tier changes
+    # come only from internal, verified callers (later, billing).
+    @router.get("/entitlements")
+    async def entitlements(request: Request):
+        token = request.cookies.get(settings.cookie_name)
+
+        if not token:
+            return _error(401, "not_authenticated")
+
+        token_hash = hash_session_token(token)
+        checked_at = now()
+
+        def work(session: Session) -> dict[str, Any] | None:
+            user = get_signed_in_user(session, token_hash, checked_at)
+
+            if user is None:
+                return None
+
+            return effective_entitlement(
+                get_entitlement(session, user.id),
+                checked_at,
+            ).as_json()
 
         payload = await run_in_threadpool(run_in_transaction, work)
 

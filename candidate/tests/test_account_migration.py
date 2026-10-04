@@ -52,7 +52,10 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0001_account_tables"]
+    assert script.get_heads() == ["0002_account_entitlements"]
+    assert script.get_revision("0002_account_entitlements").down_revision == (
+        "0001_account_tables"
+    )
 
 
 def test_upgrade_matches_models_and_downgrade_removes_tables():
@@ -86,7 +89,19 @@ def test_upgrade_matches_models_and_downgrade_removes_tables():
     engine.dispose()
 
 
-def _render_postgresql_upgrade() -> str:
+ACCOUNT_TABLES = ("users", "account_sessions", "account_entitlements")
+
+
+def _expected_grants(role: str) -> list[str]:
+    """Exactly one DML grant per account table, in migration order."""
+    return [
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.{table} "
+        f"TO {role};"
+        for table in ACCOUNT_TABLES
+    ]
+
+
+def _render_postgresql_upgrade(revision_range: str = "head") -> str:
     config = _config()
     config.set_main_option(
         "sqlalchemy.url",
@@ -95,7 +110,7 @@ def _render_postgresql_upgrade() -> str:
     buffer = io.StringIO()
     config.output_buffer = buffer
 
-    command.upgrade(config, "head", sql=True)
+    command.upgrade(config, revision_range, sql=True)
     return buffer.getvalue()
 
 
@@ -229,14 +244,9 @@ def test_postgresql_ddl_grants_nothing_else():
         if re.match(r"\s*(GRANT|REVOKE)\b", line, re.IGNORECASE)
     ]
 
-    # Exactly the two table DML grants: nothing on alembic_version, no
+    # Exactly the per-table DML grants: nothing on alembic_version, no
     # schema CREATE, no role membership.
-    assert grants == [
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.users "
-        "TO kalillac_app;",
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
-        "kalillac.account_sessions TO kalillac_app;",
-    ]
+    assert grants == _expected_grants("kalillac_app")
     assert not any("alembic_version" in grant for grant in grants)
     assert not re.search(r"\bON\s+SCHEMA\b", sql, re.IGNORECASE)
     assert not re.search(r"GRANT\s+CREATE", sql, re.IGNORECASE)
@@ -306,12 +316,9 @@ def test_defaults_set_role_kalillac_owner():
 
 
 def test_defaults_grant_dml_to_kalillac_app():
-    assert _grant_lines(_render_postgresql_upgrade()) == [
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.users "
-        "TO kalillac_app;",
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
-        "kalillac.account_sessions TO kalillac_app;",
-    ]
+    assert _grant_lines(_render_postgresql_upgrade()) == _expected_grants(
+        "kalillac_app"
+    )
 
 
 def test_blank_settings_mean_defaults(monkeypatch):
@@ -336,12 +343,7 @@ def test_staging_override_grants_dml_to_staging_app(monkeypatch):
 
     sql = _render_postgresql_upgrade()
 
-    assert _grant_lines(sql) == [
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.users "
-        f"TO {STAGING_APP};",
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
-        f"kalillac.account_sessions TO {STAGING_APP};",
-    ]
+    assert _grant_lines(sql) == _expected_grants(STAGING_APP)
     assert "kalillac_app;" not in sql
     # The schema name does not change per environment.
     assert "CREATE TABLE kalillac.users" in sql
@@ -411,3 +413,217 @@ def test_sqlite_unaffected_by_role_settings(monkeypatch):
     engine.dispose()
 
     assert {"users", "account_sessions", "alembic_version"} <= tables
+
+
+# --- 0002: account entitlements --------------------------------------------------
+
+
+ENTITLEMENTS_ONLY = "0001_account_tables:0002_account_entitlements"
+
+
+EARLY_USER_IDS = (
+    "00000000000000000000000000000001",
+    "00000000000000000000000000000002",
+)
+
+
+def _entitlement_rows(connection):
+    from sqlalchemy import text
+
+    return connection.execute(
+        text(
+            "SELECT user_id, tier, source, created_at, updated_at, expires_at "
+            "FROM kalillac.account_entitlements ORDER BY user_id"
+        )
+    ).all()
+
+
+def _assert_backfilled(connection):
+    rows = _entitlement_rows(connection)
+
+    # Exactly one row per pre-existing account, no more.
+    assert [row.user_id for row in rows] == list(EARLY_USER_IDS)
+
+    for row in rows:
+        assert row.tier == "free"
+        assert row.source == "migration"
+        assert row.expires_at is None
+        assert row.created_at is not None
+        assert row.updated_at is not None
+
+
+def test_entitlement_migration_backfills_existing_accounts_once():
+    from sqlalchemy import text
+
+    engine = make_sqlite_engine()
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "0001_account_tables")
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert "account_entitlements" not in tables
+
+        # Accounts that exist before entitlements (as on staging), one of
+        # them signed in.
+        for index, user_id in enumerate(EARLY_USER_IDS):
+            connection.execute(
+                text(
+                    "INSERT INTO kalillac.users (id, email, password_hash) "
+                    "VALUES (:id, :email, 'hash')"
+                ),
+                {"id": user_id, "email": f"early{index}@example.com"},
+            )
+
+        connection.execute(
+            text(
+                "INSERT INTO kalillac.account_sessions "
+                "(id, user_id, token_hash, expires_at) "
+                "VALUES ('00000000000000000000000000000099', :user_id, "
+                "'digest', '2099-01-01 00:00:00')"
+            ),
+            {"user_id": EARLY_USER_IDS[0]},
+        )
+
+        command.upgrade(_config(connection=connection), "head")
+        _assert_backfilled(connection)
+
+        # Upgrading again (already at head) adds nothing.
+        command.upgrade(_config(connection=connection), "head")
+        _assert_backfilled(connection)
+
+        # Downgrade removes only the entitlement table; accounts and
+        # sign-in sessions are preserved.
+        command.downgrade(_config(connection=connection), "0001_account_tables")
+        tables = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert "account_entitlements" not in tables
+        assert {"users", "account_sessions"} <= tables
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM kalillac.users")
+        ).scalar() == len(EARLY_USER_IDS)
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM kalillac.account_sessions")
+        ).scalar() == 1
+
+        # Re-upgrading backfills again, still exactly one row per account.
+        command.upgrade(_config(connection=connection), "head")
+        _assert_backfilled(connection)
+
+    engine.dispose()
+
+
+def test_entitlement_backfill_with_no_accounts_inserts_nothing():
+    engine = make_sqlite_engine()
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "head")
+        assert _entitlement_rows(connection) == []
+
+    engine.dispose()
+
+
+def test_entitlement_postgresql_ddl():
+    sql = _render_postgresql_upgrade(ENTITLEMENTS_ONLY)
+
+    assert "CREATE TABLE kalillac.account_entitlements" in sql
+    assert "user_id UUID NOT NULL" in sql
+    assert "tier VARCHAR(16) DEFAULT 'free' NOT NULL" in sql
+    assert "source VARCHAR(32) DEFAULT 'registration' NOT NULL" in sql
+    assert "expires_at TIMESTAMP WITH TIME ZONE" in sql
+    assert (
+        "CONSTRAINT ck_account_entitlements_tier_valid "
+        "CHECK (tier IN ('free', 'paid'))"
+    ) in sql
+    assert (
+        "CONSTRAINT fk_account_entitlements_user_id_users FOREIGN KEY(user_id) "
+        "REFERENCES kalillac.users (id) ON DELETE CASCADE"
+    ) in sql
+    assert "CONSTRAINT pk_account_entitlements PRIMARY KEY (user_id)" in sql
+
+    # 0002 creates only the entitlement table: no other tables, no schema.
+    assert sql.count("CREATE TABLE kalillac.") == 1
+    assert "CREATE SCHEMA" not in sql
+
+    # The backfill: one free 'migration' row per existing account, guarded
+    # against duplicates.
+    assert (
+        "INSERT INTO kalillac.account_entitlements "
+        "(user_id, tier, source, created_at, updated_at, expires_at) "
+        "SELECT u.id, 'free', 'migration', CURRENT_TIMESTAMP, "
+        "CURRENT_TIMESTAMP, NULL FROM kalillac.users AS u "
+        "WHERE NOT EXISTS (SELECT 1 FROM kalillac.account_entitlements AS e "
+        "WHERE e.user_id = u.id);"
+    ) in sql
+    assert sql.index("CREATE TABLE kalillac.account_entitlements") < sql.index(
+        "INSERT INTO kalillac.account_entitlements"
+    )
+    assert sql.index("INSERT INTO kalillac.account_entitlements") < sql.index(
+        "GRANT SELECT"
+    )
+    assert "UPDATE kalillac.alembic_version" in sql
+    assert "'0002_account_entitlements'" in sql
+
+
+@pytest.mark.parametrize(
+    "app_role_setting, expected_role",
+    [(None, "kalillac_app"), (STAGING_APP, STAGING_APP)],
+)
+def test_entitlement_migration_grants_only_dml_on_its_table(
+    monkeypatch,
+    app_role_setting,
+    expected_role,
+):
+    if app_role_setting:
+        monkeypatch.setenv(migration_roles.APP_ROLE_ENV, app_role_setting)
+
+    sql = _render_postgresql_upgrade(ENTITLEMENTS_ONLY)
+
+    assert _grant_lines(sql) == [
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+        f"kalillac.account_entitlements TO {expected_role};"
+    ]
+    assert not re.search(r"\bON\s+SCHEMA\b", sql, re.IGNORECASE)
+    assert not re.search(r"GRANT\s+CREATE", sql, re.IGNORECASE)
+
+    for forbidden in (
+        "ALTER DEFAULT PRIVILEGES",
+        "OWNER TO",
+        "SUPERUSER",
+        "CREATE ROLE",
+        "ALTER ROLE",
+        "REVOKE",
+    ):
+        assert forbidden not in sql.upper(), forbidden
+
+
+@pytest.mark.parametrize("app_role_setting", [None, STAGING_APP])
+def test_no_migration_grants_anything_on_alembic_version(
+    monkeypatch,
+    app_role_setting,
+):
+    if app_role_setting:
+        monkeypatch.setenv(migration_roles.APP_ROLE_ENV, app_role_setting)
+
+    sql = _render_postgresql_upgrade()
+    statements = [statement.strip() for statement in sql.split(";")]
+
+    assert not any(
+        "alembic_version" in statement
+        and re.match(r"(GRANT|REVOKE|ALTER)\b", statement, re.IGNORECASE)
+        for statement in statements
+    )
+
+
+def test_entitlement_migration_invalid_app_role_is_rejected(monkeypatch):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, "bad role")
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        _render_postgresql_upgrade(ENTITLEMENTS_ONLY)
+
+
+def test_entitlement_migration_staging_owner_role(monkeypatch):
+    # Owner assumption is shared by every online migration, 0002 included.
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, STAGING_OWNER)
+    connection = _FakeConnection("postgresql")
+
+    migration_roles.assume_migration_owner(connection)
+
+    assert connection.statements == [f"SET ROLE {STAGING_OWNER}"]

@@ -308,9 +308,26 @@ def test_account_schema_holds_identity_only():
     assert set(Base.metadata.tables) == {
         "kalillac.users",
         "kalillac.account_sessions",
+        "kalillac.account_entitlements",
     }
 
+    # Identity and sign-in tables carry no plan, billing, or conversation
+    # data; the tier lives only in its own entitlement table.
     columns = {
+        column.name
+        for name in ("kalillac.users", "kalillac.account_sessions")
+        for column in Base.metadata.tables[name].columns
+    }
+
+    for forbidden in (
+        "conversation", "message", "history", "chat", "memory",
+        "transcript", "saved", "plan", "price", "entitlement", "stripe",
+        "tier",
+    ):
+        assert not any(forbidden in column for column in columns), forbidden
+
+    # Nothing anywhere stores conversations, memory, or billing ids.
+    all_columns = {
         column.name
         for table in Base.metadata.tables.values()
         for column in table.columns
@@ -318,9 +335,10 @@ def test_account_schema_holds_identity_only():
 
     for forbidden in (
         "conversation", "message", "history", "chat", "memory",
-        "transcript", "saved", "plan", "price", "entitlement", "stripe",
+        "transcript", "price", "stripe", "customer", "subscription",
+        "usage",
     ):
-        assert not any(forbidden in column for column in columns), forbidden
+        assert not any(forbidden in column for column in all_columns), forbidden
 
 
 def test_account_creation_creates_no_conversation_state(client, db):
@@ -330,11 +348,11 @@ def test_account_creation_creates_no_conversation_state(client, db):
     _login(client)
     client.get("/api/account/me")
 
-    # Only identity and one sign-in session exist in the database.
+    # Only identity, one sign-in session, and the entitlement tier exist.
     with db() as session:
         tables = set(inspect(session.connection()).get_table_names("kalillac"))
 
-    assert tables == {"users", "account_sessions"}
+    assert tables == {"users", "account_sessions", "account_entitlements"}
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
 

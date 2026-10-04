@@ -34,11 +34,12 @@ def test_metadata_uses_private_schema():
 
 
 def test_only_approved_account_tables_exist():
-    # Account identity is approved; saved chats, memory, plans, and
-    # entitlements are not.
+    # Account identity and entitlement tier are approved; saved chats,
+    # memory, billing records, and usage metering are not.
     assert set(Base.metadata.tables) == {
         "kalillac.users",
         "kalillac.account_sessions",
+        "kalillac.account_entitlements",
     }
 
 
