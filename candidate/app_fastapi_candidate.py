@@ -11519,6 +11519,101 @@ def _release_chat_resources(sem, sid, entry):
 api = FastAPI(title="Kalillac AI API", docs_url=None, redoc_url=None, openapi_url=None)
 
 
+# Optional account endpoints (/api/account/*). Off unless explicitly enabled;
+# when off, nothing account-related is imported. Accounts are identity only:
+# no conversation is persisted. /api/chat reads the account cookie only when
+# usage metering (below) is also enabled, and then only for numeric totals.
+if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    from kalillac_db.config import database_enabled as _database_enabled
+
+    if not _database_enabled():
+        raise RuntimeError(
+            "KALILLAC_ACCOUNTS_ENABLED requires KALILLAC_DB_ENABLED."
+        )
+
+    # The account stack is not in requirements-production-lock.txt; refuse
+    # to start with a clear message rather than fail on the first login.
+    try:
+        import argon2 as _argon2  # noqa: F401
+        import psycopg as _psycopg  # noqa: F401
+        import sqlalchemy as _sqlalchemy  # noqa: F401
+    except ImportError as _missing:
+        raise RuntimeError(
+            "KALILLAC_ACCOUNTS_ENABLED requires the database dependencies; "
+            "install requirements-database.txt "
+            f"(missing: {_missing.name})."
+        ) from _missing
+
+    from kalillac_accounts.router import (
+        build_account_router,
+        load_account_settings,
+    )
+
+    _account_settings = load_account_settings()
+    api.include_router(build_account_router(settings=_account_settings))
+
+
+# Optional aggregate usage metering. Off unless explicitly enabled; when off,
+# /api/chat never inspects the account cookie, no usage database call occurs,
+# and /api/account/usage does not exist. When on, it is the single deliberate
+# place /api/chat reads the account cookie, and only to add numeric totals
+# for a signed-in account. No conversation content is ever persisted.
+_usage_meter = None
+
+if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        raise RuntimeError(
+            "KALILLAC_USAGE_METERING_ENABLED requires "
+            "KALILLAC_ACCOUNTS_ENABLED and KALILLAC_DB_ENABLED."
+        )
+
+    from kalillac_accounts.usage import UsageMeter, build_usage_router
+
+    _usage_meter = UsageMeter(settings=_account_settings)
+    api.include_router(build_usage_router(settings=_account_settings))
+
+
+# Optional Stripe billing (Checkout, Customer Portal, verified webhooks). Off
+# unless explicitly enabled; when off, neither billing code nor the stripe
+# package is imported. Billing never touches /api/chat, Private Session, or
+# usage metering, and only verified webhooks change entitlement.
+if os.getenv("KALILLAC_BILLING_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        raise RuntimeError(
+            "KALILLAC_BILLING_ENABLED requires "
+            "KALILLAC_ACCOUNTS_ENABLED and KALILLAC_DB_ENABLED."
+        )
+
+    try:
+        import stripe as _stripe  # noqa: F401
+    except ImportError as _missing:
+        raise RuntimeError(
+            "KALILLAC_BILLING_ENABLED requires the billing dependencies; "
+            "install requirements-billing.txt (missing: stripe)."
+        ) from _missing
+
+    from kalillac_billing.config import load_billing_config
+    from kalillac_billing.router import build_billing_router
+
+    # Raises BillingConfigError naming the bad setting (never its value).
+    api.include_router(
+        build_billing_router(
+            config=load_billing_config(),
+            settings=_account_settings,
+        )
+    )
+
+
 @api.get("/api/health")
 def health():
     # Minimal, leaks nothing: no version internals, env, keys, prompt, or state.
@@ -11567,6 +11662,17 @@ async def api_chat(request: _FastAPIRequest):
         # Explicit rejection. The alternative -- silently truncating -- would
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
+
+    # Usage metering only: decide once, at acceptance and before any chat
+    # resource is taken, which signed-in account (if any) this request
+    # belongs to. Placed before admission so no await separates the
+    # admission check from its bookkeeping below. A failed lookup means
+    # anonymous; it never blocks chat.
+    meter = _usage_meter
+    meter_user_id = None
+
+    if meter is not None:
+        meter_user_id = await meter.resolve_request_account(request)
 
     global _chat_waiting
 
@@ -11651,7 +11757,21 @@ async def api_chat(request: _FastAPIRequest):
                 entry.lock.release()
             _session_lock_unref(sid, entry)
 
-    return JSONResponse(content={"reply": reply, "session_id": out_sid})
+    response = JSONResponse(content={"reply": reply, "session_id": out_sid})
+
+    # Aggregate metering only on this normal 200 path, after every chat
+    # resource above is released, and only for a request that was signed in
+    # at acceptance. The task carries just the account id, date, and counts;
+    # it runs once the response is sent and never sees conversation text.
+    if meter is not None and meter_user_id is not None:
+        response.background = meter.background_for_chat(
+            meter_user_id,
+            req.message,
+            history,
+            reply,
+        )
+
+    return response
 
 
 # NOTE: There is intentionally no __main__/uvicorn.run() block here. The

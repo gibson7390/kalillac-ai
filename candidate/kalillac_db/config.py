@@ -47,13 +47,38 @@ def _read_password() -> str | None:
     return password or None
 
 
+def load_database_url() -> str | None:
+    """Return an environment-provided database URL, or None.
+
+    KALILLAC_DATABASE_URL takes precedence over the component settings
+    below when database mode is enabled. Only PostgreSQL through psycopg is
+    accepted, so a typo cannot silently point Kalillac at another engine.
+    No connection is attempted here.
+    """
+
+    if not database_enabled():
+        return None
+
+    url = os.getenv("KALILLAC_DATABASE_URL", "").strip()
+
+    if not url:
+        return None
+
+    if not url.startswith("postgresql+psycopg://"):
+        raise DatabaseConfigError(
+            "KALILLAC_DATABASE_URL must use the postgresql+psycopg:// driver."
+        )
+
+    return url
+
+
 def load_database_config() -> DatabaseConfig | None:
     """Return None while database features are disabled.
 
     No connection is attempted here.
     """
 
-    if not database_enabled():
+    if not database_enabled() or load_database_url() is not None:
         return None
 
     password = _read_password()

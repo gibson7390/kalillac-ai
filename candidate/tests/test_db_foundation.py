@@ -2,8 +2,15 @@ import os
 
 os.environ.pop("KALILLAC_DB_ENABLED", None)
 os.environ.pop("KALILLAC_DB_PASSWORD", None)
+os.environ.pop("KALILLAC_DATABASE_URL", None)
 
-from kalillac_db.config import load_database_config
+import pytest
+
+from kalillac_db.config import (
+    DatabaseConfigError,
+    load_database_config,
+    load_database_url,
+)
 from kalillac_db.engine import get_engine
 import kalillac_db.engine as engine_module
 from kalillac_db.models import Base
@@ -26,5 +33,42 @@ def test_metadata_uses_private_schema():
     assert Base.metadata.schema == "kalillac"
 
 
-def test_no_business_models_exist_yet():
-    assert len(Base.metadata.tables) == 0
+def test_only_approved_account_tables_exist():
+    # Account identity, entitlement tier, aggregate daily usage, and Stripe
+    # billing linkage are approved; saved chats and memory are not.
+    assert set(Base.metadata.tables) == {
+        "kalillac.users",
+        "kalillac.account_sessions",
+        "kalillac.account_entitlements",
+        "kalillac.account_usage_daily",
+        "kalillac.account_billing",
+        "kalillac.stripe_webhook_events",
+    }
+
+
+def test_database_url_ignored_while_disabled(monkeypatch):
+    monkeypatch.setenv(
+        "KALILLAC_DATABASE_URL",
+        "postgresql+psycopg://user:pw@db.example/kalillac",
+    )
+
+    assert load_database_url() is None
+    assert get_engine() is None
+
+
+def test_database_url_used_when_enabled(monkeypatch):
+    url = "postgresql+psycopg://user:pw@db.example/kalillac"
+    monkeypatch.setenv("KALILLAC_DB_ENABLED", "true")
+    monkeypatch.setenv("KALILLAC_DATABASE_URL", url)
+
+    assert load_database_url() == url
+    # The URL replaces component settings; no password file is needed.
+    assert load_database_config() is None
+
+
+def test_database_url_requires_psycopg_driver(monkeypatch):
+    monkeypatch.setenv("KALILLAC_DB_ENABLED", "true")
+    monkeypatch.setenv("KALILLAC_DATABASE_URL", "sqlite:///kalillac.db")
+
+    with pytest.raises(DatabaseConfigError):
+        load_database_url()
