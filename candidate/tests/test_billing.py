@@ -631,6 +631,41 @@ def test_checkout_refused_while_subscribed(client, db, gateway, status):
     assert gateway.checkout_calls == []
 
 
+@pytest.mark.parametrize("status", ["incomplete", "unpaid", "paused"])
+def test_checkout_blocked_by_unresolved_subscription(client, db, gateway, status):
+    token = _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, status=status)
+    _deliver(client, "evt_1", "customer.subscription.updated", user=user_id)
+
+    response = client.post(
+        "/api/account/billing/checkout",
+        headers=_as(client, token),
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "subscription_unresolved"}
+    assert gateway.checkout_calls == []
+    # Entitlement for these states is unchanged: free.
+    assert _entitlement(db) == ("free", "stripe", None)
+
+
+@pytest.mark.parametrize("status", ["canceled", "incomplete_expired"])
+def test_checkout_allowed_after_terminal_subscription(client, db, gateway, status):
+    token = _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, status=status)
+    _deliver(client, "evt_1", "customer.subscription.updated", user=user_id)
+
+    response = client.post(
+        "/api/account/billing/checkout",
+        headers=_as(client, token),
+    )
+
+    assert response.status_code == 200
+    assert len(gateway.checkout_calls) == 1
+
+
 def test_checkout_provider_failure_is_a_clean_error(client, db, gateway, capsys):
     token = _register_and_login(client)
     gateway.fail_provider = True
@@ -1022,6 +1057,38 @@ def test_stale_other_subscription_does_not_replace_paying_one(client, db, gatewa
 
     assert _billing(db).stripe_subscription_id == "sub_new"
     assert _entitlement(db)[0] == "paid"
+
+
+def test_conflicting_nonterminal_subscription_is_surfaced(client, db, gateway, capsys):
+    _register_and_login(client)
+    user_id = _user_id(db)
+
+    gateway.subscriptions["sub_b"] = _subscription(
+        user_id, subscription_id="sub_b", status="incomplete"
+    )
+    _deliver(client, "evt_b", "customer.subscription.created",
+             subscription="sub_b", user=user_id)
+
+    gateway.subscriptions["sub_c"] = _subscription(
+        user_id, subscription_id="sub_c", status="active"
+    )
+    response = _deliver(client, "evt_c", "customer.subscription.created",
+                        subscription="sub_c", user=user_id)
+
+    # Non-2xx so Stripe keeps reporting it; nothing chosen or recorded.
+    assert response.status_code == 409
+    assert response.json() == {"error": "reconciliation_conflict"}
+    assert _billing(db).stripe_subscription_id == "sub_b"
+    assert _entitlement(db)[0] == "free"
+
+    with db() as session:
+        recorded = set(session.scalars(select(StripeWebhookEvent.event_id)))
+    assert recorded == {"evt_b"}
+
+    output = capsys.readouterr().out
+    assert "WARN: STRIPE_WEBHOOK_CONFLICT" in output
+    for leaked in ("sub_b", "sub_c", "cus_1", str(user_id)):
+        assert leaked not in output
 
 
 # --- webhook failure handling ------------------------------------------------------

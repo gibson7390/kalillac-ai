@@ -31,7 +31,7 @@ from kalillac_db.repositories.billing import get_billing
 
 from .config import BillingConfig
 from .gateway import BillingGateway, BillingProviderError, InvalidWebhookSignature
-from .service import process_webhook, start_checkout
+from .service import ReconciliationConflict, process_webhook, start_checkout
 
 
 # Stripe events are small; this bounds memory for unauthenticated input.
@@ -150,6 +150,11 @@ def build_billing_router(
             # One paid tier: manage the existing subscription in the Portal.
             return _error(409, "already_subscribed")
 
+        if result.outcome == "subscription_unresolved":
+            # An existing subscription is neither paying nor explicitly
+            # ended; it must be resolved (e.g. in the Portal) first.
+            return _error(409, "subscription_unresolved")
+
         if result.outcome == "billing_processing":
             # Checkout completed; waiting for the verified webhook.
             return _error(409, "billing_processing")
@@ -245,6 +250,12 @@ def build_billing_router(
             )
         except InvalidWebhookSignature:
             return _error(400, "invalid_signature")
+        except ReconciliationConflict:
+            # Two different nonterminal subscriptions for one account:
+            # nothing written, event left unrecorded, so Stripe keeps
+            # reporting it until an operator resolves it.
+            print("WARN: STRIPE_WEBHOOK_CONFLICT")
+            return _error(409, "reconciliation_conflict")
         except Exception as exc:
             # Not recorded as processed; Stripe will retry. Class name only.
             print(f"WARN: STRIPE_WEBHOOK_FAILED {type(exc).__name__}")
