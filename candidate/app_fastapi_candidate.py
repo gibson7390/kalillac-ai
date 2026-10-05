@@ -162,6 +162,59 @@ class ModelProviderUnavailable(RuntimeError):
     pass
 
 
+class ChatInternalError(RuntimeError):
+    """The chat pipeline failed internally.
+
+    Raised with an empty message and `from None`, which sets no __cause__
+    and suppresses exception chaining in tracebacks. Python still records
+    the original exception as __context__; the API boundary never
+    serializes either, so the client receives only the fixed
+    internal_error body."""
+    pass
+
+
+# OpenAI-compatible Chat Completions providers (Groq, Cloudflare Workers AI)
+# report an output-token cutoff as finish_reason "length". It is mapped onto
+# the same incomplete contract _invoke_openai returns, so every existing
+# is_incomplete_model_response() check covers the fallbacks too. No
+# continuation is attempted for them; only the OpenAI path has one.
+CHAT_COMPLETIONS_LENGTH_FINISH_REASON = "length"
+
+
+def _chat_completions_response(content, finish_reason):
+    truncated = finish_reason == CHAT_COMPLETIONS_LENGTH_FINISH_REASON
+
+    return SimpleNamespace(
+        content=content,
+        incomplete=truncated,
+        incomplete_reason=OUTPUT_TOKEN_LIMIT_REASON if truncated else None,
+    )
+
+
+def _groq_response_with_finish_reason(response, model):
+    """A Groq reply cut off at the output limit, typed as incomplete.
+
+    langchain-groq puts finish_reason in response_metadata. Any other
+    finish reason returns the response unchanged.
+    """
+    metadata = getattr(response, "response_metadata", None)
+    finish_reason = (
+        metadata.get("finish_reason")
+        if isinstance(metadata, dict)
+        else None
+    )
+
+    if finish_reason != CHAT_COMPLETIONS_LENGTH_FINISH_REASON:
+        return response
+
+    print(
+        "WARN: GROQ_RESPONSE_INCOMPLETE "
+        f"{model} {finish_reason}"
+    )
+
+    return _chat_completions_response(response.content, finish_reason)
+
+
 def _model_response_has_usable_text(response):
     """Return True only when a model response contains usable answer text.
 
@@ -456,9 +509,17 @@ def _invoke_cloudflare(messages, max_tokens=None):
         return SimpleNamespace(content="")
 
     message = choices[0].get("message") or {}
+    finish_reason = choices[0].get("finish_reason")
 
-    return SimpleNamespace(
-        content=message.get("content") or ""
+    if finish_reason == CHAT_COMPLETIONS_LENGTH_FINISH_REASON:
+        print(
+            "WARN: CLOUDFLARE_RESPONSE_INCOMPLETE "
+            f"{CLOUDFLARE_MODEL} {finish_reason}"
+        )
+
+    return _chat_completions_response(
+        message.get("content") or "",
+        finish_reason,
     )
 
 
@@ -499,7 +560,7 @@ def _invoke_final_groq_fallback(messages, invoke_kwargs):
 
         raise ModelProviderUnavailable()
 
-    return response
+    return _groq_response_with_finish_reason(response, FALLBACK_GROQ_MODEL)
 
 
 def _invoke_cross_provider_fallback(
@@ -617,7 +678,7 @@ def _invoke_existing_provider_chain(messages, invoke_kwargs):
         f"{GROQ_MODEL}"
     )
 
-    return response
+    return _groq_response_with_finish_reason(response, GROQ_MODEL)
 
 
 def invoke_llm(messages, max_tokens=None):
@@ -9849,8 +9910,13 @@ Rules:
         raise
 
     except Exception as e:
+        # An internal failure is not an answer. Raise a typed error (empty
+        # message, chaining suppressed; only the original's class name is
+        # logged) so the API returns HTTP 500 internal_error instead of a
+        # 200 assistant-style reply that would be indistinguishable from,
+        # and metered as, a successful chat.
         print(f"ERROR: {type(e).__name__}")
-        return "Something went wrong on my end. Please try that again."
+        raise ChatInternalError() from None
 
 
 def run_voice_format_prompt_tests():
@@ -11741,11 +11807,12 @@ async def api_chat(request: _FastAPIRequest):
             work.add_done_callback(_on_done)
             raise
         except Exception:
-            # chat() already swallows internal errors and returns a friendly
-            # string; this is a final safety net that still leaks nothing.
+            # ChatInternalError from chat(), or anything else: a fixed body
+            # that leaks nothing. This path never reaches metering below.
             return JSONResponse(
                 status_code=500,
                 content={"error": "internal_error"},
+                headers={"Cache-Control": "no-store"},
             )
     finally:
         if waiting:
