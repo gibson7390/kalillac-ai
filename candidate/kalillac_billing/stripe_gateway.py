@@ -60,17 +60,45 @@ def _timestamp(value: Any) -> datetime | None:
     return datetime.fromtimestamp(int(value), tz=timezone.utc)
 
 
+def _cancels_at_period_end(
+    subscription: Any,
+    current_period_end: datetime | None,
+) -> bool:
+    """Whether the subscription is set to end at its current period end.
+
+    A literal cancel_at_period_end=true is always honored. Newer API shapes
+    can instead report cancel_at_period_end=false with cancel_at set to the
+    period end (as after a Customer Portal "cancel at period end"); that is
+    the same intent, so it counts only when cancel_at exactly equals the
+    first item's current_period_end. canceled_at (when cancellation was
+    requested) is deliberately not consulted, and a cancel_at at any other
+    time is a different schedule, not a period-end cancellation.
+    """
+
+    if _field(subscription, "cancel_at_period_end"):
+        return True
+
+    cancel_at = _timestamp(_field(subscription, "cancel_at"))
+
+    return (
+        cancel_at is not None
+        and current_period_end is not None
+        and cancel_at == current_period_end
+    )
+
+
 def subscription_state_from_stripe(subscription: Any) -> SubscriptionState:
     items = _field(_field(subscription, "items"), "data") or []
     first_item = items[0] if items else None
+    current_period_end = _timestamp(_field(first_item, "current_period_end"))
 
     return SubscriptionState(
         subscription_id=_field(subscription, "id"),
         customer_id=_id_of(_field(subscription, "customer")),
         status=_field(subscription, "status"),
         price_id=_id_of(_field(first_item, "price")),
-        cancel_at_period_end=bool(_field(subscription, "cancel_at_period_end")),
-        current_period_end=_timestamp(_field(first_item, "current_period_end")),
+        cancel_at_period_end=_cancels_at_period_end(subscription, current_period_end),
+        current_period_end=current_period_end,
         kalillac_user_id=_metadata_user_id(subscription),
     )
 
