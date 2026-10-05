@@ -73,6 +73,9 @@ GZIP_BOMB = gzip.compress(b"0" * 5_000_000)
 GZIP_OK = gzip.compress(json.dumps({"compressed": True}).encode())
 INCOMPRESSIBLE = gzip.compress(os.urandom(1_500_000))
 CLIENT_GONE = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+# On Linux, closing a listening socket from another thread does not wake a
+# thread blocked in accept(), so the accept loop polls with this timeout.
+ACCEPT_POLL = 0.05
 
 
 class LoopbackServer:
@@ -82,9 +85,11 @@ class LoopbackServer:
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(64)
+        self.sock.settimeout(ACCEPT_POLL)
         self.port = self.sock.getsockname()[1]
         self.lock = threading.Lock()
         self.stopping = threading.Event()
+        self.serve_errors = []      # accept failures not caused by teardown
         self.requests = {}          # path -> (headers dict, body bytes)
         self.closed = {}            # path -> Event: client closed (EOF/reset)
         self.timeouts = []          # paths whose client never closed in time
@@ -110,12 +115,26 @@ class LoopbackServer:
         while not self.stopping.is_set():
             try:
                 conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue  # re-check stopping
             except OSError:
+                if not self.stopping.is_set():
+                    # Not caused by teardown: recorded so the fixture fails.
+                    self.serve_errors.append("accept failed")
                 return
 
+            # Accepted sockets must not inherit the accept poll timeout.
+            conn.settimeout(None)
             thread = threading.Thread(target=self._handle, args=(conn,), daemon=True)
 
+            # Registered under the lock teardown uses to set `stopping`, so a
+            # connection accepted while teardown starts is closed here and
+            # never gets a handler teardown would not know about.
             with self.lock:
+                if self.stopping.is_set():
+                    conn.close()
+                    return
+
                 self.conns.add(conn)
                 self.threads.append(thread)
 
@@ -295,9 +314,11 @@ class LoopbackServer:
 
         with self.lock:
             unclosed = sorted(self.waiting - self.expected_open)
+            # Set under the lock: no connection can be registered after
+            # this snapshot (see _serve).
+            self.stopping.set()
             conns = list(self.conns)
 
-        self.stopping.set()
         self.sock.close()
 
         for conn in conns:
@@ -331,6 +352,51 @@ def server():
     assert unclosed == [], f"client connections left open: {unclosed}"
     assert alive == [], "loopback server threads did not stop"
     assert s.timeouts == [], f"client never closed: {s.timeouts}"
+    assert s.serve_errors == [], "loopback server accept failed"
+
+
+# --- loopback server teardown ----------------------------------------------------------
+
+
+def test_idle_server_close_stops_its_waiting_accept_thread():
+    s = LoopbackServer()
+    time.sleep(3 * ACCEPT_POLL)  # the accept thread is now waiting in accept()
+    assert s.accept_thread.is_alive()
+
+    start = time.perf_counter()
+    unclosed, alive = s.close(timeout=JOIN)
+    elapsed = time.perf_counter() - start
+
+    MEASUREMENTS.append(("idle server close", "close_return_s", elapsed))
+    assert alive == []
+    assert unclosed == []
+    assert s.serve_errors == []
+    assert not s.accept_thread.is_alive()
+    assert elapsed < 1.0  # bounded by the accept poll, not by JOIN
+
+
+def test_accept_loop_exits_on_stop_even_if_socket_close_never_wakes_it():
+    """Linux does not wake a thread blocked in accept() when another thread
+    closes the listening socket. Model that on any platform: signal stop
+    without closing the socket; the poll alone must end the loop."""
+
+    s = LoopbackServer()
+    time.sleep(3 * ACCEPT_POLL)
+
+    try:
+        with s.lock:
+            s.stopping.set()
+
+        start = time.perf_counter()
+        s.accept_thread.join(1.0)
+        elapsed = time.perf_counter() - start
+
+        MEASUREMENTS.append(("accept loop stop, socket open", "exit_s", elapsed))
+        assert not s.accept_thread.is_alive()
+        assert elapsed < 1.0
+        assert s.serve_errors == []
+    finally:
+        s.sock.close()
 
 
 # --- transport helpers -----------------------------------------------------------------
