@@ -208,6 +208,131 @@ def test_expanded_customer_object_is_reduced_to_its_id():
     assert "payer@example.com" not in repr(state)
 
 
+# --- cancellation at period end (newer API shape) ---------------------------------
+
+# Observed in the Stripe sandbox after a Customer Portal "cancel at period end".
+PORTAL_PERIOD_END = datetime(2026, 11, 4, 20, 14, 45, tzinfo=timezone.utc)
+PORTAL_CANCELED_AT = datetime(2026, 10, 4, 23, 15, 38, tzinfo=timezone.utc)
+
+
+def _epoch(value):
+    return int(value.timestamp())
+
+
+def _portal_subscription(**overrides):
+    """A subscription shaped like Stripe's response on this API version:
+    no top-level current_period_end; the period end lives on the item."""
+
+    subscription = {
+        "id": "sub_portal",
+        "object": "subscription",
+        "livemode": False,
+        "customer": "cus_portal",
+        "status": "active",
+        "cancel_at_period_end": False,
+        "cancel_at": _epoch(PORTAL_PERIOD_END),
+        "canceled_at": _epoch(PORTAL_CANCELED_AT),
+        "ended_at": None,
+        "metadata": {"kalillac_user_id": "33333333-3333-3333-3333-333333333333"},
+        "items": {
+            "object": "list",
+            "data": [
+                {
+                    "id": "si_portal",
+                    "object": "subscription_item",
+                    "price": {"id": "price_kalillacpaid", "object": "price"},
+                    "current_period_end": _epoch(PORTAL_PERIOD_END),
+                }
+            ],
+        },
+    }
+    subscription.update(overrides)
+    return stripe.Subscription.construct_from(subscription, "sk_test_notreal")
+
+
+def test_portal_shape_has_no_top_level_period_end():
+    subscription = _portal_subscription()
+
+    assert "current_period_end" not in subscription
+    assert subscription["cancel_at_period_end"] is False
+
+
+def test_literal_cancel_at_period_end_true_remains_true():
+    state = subscription_state_from_stripe(
+        _portal_subscription(cancel_at_period_end=True, cancel_at=None)
+    )
+
+    assert state.cancel_at_period_end is True
+
+
+def test_cancel_at_equal_to_item_period_end_means_cancel_at_period_end():
+    # Exactly the sandbox observation: literal false, cancel_at == period end.
+    state = subscription_state_from_stripe(_portal_subscription())
+
+    assert state.cancel_at_period_end is True
+    assert state.status == "active"
+
+
+def test_no_cancel_at_remains_false():
+    state = subscription_state_from_stripe(
+        _portal_subscription(cancel_at=None, canceled_at=None)
+    )
+
+    assert state.cancel_at_period_end is False
+
+
+@pytest.mark.parametrize(
+    "cancel_at",
+    [
+        PORTAL_PERIOD_END.replace(day=20),               # later, explicit date
+        PORTAL_PERIOD_END.replace(month=10, day=20),     # earlier, mid-period
+        PORTAL_PERIOD_END.replace(second=44),            # one second off
+    ],
+)
+def test_cancel_at_different_from_period_end_remains_false(cancel_at):
+    state = subscription_state_from_stripe(
+        _portal_subscription(cancel_at=_epoch(cancel_at))
+    )
+
+    assert state.cancel_at_period_end is False
+
+
+def test_cancel_at_without_item_period_end_remains_false():
+    subscription = _portal_subscription()
+    subscription["items"]["data"][0]["current_period_end"] = None
+
+    state = subscription_state_from_stripe(subscription)
+
+    assert state.cancel_at_period_end is False
+    assert state.current_period_end is None
+
+
+def test_item_period_end_is_converted_and_preserved():
+    state = subscription_state_from_stripe(_portal_subscription())
+
+    assert state.current_period_end == PORTAL_PERIOD_END
+    assert state.current_period_end.tzinfo is not None
+    assert state.current_period_end.isoformat() == "2026-11-04T20:14:45+00:00"
+
+
+def test_canceled_at_alone_does_not_mean_cancel_at_period_end():
+    state = subscription_state_from_stripe(
+        _portal_subscription(cancel_at=None, canceled_at=_epoch(PORTAL_CANCELED_AT))
+    )
+
+    assert state.cancel_at_period_end is False
+
+
+def test_canceled_at_equal_to_period_end_still_does_not_count():
+    # Even a canceled_at that happens to match the period end is ignored;
+    # only cancel_at expresses the scheduled end.
+    state = subscription_state_from_stripe(
+        _portal_subscription(cancel_at=None, canceled_at=_epoch(PORTAL_PERIOD_END))
+    )
+
+    assert state.cancel_at_period_end is False
+
+
 # --- API calls (intercepted; no network) ------------------------------------------
 
 
