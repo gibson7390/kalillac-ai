@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import gc
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
@@ -20,7 +19,6 @@ import time
 
 import pytest
 
-os.environ.setdefault("GROQ_API_KEY", "test-not-real")
 
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 
@@ -29,7 +27,6 @@ if str(CANDIDATE_DIR) not in sys.path:
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 
 import app_fastapi_candidate as app
 from kalillac_routing.request_budget import (
@@ -86,7 +83,6 @@ def isolated(monkeypatch):
     monkeypatch.setattr(app, "_chat_waiting", 0)
     monkeypatch.setattr(app, "_session_locks", {})
     monkeypatch.setattr(app, "_usage_meter", None)
-    monkeypatch.setattr(app, "_NO_RETRY_GROQ", {})
     monkeypatch.setattr(app, "_lookups_outstanding", 0, raising=False)
     monkeypatch.setattr(app, "_lookup_tasks", set(), raising=False)
     monkeypatch.setattr(app, "_chats_admitted", 0, raising=False)
@@ -138,33 +134,13 @@ class _FakeHTTPResponse(io.BytesIO):
         return False
 
 
-class FakeGroq:
-    def __init__(self, name, calls, outcome):
-        self.name = name
-        self.calls = calls
-        self.outcome = outcome
-
-    def invoke(self, messages, **kwargs):
-        self.calls.append((self.name, kwargs))
-        result = self.outcome() if callable(self.outcome) else self.outcome
-
-        if isinstance(result, BaseException):
-            raise result
-
-        return result
-
-
 @pytest.fixture
 def providers(monkeypatch):
-    """Fakes for every model provider; records each network attempt."""
+    """Fakes for the only model provider (OpenAI); records each network
+    attempt. Any other outbound urllib request fails the test."""
 
     calls = []
-    state = {
-        "openai": [],
-        "cloudflare": [],
-        "groq_120b": ConnectionError("groq down"),
-        "groq_20b": ConnectionError("groq down"),
-    }
+    state = {"openai": []}
 
     def fake_post(payload, **kwargs):
         calls.append(("openai", kwargs))
@@ -175,24 +151,6 @@ def providers(monkeypatch):
             raise result
 
         return result
-
-    def fake_urlopen(request, timeout=None):
-        calls.append(("cloudflare", {"timeout": timeout}))
-        result = state["cloudflare"].pop(0) if state["cloudflare"] else ConnectionError("cf down")
-
-        if isinstance(result, BaseException):
-            raise result
-
-        return _FakeHTTPResponse(json.dumps(result).encode())
-
-    shared = {
-        app.GROQ_MODEL: FakeGroq("shared_120b", calls, lambda: state["groq_120b"]),
-        app.FALLBACK_GROQ_MODEL: FakeGroq("shared_20b", calls, lambda: state["groq_20b"]),
-    }
-    no_retry = {
-        app.GROQ_MODEL: FakeGroq("no_retry_120b", calls, lambda: state["groq_120b"]),
-        app.FALLBACK_GROQ_MODEL: FakeGroq("no_retry_20b", calls, lambda: state["groq_20b"]),
-    }
 
     # Budgeted OpenAI requests go through the bounded transport seam; the
     # scripted transport replays the same OpenAI script and call log.
@@ -220,12 +178,11 @@ def providers(monkeypatch):
     monkeypatch.setattr(app, "_request_limits", RequestLimits(**BASE_LIMITS))
 
     monkeypatch.setattr(app, "_post_openai_responses", fake_post)
-    monkeypatch.setattr(app, "CLOUDFLARE_AI_TOKEN", "test-cloudflare-token")
-    monkeypatch.setattr(app, "CLOUDFLARE_ACCOUNT_ID", "test-account")
-    monkeypatch.setattr(app.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(app, "llm", shared[app.GROQ_MODEL])
-    monkeypatch.setattr(app, "fallback_llm", shared[app.FALLBACK_GROQ_MODEL])
-    monkeypatch.setattr(app, "_no_retry_groq", lambda model: no_retry[model])
+
+    def no_other_network(*args, **kwargs):
+        raise AssertionError("unexpected outbound request")
+
+    monkeypatch.setattr(app.urllib.request, "urlopen", no_other_network)
 
     return calls, state
 
@@ -258,92 +215,16 @@ def test_flag_off_request_creates_no_budget(monkeypatch):
     assert seen == [None]
 
 
-def test_flag_off_providers_keep_shared_clients_and_existing_calls(providers, monkeypatch):
+def test_flag_off_openai_failure_is_provider_unavailable_without_fallback(providers):
     calls, state = providers
     state["openai"] = [ConnectionError("openai down")]
-    state["groq_120b"] = AIMessage(content="from shared groq")
 
-    response = app.invoke_llm(MESSAGES)
+    with pytest.raises(app.ModelProviderUnavailable) as caught:
+        app.invoke_llm(MESSAGES)
 
-    assert response.content == "from shared groq"
-    # No timeout override and the shared (retrying) Groq client.
-    assert calls == [("openai", {}), ("shared_120b", {})]
-
-
-# --- hidden retries ---------------------------------------------------------------------
-
-
-def test_budgeted_groq_client_has_shared_settings_without_retries():
-    twin = app._no_retry_groq(app.GROQ_MODEL)
-    shared = app.llm
-
-    assert twin is not shared
-    assert twin.client is not shared.client
-    assert twin.model_name == shared.model_name
-    assert twin.temperature == shared.temperature
-    assert twin.max_tokens == shared.max_tokens
-    assert twin.groq_api_key.get_secret_value() == shared.groq_api_key.get_secret_value()
-    assert twin.max_retries == 0
-    assert twin.client._client.max_retries == 0
-    # The shared client is untouched.
-    assert shared.max_retries == 2
-    assert shared.client._client.max_retries == 2
-    assert app._no_retry_groq(app.GROQ_MODEL) is twin
-
-
-class _CountingHandler(BaseHTTPRequestHandler):
-    count = 0
-    lock = threading.Lock()
-
-    def do_POST(self):
-        with _CountingHandler.lock:
-            _CountingHandler.count += 1
-        self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        body = b'{"error":{"message":"unavailable"}}'
-        self.send_response(500)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-@pytest.fixture
-def failing_groq_server(monkeypatch):
-    _CountingHandler.count = 0
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    monkeypatch.setenv("GROQ_BASE_URL", f"http://127.0.0.1:{server.server_address[1]}")
-    yield _CountingHandler
-    server.shutdown()
-    server.server_close()
-    thread.join(JOIN)
-
-
-def test_budgeted_groq_attempt_is_exactly_one_http_request(failing_groq_server):
-    # Control: a default client really retries (3 requests for one call).
-    retrying = ChatGroq(model=app.GROQ_MODEL, api_key="test-not-real")
-
-    with pytest.raises(Exception):
-        retrying.invoke(MESSAGES)
-
-    assert failing_groq_server.count == 3
-
-    failing_groq_server.count = 0
-    request_budget = budget(models=5)
-
-    with budget_scope(request_budget):
-        client = app._groq_client_for_attempt(app.llm, app.GROQ_MODEL)
-
-        with pytest.raises(Exception):
-            client.invoke(MESSAGES)
-
-    assert failing_groq_server.count == 1
-    assert request_budget.model_attempts == 1
+    # Exactly one OpenAI request, no timeout override, no other provider.
+    assert calls == [("openai", {})]
+    assert type(caught.value) is app.ModelProviderUnavailable
 
 
 # --- model admissions -------------------------------------------------------------------
@@ -392,31 +273,30 @@ def test_cancellation_during_a_call_stops_the_provider_chain(providers):
     assert names(calls) == ["openai"]
 
 
-def test_every_fallback_attempt_is_admitted_with_no_retry_groq(providers):
+def test_remote_failure_admits_one_attempt_and_tries_no_other_provider(providers):
     calls, state = providers
     state["openai"] = [ConnectionError("openai down")]
-    state["groq_20b"] = AIMessage(content="final fallback")
     request_budget = budget(models=4)
 
     with budget_scope(request_budget):
-        response = app.invoke_llm(MESSAGES)
+        with pytest.raises(app.ModelProviderUnavailable):
+            app.invoke_llm(MESSAGES)
 
-    assert response.content == "final fallback"
-    assert names(calls) == ["openai", "no_retry_120b", "cloudflare", "no_retry_20b"]
-    assert request_budget.model_attempts == 4
-    assert 0 < dict(calls)["cloudflare"]["timeout"] <= 90
+    assert names(calls) == ["openai"]
+    assert request_budget.model_attempts == 1
 
 
-def test_attempt_cap_stops_the_chain_before_the_next_provider(providers):
+def test_attempt_cap_stops_before_a_further_openai_request(providers):
     calls, state = providers
-    state["openai"] = [ConnectionError("openai down")]
-    state["groq_20b"] = AIMessage(content="never reached")
+    state["openai"] = [openai_reply("first answer")]
 
-    with budget_scope(budget(models=3)):
+    with budget_scope(budget(models=1)):
+        app.invoke_llm(MESSAGES)
+
         with pytest.raises(CallBudgetExhausted):
             app.invoke_llm(MESSAGES)
 
-    assert names(calls) == ["openai", "no_retry_120b", "cloudflare"]
+    assert names(calls) == ["openai"]
 
 
 def test_repair_is_an_admitted_model_attempt(providers):
@@ -575,14 +455,14 @@ def test_native_tool_stop_never_falls_through_to_legacy(monkeypatch, stop):
     assert legacy == []
 
 
-def test_native_tool_failure_still_falls_through_as_before(monkeypatch):
+def test_native_tool_protocol_failure_falls_through_once(monkeypatch):
     legacy = []
     monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
     monkeypatch.setattr(app, "classify_request", lambda message, history: "general")
     monkeypatch.setattr(app, "requires_web_verification", lambda message, history: False)
 
     def native(*args):
-        raise RuntimeError("native path broke")
+        raise app.ToolLoopProtocolError("Maximum tool rounds exceeded.")
 
     def legacy_llm(*args, **kwargs):
         legacy.append(1)
@@ -593,6 +473,24 @@ def test_native_tool_failure_still_falls_through_as_before(monkeypatch):
 
     assert app.chat("hello there", [], session_id="budget-native-fail") == "legacy answer"
     assert legacy == [1]
+
+
+def test_native_tool_internal_defect_is_internal_error_without_legacy(monkeypatch):
+    legacy = []
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
+    monkeypatch.setattr(app, "classify_request", lambda message, history: "general")
+    monkeypatch.setattr(app, "requires_web_verification", lambda message, history: False)
+
+    def native(*args):
+        raise RuntimeError("native path broke")
+
+    monkeypatch.setattr(app, "_run_v31_native_tool_chat", native)
+    monkeypatch.setattr(app, "invoke_llm", lambda *a, **k: legacy.append(1))
+
+    with pytest.raises(app.ChatInternalError):
+        app.chat("hello there", [], session_id="budget-native-defect")
+
+    assert legacy == []
 
 
 def test_chat_catch_all_passes_stops_and_still_maps_errors(monkeypatch):
@@ -670,7 +568,7 @@ def test_enabled_success_runs_under_the_request_budget(monkeypatch):
     def fake_chat(message, history, request=None, session_id=None):
         request_budget = current_budget()
         seen.append(request_budget)
-        app._admit_model_call(90)
+        current_budget().admit_model_attempt()
         return "budgeted reply"
 
     monkeypatch.setattr(app, "chat", fake_chat)
@@ -962,9 +860,9 @@ def test_concurrent_requests_have_isolated_budgets(monkeypatch):
 
     def admitting_chat(message, history, request=None, session_id=None):
         # Two attempts each: a shared budget would exhaust on the third.
-        app._admit_model_call(90)
+        current_budget().admit_model_attempt()
         time.sleep(0.05)
-        app._admit_model_call(90)
+        current_budget().admit_model_attempt()
         with lock:
             seen.append(current_budget())
         return "ok"
@@ -1335,38 +1233,6 @@ def test_handler_cancelled_during_cleanup_await_keeps_capacity_until_worker_exit
         assert app._chat_waiting == 0
 
     asyncio.run(scenario())
-
-
-# --- review round 2: Groq initialization before admission -----------------------------------
-
-
-@pytest.mark.parametrize("stop", ["cancel", "deadline"])
-def test_groq_stop_during_client_initialization_sends_nothing(monkeypatch, stop):
-    now = [100.0]
-    request_budget = budget(seconds=5.0, clock=lambda: now[0])
-    invokes = []
-
-    class NeverInvoked:
-        def invoke(self, *args, **kwargs):
-            invokes.append(1)
-            raise AssertionError("request sent after a stop")
-
-    def slow_initialization(model):
-        if stop == "cancel":
-            request_budget.cancel()
-        else:
-            now[0] += 10.0                  # the deadline passes meanwhile
-        return NeverInvoked()
-
-    monkeypatch.setattr(app, "_no_retry_groq", slow_initialization)
-    expected = RequestCancelled if stop == "cancel" else RequestDeadlineExceeded
-
-    with budget_scope(request_budget):
-        with pytest.raises(expected):
-            app._invoke_existing_provider_chain(MESSAGES, {})
-
-    assert invokes == []
-    assert request_budget.model_attempts == 0
 
 
 # --- review round 2: account-resolution wait ------------------------------------------------
@@ -2844,13 +2710,12 @@ def test_local_transport_failure_is_service_unavailable_without_fallback(
 ):
     calls, state = providers
     state["openai"] = [LOCAL_FAILURES[failure]()]
-    state["groq_120b"] = AIMessage(content="must never be used")
 
     (status, body), headers = _handler_run(monkeypatch)
 
     assert (status, body) == SERVICE_UNAVAILABLE
     assert headers[b"cache-control"] == b"no-store"
-    # No Groq, no Cloudflare, no second OpenAI request.
+    # No other provider and no second OpenAI request.
     assert names(calls) == ["openai"]
     assert len(state["transport_posts"]) == 1
     assert state["holder"].quarantined is failure.startswith("cleanup")
@@ -2865,7 +2730,6 @@ def test_cap_selected_unconfirmed_cleanup_is_service_unavailable_and_quarantines
 ):
     calls, state = providers
     state["openai"] = [TransportCleanupUnconfirmed("deadline")]
-    state["groq_120b"] = AIMessage(content="must never be used")
 
     # A 1 s per-call cap is shorter than the 5 s request: cap-selected.
     (status, body), headers = _handler_run(monkeypatch, cap=1.0)
@@ -2875,23 +2739,19 @@ def test_cap_selected_unconfirmed_cleanup_is_service_unavailable_and_quarantines
     assert state["holder"].quarantined is True
 
 
-def test_clean_cap_selected_timeout_keeps_the_existing_fallback(providers):
+def test_clean_cap_selected_timeout_is_provider_unavailable_without_fallback(
+    providers, monkeypatch,
+):
     calls, state = providers
     state["openai"] = [TransportDeadlineExceeded()]
-    state["groq_120b"] = AIMessage(content="from groq")
-    app_cap = 1.0
+    monkeypatch.setattr(app, "OPENAI_CALL_TIMEOUT_SECONDS", 1.0)
 
     with budget_scope(budget(seconds=5.0)):
-        original = app.OPENAI_CALL_TIMEOUT_SECONDS
-        app.OPENAI_CALL_TIMEOUT_SECONDS = app_cap
+        with pytest.raises(app.ModelProviderUnavailable) as caught:
+            app.invoke_llm(MESSAGES)
 
-        try:
-            response = app.invoke_llm(MESSAGES)
-        finally:
-            app.OPENAI_CALL_TIMEOUT_SECONDS = original
-
-    assert response.content == "from groq"
-    assert names(calls) == ["openai", "no_retry_120b"]
+    assert not isinstance(caught.value, app.LocalModelServiceUnavailable)
+    assert names(calls) == ["openai"]
     assert state["holder"].quarantined is False
 
 
@@ -2901,16 +2761,16 @@ def test_clean_cap_selected_timeout_keeps_the_existing_fallback(providers):
      UnsupportedContentEncoding(), ResponseTooLarge()],
     ids=lambda e: type(e).__name__,
 )
-def test_remote_openai_failures_keep_the_existing_fallback(providers, error):
+def test_remote_openai_failures_are_provider_unavailable_without_fallback(providers, error):
     calls, state = providers
     state["openai"] = [error]
-    state["groq_120b"] = AIMessage(content="from groq")
 
     with budget_scope(budget()):
-        response = app.invoke_llm(MESSAGES)
+        with pytest.raises(app.ModelProviderUnavailable) as caught:
+            app.invoke_llm(MESSAGES)
 
-    assert response.content == "from groq"
-    assert names(calls) == ["openai", "no_retry_120b"]
+    assert not isinstance(caught.value, app.LocalModelServiceUnavailable)
+    assert names(calls) == ["openai"]
     assert state["holder"].quarantined is False
 
 
@@ -2953,7 +2813,6 @@ def test_transport_defects_are_internal_errors_without_fallback(
     providers, monkeypatch, capsys, defect,
 ):
     calls, state = providers
-    state["groq_120b"] = AIMessage(content="must never be used")
 
     if defect == "type_error":
         state["openai"] = [TypeError(SECRET_PROMPT)]
@@ -2979,7 +2838,6 @@ def test_transport_defects_are_internal_errors_without_fallback(
 def test_continuation_cannot_swallow_a_local_transport_failure(providers, error, raised):
     calls, state = providers
     state["openai"] = [openai_reply("Partial", cut_off=True), error]
-    state["groq_120b"] = AIMessage(content="must never be used")
 
     with budget_scope(budget()):
         with pytest.raises(getattr(app, raised)):

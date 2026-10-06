@@ -45,12 +45,13 @@ def openai_calls(monkeypatch):
         state["payloads"].append(payload)
         return _completed(state["replies"].pop(0))
 
-    def no_fallback(messages, invoke_kwargs):
+    def no_fallback(*args, **kwargs):
         raise AssertionError("fallback chain must not run")
 
     monkeypatch.setattr(app, "OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setattr(app, "_post_openai_responses", fake_post)
-    monkeypatch.setattr(app, "_invoke_existing_provider_chain", no_fallback)
+    # OpenAI is the only provider: any other outbound request fails.
+    monkeypatch.setattr(app.urllib.request, "urlopen", no_fallback)
 
     return state
 
@@ -105,20 +106,33 @@ def test_router_prompt_states_model_id_rule():
 @pytest.mark.parametrize(
     "code, expected",
     [
-        ('MODEL = "gpt-oss-120b"\n', "Short model id gpt-oss-120b"),
-        ('MODEL = "gpt-oss-20b"\n', "Short model id gpt-oss-20b"),
+        # OpenAI-only: no other model id is part of Kalillac's configuration.
+        ('MODEL = "gpt-oss-120b"\n', "Model id gpt-oss-120b is not in Kalillac"),
+        ('MODEL = "gpt-oss-20b"\n', "Model id gpt-oss-20b is not in Kalillac"),
+        ('MODEL = "openai/gpt-oss-120b"\n', "Model id openai/gpt-oss-120b is not in Kalillac"),
+        ('MODEL = "@cf/openai/gpt-oss-120b"\n', "Model id @cf/openai/gpt-oss-120b is not in Kalillac"),
         ('MODEL = "gpt-4o"\n', "Model id gpt-4o is not in Kalillac"),
         ('MODEL = "gpt-5.6"\n', "Model id gpt-5.6 is not in Kalillac"),
         (
             'CHAIN = ["openai/gpt-oss-20b", "gpt-5.6-luna"]\n',
-            "Provider chain order contradicts",
+            "Model id openai/gpt-oss-20b is not in Kalillac",
         ),
         (
             'CHAIN = [\n'
             '    {"provider": "groq", "model": "openai/gpt-oss-120b"},\n'
             '    {"provider": "openai", "model": "gpt-5.6-luna"},\n'
             ']\n',
-            "Provider chain order contradicts",
+            "Model id openai/gpt-oss-120b is not in Kalillac",
+        ),
+        (
+            # The retired four-provider chain is no longer Kalillac's.
+            "CHAIN = [\n"
+            '    ("openai", "gpt-5.6-luna"),\n'
+            '    ("groq", "openai/gpt-oss-120b"),\n'
+            '    ("cloudflare", "@cf/openai/gpt-oss-120b"),\n'
+            '    ("groq", "openai/gpt-oss-20b"),\n'
+            "]\n",
+            "Model id openai/gpt-oss-20b is not in Kalillac",
         ),
     ],
 )
@@ -132,14 +146,7 @@ def test_fidelity_rejects_contradicting_model_facts(code, expected):
     "code",
     [
         'import os\nMODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")\n',
-        (
-            "CHAIN = [\n"
-            '    ("openai", "gpt-5.6-luna"),\n'
-            '    ("groq", "openai/gpt-oss-120b"),\n'
-            '    ("cloudflare", "@cf/openai/gpt-oss-120b"),\n'
-            '    ("groq", "openai/gpt-oss-20b"),\n'
-            "]\n"
-        ),
+        'CHAIN = [("openai", "gpt-5.6-luna")]\n',
         'PRIMARY = "gpt-5.6-luna"\n',
         "def call_model(messages):\n    return provider.complete(messages)\n",
     ],

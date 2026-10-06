@@ -109,14 +109,15 @@ def fake_openai(monkeypatch):
             }
         ]
 
-    def no_fallback(messages, invoke_kwargs):
+    def no_fallback(*args, **kwargs):
         state["fallbacks"] += 1
         raise AssertionError("fallback provider chain must not run")
 
     monkeypatch.setattr(app, "OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setattr(app, "_post_openai_responses", fake_post)
     monkeypatch.setattr(app, "run_web_search", fake_search)
-    monkeypatch.setattr(app, "_invoke_existing_provider_chain", no_fallback)
+    # OpenAI is the only provider: any other outbound request fails.
+    monkeypatch.setattr(app.urllib.request, "urlopen", no_fallback)
 
     return state
 

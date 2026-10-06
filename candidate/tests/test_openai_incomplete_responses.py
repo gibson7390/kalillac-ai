@@ -145,10 +145,11 @@ def test_invoke_llm_returns_typed_incomplete_without_fallback(
 ):
     openai_calls["queue"] = [_cut_off("part one"), _cut_off(" part two")]
 
-    def no_fallback(messages, invoke_kwargs):
+    def no_fallback(*args, **kwargs):
         raise AssertionError("fallback chain must not run")
 
-    monkeypatch.setattr(app, "_invoke_existing_provider_chain", no_fallback)
+    # OpenAI is the only provider: any other outbound request fails.
+    monkeypatch.setattr(app.urllib.request, "urlopen", no_fallback)
 
     response = app.invoke_llm(MESSAGES)
 
