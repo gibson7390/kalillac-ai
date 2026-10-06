@@ -30,14 +30,21 @@ Important limits:
 Nothing about the request's content is stored: no prompts, responses,
 search queries, credentials, session ids, or account identifiers. The only
 state is a deadline, a flag, and two counters.
+
+Request-local propagation: budget_scope() makes a budget the current one
+for the calling context, and current_budget() reads it. A context copied
+while a scope is active (asyncio tasks, AnyIO/Starlette worker threads)
+keeps that budget; other requests never see it.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 import threading
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 
 MODEL_ATTEMPT = "model"
@@ -189,6 +196,12 @@ class RequestBudget:
 
         self._admit(SEARCH_ATTEMPT)
 
+    def ensure_open(self) -> None:
+        """Raise RequestCancelled or RequestDeadlineExceeded if no further
+        work may happen; consumes nothing. For checks after work finishes."""
+
+        self._check_open()
+
     def call_timeout(self, per_call_timeout: float) -> float:
         """Seconds the next call may use: remaining time, capped by
         per_call_timeout. Always positive; raises instead of returning
@@ -197,3 +210,30 @@ class RequestBudget:
 
         cap = _positive_seconds(per_call_timeout, "per_call_timeout")
         return min(self._check_open(), cap)
+
+
+_CURRENT_BUDGET: ContextVar[RequestBudget | None] = ContextVar(
+    "kalillac_request_budget",
+    default=None,
+)
+
+
+def current_budget() -> RequestBudget | None:
+    """The budget of the request this code is running for, if any."""
+
+    return _CURRENT_BUDGET.get()
+
+
+@contextmanager
+def budget_scope(budget: RequestBudget) -> Iterator[RequestBudget]:
+    """Make `budget` current for this context until the block exits."""
+
+    if not isinstance(budget, RequestBudget):
+        raise TypeError("budget must be a RequestBudget.")
+
+    token = _CURRENT_BUDGET.set(budget)
+
+    try:
+        yield budget
+    finally:
+        _CURRENT_BUDGET.reset(token)

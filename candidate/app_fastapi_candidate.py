@@ -27,6 +27,16 @@ from kalillac_routing.source_policy import (
     get_authoritative_search_domains,
 )
 from kalillac_routing.tool_contract import OPENAI_TOOLS
+from kalillac_routing.request_budget import (
+    CallBudgetExhausted,
+    RequestBudget,
+    RequestBudgetError,
+    RequestCancelled,
+    RequestDeadlineExceeded,
+    budget_scope,
+    current_budget,
+)
+from kalillac_routing.request_limits import load_request_limits
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -155,6 +165,101 @@ fallback_llm = ChatGroq(
     max_tokens=MAX_RESPONSE_TOKENS,
     api_key=GROQ_API_KEY,
 )
+
+
+# --- request budget (KALILLAC_REQUEST_BUDGET_ENABLED) -------------------------
+#
+# When /api/chat runs a request under a RequestBudget, every model and
+# search network attempt is admitted against it first. With no budget in
+# context (the flag is off, or chat() is called directly) these helpers do
+# nothing and every call keeps its existing behavior and timeouts.
+
+# Existing per-call timeouts, used as caps for budgeted calls (a budgeted
+# call never gets MORE time than today, only less when the deadline nears).
+OPENAI_CALL_TIMEOUT_SECONDS = 90          # _post_openai_responses default
+CLOUDFLARE_CALL_TIMEOUT_SECONDS = 90
+# tavily-python 0.7.26 TavilyClient.extract() default timeout.
+TAVILY_EXTRACT_TIMEOUT_SECONDS = 30
+
+
+def _admit_model_call(timeout_cap):
+    """Admit one model network attempt; returns its timeout, or None when
+    no budget applies (the caller then keeps its existing timeout)."""
+    budget = current_budget()
+
+    if budget is None:
+        return None
+
+    budget.admit_model_attempt()
+    return budget.call_timeout(timeout_cap)
+
+
+def _admit_search_call(timeout_cap):
+    """Admit one search-provider network operation (search, retry search,
+    or extraction); returns its timeout, or None when no budget applies."""
+    budget = current_budget()
+
+    if budget is None:
+        return None
+
+    budget.admit_search_attempt()
+    return budget.call_timeout(timeout_cap)
+
+
+# The shared Groq clients keep the SDK's automatic retries (max_retries=2),
+# which would be hidden network attempts. Budgeted requests use separate
+# clients with identical settings and max_retries=0, so each admitted
+# attempt is exactly one request. The shared clients are never mutated.
+_NO_RETRY_GROQ = {}
+_NO_RETRY_GROQ_LOCK = _threading.Lock()
+
+
+def _no_retry_groq(model):
+    with _NO_RETRY_GROQ_LOCK:
+        client = _NO_RETRY_GROQ.get(model)
+
+        if client is None:
+            client = ChatGroq(
+                model=model,
+                temperature=0.1,
+                max_tokens=MAX_RESPONSE_TOKENS,
+                api_key=GROQ_API_KEY,
+                max_retries=0,
+            )
+            _NO_RETRY_GROQ[model] = client
+
+        return client
+
+
+def _groq_client_for_attempt(shared_client, model):
+    """The client for one Groq attempt: the shared client without a budget,
+    otherwise an admitted attempt on the no-retry client.
+
+    The Groq call's own duration is still bounded only by the SDK's
+    timeouts: ChatGroq has no verified per-call timeout argument, so the
+    remaining budget cannot be applied to it in this slice."""
+    budget = current_budget()
+
+    if budget is None:
+        return shared_client
+
+    # Resolve (possibly constructing) the client first; admission is the
+    # last step before the caller invokes it, so a cancellation or deadline
+    # reached during initialization prevents the request.
+    client = _no_retry_groq(model)
+    budget.admit_model_attempt()
+    return client
+
+
+def _post_openai_for_attempt(payload):
+    """One admitted OpenAI Responses request (primary, continuation, or
+    native-tool round). Without a budget the call is unchanged."""
+    timeout = _admit_model_call(OPENAI_CALL_TIMEOUT_SECONDS)
+
+    if timeout is None:
+        return _post_openai_responses(payload)
+
+    return _post_openai_responses(payload, timeout=timeout)
 
 
 class ModelProviderUnavailable(RuntimeError):
@@ -307,7 +412,7 @@ def _invoke_openai(messages, max_tokens=None):
         ),
     }
 
-    data = _post_openai_responses(payload)
+    data = _post_openai_for_attempt(payload)
     text = _openai_output_text(data)
     incomplete_reason = response_incomplete_reason(data)
 
@@ -333,9 +438,13 @@ def _invoke_openai(messages, max_tokens=None):
         ]
 
         try:
-            continuation = _post_openai_responses(
+            continuation = _post_openai_for_attempt(
                 continuation_payload
             )
+        except RequestBudgetError:
+            # A request-level stop is not a failed continuation: never
+            # return the partial answer as if the request could go on.
+            raise
         except Exception as continuation_error:
             print(
                 "WARN: OPENAI_CONTINUATION_FAILED "
@@ -495,9 +604,15 @@ def _invoke_cloudflare(messages, max_tokens=None):
         method="POST",
     )
 
+    timeout = _admit_model_call(CLOUDFLARE_CALL_TIMEOUT_SECONDS)
+
     with urllib.request.urlopen(
         request,
-        timeout=90,
+        timeout=(
+            CLOUDFLARE_CALL_TIMEOUT_SECONDS
+            if timeout is None
+            else timeout
+        ),
     ) as response:
         data = json.loads(
             response.read().decode()
@@ -525,11 +640,16 @@ def _invoke_cloudflare(messages, max_tokens=None):
 
 def _invoke_final_groq_fallback(messages, invoke_kwargs):
     """Final same-provider fallback: Groq GPT-OSS-20B."""
+    client = _groq_client_for_attempt(fallback_llm, FALLBACK_GROQ_MODEL)
+
     try:
-        response = fallback_llm.invoke(
+        response = client.invoke(
             messages,
             **invoke_kwargs,
         )
+
+    except RequestBudgetError:
+        raise
 
     except Exception as fallback_error:
         status = getattr(
@@ -587,6 +707,9 @@ def _invoke_cross_provider_fallback(
             f"{CLOUDFLARE_MODEL} -> {FALLBACK_GROQ_MODEL}"
         )
 
+    except RequestBudgetError:
+        raise
+
     except Exception as cloudflare_error:
         status = (
             getattr(
@@ -621,11 +744,16 @@ def _invoke_cross_provider_fallback(
 
 def _invoke_existing_provider_chain(messages, invoke_kwargs):
     """Existing Groq 120B -> Cloudflare 120B -> Groq 20B chain."""
+    client = _groq_client_for_attempt(llm, GROQ_MODEL)
+
     try:
-        response = llm.invoke(
+        response = client.invoke(
             messages,
             **invoke_kwargs,
         )
+
+    except RequestBudgetError:
+        raise
 
     except RateLimitError:
         print(
@@ -701,6 +829,11 @@ def invoke_llm(messages, max_tokens=None):
             "WARN: OPENAI_PRIMARY_EMPTY_RESPONSE "
             f"{OPENAI_MODEL} -> {GROQ_MODEL}"
         )
+
+    except RequestBudgetError:
+        # Cancellation, deadline or attempt exhaustion stops the request;
+        # it is never a reason to try the next provider.
+        raise
 
     except Exception as openai_error:
         status = (
@@ -1241,6 +1374,13 @@ def run_web_search(query, include_domains=None):
             if domains:
                 search_args["include_domains"] = domains[:5]
 
+            # Each search (including the domain retry) is one admitted
+            # search-provider operation when a request budget applies.
+            timeout = _admit_search_call(SEARCH_TIMEOUT_SECONDS)
+
+            if timeout is not None:
+                search_args["timeout"] = timeout
+
             return client.search(**search_args)
 
         depth = (
@@ -1324,13 +1464,26 @@ def run_web_search(query, include_domains=None):
                         # as the relevance query. This gives the model article
                         # evidence rather than an arbitrary search-page chunk.
                         try:
+                            # Extraction is a separate search-provider
+                            # operation and counts against the budget too.
+                            extract_timeout = _admit_search_call(
+                                TAVILY_EXTRACT_TIMEOUT_SECONDS
+                            )
+                            extract_options = (
+                                {}
+                                if extract_timeout is None
+                                else {"timeout": extract_timeout}
+                            )
                             extracted_response = client.extract(
                                 urls=url,
                                 query=title,
                                 chunks_per_source=1,
                                 extract_depth="basic",
                                 format="markdown",
+                                **extract_options,
                             )
+                        except RequestBudgetError:
+                            raise
                         except Exception as exc:
                             log(
                                 "WARN: NEWS_ARTICLE_EXTRACT_FAILED "
@@ -1472,6 +1625,11 @@ def run_web_search(query, include_domains=None):
 
         # Keep downstream prompt size bounded.
         return "ok", results[:MAX_SEARCH_RESULTS]
+
+    except RequestBudgetError:
+        # A request-level stop is not "search unavailable": that would let
+        # the caller answer, or the native-tool loop call the model again.
+        raise
 
     except Exception as e:
         print(
@@ -9087,7 +9245,7 @@ def _invoke_openai_native_tools(input_items, instructions):
     }
 
     # status/incomplete_details are inspected by run_tool_loop.
-    return _post_openai_responses(payload)
+    return _post_openai_for_attempt(payload)
 
 
 def _v31_runtime_facts():
@@ -9570,6 +9728,10 @@ def chat(message, history, request=None, session_id=None):
                     state,
                 )
 
+            except RequestBudgetError:
+                # Never fall through to the legacy pipeline after a stop.
+                raise
+
             except Exception as native_error:
                 # Transitional safety behavior only:
                 # if the experimental V31 path itself fails, continue through
@@ -9907,6 +10069,11 @@ Rules:
         # Preserve provider exhaustion as a typed failure so the FastAPI
         # boundary can return an honest HTTP 503 instead of disguising an
         # unavailable provider chain as a successful 200 chat response.
+        raise
+
+    except RequestBudgetError:
+        # Cancellation, deadline and attempt exhaustion reach the API
+        # boundary unchanged; they are neither replies nor internal errors.
         raise
 
     except Exception as e:
@@ -11320,6 +11487,7 @@ def run_engagement_live_tests():
 
 import asyncio
 import secrets as _secrets
+import time
 
 from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
@@ -11452,6 +11620,14 @@ def chat_core(message, history, session_id, resolved=False):
     Returns (reply_text, resolved_session_id)."""
     sid = session_id if resolved else resolve_session_id(session_id)
     reply = chat(message, history, session_id=sid)
+
+    # Under a request budget, a reply finished (or post-processed) after
+    # cancellation or the deadline is not a success.
+    budget = current_budget()
+
+    if budget is not None:
+        budget.ensure_open()
+
     return reply, sid
 
 
@@ -11580,6 +11756,46 @@ def _release_chat_resources(sem, sid, entry):
     _session_lock_unref(sid, entry)
 
 
+# Admitted chats under a request budget: requests allowed into the chat
+# lifecycle, from admission until their worker really exits (or until the
+# request ends, if no worker was started). This is the authority for total
+# admission, at most MAX_CONCURRENT_CHATS + MAX_QUEUED_CHATS. It is separate
+# from the global slot, the session lock, _chat_waiting and the account-lookup
+# reservation. Event-loop thread only.
+_chats_admitted = 0
+
+
+class _ChatAdmission:
+    """One admitted-chat reservation. Whoever owns it -- the handler, or the
+    worker's exit once the handler has handed off -- releases it exactly
+    once."""
+
+    __slots__ = ("held",)
+
+    def __init__(self):
+        self.held = True
+
+    def release(self):
+        global _chats_admitted
+
+        if self.held:
+            self.held = False
+            _chats_admitted -= 1
+
+
+def _reserve_chat():
+    """Reserve one admitted-chat place, or return None when the combined
+    capacity is reached. Synchronous: the check and the reservation cannot be
+    separated by another handler."""
+    global _chats_admitted
+
+    if _chats_admitted >= MAX_CONCURRENT_CHATS + MAX_QUEUED_CHATS:
+        return None
+
+    _chats_admitted += 1
+    return _ChatAdmission()
+
+
 # ---------------------------- FastAPI app ---------------------------------
 
 api = FastAPI(title="Kalillac AI API", docs_url=None, redoc_url=None, openapi_url=None)
@@ -11690,6 +11906,460 @@ def health():
 from fastapi import Request as _FastAPIRequest
 
 
+# Optional request budget. Off unless explicitly enabled; when on, every
+# setting must be explicit and valid or startup fails (naming the setting,
+# never its value). When off, /api/chat below is unchanged.
+_request_limits = load_request_limits()
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _budget_error(status, code):
+    return JSONResponse(status_code=status, content={"error": code}, headers=_NO_STORE)
+
+
+def _cancelled_response():
+    # The client is gone (or the request was cancelled), so this response
+    # is normally never read. 499 is the conventional "client closed
+    # request" status; it is not a provider outage and is never metered.
+    return _budget_error(499, "request_cancelled")
+
+
+async def _watch_for_disconnect(receive, budget, disconnected):
+    """The only receive() caller after the body was read. Marks the budget
+    cancelled when the client disconnects. A detected disconnect is not
+    proof of anything about earlier response delivery."""
+    while True:
+        message = await receive()
+
+        if message.get("type") == "http.disconnect":
+            budget.cancel()
+            disconnected.set()
+            return
+
+
+def _consume_outcome(task):
+    """Done-callback: retrieve a task's outcome so it is never reported as
+    unretrieved. The outcome itself is deliberately discarded."""
+    if not task.cancelled():
+        task.exception()
+
+
+# Account lookups admitted by budgeted requests and not yet finished: waiting
+# for a thread-limiter token, running, or no longer awaited by their request.
+# The set holds strong references until each task really completes.
+# Event-loop thread only.
+_lookups_outstanding = 0
+_lookup_tasks = set()
+
+
+def _start_lookup(meter, request):
+    """Reserve lookup capacity and start one account lookup, or return None
+    when MAX_QUEUED_CHATS lookups are already outstanding.
+
+    The check, the reservation and the task creation happen with no await in
+    between, so concurrent handlers cannot all pass a check that none of them
+    has counted yet. The reservation is rolled back if the task cannot be
+    created, and otherwise released exactly once, by the task's completion,
+    whatever its outcome.
+
+    A request that stops waiting never cancels its lookup: cancelling would
+    end the awaiting task at once and hand its AnyIO thread-limiter token back
+    while the synchronous lookup is still running (measured on Starlette
+    0.52.1 / AnyIO 4.14.2). Left alone, the task keeps its token until its
+    thread really returns, its capacity stays reserved until then, and its
+    outcome is consumed and discarded; nothing else runs because of it.
+    """
+    global _lookups_outstanding
+
+    if _lookups_outstanding >= MAX_QUEUED_CHATS:
+        return None
+
+    _lookups_outstanding += 1
+
+    try:
+        task = asyncio.ensure_future(meter.resolve_request_account(request))
+    except BaseException:
+        _lookups_outstanding -= 1
+        raise
+
+    _lookup_tasks.add(task)
+    task.add_done_callback(_lookup_finished)
+    return task
+
+
+def _lookup_finished(task):
+    """Done-callback of every admitted lookup: runs once, on completion."""
+    global _lookups_outstanding
+    _lookups_outstanding -= 1
+    _lookup_tasks.discard(task)
+    _consume_outcome(task)
+
+
+async def _await_task_or_stop(task, deadline, stop):
+    """Wait for `task` until `deadline` (monotonic) or until `stop` is set.
+    Returns "done", "stopped" or "timeout". Never cancels or awaits `task`
+    beyond this wait, and leaves nothing behind that needs awaiting."""
+    if task.done():
+        return "done"
+
+    stopper = asyncio.ensure_future(stop.wait())
+
+    try:
+        await asyncio.wait(
+            {task, stopper},
+            timeout=max(0.0, deadline - time.monotonic()),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        # Cancelled, never awaited: a cancelled task is not reported, and no
+        # cleanup await exists here for a second cancellation to interrupt.
+        stopper.cancel()
+
+    if task.done():
+        return "done"
+
+    return "stopped" if stop.is_set() else "timeout"
+
+
+async def _acquire_bounded(acquire, release, deadline, stop):
+    """Acquire via acquire() unless `stop` is set or `deadline` (monotonic)
+    passes first. Returns "acquired", "timeout", "stopped" or "failed".
+
+    "failed" means the acquisition itself ended without acquiring -- it
+    raised, was cancelled by something other than this caller, or returned
+    a false result -- while `stop` was not set. That is neither congestion
+    nor a deadline, and is never reported as "timeout".
+
+    Ownership is explicit: only an "acquired" return hands the primitive to
+    the caller, and nothing is awaited between the final checks and that
+    return. Stop and deadline take precedence: they are checked before
+    acquisition starts and again after it completes, and an acquisition
+    that raced them is released. Until ownership is handed over -- on
+    cancellation, failure, or a lost race -- the helper releases whatever
+    the acquisition obtained, whenever it really completes. External
+    cancellation is re-raised, never swallowed.
+    """
+
+    if stop.is_set():
+        return "stopped"
+
+    if time.monotonic() >= deadline:
+        return "timeout"
+
+    def release_if_acquired(task):
+        # Runs only for acquisitions the caller never received.
+        if task.cancelled():
+            return
+
+        if task.exception() is None and task.result():
+            release()
+
+    attempt = asyncio.ensure_future(acquire())
+    stopper = asyncio.ensure_future(stop.wait())
+
+    try:
+        await asyncio.wait(
+            {attempt, stopper},
+            timeout=max(0.0, deadline - time.monotonic()),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except BaseException:
+        stopper.cancel()
+        attempt.cancel()  # no effect if it already finished
+        attempt.add_done_callback(release_if_acquired)
+        raise
+
+    stopper.cancel()
+
+    if not attempt.done():
+        attempt.cancel()
+        attempt.add_done_callback(release_if_acquired)
+        return "stopped" if stop.is_set() else "timeout"
+
+    if attempt.cancelled() or attempt.exception() is not None:
+        failure = (
+            "CancelledError" if attempt.cancelled()
+            else type(attempt.exception()).__name__
+        )
+        _consume_outcome(attempt)
+
+        if stop.is_set():
+            return "stopped"
+
+        # Class name only: never the message or anything about the request.
+        log("WARN: CHAT_ACQUIRE_FAILED", failure)
+        return "failed"
+
+    if not attempt.result():
+        return "stopped" if stop.is_set() else "failed"
+
+    # Acquired. A stop or deadline that is already true wins the race.
+    if stop.is_set():
+        release()
+        return "stopped"
+
+    if time.monotonic() >= deadline:
+        release()
+        return "timeout"
+
+    return "acquired"
+
+
+async def _api_chat_with_budget(request, req, history, limits):
+    """The /api/chat lifecycle under a RequestBudget.
+
+    One budget covers account resolution, the queue waits and the worker.
+    The disconnect watcher starts after the body was consumed, before any
+    wait, and is always stopped and awaited.
+
+    Worker ownership: once the worker exists, every exit -- a return, an
+    exception, or cancellation at ANY await -- either sees the worker
+    finished and releases the session lock, slot and admitted-chat
+    reservation here, or cancels the budget and hands their release to the
+    worker's actual exit. The worker task is never cancelled to make it look
+    finished: its thread keeps running until it returns. Before the worker
+    exists, every exit after admission releases the reservation here.
+    """
+
+    global _chat_waiting
+
+    budget = RequestBudget(
+        duration_seconds=limits.deadline_seconds,
+        max_model_attempts=limits.max_model_attempts,
+        max_search_attempts=limits.max_search_attempts,
+    )
+    disconnected = asyncio.Event()
+    watcher = asyncio.ensure_future(
+        _watch_for_disconnect(request.receive, budget, disconnected)
+    )
+
+    def stopped_response():
+        if disconnected.is_set() or budget.cancelled:
+            return _cancelled_response()
+
+        return _budget_error(504, "request_timeout")
+
+    try:
+        meter = _usage_meter
+        meter_user_id = None
+
+        if meter is not None:
+            # Bounded by the request deadline and the disconnect watcher, and
+            # by the lookup capacity reserved in _start_lookup. A lookup the
+            # request stops waiting for -- on a stop or on cancellation of
+            # this handler -- is not cancelled: it keeps its capacity until
+            # its synchronous work really finishes.
+            lookup = _start_lookup(meter, request)
+
+            if lookup is None:
+                return _budget_error(429, "busy")
+
+            lookup_state = await _await_task_or_stop(
+                lookup,
+                budget.deadline,
+                disconnected,
+            )
+
+            if lookup_state != "done":
+                return stopped_response()
+
+            meter_user_id = lookup.result()
+
+        # Nothing below starts once the request is already stopped.
+        if disconnected.is_set() or budget.cancelled:
+            return _cancelled_response()
+
+        if time.monotonic() >= budget.deadline:
+            return _budget_error(504, "request_timeout")
+
+        sid = resolve_session_id(req.session_id)
+        sem = _get_chat_semaphore()
+
+        # Admission. No await from here until the reservation is owned.
+        #
+        # Every holder of, or contender for, a global slot holds an
+        # admitted-chat reservation (a worker that outlives its handler keeps
+        # it). So while fewer than MAX_CONCURRENT_CHATS are admitted, a
+        # request whose session has no holder or waiter can neither wait for
+        # its session lock nor for a slot. Otherwise it may have to wait and
+        # needs a waiting place. Unlike sem.locked(), this does not depend on
+        # whether acquisitions already scheduled by other handlers have run.
+        must_wait = (
+            sid in _session_locks
+            or _chats_admitted >= MAX_CONCURRENT_CHATS
+        )
+        if must_wait and _chat_waiting >= MAX_QUEUED_CHATS:
+            return _budget_error(429, "busy")
+
+        admission = _reserve_chat()
+
+        if admission is None:
+            return _budget_error(429, "busy")
+
+        try:
+            entry = _session_lock_ref(sid)
+        except BaseException:
+            admission.release()
+            raise
+
+        holds_session = False
+        holds_slot = False
+        handed_off = False
+        # _chat_waiting counts admitted requests that may have to wait.
+        waiting = must_wait
+        work = None
+
+        if waiting:
+            _chat_waiting += 1
+        # One queue deadline shared by the session lock and the slot,
+        # starting when queueing starts and never later than the request
+        # deadline. Which deadline selected it is recorded: when the request
+        # deadline did (or tied), a queue timeout IS the request timing out,
+        # even if the wait returns before the clock reads that deadline.
+        queue_wait_deadline = time.monotonic() + limits.queue_wait_seconds
+        queue_deadline = min(queue_wait_deadline, budget.deadline)
+        request_deadline_selected = budget.deadline <= queue_wait_deadline
+
+        def _release_when_worker_exits(fut, _sem=sem, _sid=sid, _entry=entry):
+            # Consume the detached worker's outcome so nothing is left
+            # unretrieved, then release what it was holding -- once --
+            # including its admitted-chat reservation.
+            _consume_outcome(fut)
+            _release_chat_resources(_sem, _sid, _entry)
+            admission.release()
+
+        try:
+            for acquire, release in (
+                (entry.lock.acquire, entry.lock.release),
+                (sem.acquire, sem.release),
+            ):
+                outcome = await _acquire_bounded(
+                    acquire,
+                    release,
+                    queue_deadline,
+                    disconnected,
+                )
+
+                # Ownership arrives with "acquired" and is recorded before
+                # any further await.
+                if outcome == "acquired":
+                    if acquire == entry.lock.acquire:
+                        holds_session = True
+                    else:
+                        holds_slot = True
+                    continue
+
+                if outcome == "stopped":
+                    return _cancelled_response()
+
+                if outcome == "failed":
+                    # The acquisition itself failed: not busy, not a
+                    # timeout -- unless a disconnect or the real request
+                    # deadline already won.
+                    if disconnected.is_set() or budget.cancelled:
+                        return _cancelled_response()
+
+                    if time.monotonic() >= budget.deadline:
+                        return _budget_error(504, "request_timeout")
+
+                    return _budget_error(500, "internal_error")
+
+                # Timed out. If the request deadline selected the queue
+                # deadline, the request timed out. Otherwise the shorter
+                # queue wait expired: busy, unless the request deadline has
+                # really passed by now.
+                if request_deadline_selected or time.monotonic() >= budget.deadline:
+                    return _budget_error(504, "request_timeout")
+
+                return _budget_error(429, "busy")
+
+            if waiting:
+                _chat_waiting -= 1
+                waiting = False
+
+            # The worker thread sees this budget through a copied context.
+            with budget_scope(budget):
+                work = asyncio.ensure_future(
+                    run_in_threadpool(chat_core, req.message, history, sid, True)
+                )
+
+            work_state = await _await_task_or_stop(
+                work,
+                budget.deadline,
+                disconnected,
+            )
+
+            if work_state != "done":
+                # The worker is still inside a call that cannot be
+                # interrupted; the finally below hands capacity to its exit.
+                return stopped_response()
+
+            try:
+                reply, out_sid = work.result()
+            except RequestCancelled:
+                return _cancelled_response()
+            except RequestDeadlineExceeded:
+                return _budget_error(504, "request_timeout")
+            except (CallBudgetExhausted, ModelProviderUnavailable):
+                return _budget_error(503, "model_provider_unavailable")
+            except Exception:
+                return _budget_error(500, "internal_error")
+
+            # A reply that finished after cancellation, disconnect or the
+            # deadline is never a success.
+            if disconnected.is_set() or budget.cancelled:
+                return _cancelled_response()
+
+            try:
+                budget.ensure_open()
+            except RequestCancelled:
+                return _cancelled_response()
+            except RequestDeadlineExceeded:
+                return _budget_error(504, "request_timeout")
+        finally:
+            # No await in this block, so a repeated cancellation cannot
+            # interrupt it.
+            if waiting:
+                _chat_waiting -= 1
+
+            if work is not None:
+                if work.done():
+                    _consume_outcome(work)
+                else:
+                    # Every exit while the worker still runs -- including
+                    # cancellation at any await above -- stops further
+                    # admissions and transfers the release to its exit.
+                    budget.cancel()
+                    handed_off = True
+                    work.add_done_callback(_release_when_worker_exits)
+
+            if not handed_off:
+                if holds_slot:
+                    sem.release()
+                if holds_session:
+                    entry.lock.release()
+                _session_lock_unref(sid, entry)
+                admission.release()
+
+        # Success. Sending it is not proof of delivery: a disconnect after
+        # this point is not detected, as before this change.
+        response = JSONResponse(content={"reply": reply, "session_id": out_sid})
+
+        if meter is not None and meter_user_id is not None:
+            response.background = meter.background_for_chat(
+                meter_user_id,
+                req.message,
+                history,
+                reply,
+            )
+
+        return response
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+
+
 @api.post("/api/chat")
 async def api_chat(request: _FastAPIRequest):
     """One request -> one response (no streaming). Validates at the boundary,
@@ -11728,6 +12398,11 @@ async def api_chat(request: _FastAPIRequest):
         # Explicit rejection. The alternative -- silently truncating -- would
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
+
+    limits = _request_limits
+
+    if limits is not None:
+        return await _api_chat_with_budget(request, req, history, limits)
 
     # Usage metering only: decide once, at acceptance and before any chat
     # resource is taken, which signed-in account (if any) this request
