@@ -653,12 +653,14 @@ def test_exhaustion_mid_extraction_stops_without_a_request(tavily):
     tavily.script = [results(article(1), article(2), article(3)), LONG]
 
     with budget_scope(budget(searches=2)):
-        with pytest.raises(CallBudgetExhausted):
-            app.run_web_search("latest AI news")
+        status, found = app.run_web_search("latest AI news")
 
+    # No request after exhaustion; the article fetched before it is kept.
     assert [post["url"] for post in tavily.posts] == [
         tavily_transport.SEARCH_URL, tavily_transport.EXTRACT_URL,
     ]
+    assert status == "partial"
+    assert [item["url"] for item in found] == [article(1)["url"]]
 
 
 def test_named_domain_retry_is_a_separate_admission(tavily):
@@ -959,7 +961,7 @@ def test_search_exhaustion_is_service_unavailable(tavily, monkeypatch):
     "outcome, expected",
     [
         (CallBudgetExhausted("search"), SERVICE_UNAVAILABLE),
-        (CallBudgetExhausted("model"), PROVIDER_UNAVAILABLE),
+        (CallBudgetExhausted("model"), (422, {"error": "processing_limit_reached"})),
         ("search_transport", SERVICE_UNAVAILABLE),
         (RequestCancelled(), (499, {"error": "request_cancelled"})),
         (RequestDeadlineExceeded(), (504, {"error": "request_timeout"})),

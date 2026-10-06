@@ -421,16 +421,17 @@ def test_search_and_each_extraction_are_admitted(bounded_tavily):
     assert all(0 < post["timeout"] <= 30 for name, post in calls if name == "extract")
 
 
-def test_search_stop_during_extraction_propagates(bounded_tavily):
+def test_search_exhaustion_during_extraction_keeps_fetched_results(bounded_tavily):
     calls, state = bounded_tavily
     state["search"] = [news_results(3)]
 
     with budget_scope(budget(searches=2)):
-        with pytest.raises(CallBudgetExhausted):
-            app.run_web_search("latest AI news")
+        status, results = app.run_web_search("latest AI news")
 
-    # One search and one extraction; the loop did not continue.
+    # One search and one extraction; the loop did not continue, and only the
+    # article fetched before exhaustion is kept.
     assert [name for name, _ in calls] == ["search", "extract"]
+    assert status == "partial" and len(results) == 1
 
 
 def test_domain_retry_search_is_admitted(bounded_tavily):
@@ -582,7 +583,8 @@ def test_worker_rechecks_budget_after_chat_returns(monkeypatch):
 @pytest.mark.parametrize(
     "outcome, status, code",
     [
-        (CallBudgetExhausted("model"), 503, "model_provider_unavailable"),
+        # Kalillac's own model-attempt limit, not a provider outage.
+        (CallBudgetExhausted("model"), 422, "processing_limit_reached"),
         (app.ModelProviderUnavailable(), 503, "model_provider_unavailable"),
         (RequestDeadlineExceeded(), 504, "request_timeout"),
         (RequestCancelled(), 499, "request_cancelled"),
@@ -1765,7 +1767,9 @@ def test_failed_lookup_releases_its_reservation_exactly_once(monkeypatch, synchr
 
     results = asyncio.run(scenario())
 
-    assert results == ["raised", (0, 0)] * 3
+    # The injected lookup failure crosses the /api/chat route boundary as the
+    # fixed 500 contract; each reservation is still released exactly once.
+    assert results == [(500, {"error": "internal_error"}), (0, 0)] * 3
     assert meter.calls == 3
     assert chat_calls == []
     assert meter.metered == []
@@ -2205,10 +2209,12 @@ def test_admitted_chat_reservation_is_released_exactly_once(monkeypatch, case):
         "cancel_worker": "cancelled",
         "deadline_worker": TIMEOUT,
         "detached_worker_fails": CANCELLED,
-        "session_ref_fails": "raised RuntimeError",
+        # Injected internal failures cross the /api/chat route boundary as the
+        # fixed 500 contract; ownership cleanup is still verified below.
+        "session_ref_fails": INTERNAL,
         "session_lock_acquire_fails": INTERNAL,
         "slot_acquire_fails": INTERNAL,
-        "worker_creation_fails": "raised RuntimeError",
+        "worker_creation_fails": INTERNAL,
     }
 
     if case in expected_a:
@@ -2581,6 +2587,7 @@ from kalillac_routing.bounded_transport import (
 SECRET_PROMPT = "PROMPT-TEXT-THAT-MUST-NOT-LEAK"
 SERVICE_UNAVAILABLE = (503, {"error": "service_unavailable"})
 PROVIDERS_UNAVAILABLE = (503, {"error": "model_provider_unavailable"})
+PROCESSING_LIMIT_REACHED = (422, {"error": "processing_limit_reached"})
 INTERNAL_ERROR = (500, {"error": "internal_error"})
 
 
@@ -2917,7 +2924,7 @@ def test_native_routing_cannot_fall_through_after_a_local_transport_failure(
     "raised, expected",
     [("ProviderTransportUnavailable", SERVICE_UNAVAILABLE),
      ("ModelProviderUnavailable", PROVIDERS_UNAVAILABLE),
-     ("CallBudgetExhausted", PROVIDERS_UNAVAILABLE)],
+     ("CallBudgetExhausted", PROCESSING_LIMIT_REACHED)],
 )
 def test_handler_keeps_local_transport_and_provider_exhaustion_distinct(
     monkeypatch, raised, expected,
