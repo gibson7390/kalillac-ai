@@ -37,7 +37,7 @@ from kalillac_routing.request_budget import (
     budget_scope,
     current_budget,
 )
-from kalillac_routing import provider_transport
+from kalillac_routing import provider_transport, tavily_transport
 from kalillac_routing.request_limits import RequestLimits, TransportLimits
 
 
@@ -59,6 +59,18 @@ BASE_LIMITS = {
     "transport": TRANSPORT_LIMITS,
     # The owner-selected deployment value (2 MiB).
     "openai_max_bytes": 2097152,
+    "tavily_transport": TransportLimits(
+        max_outstanding=3,
+        dns_threads=1,
+        max_pending_dns=3,
+        cancel_poll_interval_seconds=0.02,
+        backstop_grace_seconds=0.5,
+        cleanup_grace_seconds=1.0,
+        close_timeout_seconds=2.0,
+    ),
+    # The selected Tavily ceilings.
+    "tavily_search_max_bytes": 262144,
+    "tavily_extract_max_bytes": 524288,
 }
 ORIGINAL_POST_OPENAI_RESPONSES = app._post_openai_responses
 
@@ -349,6 +361,37 @@ def tavily(monkeypatch):
     return calls, state
 
 
+@pytest.fixture
+def bounded_tavily(monkeypatch):
+    """Budgeted Tavily requests go through Tavily's own bounded transport;
+    this scripted transport records each POST."""
+    posts = []
+    state = {"search": []}
+
+    class ScriptedTavilyTransport:
+        def __init__(self, **settings):
+            pass
+
+        def post_json(self, url, payload, *, headers, timeout, max_bytes, cancelled=None):
+            posts.append((url.rsplit("/", 1)[-1], {"payload": payload, "timeout": timeout}))
+
+            if url == tavily_transport.SEARCH_URL:
+                return state["search"].pop(0)
+
+            return {"results": [{"raw_content": "Article text. " * 30}]}
+
+        def close(self, timeout):
+            return None
+
+    monkeypatch.setattr(
+        tavily_transport, "_SLOT",
+        tavily_transport.TavilyTransportSlot(factory=ScriptedTavilyTransport),
+    )
+    monkeypatch.setattr(app, "TAVILY_API_KEY", "test-tavily-key")
+    monkeypatch.setattr(app, "_request_limits", RequestLimits(**BASE_LIMITS))
+    return posts, state
+
+
 def news_results(count):
     return {"results": [
         {
@@ -362,8 +405,8 @@ def news_results(count):
     ]}
 
 
-def test_search_and_each_extraction_are_admitted(tavily):
-    calls, state = tavily
+def test_search_and_each_extraction_are_admitted(bounded_tavily):
+    calls, state = bounded_tavily
     state["search"] = [news_results(3)]
     request_budget = budget(searches=6)
 
@@ -373,12 +416,13 @@ def test_search_and_each_extraction_are_admitted(tavily):
     assert status == "ok"
     assert [name for name, _ in calls] == ["search", "extract", "extract", "extract"]
     assert request_budget.search_attempts == 4
+    assert request_budget.model_attempts == 0
     assert 0 < calls[0][1]["timeout"] <= app.SEARCH_TIMEOUT_SECONDS
-    assert all(0 < kwargs["timeout"] <= 30 for name, kwargs in calls if name == "extract")
+    assert all(0 < post["timeout"] <= 30 for name, post in calls if name == "extract")
 
 
-def test_search_stop_during_extraction_propagates(tavily):
-    calls, state = tavily
+def test_search_stop_during_extraction_propagates(bounded_tavily):
+    calls, state = bounded_tavily
     state["search"] = [news_results(3)]
 
     with budget_scope(budget(searches=2)):
@@ -389,8 +433,8 @@ def test_search_stop_during_extraction_propagates(tavily):
     assert [name for name, _ in calls] == ["search", "extract"]
 
 
-def test_domain_retry_search_is_admitted(tavily):
-    calls, state = tavily
+def test_domain_retry_search_is_admitted(bounded_tavily):
+    calls, state = bounded_tavily
     off_host = {"results": [{
         "title": "Python docs page",
         "url": "https://docs.python.org/3/whatsnew/",

@@ -36,6 +36,24 @@ Bounded provider transport (the request-budgeted OpenAI path):
 - KALILLAC_OPENAI_MAX_BYTES: the largest OpenAI response body accepted, on
   the wire and decoded.
 
+Bounded Tavily transport (the request-budgeted search path). Tavily has its
+own transport and capacity, never OpenAI's; the same rules apply to each
+setting as to its OpenAI counterpart above:
+
+- KALILLAC_TAVILY_TRANSPORT_MAX_OUTSTANDING
+- KALILLAC_TAVILY_TRANSPORT_DNS_THREADS
+- KALILLAC_TAVILY_TRANSPORT_MAX_PENDING_DNS
+- KALILLAC_TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS
+- KALILLAC_TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS
+- KALILLAC_TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS
+- KALILLAC_TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS
+- KALILLAC_TAVILY_SEARCH_MAX_BYTES: the largest Tavily search response body
+  accepted, on the wire and decoded. The selected value is 262144 (the
+  largest measured search response was 8,667 bytes).
+- KALILLAC_TAVILY_EXTRACT_MAX_BYTES: the largest Tavily extraction response
+  body accepted, on the wire and decoded. The selected value is 524288 (the
+  largest measured extraction response was 1,081 bytes).
+
 These mirror BoundedTransport's own constructor rules: counts are positive
 integers, seconds positive finite numbers.
 
@@ -66,6 +84,17 @@ TRANSPORT_BACKSTOP_GRACE_SECONDS = "KALILLAC_TRANSPORT_BACKSTOP_GRACE_SECONDS"
 TRANSPORT_CLEANUP_GRACE_SECONDS = "KALILLAC_TRANSPORT_CLEANUP_GRACE_SECONDS"
 TRANSPORT_CLOSE_TIMEOUT_SECONDS = "KALILLAC_TRANSPORT_CLOSE_TIMEOUT_SECONDS"
 OPENAI_MAX_BYTES = "KALILLAC_OPENAI_MAX_BYTES"
+TAVILY_TRANSPORT_MAX_OUTSTANDING = "KALILLAC_TAVILY_TRANSPORT_MAX_OUTSTANDING"
+TAVILY_TRANSPORT_DNS_THREADS = "KALILLAC_TAVILY_TRANSPORT_DNS_THREADS"
+TAVILY_TRANSPORT_MAX_PENDING_DNS = "KALILLAC_TAVILY_TRANSPORT_MAX_PENDING_DNS"
+TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS = (
+    "KALILLAC_TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS"
+)
+TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS = "KALILLAC_TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS"
+TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS = "KALILLAC_TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS"
+TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS = "KALILLAC_TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS"
+TAVILY_SEARCH_MAX_BYTES = "KALILLAC_TAVILY_SEARCH_MAX_BYTES"
+TAVILY_EXTRACT_MAX_BYTES = "KALILLAC_TAVILY_EXTRACT_MAX_BYTES"
 
 _SECONDS_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 _COUNT_RE = re.compile(r"[0-9]+")
@@ -94,6 +123,9 @@ class RequestLimits:
     max_search_attempts: int
     transport: TransportLimits
     openai_max_bytes: int
+    tavily_transport: TransportLimits
+    tavily_search_max_bytes: int
+    tavily_extract_max_bytes: int
 
 
 def request_budget_enabled() -> bool:
@@ -178,6 +210,21 @@ def load_request_limits() -> RequestLimits | None:
         cleanup_grace_seconds=_positive_seconds(TRANSPORT_CLEANUP_GRACE_SECONDS),
         close_timeout_seconds=_positive_seconds(TRANSPORT_CLOSE_TIMEOUT_SECONDS),
     )
+    openai_max_bytes = _positive_count(OPENAI_MAX_BYTES)
+
+    tavily_transport = TransportLimits(
+        max_outstanding=_positive_count(TAVILY_TRANSPORT_MAX_OUTSTANDING),
+        dns_threads=_positive_count(TAVILY_TRANSPORT_DNS_THREADS),
+        max_pending_dns=_positive_count(TAVILY_TRANSPORT_MAX_PENDING_DNS),
+        cancel_poll_interval_seconds=_positive_seconds(
+            TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS
+        ),
+        backstop_grace_seconds=_positive_seconds(
+            TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS
+        ),
+        cleanup_grace_seconds=_positive_seconds(TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS),
+        close_timeout_seconds=_positive_seconds(TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS),
+    )
 
     return RequestLimits(
         deadline_seconds=deadline,
@@ -185,5 +232,8 @@ def load_request_limits() -> RequestLimits | None:
         max_model_attempts=max_model_attempts,
         max_search_attempts=max_search_attempts,
         transport=transport,
-        openai_max_bytes=_positive_count(OPENAI_MAX_BYTES),
+        openai_max_bytes=openai_max_bytes,
+        tavily_transport=tavily_transport,
+        tavily_search_max_bytes=_positive_count(TAVILY_SEARCH_MAX_BYTES),
+        tavily_extract_max_bytes=_positive_count(TAVILY_EXTRACT_MAX_BYTES),
     )
