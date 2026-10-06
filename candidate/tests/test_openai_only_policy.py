@@ -674,10 +674,12 @@ def test_api_failure_wording_is_accurate():
 
 # SHA-256 of each function's source as reviewed in the Tavily bounded-transport
 # slice (base cb0c2cc1). The SDK-path _admit_search_call was removed there:
-# budgeted Tavily requests now use _post_tavily_for_attempt. Any later change
-# to the search path must update these deliberately.
+# budgeted Tavily requests now use _post_tavily_for_attempt. run_web_search was
+# updated deliberately in the error-contract slice (base cc6a3b43) to keep
+# usable results when the search-attempt allowance runs out ("partial"). Any
+# later change to the search path must update these deliberately.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "986ff405906a8df8407ec64b6dd1c3a42a1c2b676518b022c742c9d1ba06a7d6",
+    "run_web_search": "82fbaeeb24c6db7d7eca63f72976ad935daa4d7ee9c6cc95dab8377c6b56428d",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
     "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
     "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",

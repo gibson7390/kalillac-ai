@@ -28,6 +28,7 @@ from kalillac_routing.source_policy import (
 )
 from kalillac_routing.tool_contract import OPENAI_TOOLS, ToolValidationError
 from kalillac_routing.request_budget import (
+    MODEL_ATTEMPT,
     SEARCH_ATTEMPT,
     CallBudgetExhausted,
     RequestBudget,
@@ -617,6 +618,51 @@ UNVALIDATED_CODE_NOTICE = (
 )
 
 
+LIMITED_SEARCH_NOTICE = (
+    "Live search was limited for this request. This answer uses only the "
+    "sources listed below."
+)
+
+
+def with_limited_search_notice(reply):
+    """The reply followed by the fixed limited-search notice as one
+    standalone paragraph, exactly once. Application-written: a paragraph
+    the model added that is exactly the notice is removed first. The same
+    sentence inside a larger paragraph, a quotation or a fenced code block
+    is answer content and is kept, as are the original paragraph breaks."""
+    # Paragraphs at even indexes, the blank-line separators between them at
+    # odd indexes.
+    parts = re.split(r"(\n[ \t]*\n(?:[ \t]*\n)*)", str(reply))
+    kept = []
+    in_fence = False
+    skip_separator = False
+
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            if not skip_separator:
+                kept.append(part)
+            skip_separator = False
+            continue
+
+        if not in_fence and part.strip() == LIMITED_SEARCH_NOTICE:
+            # Drop the copy together with the separator before it, or the
+            # one after it when it opens the reply.
+            if kept:
+                kept.pop()
+            else:
+                skip_separator = True
+            continue
+
+        kept.append(part)
+
+        for line in part.split("\n"):
+            if line.lstrip().startswith(("```", "~~~")):
+                in_fence = not in_fence
+
+    text = "".join(kept).rstrip()
+    return f"{text}\n\n{LIMITED_SEARCH_NOTICE}"
+
+
 def mark_incomplete_reply(reply, unvalidated_code=False):
     """Append the visible cut-off notice, closing an open code fence so
     the notice renders as text rather than inside the code block.
@@ -830,11 +876,18 @@ def run_web_search(query, include_domains=None):
     concise retrieval query and advanced depth because current authoritative
     evidence matters more than broad result recall in that case.
 
-    status: "ok" | "unavailable".
+    status: "ok" | "partial" | "unavailable".
+    "partial": usable results were obtained, then the request's
+    search-attempt allowance ran out before a later extraction or retry
+    could be admitted; the results are exactly those obtained so far.
     Provider errors are never exposed to the user.
     """
     if not TAVILY_API_KEY:
         return "unavailable", []
+
+    # The search-attempt exhaustion that ended later work after usable
+    # results were obtained; None while coverage is complete.
+    coverage_exhausted = None
 
     try:
         from urllib.parse import urlparse
@@ -1242,6 +1295,7 @@ def run_web_search(query, include_domains=None):
         )
 
         def clean_results(search_response):
+            nonlocal coverage_exhausted
             cleaned = []
 
             limit = (
@@ -1330,6 +1384,15 @@ def run_web_search(query, include_domains=None):
                                     "extract",
                                     extract_args,
                                 )
+                        except CallBudgetExhausted as exhausted:
+                            # Not admitted, so nothing was sent. Articles
+                            # already fetched stay usable; with none there
+                            # is nothing to keep and the request stops.
+                            if exhausted.kind != SEARCH_ATTEMPT or not cleaned:
+                                raise
+
+                            coverage_exhausted = exhausted
+                            break
                         except _SEARCH_PATH_STOPS:
                             raise
                         except Exception as exc:
@@ -1455,24 +1518,39 @@ def run_web_search(query, include_domains=None):
                         retry_domains.append(retry)
 
                 if retry_domains != requested_domains:
-                    retry_response = perform_search(
-                        raw_query,
-                        retry_domains,
-                        "basic",
-                    )
+                    try:
+                        retry_response = perform_search(
+                            raw_query,
+                            retry_domains,
+                            "basic",
+                        )
+                    except CallBudgetExhausted as exhausted:
+                        # The retry was not admitted, so nothing was sent;
+                        # the first-pass results are kept as they are.
+                        if exhausted.kind != SEARCH_ATTEMPT:
+                            raise
 
-                    retry_results = clean_results(
-                        retry_response
-                    )
+                        coverage_exhausted = exhausted
+                    else:
+                        retry_results = clean_results(
+                            retry_response
+                        )
 
-                    if retry_results:
-                        results = retry_results
+                        if retry_results:
+                            results = retry_results
 
         if not results:
+            if coverage_exhausted is not None:
+                # Exhaustion never turns into "no results found".
+                raise coverage_exhausted
+
             return "unavailable", []
 
         # Keep downstream prompt size bounded.
-        return "ok", results[:MAX_SEARCH_RESULTS]
+        return (
+            "partial" if coverage_exhausted is not None else "ok",
+            results[:MAX_SEARCH_RESULTS],
+        )
 
     except _SEARCH_PATH_STOPS:
         # A request-level stop, a local search transport outage or an
@@ -9007,6 +9085,10 @@ WEB SEARCH:
   not claim that any current information was verified, and do not cite or
   invent sources. You may add clearly qualified general knowledge when it is
   useful.
+- When a successful search_web result has coverage "limited", use only the
+  returned results for claims requiring current verification, do not imply
+  that the search was exhaustive, and cite only the returned sources. Do not
+  add a separate coverage notice; Kalillac appends the fixed notice.
 
 KALILLAC RUNTIME:
 - For questions about Kalillac's current architecture, router, routing behavior, request flow, native tools, or provider behavior, request get_kalillac_runtime_facts before answering. Do not reconstruct Kalillac's architecture from generic AI patterns.
@@ -9210,6 +9292,7 @@ def _run_v31_native_tool_chat(
 
     search_results = []
     search_calls = 0
+    search_coverage_limited = False
 
     current_date = (
         datetime.now().date().isoformat()
@@ -9258,7 +9341,7 @@ def _run_v31_native_tool_chat(
             raise ChatInternalError() from None
 
     def run_tool(call):
-        nonlocal search_calls
+        nonlocal search_calls, search_coverage_limited
 
         if (
             call.name
@@ -9318,7 +9401,7 @@ def _run_v31_native_tool_chat(
             include_domains=domains,
         )
 
-        if status != "ok":
+        if status not in {"ok", "partial"}:
             return {
                 "status": "unavailable",
                 "results": [],
@@ -9326,8 +9409,12 @@ def _run_v31_native_tool_chat(
 
         search_results[:] = results
 
+        if status == "partial":
+            search_coverage_limited = True
+
         return {
             "status": "ok",
+            "coverage": "limited" if status == "partial" else "complete",
             "search_date": current_date,
             "query": query,
             "results": [
@@ -9397,6 +9484,9 @@ def _run_v31_native_tool_chat(
 
         if not search_results:
             return reply
+
+        if search_coverage_limited:
+            reply = with_limited_search_notice(reply)
 
         sources = "\n".join(
             f"- [{item['title']}]({item['url']})"
@@ -9692,7 +9782,7 @@ def chat(message, history, request=None, session_id=None):
                 include_domains=search_domains,
             )
 
-            if status != "ok":
+            if status not in {"ok", "partial"}:
                 log("SEARCH: unavailable")
                 log("===== END ROUTE LOG =====\n")
 
@@ -9835,6 +9925,9 @@ Rules:
 
             if is_incomplete_model_response(response):
                 reply = mark_incomplete_reply(reply)
+
+            if status == "partial":
+                reply = with_limited_search_notice(reply)
 
             sources = "\n".join(
                 f"- [{item['title']}]({item['url']})" for item in results
@@ -12173,12 +12266,15 @@ async def _api_chat_with_budget(request, req, history, limits):
                 # provider failure.
                 return _budget_error(503, "service_unavailable")
             except CallBudgetExhausted as exhausted:
-                # Kalillac's own search-attempt limit is not a model-provider
-                # failure.
+                # Kalillac's own attempt limits are not model-provider
+                # failures.
                 if exhausted.kind == SEARCH_ATTEMPT:
                     return _budget_error(503, "service_unavailable")
 
-                return _budget_error(503, "model_provider_unavailable")
+                if exhausted.kind == MODEL_ATTEMPT:
+                    return _budget_error(422, "processing_limit_reached")
+
+                return _budget_error(500, "internal_error")
             except ModelProviderUnavailable:
                 return _budget_error(503, "model_provider_unavailable")
             except Exception:
@@ -12240,6 +12336,24 @@ async def _api_chat_with_budget(request, req, history, limits):
 
 @api.post("/api/chat")
 async def api_chat(request: _FastAPIRequest):
+    """POST /api/chat. Every response it returns -- success or error, with
+    or without a request budget -- is marked Cache-Control: no-store.
+
+    The final boundary for an unexpected defect: an ordinary exception that
+    escapes the normal mapping becomes the fixed 500 internal_error, logged
+    by class name only. asyncio.CancelledError is a BaseException, so it is
+    not caught here and the task's cancellation propagates unchanged."""
+    try:
+        response = await _api_chat_response(request)
+    except Exception as defect:
+        print(f"ERROR: CHAT_ROUTE_UNEXPECTED {type(defect).__name__}")
+        response = JSONResponse(status_code=500, content={"error": "internal_error"})
+
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+async def _api_chat_response(request):
     """One request -> one response (no streaming). Validates at the boundary,
     mints/resolves an opaque session id, and runs the preserved core.
     Never leaks tracebacks, keys, env, the system prompt, or session contents."""
