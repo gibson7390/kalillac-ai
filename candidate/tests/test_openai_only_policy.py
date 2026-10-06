@@ -28,7 +28,7 @@ if str(CANDIDATE_DIR) not in sys.path:
 
 
 import app_fastapi_candidate as app
-from kalillac_routing import provider_transport
+from kalillac_routing import provider_transport, tavily_transport
 from kalillac_routing.bounded_transport import (
     InvalidJSONResponse,
     TransportConnectionError,
@@ -68,6 +68,17 @@ LIMITS = RequestLimits(
         close_timeout_seconds=3.0,
     ),
     openai_max_bytes=2097152,
+    tavily_transport=TransportLimits(
+        max_outstanding=3,
+        dns_threads=1,
+        max_pending_dns=3,
+        cancel_poll_interval_seconds=0.02,
+        backstop_grace_seconds=0.5,
+        cleanup_grace_seconds=1.0,
+        close_timeout_seconds=2.0,
+    ),
+    tavily_search_max_bytes=262144,
+    tavily_extract_max_bytes=524288,
 )
 SERVICE_UNAVAILABLE = {"error": "service_unavailable"}
 PROVIDER_UNAVAILABLE = {"error": "model_provider_unavailable"}
@@ -658,22 +669,45 @@ def test_api_failure_wording_is_accurate():
     assert "chat then returns a friendly" not in facts
 
 
-# --- 15. Tavily is unchanged ------------------------------------------------------------------------
+# --- 15. the Tavily path is exactly the reviewed version -------------------------------------------
 
 
-# SHA-256 of each function's source on origin/main 4f56ded0 (before this slice).
+# SHA-256 of each function's source as reviewed in the Tavily bounded-transport
+# slice (base cb0c2cc1). The SDK-path _admit_search_call was removed there:
+# budgeted Tavily requests now use _post_tavily_for_attempt. Any later change
+# to the search path must update these deliberately.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "5511214d2768d2ceb26d89e4d588ea370577e2b09781fce6098eef4f4c1edf9e",
-    "_admit_search_call": "1fcc8b4d3f0b1a65ed46ba60e64c7bc060816d128beacd4615829543f98ef0e5",
+    "run_web_search": "986ff405906a8df8407ec64b6dd1c3a42a1c2b676518b022c742c9d1ba06a7d6",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
+    "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
+    "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",
 }
+TAVILY_TRANSPORT_MODULE_SOURCE = "3e448019cf1fd14992ead2ffb3aaba64fb0faff82005108e3749f2f1812e6676"
 
 
 @pytest.mark.parametrize("name", list(TAVILY_PATH_SOURCE))
-def test_tavily_path_source_is_unchanged(name):
+def test_tavily_path_source_is_the_reviewed_version(name):
     source = inspect.getsource(getattr(app, name))
 
     assert hashlib.sha256(source.encode()).hexdigest() == TAVILY_PATH_SOURCE[name]
+
+
+def test_tavily_transport_module_is_the_reviewed_version():
+    source = inspect.getsource(tavily_transport)
+
+    assert hashlib.sha256(source.encode()).hexdigest() == TAVILY_TRANSPORT_MODULE_SOURCE
+
+
+def test_removed_search_helper_and_providers_stay_absent_from_the_tavily_path():
+    assert not hasattr(app, "_admit_search_call")
+    sources = [inspect.getsource(getattr(app, name)) for name in TAVILY_PATH_SOURCE]
+    sources.append(inspect.getsource(tavily_transport))
+
+    for source in sources:
+        lowered = source.lower()
+
+        for removed in ("groq", "cloudflare", "workers ai", "admit_model_attempt"):
+            assert removed not in lowered
 
 
 # --- 16. the tests themselves cannot reach a provider ----------------------------------------------

@@ -25,6 +25,15 @@ from kalillac_routing.request_limits import (
     MAX_SEARCH_ATTEMPTS,
     OPENAI_MAX_BYTES,
     QUEUE_WAIT_SECONDS,
+    TAVILY_EXTRACT_MAX_BYTES,
+    TAVILY_SEARCH_MAX_BYTES,
+    TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS,
+    TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
+    TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS,
+    TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS,
+    TAVILY_TRANSPORT_DNS_THREADS,
+    TAVILY_TRANSPORT_MAX_OUTSTANDING,
+    TAVILY_TRANSPORT_MAX_PENDING_DNS,
     TRANSPORT_BACKSTOP_GRACE_SECONDS,
     TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
     TRANSPORT_CLEANUP_GRACE_SECONDS,
@@ -53,6 +62,17 @@ VALID = {
     TRANSPORT_CLEANUP_GRACE_SECONDS: "1.5",
     TRANSPORT_CLOSE_TIMEOUT_SECONDS: "5",
     OPENAI_MAX_BYTES: "2097152",
+    # Test values, distinct from OpenAI's so a mix-up cannot pass.
+    TAVILY_TRANSPORT_MAX_OUTSTANDING: "3",
+    TAVILY_TRANSPORT_DNS_THREADS: "1",
+    TAVILY_TRANSPORT_MAX_PENDING_DNS: "6",
+    TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS: "0.04",
+    TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS: "1",
+    TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS: "0.75",
+    TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS: "4",
+    # The selected ceilings.
+    TAVILY_SEARCH_MAX_BYTES: "262144",
+    TAVILY_EXTRACT_MAX_BYTES: "524288",
 }
 SECONDS = [
     DEADLINE_SECONDS,
@@ -61,6 +81,10 @@ SECONDS = [
     TRANSPORT_BACKSTOP_GRACE_SECONDS,
     TRANSPORT_CLEANUP_GRACE_SECONDS,
     TRANSPORT_CLOSE_TIMEOUT_SECONDS,
+    TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
+    TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS,
+    TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS,
+    TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS,
 ]
 COUNTS = [
     MAX_MODEL_ATTEMPTS,
@@ -69,6 +93,11 @@ COUNTS = [
     TRANSPORT_DNS_THREADS,
     TRANSPORT_MAX_PENDING_DNS,
     OPENAI_MAX_BYTES,
+    TAVILY_TRANSPORT_MAX_OUTSTANDING,
+    TAVILY_TRANSPORT_DNS_THREADS,
+    TAVILY_TRANSPORT_MAX_PENDING_DNS,
+    TAVILY_SEARCH_MAX_BYTES,
+    TAVILY_EXTRACT_MAX_BYTES,
 ]
 
 
@@ -107,6 +136,9 @@ def test_disabled_flag_ignores_every_other_setting(monkeypatch, flag):
         TRANSPORT_MAX_OUTSTANDING: "garbage-987",
         TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS: "-1",
         OPENAI_MAX_BYTES: "0",
+        TAVILY_TRANSPORT_MAX_OUTSTANDING: "garbage-987",
+        TAVILY_SEARCH_MAX_BYTES: "0",
+        TAVILY_EXTRACT_MAX_BYTES: "-1",
     })
 
     assert load_request_limits() is None
@@ -144,7 +176,28 @@ def test_valid_settings(monkeypatch):
             close_timeout_seconds=5.0,
         ),
         openai_max_bytes=2097152,
+        tavily_transport=TransportLimits(
+            max_outstanding=3,
+            dns_threads=1,
+            max_pending_dns=6,
+            cancel_poll_interval_seconds=0.04,
+            backstop_grace_seconds=1.0,
+            cleanup_grace_seconds=0.75,
+            close_timeout_seconds=4.0,
+        ),
+        tavily_search_max_bytes=262144,
+        tavily_extract_max_bytes=524288,
     )
+
+
+def test_tavily_settings_never_reuse_openai_values(monkeypatch):
+    _set(monkeypatch, VALID)
+    limits = load_request_limits()
+
+    assert limits.tavily_transport != limits.transport
+    assert limits.tavily_search_max_bytes != limits.openai_max_bytes
+    assert limits.tavily_extract_max_bytes != limits.openai_max_bytes
+    assert limits.tavily_search_max_bytes != limits.tavily_extract_max_bytes
 
 
 @pytest.mark.parametrize("cls", [RequestLimits, TransportLimits])
@@ -178,6 +231,34 @@ def test_every_transport_setting_is_named_and_distinct():
         "KALILLAC_TRANSPORT_CLOSE_TIMEOUT_SECONDS",
         "KALILLAC_OPENAI_MAX_BYTES",
     ]
+    assert set(names) <= set(SECONDS + COUNTS)
+
+
+def test_every_tavily_setting_is_named_and_distinct():
+    names = [
+        TAVILY_TRANSPORT_MAX_OUTSTANDING,
+        TAVILY_TRANSPORT_DNS_THREADS,
+        TAVILY_TRANSPORT_MAX_PENDING_DNS,
+        TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
+        TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS,
+        TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS,
+        TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS,
+        TAVILY_SEARCH_MAX_BYTES,
+        TAVILY_EXTRACT_MAX_BYTES,
+    ]
+
+    assert names == [
+        "KALILLAC_TAVILY_TRANSPORT_MAX_OUTSTANDING",
+        "KALILLAC_TAVILY_TRANSPORT_DNS_THREADS",
+        "KALILLAC_TAVILY_TRANSPORT_MAX_PENDING_DNS",
+        "KALILLAC_TAVILY_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS",
+        "KALILLAC_TAVILY_TRANSPORT_BACKSTOP_GRACE_SECONDS",
+        "KALILLAC_TAVILY_TRANSPORT_CLEANUP_GRACE_SECONDS",
+        "KALILLAC_TAVILY_TRANSPORT_CLOSE_TIMEOUT_SECONDS",
+        "KALILLAC_TAVILY_SEARCH_MAX_BYTES",
+        "KALILLAC_TAVILY_EXTRACT_MAX_BYTES",
+    ]
+    assert len(set(SECONDS + COUNTS)) == len(SECONDS + COUNTS)
     assert set(names) <= set(SECONDS + COUNTS)
 
 
@@ -243,6 +324,22 @@ def test_invalid_enabled_settings_refuse_startup_naming_the_setting():
 
     assert result.returncode != 0
     assert f"{MAX_MODEL_ATTEMPTS} must be a positive integer." in result.stderr
+    assert "abc-987" not in result.stderr
+
+
+@pytest.mark.parametrize("name", [TAVILY_SEARCH_MAX_BYTES, TAVILY_TRANSPORT_MAX_OUTSTANDING])
+def test_missing_enabled_tavily_setting_refuses_startup_naming_it(name):
+    result = _import_app({k: v for k, v in VALID.items() if k != name})
+
+    assert result.returncode != 0
+    assert f"{ENABLED_FLAG} is enabled but {name} is not set." in result.stderr
+
+
+def test_invalid_enabled_tavily_setting_refuses_startup_without_echo():
+    result = _import_app({**VALID, TAVILY_EXTRACT_MAX_BYTES: "abc-987"})
+
+    assert result.returncode != 0
+    assert f"{TAVILY_EXTRACT_MAX_BYTES} must be a positive integer." in result.stderr
     assert "abc-987" not in result.stderr
 
 

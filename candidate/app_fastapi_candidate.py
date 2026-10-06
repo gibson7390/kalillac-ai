@@ -28,6 +28,7 @@ from kalillac_routing.source_policy import (
 )
 from kalillac_routing.tool_contract import OPENAI_TOOLS, ToolValidationError
 from kalillac_routing.request_budget import (
+    SEARCH_ATTEMPT,
     CallBudgetExhausted,
     RequestBudget,
     RequestBudgetError,
@@ -42,6 +43,7 @@ from kalillac_routing.provider_transport import (
     TransportUnavailable,
     post_json_within_budget,
 )
+from kalillac_routing import tavily_transport
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -157,18 +159,6 @@ OPENAI_CALL_TIMEOUT_SECONDS = 90          # _post_openai_responses default
 TAVILY_EXTRACT_TIMEOUT_SECONDS = 30
 
 
-def _admit_search_call(timeout_cap):
-    """Admit one search-provider network operation (search, retry search,
-    or extraction); returns its timeout, or None when no budget applies."""
-    budget = current_budget()
-
-    if budget is None:
-        return None
-
-    budget.admit_search_attempt()
-    return budget.call_timeout(timeout_cap)
-
-
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 # The process's bounded transport for request-budgeted OpenAI requests.
@@ -276,6 +266,15 @@ class OpenAIConfigurationUnavailable(LocalModelServiceUnavailable):
     pass
 
 
+class SearchTransportUnavailable(LocalModelServiceUnavailable):
+    """Kalillac's own bounded search transport cannot serve the request
+    (capacity, quarantine, shutdown, startup, or unconfirmed cleanup). A
+    local outage: never "no search results", never a model-provider
+    failure. Shares the local-outage base so every path propagates it and
+    the API answers 503 service_unavailable."""
+    pass
+
+
 class ChatInternalError(RuntimeError):
     """The chat pipeline failed internally.
 
@@ -295,6 +294,87 @@ _OPENAI_PATH_STOPS = (
     ModelProviderUnavailable,
     ChatInternalError,
 )
+
+# Never turned into "search unavailable" or a skipped extraction: request
+# stops (including search-attempt exhaustion), a local search transport
+# outage, and internal defects end the request.
+_SEARCH_PATH_STOPS = (
+    RequestBudgetError,
+    SearchTransportUnavailable,
+    ChatInternalError,
+)
+
+
+def _post_tavily_for_attempt(budget, operation, arguments):
+    """One admitted Tavily request ("search" or "extract") under a request
+    budget, through Tavily's own bounded transport.
+
+    Exactly one search-attempt admission (never a model attempt), then one
+    observation of the remaining time selects the HTTP timeout and whether
+    the request deadline chose it; the payload is built from that same
+    value. Local transport unavailability becomes SearchTransportUnavailable
+    and an argument or configuration defect ChatInternalError. Cancellation
+    and deadline stops propagate; remote failures (HTTP status, connection,
+    invalid or oversized body, a cap-selected timeout) propagate as their
+    own errors for the caller's existing unavailable handling. Logs carry
+    fixed labels and class names only.
+    """
+    budget.admit_search_attempt()
+
+    if operation == "search":
+        cap = SEARCH_TIMEOUT_SECONDS
+    else:
+        cap = TAVILY_EXTRACT_TIMEOUT_SECONDS
+
+    timeout, request_selected = budget.select_call_timeout(cap)
+    limits = _request_limits
+    was_quarantined = tavily_transport.quarantined()
+
+    try:
+        if limits is None:
+            raise ValueError("request limits are not configured.")
+
+        if operation == "search":
+            url = tavily_transport.SEARCH_URL
+            payload = tavily_transport.search_payload(arguments)
+            max_bytes = limits.tavily_search_max_bytes
+        elif operation == "extract":
+            url = tavily_transport.EXTRACT_URL
+            payload = tavily_transport.extract_payload(arguments, timeout)
+            max_bytes = limits.tavily_extract_max_bytes
+        else:
+            raise ValueError("unsupported search operation.")
+
+        return tavily_transport.post_json(
+            url,
+            payload,
+            api_key=TAVILY_API_KEY,
+            settings=limits.tavily_transport,
+            budget=budget,
+            timeout=timeout,
+            request_deadline_selected=request_selected,
+            max_bytes=max_bytes,
+        )
+    except TransportUnavailable as unavailable:
+        print(f"WARN: SEARCH_TRANSPORT_UNAVAILABLE {unavailable.reason}")
+        raise SearchTransportUnavailable() from None
+    except (TypeError, ValueError) as defect:
+        print(f"ERROR: SEARCH_TRANSPORT_DEFECT {type(defect).__name__}")
+        raise ChatInternalError() from None
+    finally:
+        if not was_quarantined and tavily_transport.quarantined():
+            print("WARN: SEARCH_TRANSPORT_QUARANTINED cleanup_unconfirmed")
+
+
+def _close_tavily_transport():
+    """Shutdown hook: close Tavily's bounded transport only if one exists,
+    bounded by its configured close timeout. Never creates one; safe to
+    repeat."""
+    report = tavily_transport.close_transport()
+
+    if report is not None:
+        clean = bool(getattr(report, "clean", False))
+        print(f"INFO: SEARCH_TRANSPORT_CLOSED clean={clean}")
 
 
 def _status_text(error):
@@ -1091,8 +1171,15 @@ def run_web_search(query, include_domains=None):
 
             search_domains = primary_domains
 
-        client = TavilyClient(
-            api_key=TAVILY_API_KEY
+        # Under a request budget every Tavily request goes through Kalillac's
+        # own bounded transport; the SDK client is used only without one.
+        budget = current_budget()
+        client = (
+            TavilyClient(
+                api_key=TAVILY_API_KEY
+            )
+            if budget is None
+            else None
         )
 
         def perform_search(
@@ -1131,14 +1218,16 @@ def run_web_search(query, include_domains=None):
             if domains:
                 search_args["include_domains"] = domains[:5]
 
+            if budget is None:
+                return client.search(**search_args)
+
             # Each search (including the domain retry) is one admitted
             # search-provider operation when a request budget applies.
-            timeout = _admit_search_call(SEARCH_TIMEOUT_SECONDS)
-
-            if timeout is not None:
-                search_args["timeout"] = timeout
-
-            return client.search(**search_args)
+            return _post_tavily_for_attempt(
+                budget,
+                "search",
+                search_args,
+            )
 
         depth = (
             "advanced"
@@ -1221,25 +1310,27 @@ def run_web_search(query, include_domains=None):
                         # as the relevance query. This gives the model article
                         # evidence rather than an arbitrary search-page chunk.
                         try:
-                            # Extraction is a separate search-provider
-                            # operation and counts against the budget too.
-                            extract_timeout = _admit_search_call(
-                                TAVILY_EXTRACT_TIMEOUT_SECONDS
-                            )
-                            extract_options = (
-                                {}
-                                if extract_timeout is None
-                                else {"timeout": extract_timeout}
-                            )
-                            extracted_response = client.extract(
-                                urls=url,
-                                query=title,
-                                chunks_per_source=1,
-                                extract_depth="basic",
-                                format="markdown",
-                                **extract_options,
-                            )
-                        except RequestBudgetError:
+                            extract_args = {
+                                "urls": url,
+                                "query": title,
+                                "chunks_per_source": 1,
+                                "extract_depth": "basic",
+                                "format": "markdown",
+                            }
+
+                            if budget is None:
+                                extracted_response = client.extract(
+                                    **extract_args
+                                )
+                            else:
+                                # Extraction is a separate search-provider
+                                # operation and counts against the budget too.
+                                extracted_response = _post_tavily_for_attempt(
+                                    budget,
+                                    "extract",
+                                    extract_args,
+                                )
+                        except _SEARCH_PATH_STOPS:
                             raise
                         except Exception as exc:
                             log(
@@ -1383,9 +1474,10 @@ def run_web_search(query, include_domains=None):
         # Keep downstream prompt size bounded.
         return "ok", results[:MAX_SEARCH_RESULTS]
 
-    except RequestBudgetError:
-        # A request-level stop is not "search unavailable": that would let
-        # the caller answer, or the native-tool loop call the model again.
+    except _SEARCH_PATH_STOPS:
+        # A request-level stop, a local search transport outage or an
+        # internal defect is not "search unavailable": that would let the
+        # caller answer, or the native-tool loop call the model again.
         raise
 
     except Exception as e:
@@ -8910,6 +9002,11 @@ WEB SEARCH:
 - After a successful search, ground current/external factual claims in the
   returned search evidence. If the evidence is insufficient, say so rather
   than inventing an answer.
+- If search_web returns status "unavailable" or "limited", say plainly that
+  live web search could not be used, or was limited, for this request. Do
+  not claim that any current information was verified, and do not cite or
+  invent sources. You may add clearly qualified general knowledge when it is
+  useful.
 
 KALILLAC RUNTIME:
 - For questions about Kalillac's current architecture, router, routing behavior, request flow, native tools, or provider behavior, request get_kalillac_runtime_facts before answering. Do not reconstruct Kalillac's architecture from generic AI patterns.
@@ -11566,6 +11663,8 @@ api = FastAPI(title="Kalillac AI API", docs_url=None, redoc_url=None, openapi_ur
 # exists). add_event_handler runs with the default lifespan and, unlike
 # on_event, is not deprecated.
 api.add_event_handler("shutdown", _close_openai_transport)
+# Tavily's bounded transport is separate and closes separately.
+api.add_event_handler("shutdown", _close_tavily_transport)
 
 
 # Optional account endpoints (/api/account/*). Off unless explicitly enabled;
@@ -12073,7 +12172,14 @@ async def _api_chat_with_budget(request, req, history, limits):
                 # a local outage (transport or configuration) is not a
                 # provider failure.
                 return _budget_error(503, "service_unavailable")
-            except (CallBudgetExhausted, ModelProviderUnavailable):
+            except CallBudgetExhausted as exhausted:
+                # Kalillac's own search-attempt limit is not a model-provider
+                # failure.
+                if exhausted.kind == SEARCH_ATTEMPT:
+                    return _budget_error(503, "service_unavailable")
+
+                return _budget_error(503, "model_provider_unavailable")
+            except ModelProviderUnavailable:
                 return _budget_error(503, "model_provider_unavailable")
             except Exception:
                 return _budget_error(500, "internal_error")
