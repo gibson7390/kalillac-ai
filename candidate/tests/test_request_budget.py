@@ -404,3 +404,100 @@ def test_budget_holds_only_deadline_flag_and_counters():
         "_cancelled",
         "_lock",
     }
+
+
+# --- timeout selection with provenance (bounded provider transport) -----------------
+
+
+class CountingClock(FakeClock):
+    """A fake clock that counts how often it is read."""
+
+    def __init__(self, start=1000.0):
+        super().__init__(start)
+        self.reads = 0
+
+    def __call__(self):
+        self.reads += 1
+        return self.now
+
+
+def test_select_call_timeout_observes_remaining_time_exactly_once():
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    before = clock.reads
+
+    budget.select_call_timeout(90.0)
+
+    assert clock.reads - before == 1
+
+
+def test_select_call_timeout_cap_selected():
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    clock.advance(5.0)                      # 25 s remain
+
+    assert budget.select_call_timeout(10.0) == (10.0, False)
+
+
+def test_select_call_timeout_request_selected():
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    clock.advance(25.0)                     # 5 s remain
+
+    assert budget.select_call_timeout(10.0) == (5.0, True)
+
+
+def test_select_call_timeout_exact_tie_is_request_selected():
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    clock.advance(20.0)                     # exactly 10 s remain
+
+    assert budget.select_call_timeout(10.0) == (10.0, True)
+
+
+def test_select_call_timeout_cancelled_raises_without_selecting():
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    budget.cancel()
+
+    with pytest.raises(RequestCancelled):
+        budget.select_call_timeout(10.0)
+
+
+@pytest.mark.parametrize("elapsed", [30.0, 31.0])
+def test_select_call_timeout_expired_raises(elapsed):
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    clock.advance(elapsed)
+
+    with pytest.raises(RequestDeadlineExceeded):
+        budget.select_call_timeout(10.0)
+
+
+@pytest.mark.parametrize(
+    "cap, error",
+    [(0, ValueError), (-1.0, ValueError), (math.inf, ValueError),
+     (math.nan, ValueError), (True, TypeError), ("10", TypeError), (None, TypeError)],
+)
+def test_select_call_timeout_validates_the_cap_before_reading_the_clock(cap, error):
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    before = clock.reads
+
+    with pytest.raises(error):
+        budget.select_call_timeout(cap)
+
+    assert clock.reads == before
+
+
+@pytest.mark.parametrize("elapsed, cap", [(5.0, 10.0), (25.0, 10.0), (20.0, 10.0)])
+def test_call_timeout_matches_select_call_timeout_with_one_read(elapsed, cap):
+    clock = CountingClock()
+    budget = _budget(clock, duration=30.0)
+    clock.advance(elapsed)
+    before = clock.reads
+
+    timeout = budget.call_timeout(cap)
+
+    assert clock.reads - before == 1
+    assert timeout == budget.select_call_timeout(cap)[0]

@@ -37,6 +37,11 @@ from kalillac_routing.request_budget import (
     current_budget,
 )
 from kalillac_routing.request_limits import load_request_limits
+from kalillac_routing.provider_transport import (
+    TransportHolder,
+    TransportUnavailable,
+    post_json_within_budget,
+)
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -251,19 +256,95 @@ def _groq_client_for_attempt(shared_client, model):
     return client
 
 
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+
+# The process's bounded transport for request-budgeted OpenAI requests.
+# Created on the first budgeted request only; never with the flag off.
+_OPENAI_TRANSPORT = TransportHolder()
+
+
 def _post_openai_for_attempt(payload):
     """One admitted OpenAI Responses request (primary, continuation, or
-    native-tool round). Without a budget the call is unchanged."""
-    timeout = _admit_model_call(OPENAI_CALL_TIMEOUT_SECONDS)
+    native-tool round). Without a budget the call is unchanged (urllib).
 
-    if timeout is None:
+    With a budget: exactly one model-attempt admission, then one bounded
+    transport request whose timeout and provenance come from a single
+    observation of the remaining request time."""
+    budget = current_budget()
+
+    if budget is None:
         return _post_openai_responses(payload)
 
-    return _post_openai_responses(payload, timeout=timeout)
+    budget.admit_model_attempt()
+    timeout, request_selected = budget.select_call_timeout(
+        OPENAI_CALL_TIMEOUT_SECONDS
+    )
+    return _post_openai_bounded(payload, budget, timeout, request_selected)
+
+
+def _post_openai_bounded(payload, budget, timeout, request_selected):
+    """The budgeted OpenAI request through the bounded transport.
+
+    Local transport unavailability becomes ProviderTransportUnavailable and
+    a transport programming/configuration defect becomes ChatInternalError;
+    neither may reach another provider. Cancellation and deadline stops
+    propagate; remote failures propagate as their transport error so the
+    existing fallback applies. Logs carry fixed labels and class names only.
+    """
+    limits = _request_limits
+    was_quarantined = _OPENAI_TRANSPORT.quarantined
+
+    try:
+        if limits is None:
+            raise ValueError("request limits are not configured.")
+
+        return post_json_within_budget(
+            _OPENAI_TRANSPORT,
+            limits.transport,
+            OPENAI_RESPONSES_URL,
+            payload,
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            budget=budget,
+            timeout=timeout,
+            request_deadline_selected=request_selected,
+            max_bytes=limits.openai_max_bytes,
+        )
+    except TransportUnavailable as unavailable:
+        print(f"WARN: OPENAI_TRANSPORT_UNAVAILABLE {unavailable.reason}")
+        raise ProviderTransportUnavailable() from None
+    except (TypeError, ValueError) as defect:
+        print(f"ERROR: OPENAI_TRANSPORT_DEFECT {type(defect).__name__}")
+        raise ChatInternalError() from None
+    finally:
+        if not was_quarantined and _OPENAI_TRANSPORT.quarantined:
+            print("WARN: PROVIDER_TRANSPORT_QUARANTINED cleanup_unconfirmed")
+
+
+def _close_openai_transport():
+    """Shutdown hook: close the bounded transport only if one exists,
+    bounded by its configured close timeout. Never creates one; safe to
+    repeat."""
+    report = _OPENAI_TRANSPORT.close()
+
+    if report is not None:
+        clean = bool(getattr(report, "clean", False))
+        print(f"INFO: PROVIDER_TRANSPORT_CLOSED clean={clean}")
 
 
 class ModelProviderUnavailable(RuntimeError):
     """The configured model provider could not complete this request."""
+    pass
+
+
+class ProviderTransportUnavailable(ModelProviderUnavailable):
+    """The local bounded transport cannot serve the request (capacity,
+    quarantine, shutdown, or unconfirmed cleanup). Not provider exhaustion:
+    no other provider is tried, and the API answers 503
+    service_unavailable. Subclasses ModelProviderUnavailable so chat()
+    propagates it; the API handler must catch it before the broader class."""
     pass
 
 
@@ -276,6 +357,15 @@ class ChatInternalError(RuntimeError):
     serializes either, so the client receives only the fixed
     internal_error body."""
     pass
+
+
+# Never caught as a provider failure on the OpenAI path: request stops, a
+# local transport outage, and internal defects all end the request here.
+_OPENAI_PATH_STOPS = (
+    RequestBudgetError,
+    ProviderTransportUnavailable,
+    ChatInternalError,
+)
 
 
 # OpenAI-compatible Chat Completions providers (Groq, Cloudflare Workers AI)
@@ -441,9 +531,10 @@ def _invoke_openai(messages, max_tokens=None):
             continuation = _post_openai_for_attempt(
                 continuation_payload
             )
-        except RequestBudgetError:
-            # A request-level stop is not a failed continuation: never
-            # return the partial answer as if the request could go on.
+        except _OPENAI_PATH_STOPS:
+            # A request-level stop, local transport outage or internal
+            # defect is not a failed continuation: never return the partial
+            # answer as if the request could go on.
             raise
         except Exception as continuation_error:
             print(
@@ -475,7 +566,7 @@ def _invoke_openai(messages, max_tokens=None):
 def _post_openai_responses(payload, timeout=90):
     """POST one Responses API request and return the decoded JSON body."""
     request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
+        OPENAI_RESPONSES_URL,
         data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -830,9 +921,10 @@ def invoke_llm(messages, max_tokens=None):
             f"{OPENAI_MODEL} -> {GROQ_MODEL}"
         )
 
-    except RequestBudgetError:
-        # Cancellation, deadline or attempt exhaustion stops the request;
-        # it is never a reason to try the next provider.
+    except _OPENAI_PATH_STOPS:
+        # Cancellation, deadline or attempt exhaustion, a local transport
+        # outage, or an internal defect stops the request; none is a reason
+        # to try the next provider.
         raise
 
     except Exception as openai_error:
@@ -9728,8 +9820,9 @@ def chat(message, history, request=None, session_id=None):
                     state,
                 )
 
-            except RequestBudgetError:
-                # Never fall through to the legacy pipeline after a stop.
+            except _OPENAI_PATH_STOPS:
+                # Never fall through to the legacy pipeline after a stop, a
+                # local transport outage or an internal defect.
                 raise
 
             except Exception as native_error:
@@ -11800,6 +11893,11 @@ def _reserve_chat():
 
 api = FastAPI(title="Kalillac AI API", docs_url=None, redoc_url=None, openapi_url=None)
 
+# Bounded shutdown of the budgeted OpenAI transport (closes only one that
+# exists). add_event_handler runs with the default lifespan and, unlike
+# on_event, is not deprecated.
+api.add_event_handler("shutdown", _close_openai_transport)
+
 
 # Optional account endpoints (/api/account/*). Off unless explicitly enabled;
 # when off, nothing account-related is imported. Accounts are identity only:
@@ -12301,6 +12399,10 @@ async def _api_chat_with_budget(request, req, history, limits):
                 return _cancelled_response()
             except RequestDeadlineExceeded:
                 return _budget_error(504, "request_timeout")
+            except ProviderTransportUnavailable:
+                # Must precede the broader ModelProviderUnavailable handler:
+                # a local transport outage is not provider exhaustion.
+                return _budget_error(503, "service_unavailable")
             except (CallBudgetExhausted, ModelProviderUnavailable):
                 return _budget_error(503, "model_provider_unavailable")
             except Exception:

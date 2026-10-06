@@ -23,9 +23,18 @@ from kalillac_routing.request_limits import (
     ENABLED_FLAG,
     MAX_MODEL_ATTEMPTS,
     MAX_SEARCH_ATTEMPTS,
+    OPENAI_MAX_BYTES,
     QUEUE_WAIT_SECONDS,
+    TRANSPORT_BACKSTOP_GRACE_SECONDS,
+    TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
+    TRANSPORT_CLEANUP_GRACE_SECONDS,
+    TRANSPORT_CLOSE_TIMEOUT_SECONDS,
+    TRANSPORT_DNS_THREADS,
+    TRANSPORT_MAX_OUTSTANDING,
+    TRANSPORT_MAX_PENDING_DNS,
     RequestLimitConfigError,
     RequestLimits,
+    TransportLimits,
     load_request_limits,
 )
 
@@ -36,9 +45,31 @@ VALID = {
     QUEUE_WAIT_SECONDS: "2.5",
     MAX_MODEL_ATTEMPTS: "6",
     MAX_SEARCH_ATTEMPTS: "4",
+    TRANSPORT_MAX_OUTSTANDING: "8",
+    TRANSPORT_DNS_THREADS: "2",
+    TRANSPORT_MAX_PENDING_DNS: "16",
+    TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS: "0.05",
+    TRANSPORT_BACKSTOP_GRACE_SECONDS: "2",
+    TRANSPORT_CLEANUP_GRACE_SECONDS: "1.5",
+    TRANSPORT_CLOSE_TIMEOUT_SECONDS: "5",
+    OPENAI_MAX_BYTES: "2097152",
 }
-SECONDS = [DEADLINE_SECONDS, QUEUE_WAIT_SECONDS]
-COUNTS = [MAX_MODEL_ATTEMPTS, MAX_SEARCH_ATTEMPTS]
+SECONDS = [
+    DEADLINE_SECONDS,
+    QUEUE_WAIT_SECONDS,
+    TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
+    TRANSPORT_BACKSTOP_GRACE_SECONDS,
+    TRANSPORT_CLEANUP_GRACE_SECONDS,
+    TRANSPORT_CLOSE_TIMEOUT_SECONDS,
+]
+COUNTS = [
+    MAX_MODEL_ATTEMPTS,
+    MAX_SEARCH_ATTEMPTS,
+    TRANSPORT_MAX_OUTSTANDING,
+    TRANSPORT_DNS_THREADS,
+    TRANSPORT_MAX_PENDING_DNS,
+    OPENAI_MAX_BYTES,
+]
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +104,9 @@ def test_disabled_flag_ignores_every_other_setting(monkeypatch, flag):
         DEADLINE_SECONDS: "garbage-987",
         QUEUE_WAIT_SECONDS: "-1",
         MAX_MODEL_ATTEMPTS: "0",
+        TRANSPORT_MAX_OUTSTANDING: "garbage-987",
+        TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS: "-1",
+        OPENAI_MAX_BYTES: "0",
     })
 
     assert load_request_limits() is None
@@ -100,15 +134,51 @@ def test_valid_settings(monkeypatch):
         queue_wait_seconds=2.5,
         max_model_attempts=6,
         max_search_attempts=4,
+        transport=TransportLimits(
+            max_outstanding=8,
+            dns_threads=2,
+            max_pending_dns=16,
+            cancel_poll_interval_seconds=0.05,
+            backstop_grace_seconds=2.0,
+            cleanup_grace_seconds=1.5,
+            close_timeout_seconds=5.0,
+        ),
+        openai_max_bytes=2097152,
     )
 
 
-def test_no_builtin_values():
+@pytest.mark.parametrize("cls", [RequestLimits, TransportLimits])
+def test_no_builtin_values(cls):
     assert all(
         field.default is dataclasses.MISSING
         and field.default_factory is dataclasses.MISSING
-        for field in dataclasses.fields(RequestLimits)
+        for field in dataclasses.fields(cls)
     )
+
+
+def test_every_transport_setting_is_named_and_distinct():
+    names = [
+        TRANSPORT_MAX_OUTSTANDING,
+        TRANSPORT_DNS_THREADS,
+        TRANSPORT_MAX_PENDING_DNS,
+        TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS,
+        TRANSPORT_BACKSTOP_GRACE_SECONDS,
+        TRANSPORT_CLEANUP_GRACE_SECONDS,
+        TRANSPORT_CLOSE_TIMEOUT_SECONDS,
+        OPENAI_MAX_BYTES,
+    ]
+
+    assert names == [
+        "KALILLAC_TRANSPORT_MAX_OUTSTANDING",
+        "KALILLAC_TRANSPORT_DNS_THREADS",
+        "KALILLAC_TRANSPORT_MAX_PENDING_DNS",
+        "KALILLAC_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS",
+        "KALILLAC_TRANSPORT_BACKSTOP_GRACE_SECONDS",
+        "KALILLAC_TRANSPORT_CLEANUP_GRACE_SECONDS",
+        "KALILLAC_TRANSPORT_CLOSE_TIMEOUT_SECONDS",
+        "KALILLAC_OPENAI_MAX_BYTES",
+    ]
+    assert set(names) <= set(SECONDS + COUNTS)
 
 
 @pytest.mark.parametrize("name", SECONDS + COUNTS)
