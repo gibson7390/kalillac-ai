@@ -202,14 +202,31 @@ class RequestBudget:
 
         self._check_open()
 
+    def select_call_timeout(self, per_call_timeout: float) -> tuple[float, bool]:
+        """(timeout, request_deadline_selected) for the next call.
+
+        The remaining time is observed exactly once. timeout is that
+        remaining time capped by per_call_timeout; request_deadline_selected
+        is True when the request deadline, not the cap, set it (a tie counts
+        as the request deadline). Raises instead of returning zero or a
+        negative value.
+        """
+
+        cap = _positive_seconds(per_call_timeout, "per_call_timeout")
+        remaining = self._check_open()
+
+        if remaining <= cap:
+            return remaining, True
+
+        return cap, False
+
     def call_timeout(self, per_call_timeout: float) -> float:
         """Seconds the next call may use: remaining time, capped by
         per_call_timeout. Always positive; raises instead of returning
         zero or a negative value.
         """
 
-        cap = _positive_seconds(per_call_timeout, "per_call_timeout")
-        return min(self._check_open(), cap)
+        return self.select_call_timeout(per_call_timeout)[0]
 
 
 _CURRENT_BUDGET: ContextVar[RequestBudget | None] = ContextVar(

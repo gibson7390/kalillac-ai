@@ -19,6 +19,26 @@ so no limit exists that the operator did not choose:
   AND every article extraction, because each is a separate network
   operation.
 
+Bounded provider transport (the request-budgeted OpenAI path):
+
+- KALILLAC_TRANSPORT_MAX_OUTSTANDING: admitted, unfinished transport
+  requests at once (per process).
+- KALILLAC_TRANSPORT_DNS_THREADS: threads for DNS lookups.
+- KALILLAC_TRANSPORT_MAX_PENDING_DNS: queued plus running DNS lookups.
+- KALILLAC_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS: how often a waiting call
+  checks for request cancellation.
+- KALILLAC_TRANSPORT_BACKSTOP_GRACE_SECONDS: how long past a call's own
+  deadline the caller waits before cancelling it from outside.
+- KALILLAC_TRANSPORT_CLEANUP_GRACE_SECONDS: how long a cancelled call may
+  take to confirm its cleanup.
+- KALILLAC_TRANSPORT_CLOSE_TIMEOUT_SECONDS: the most shutdown waits for the
+  transport to close.
+- KALILLAC_OPENAI_MAX_BYTES: the largest OpenAI response body accepted, on
+  the wire and decoded.
+
+These mirror BoundedTransport's own constructor rules: counts are positive
+integers, seconds positive finite numbers.
+
 Validation errors name the setting, never its value. Seconds accept plain
 decimal numbers only ("90", "12.5"); counts accept ASCII digits only.
 """
@@ -38,6 +58,14 @@ DEADLINE_SECONDS = "KALILLAC_REQUEST_DEADLINE_SECONDS"
 QUEUE_WAIT_SECONDS = "KALILLAC_REQUEST_QUEUE_WAIT_SECONDS"
 MAX_MODEL_ATTEMPTS = "KALILLAC_REQUEST_MAX_MODEL_ATTEMPTS"
 MAX_SEARCH_ATTEMPTS = "KALILLAC_REQUEST_MAX_SEARCH_ATTEMPTS"
+TRANSPORT_MAX_OUTSTANDING = "KALILLAC_TRANSPORT_MAX_OUTSTANDING"
+TRANSPORT_DNS_THREADS = "KALILLAC_TRANSPORT_DNS_THREADS"
+TRANSPORT_MAX_PENDING_DNS = "KALILLAC_TRANSPORT_MAX_PENDING_DNS"
+TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS = "KALILLAC_TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS"
+TRANSPORT_BACKSTOP_GRACE_SECONDS = "KALILLAC_TRANSPORT_BACKSTOP_GRACE_SECONDS"
+TRANSPORT_CLEANUP_GRACE_SECONDS = "KALILLAC_TRANSPORT_CLEANUP_GRACE_SECONDS"
+TRANSPORT_CLOSE_TIMEOUT_SECONDS = "KALILLAC_TRANSPORT_CLOSE_TIMEOUT_SECONDS"
+OPENAI_MAX_BYTES = "KALILLAC_OPENAI_MAX_BYTES"
 
 _SECONDS_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 _COUNT_RE = re.compile(r"[0-9]+")
@@ -48,11 +76,24 @@ class RequestLimitConfigError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class TransportLimits:
+    max_outstanding: int
+    dns_threads: int
+    max_pending_dns: int
+    cancel_poll_interval_seconds: float
+    backstop_grace_seconds: float
+    cleanup_grace_seconds: float
+    close_timeout_seconds: float
+
+
+@dataclass(frozen=True)
 class RequestLimits:
     deadline_seconds: float
     queue_wait_seconds: float
     max_model_attempts: int
     max_search_attempts: int
+    transport: TransportLimits
+    openai_max_bytes: int
 
 
 def request_budget_enabled() -> bool:
@@ -123,9 +164,26 @@ def load_request_limits() -> RequestLimits | None:
             f"{QUEUE_WAIT_SECONDS} must be less than {DEADLINE_SECONDS}."
         )
 
+    max_model_attempts = _positive_count(MAX_MODEL_ATTEMPTS)
+    max_search_attempts = _positive_count(MAX_SEARCH_ATTEMPTS)
+
+    transport = TransportLimits(
+        max_outstanding=_positive_count(TRANSPORT_MAX_OUTSTANDING),
+        dns_threads=_positive_count(TRANSPORT_DNS_THREADS),
+        max_pending_dns=_positive_count(TRANSPORT_MAX_PENDING_DNS),
+        cancel_poll_interval_seconds=_positive_seconds(
+            TRANSPORT_CANCEL_POLL_INTERVAL_SECONDS
+        ),
+        backstop_grace_seconds=_positive_seconds(TRANSPORT_BACKSTOP_GRACE_SECONDS),
+        cleanup_grace_seconds=_positive_seconds(TRANSPORT_CLEANUP_GRACE_SECONDS),
+        close_timeout_seconds=_positive_seconds(TRANSPORT_CLOSE_TIMEOUT_SECONDS),
+    )
+
     return RequestLimits(
         deadline_seconds=deadline,
         queue_wait_seconds=queue_wait,
-        max_model_attempts=_positive_count(MAX_MODEL_ATTEMPTS),
-        max_search_attempts=_positive_count(MAX_SEARCH_ATTEMPTS),
+        max_model_attempts=max_model_attempts,
+        max_search_attempts=max_search_attempts,
+        transport=transport,
+        openai_max_bytes=_positive_count(OPENAI_MAX_BYTES),
     )

@@ -40,16 +40,39 @@ from kalillac_routing.request_budget import (
     budget_scope,
     current_budget,
 )
-from kalillac_routing.request_limits import RequestLimits
+from kalillac_routing import provider_transport
+from kalillac_routing.request_limits import RequestLimits, TransportLimits
 
 
 MESSAGES = [SystemMessage(content="system"), HumanMessage(content="hello")]
+TRANSPORT_LIMITS = TransportLimits(
+    max_outstanding=4,
+    dns_threads=1,
+    max_pending_dns=4,
+    cancel_poll_interval_seconds=0.02,
+    backstop_grace_seconds=0.5,
+    cleanup_grace_seconds=1.0,
+    close_timeout_seconds=3.0,
+)
 BASE_LIMITS = {
     "deadline_seconds": 5.0,
     "queue_wait_seconds": 2.0,
     "max_model_attempts": 6,
     "max_search_attempts": 6,
+    "transport": TRANSPORT_LIMITS,
+    # The owner-selected deployment value (2 MiB).
+    "openai_max_bytes": 2097152,
 }
+ORIGINAL_POST_OPENAI_RESPONSES = app._post_openai_responses
+
+
+class UnexpectedTransport(BaseException):
+    """A test reached the real bounded transport without installing a
+    fake. BaseException, so no broad provider handler can hide it."""
+
+
+def _refuse_transport(**kwargs):
+    raise UnexpectedTransport()
 JOIN = 10.0
 
 
@@ -67,6 +90,11 @@ def isolated(monkeypatch):
     monkeypatch.setattr(app, "_lookups_outstanding", 0, raising=False)
     monkeypatch.setattr(app, "_lookup_tasks", set(), raising=False)
     monkeypatch.setattr(app, "_chats_admitted", 0, raising=False)
+    monkeypatch.setattr(
+        app, "_OPENAI_TRANSPORT",
+        provider_transport.TransportHolder(factory=_refuse_transport),
+        raising=False,
+    )
     monkeypatch.setattr(app, "OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", False)
 
@@ -165,6 +193,31 @@ def providers(monkeypatch):
         app.GROQ_MODEL: FakeGroq("no_retry_120b", calls, lambda: state["groq_120b"]),
         app.FALLBACK_GROQ_MODEL: FakeGroq("no_retry_20b", calls, lambda: state["groq_20b"]),
     }
+
+    # Budgeted OpenAI requests go through the bounded transport seam; the
+    # scripted transport replays the same OpenAI script and call log.
+    transport_posts = []
+
+    class ScriptedTransport:
+        def __init__(self, **settings):
+            self.settings = settings
+            self.closes = []
+            state["transport"] = self
+
+        def post_json(self, url, payload, *, headers, timeout, max_bytes, cancelled=None):
+            transport_posts.append({
+                "url": url, "payload": payload, "headers": headers,
+                "timeout": timeout, "max_bytes": max_bytes, "cancelled": cancelled,
+            })
+            return fake_post(payload, timeout=timeout)
+
+        def close(self, timeout):
+            self.closes.append(timeout)
+
+    state["transport_posts"] = transport_posts
+    state["holder"] = provider_transport.TransportHolder(factory=ScriptedTransport)
+    monkeypatch.setattr(app, "_OPENAI_TRANSPORT", state["holder"], raising=False)
+    monkeypatch.setattr(app, "_request_limits", RequestLimits(**BASE_LIMITS))
 
     monkeypatch.setattr(app, "_post_openai_responses", fake_post)
     monkeypatch.setattr(app, "CLOUDFLARE_AI_TOKEN", "test-cloudflare-token")
@@ -2595,3 +2648,418 @@ def test_acquisition_error_is_not_reported_as_busy_or_timeout(monkeypatch, case,
     assert observed["fresh"][0] == 200
     assert observed["after_fresh"] == (0, 0, 0, 0, app.MAX_CONCURRENT_CHATS)
     assert reported == []
+
+
+# --- bounded provider transport: OpenAI Responses (slice 1) --------------------------------
+
+
+from kalillac_routing.bounded_transport import (
+    InvalidJSONResponse,
+    ResponseTooLarge,
+    TransportCancelled,
+    TransportCleanupUnconfirmed,
+    TransportClosed,
+    TransportConnectionError,
+    TransportDeadlineExceeded,
+    TransportError,
+    TransportHTTPError,
+    TransportOverloaded,
+    TransportQuarantined,
+    UnsupportedContentEncoding,
+)
+
+SECRET_PROMPT = "PROMPT-TEXT-THAT-MUST-NOT-LEAK"
+SERVICE_UNAVAILABLE = (503, {"error": "service_unavailable"})
+PROVIDERS_UNAVAILABLE = (503, {"error": "model_provider_unavailable"})
+INTERNAL_ERROR = (500, {"error": "internal_error"})
+
+
+class _CapturedResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_flag_off_openai_keeps_urllib_and_never_creates_a_transport(monkeypatch):
+    captured = []
+
+    def fake_urlopen(request, timeout=None):
+        captured.append((request, timeout))
+        return _CapturedResponse(json.dumps(openai_reply("plain")).encode())
+
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake_urlopen)
+    payload = {"model": app.OPENAI_MODEL, "input": [{"role": "user", "content": "hi"}]}
+
+    data = app._post_openai_for_attempt(payload)
+
+    assert data == openai_reply("plain")
+    request, timeout = captured[0]
+    assert request.full_url == app.OPENAI_RESPONSES_URL == "https://api.openai.com/v1/responses"
+    assert request.data == json.dumps(payload).encode()
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == "Bearer test-openai-key"
+    assert request.get_header("Content-type") == "application/json"
+    assert timeout == 90
+    assert app._OPENAI_TRANSPORT.existing() is None
+
+
+@pytest.mark.parametrize("path", ["primary", "continuation", "native_tool_rounds"])
+def test_every_budgeted_openai_request_uses_the_bounded_transport(providers, monkeypatch, path):
+    calls, state = providers
+    urllib_calls = []
+    monkeypatch.setattr(
+        app.urllib.request, "urlopen", lambda *a, **k: urllib_calls.append(1),
+    )
+    request_budget = budget(models=6)
+
+    with budget_scope(request_budget):
+        if path == "primary":
+            state["openai"] = [openai_reply("answer")]
+            app.invoke_llm(MESSAGES)
+            expected = 1
+        elif path == "continuation":
+            state["openai"] = [openai_reply("Partial", cut_off=True), openai_reply(" rest")]
+            app.invoke_llm(MESSAGES)
+            expected = 2
+        else:
+            state["openai"] = [
+                {"output": [{
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_kalillac_runtime_facts",
+                    "arguments": '{"topic": "models"}',
+                }]},
+                openai_reply("final answer"),
+            ]
+            app._run_v31_native_tool_chat("what model are you", [], {"memory": [], "search_times": []})
+            expected = 2
+
+    # One outbound request, one admission, one transport post: no more.
+    assert urllib_calls == []
+    assert names(calls) == ["openai"] * expected
+    assert len(state["transport_posts"]) == expected
+    assert request_budget.model_attempts == expected
+
+
+def test_budgeted_payload_headers_and_limits_match_the_urllib_request(providers, monkeypatch):
+    calls, state = providers
+    captured = []
+
+    def fake_urlopen(request, timeout=None):
+        captured.append(request)
+        return _CapturedResponse(json.dumps(openai_reply("plain")).encode())
+
+    monkeypatch.setattr(app.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(app, "_post_openai_responses", ORIGINAL_POST_OPENAI_RESPONSES)
+    payload = {"model": app.OPENAI_MODEL, "input": [{"role": "user", "content": "hé \"q\""}]}
+
+    app._post_openai_for_attempt(payload)                     # flag off: urllib
+
+    state["openai"] = [openai_reply("bounded")]
+
+    with budget_scope(budget()):
+        app._post_openai_for_attempt(payload)                 # budgeted: transport
+
+    request = captured[0]
+    post = state["transport_posts"][0]
+    assert post["url"] == request.full_url
+    assert json.dumps(post["payload"], allow_nan=False).encode() == request.data
+    assert {k.lower(): v for k, v in post["headers"].items()} == {
+        k.lower(): v for k, v in request.header_items()
+    }
+    assert post["max_bytes"] == 2097152
+    assert state["transport"].settings == {
+        "max_outstanding": TRANSPORT_LIMITS.max_outstanding,
+        "dns_threads": TRANSPORT_LIMITS.dns_threads,
+        "max_pending_dns": TRANSPORT_LIMITS.max_pending_dns,
+        "cancel_poll_interval": TRANSPORT_LIMITS.cancel_poll_interval_seconds,
+        "backstop_grace": TRANSPORT_LIMITS.backstop_grace_seconds,
+        "cleanup_grace": TRANSPORT_LIMITS.cleanup_grace_seconds,
+    }
+
+
+def test_budgeted_timeout_and_provenance_come_from_one_selection(providers, monkeypatch):
+    calls, state = providers
+    state["openai"] = [openai_reply("answer")]
+    selections = []
+    request_budget = budget(seconds=5.0)
+    real_select = request_budget.select_call_timeout
+
+    def spy(cap):
+        result = real_select(cap)
+        selections.append((cap, result))
+        return result
+
+    monkeypatch.setattr(request_budget, "select_call_timeout", spy)
+    monkeypatch.setattr(request_budget, "call_timeout", lambda cap: pytest.fail("second read"))
+
+    with budget_scope(request_budget):
+        app._post_openai_for_attempt({"model": "m"})
+
+    (cap, (timeout, selected)), = selections
+    assert cap == app.OPENAI_CALL_TIMEOUT_SECONDS
+    assert selected is True                      # 5 s remain, cap 90
+    assert state["transport_posts"][0]["timeout"] == timeout
+
+
+def _chat_through_invoke_llm(message, history, request=None, session_id=None):
+    return app.invoke_llm(
+        [SystemMessage(content="system"), HumanMessage(content=SECRET_PROMPT)]
+    ).content
+
+
+def _handler_run(monkeypatch, *, cap=None):
+    """One budgeted /api/chat request whose chat runs the real provider chain."""
+    enable(monkeypatch)
+    monkeypatch.setattr(app, "chat", _chat_through_invoke_llm)
+
+    if cap is not None:
+        monkeypatch.setattr(app, "OPENAI_CALL_TIMEOUT_SECONDS", cap)
+
+    async def scenario():
+        exchange = Exchange({"message": SECRET_PROMPT, "history": []})
+        result = await asyncio.wait_for(exchange.run(), 5.0)
+        start = next(m for m in exchange.messages if m["type"] == "http.response.start")
+        return result, dict(start["headers"])
+
+    return asyncio.run(scenario())
+
+
+LOCAL_FAILURES = {
+    "overloaded": lambda: TransportOverloaded(),
+    "quarantined": lambda: TransportQuarantined(),
+    "closed": lambda: TransportClosed(),
+    "base_transport_error": lambda: TransportError(),
+    "cancelled_by_transport": lambda: TransportCancelled(),
+    "cleanup_connection": lambda: TransportCleanupUnconfirmed("connection"),
+    "cleanup_cancelled_without_request_stop": lambda: TransportCleanupUnconfirmed("cancelled"),
+}
+
+
+@pytest.mark.parametrize("failure", list(LOCAL_FAILURES))
+def test_local_transport_failure_is_service_unavailable_without_fallback(
+    providers, monkeypatch, capsys, failure,
+):
+    calls, state = providers
+    state["openai"] = [LOCAL_FAILURES[failure]()]
+    state["groq_120b"] = AIMessage(content="must never be used")
+
+    (status, body), headers = _handler_run(monkeypatch)
+
+    assert (status, body) == SERVICE_UNAVAILABLE
+    assert headers[b"cache-control"] == b"no-store"
+    # No Groq, no Cloudflare, no second OpenAI request.
+    assert names(calls) == ["openai"]
+    assert len(state["transport_posts"]) == 1
+    assert state["holder"].quarantined is failure.startswith("cleanup")
+    out = capsys.readouterr()
+    for secret in (SECRET_PROMPT, "test-openai-key", "Bearer", app.OPENAI_RESPONSES_URL):
+        assert secret not in out.out + out.err
+        assert secret not in json.dumps(body)
+
+
+def test_cap_selected_unconfirmed_cleanup_is_service_unavailable_and_quarantines(
+    providers, monkeypatch,
+):
+    calls, state = providers
+    state["openai"] = [TransportCleanupUnconfirmed("deadline")]
+    state["groq_120b"] = AIMessage(content="must never be used")
+
+    # A 1 s per-call cap is shorter than the 5 s request: cap-selected.
+    (status, body), headers = _handler_run(monkeypatch, cap=1.0)
+
+    assert (status, body) == SERVICE_UNAVAILABLE
+    assert names(calls) == ["openai"]
+    assert state["holder"].quarantined is True
+
+
+def test_clean_cap_selected_timeout_keeps_the_existing_fallback(providers):
+    calls, state = providers
+    state["openai"] = [TransportDeadlineExceeded()]
+    state["groq_120b"] = AIMessage(content="from groq")
+    app_cap = 1.0
+
+    with budget_scope(budget(seconds=5.0)):
+        original = app.OPENAI_CALL_TIMEOUT_SECONDS
+        app.OPENAI_CALL_TIMEOUT_SECONDS = app_cap
+
+        try:
+            response = app.invoke_llm(MESSAGES)
+        finally:
+            app.OPENAI_CALL_TIMEOUT_SECONDS = original
+
+    assert response.content == "from groq"
+    assert names(calls) == ["openai", "no_retry_120b"]
+    assert state["holder"].quarantined is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TransportConnectionError(), TransportHTTPError(500), InvalidJSONResponse(),
+     UnsupportedContentEncoding(), ResponseTooLarge()],
+    ids=lambda e: type(e).__name__,
+)
+def test_remote_openai_failures_keep_the_existing_fallback(providers, error):
+    calls, state = providers
+    state["openai"] = [error]
+    state["groq_120b"] = AIMessage(content="from groq")
+
+    with budget_scope(budget()):
+        response = app.invoke_llm(MESSAGES)
+
+    assert response.content == "from groq"
+    assert names(calls) == ["openai", "no_retry_120b"]
+    assert state["holder"].quarantined is False
+
+
+@pytest.mark.parametrize(
+    "case, expected",
+    [("cancelled", (499, {"error": "request_cancelled"})),
+     ("request_deadline", (504, {"error": "request_timeout"}))],
+)
+def test_request_stop_beats_unconfirmed_cleanup_and_still_quarantines(
+    providers, monkeypatch, case, expected,
+):
+    calls, state = providers
+
+    def stop_then_unconfirmed():
+        if case == "cancelled":
+            current_budget().cancel()
+            return TransportCleanupUnconfirmed("cancelled")
+
+        # 5 s request, 90 s cap: the request deadline selected the timeout.
+        return TransportCleanupUnconfirmed("deadline")
+
+    state["openai"] = [stop_then_unconfirmed, openai_reply("never sent")]
+
+    (status, body), headers = _handler_run(monkeypatch)
+
+    assert (status, body) == expected
+    assert headers[b"cache-control"] == b"no-store"
+    assert names(calls) == ["openai"]
+    assert state["holder"].quarantined is True
+
+    # The quarantine persists: the next request is a local 503 with no post.
+    (status, body), _ = _handler_run(monkeypatch)
+
+    assert (status, body) == SERVICE_UNAVAILABLE
+    assert len(state["transport_posts"]) == 1
+
+
+@pytest.mark.parametrize("defect", ["type_error", "value_error", "incompatible_settings"])
+def test_transport_defects_are_internal_errors_without_fallback(
+    providers, monkeypatch, capsys, defect,
+):
+    calls, state = providers
+    state["groq_120b"] = AIMessage(content="must never be used")
+
+    if defect == "type_error":
+        state["openai"] = [TypeError(SECRET_PROMPT)]
+    elif defect == "value_error":
+        state["openai"] = [ValueError(SECRET_PROMPT)]
+    else:
+        other = TransportLimits(**{**TRANSPORT_LIMITS.__dict__, "max_outstanding": 99})
+        state["holder"].get_or_create(other)
+
+    (status, body), headers = _handler_run(monkeypatch)
+
+    assert (status, body) == INTERNAL_ERROR
+    assert headers[b"cache-control"] == b"no-store"
+    assert names(calls) == ([] if defect == "incompatible_settings" else ["openai"])
+    out = capsys.readouterr()
+    assert SECRET_PROMPT not in out.out + out.err
+
+
+@pytest.mark.parametrize(
+    "error, raised",
+    [(TransportOverloaded(), "ProviderTransportUnavailable"), (ValueError("x"), "ChatInternalError")],
+)
+def test_continuation_cannot_swallow_a_local_transport_failure(providers, error, raised):
+    calls, state = providers
+    state["openai"] = [openai_reply("Partial", cut_off=True), error]
+    state["groq_120b"] = AIMessage(content="must never be used")
+
+    with budget_scope(budget()):
+        with pytest.raises(getattr(app, raised)):
+            app.invoke_llm(MESSAGES)
+
+    assert names(calls) == ["openai", "openai"]
+
+
+@pytest.mark.parametrize(
+    "error, raised",
+    [(TransportOverloaded(), "ProviderTransportUnavailable"), (ValueError("x"), "ChatInternalError")],
+)
+def test_native_routing_cannot_fall_through_after_a_local_transport_failure(
+    providers, monkeypatch, error, raised,
+):
+    calls, state = providers
+    legacy = []
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
+    monkeypatch.setattr(app, "classify_request", lambda message, history: "general")
+    monkeypatch.setattr(app, "requires_web_verification", lambda message, history: False)
+    monkeypatch.setattr(app, "invoke_llm", lambda *a, **k: legacy.append(1))
+    state["openai"] = [error]
+
+    with budget_scope(budget()):
+        with pytest.raises(getattr(app, raised)):
+            app.chat("hello there", [], session_id="bounded-native-local")
+
+    assert legacy == []
+    assert names(calls) == ["openai"]
+
+
+@pytest.mark.parametrize(
+    "raised, expected",
+    [("ProviderTransportUnavailable", SERVICE_UNAVAILABLE),
+     ("ModelProviderUnavailable", PROVIDERS_UNAVAILABLE),
+     ("CallBudgetExhausted", PROVIDERS_UNAVAILABLE)],
+)
+def test_handler_keeps_local_transport_and_provider_exhaustion_distinct(
+    monkeypatch, raised, expected,
+):
+    """Fails if the local-transport handler is moved after, or merged into,
+    the broader ModelProviderUnavailable handler."""
+    enable(monkeypatch)
+
+    def failing_chat(message, history, request=None, session_id=None):
+        if raised == "CallBudgetExhausted":
+            raise CallBudgetExhausted("model")
+        raise getattr(app, raised)()
+
+    monkeypatch.setattr(app, "chat", failing_chat)
+
+    async def scenario():
+        exchange = Exchange({"message": "hi", "history": []})
+        result = await asyncio.wait_for(exchange.run(), 5.0)
+        start = next(m for m in exchange.messages if m["type"] == "http.response.start")
+        return result, dict(start["headers"])
+
+    result, headers = asyncio.run(scenario())
+
+    assert issubclass(app.ProviderTransportUnavailable, app.ModelProviderUnavailable)
+    assert result == expected
+    assert headers[b"cache-control"] == b"no-store"
+
+
+def test_shutdown_never_constructs_a_transport(monkeypatch):
+    with TestClient(app.api):
+        pass
+
+    assert app._OPENAI_TRANSPORT.existing() is None
+    assert app._OPENAI_TRANSPORT.closed is True
+
+
+def test_shutdown_boundedly_closes_an_existing_transport_once_per_call(providers):
+    calls, state = providers
+    transport = state["holder"].get_or_create(TRANSPORT_LIMITS)
+
+    with TestClient(app.api):
+        pass
+
+    app._close_openai_transport()                  # repeated shutdown is safe
+
+    assert transport.closes == [TRANSPORT_LIMITS.close_timeout_seconds] * 2
+    assert state["holder"].closed is True
