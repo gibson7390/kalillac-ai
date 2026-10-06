@@ -13,16 +13,15 @@ Every provider here is fake; no network access occurs.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import io
-import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
 os.environ.setdefault("GROQ_API_KEY", "test-not-real")
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
 
 import app_fastapi_candidate as app
@@ -212,92 +211,49 @@ def test_successful_chat_is_still_metered(client, db):
     assert row.successful_chats == 1
 
 
-# --- fallback provider truncation ---------------------------------------------------------
+# --- OpenAI-only provider policy: truncation and failure ----------------------------------
 
 
-class _FakeGroq:
-    def __init__(self, response=None, error=None):
-        self.response = response
-        self.error = error
-        self.calls = 0
-
-    def invoke(self, messages, **kwargs):
-        self.calls += 1
-
-        if self.error is not None:
-            raise self.error
-
-        return self.response
-
-
-def _groq_reply(text, finish_reason):
-    return AIMessage(
+def _typed(text, incomplete=False):
+    return SimpleNamespace(
         content=text,
-        response_metadata={"finish_reason": finish_reason},
+        incomplete=incomplete,
+        incomplete_reason=app.OUTPUT_TOKEN_LIMIT_REASON if incomplete else None,
     )
 
 
-class _FakeHTTPResponse(io.BytesIO):
-    def __enter__(self):
-        return self
+@pytest.fixture
+def no_other_network(monkeypatch):
+    """Any outbound urllib request (another provider) fails the test."""
 
-    def __exit__(self, *exc):
-        return False
+    def refuse(*args, **kwargs):
+        raise AssertionError("unexpected outbound request")
+
+    monkeypatch.setattr(app.urllib.request, "urlopen", refuse)
 
 
 @pytest.fixture
-def openai_down(monkeypatch):
+def openai_down(monkeypatch, no_other_network):
+    calls = []
+
     def fail(messages, max_tokens=None):
+        calls.append(1)
         raise RuntimeError("openai unavailable")
 
     monkeypatch.setattr(app, "_invoke_openai", fail)
+    return calls
 
 
-@pytest.fixture
-def cloudflare(monkeypatch):
-    """Queue fake Cloudflare Chat Completions bodies."""
+def test_openai_failure_is_provider_unavailable_with_no_other_provider(openai_down):
+    with pytest.raises(app.ModelProviderUnavailable) as caught:
+        app.invoke_llm(MESSAGES)
 
-    state = {"bodies": [], "calls": 0}
-
-    def urlopen(request, timeout=None):
-        state["calls"] += 1
-        return _FakeHTTPResponse(json.dumps(state["bodies"].pop(0)).encode())
-
-    monkeypatch.setattr(app, "CLOUDFLARE_AI_TOKEN", "test-cloudflare-token")
-    monkeypatch.setattr(app, "CLOUDFLARE_ACCOUNT_ID", "test-account")
-    monkeypatch.setattr(app.urllib.request, "urlopen", urlopen)
-    return state
+    assert openai_down == [1]
+    assert not isinstance(caught.value, app.LocalModelServiceUnavailable)
 
 
-def _cloudflare_body(text, finish_reason):
-    return {
-        "choices": [
-            {
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": finish_reason,
-            }
-        ]
-    }
-
-
-def test_groq_length_finish_is_incomplete(monkeypatch, openai_down, cloudflare):
-    monkeypatch.setattr(app, "llm", _FakeGroq(_groq_reply("Partial ans", "length")))
-
-    response = app.invoke_llm(MESSAGES)
-
-    assert app.is_incomplete_model_response(response)
-    assert response.incomplete_reason == app.OUTPUT_TOKEN_LIMIT_REASON
-    assert response.content == "Partial ans"
-    # Same rule as OpenAI: a cut-off reply is typed, not replaced by a fallback.
-    assert cloudflare["calls"] == 0
-
-
-def test_final_groq_fallback_length_finish_is_incomplete(monkeypatch, openai_down, cloudflare):
-    monkeypatch.setattr(app, "llm", _FakeGroq(error=RuntimeError("down")))
-    cloudflare["bodies"] = [_cloudflare_body("", "stop")]
-    monkeypatch.setattr(
-        app, "fallback_llm", _FakeGroq(_groq_reply("Partial ans", "length"))
-    )
+def test_openai_truncated_reply_stays_typed_incomplete(monkeypatch, no_other_network):
+    monkeypatch.setattr(app, "_invoke_openai", lambda m, max_tokens=None: _typed("Partial ans", True))
 
     response = app.invoke_llm(MESSAGES)
 
@@ -306,56 +262,11 @@ def test_final_groq_fallback_length_finish_is_incomplete(monkeypatch, openai_dow
     assert response.content == "Partial ans"
 
 
-def test_normal_groq_reply_is_unchanged(monkeypatch, openai_down, cloudflare):
-    reply = _groq_reply("A complete answer.", "stop")
-    monkeypatch.setattr(app, "llm", _FakeGroq(reply))
-
-    response = app.invoke_llm(MESSAGES)
-
-    assert response is reply
-    assert not app.is_incomplete_model_response(response)
-    assert cloudflare["calls"] == 0
-
-
-def test_groq_reply_without_finish_reason_is_unchanged(monkeypatch, openai_down):
-    reply = AIMessage(content="A complete answer.")
-    monkeypatch.setattr(app, "llm", _FakeGroq(reply))
-
-    response = app.invoke_llm(MESSAGES)
-
-    assert response is reply
-    assert not app.is_incomplete_model_response(response)
-
-
-def test_cloudflare_length_finish_is_incomplete(monkeypatch, openai_down, cloudflare):
-    monkeypatch.setattr(app, "llm", _FakeGroq(error=RuntimeError("down")))
-    final = _FakeGroq(_groq_reply("unused", "stop"))
-    monkeypatch.setattr(app, "fallback_llm", final)
-    cloudflare["bodies"] = [_cloudflare_body("Partial ans", "length")]
-
-    response = app.invoke_llm(MESSAGES)
-
-    assert app.is_incomplete_model_response(response)
-    assert response.incomplete_reason == app.OUTPUT_TOKEN_LIMIT_REASON
-    assert response.content == "Partial ans"
-    assert final.calls == 0
-
-
-def test_normal_cloudflare_reply_is_unchanged(cloudflare):
-    cloudflare["bodies"] = [_cloudflare_body("A complete answer.", "stop")]
-
-    response = app._invoke_cloudflare(MESSAGES)
-
-    assert response.content == "A complete answer."
-    assert not app.is_incomplete_model_response(response)
-    assert response.incomplete_reason is None
-
-
-def test_truncated_fallback_reply_is_marked_cut_off(monkeypatch, openai_down):
+def test_truncated_reply_is_marked_cut_off(monkeypatch, no_other_network):
     monkeypatch.setattr(app, "classify_request", lambda message, history: "general")
     monkeypatch.setattr(app, "requires_web_verification", lambda message, history: False)
     monkeypatch.setattr(
-        app, "llm", _FakeGroq(_groq_reply("Rivers flow because", "length"))
+        app, "_invoke_openai", lambda m, max_tokens=None: _typed("Rivers flow because", True)
     )
 
     reply = app.chat("Explain rivers.", [], session_id="error-integrity-truncated")
@@ -364,14 +275,24 @@ def test_truncated_fallback_reply_is_marked_cut_off(monkeypatch, openai_down):
     assert app.has_incomplete_notice(reply)
 
 
-def test_complete_fallback_reply_has_no_cut_off_notice(monkeypatch, openai_down):
+def test_complete_reply_has_no_cut_off_notice(monkeypatch, no_other_network):
     monkeypatch.setattr(app, "classify_request", lambda message, history: "general")
     monkeypatch.setattr(app, "requires_web_verification", lambda message, history: False)
     monkeypatch.setattr(
-        app, "llm", _FakeGroq(_groq_reply("Rivers flow downhill.", "stop"))
+        app, "_invoke_openai", lambda m, max_tokens=None: _typed("Rivers flow downhill.")
     )
 
     reply = app.chat("Explain rivers.", [], session_id="error-integrity-complete")
 
     assert reply == "Rivers flow downhill."
     assert not app.has_incomplete_notice(reply)
+
+
+def test_openai_failure_in_chat_is_provider_unavailable(monkeypatch, openai_down):
+    monkeypatch.setattr(app, "classify_request", lambda message, history: "general")
+    monkeypatch.setattr(app, "requires_web_verification", lambda message, history: False)
+
+    with pytest.raises(app.ModelProviderUnavailable):
+        app.chat("Explain rivers.", [], session_id="error-integrity-openai-down")
+
+    assert openai_down == [1]

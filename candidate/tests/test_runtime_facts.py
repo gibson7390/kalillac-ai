@@ -22,12 +22,6 @@ def make_config():
         primary_provider="OpenAI",
         primary_model="gpt-5.6-luna",
         reasoning_effort="low",
-        first_fallback_provider="Groq",
-        first_fallback_model="openai/gpt-oss-120b",
-        second_fallback_provider="Cloudflare Workers AI",
-        second_fallback_model="@cf/openai/gpt-oss-120b",
-        final_fallback_provider="Groq",
-        final_fallback_model="openai/gpt-oss-20b",
     )
 
 
@@ -41,29 +35,39 @@ def test_primary_configuration_is_reported():
     }
 
 
-def test_fallback_chain_preserves_order():
+def test_there_is_no_automatic_model_fallback():
     facts = build_runtime_facts(make_config())
 
-    assert facts["configured_fallback_chain"] == [
-        {
-            "provider": "Groq",
-            "model": "openai/gpt-oss-120b",
-        },
-        {
-            "provider": "Cloudflare Workers AI",
-            "model": "@cf/openai/gpt-oss-120b",
-        },
-        {
-            "provider": "Groq",
-            "model": "openai/gpt-oss-20b",
-        },
-    ]
+    assert facts["configured_fallback_chain"] == []
+    assert facts["automatic_model_fallback"] is False
+    assert "model-provider-unavailable" in facts["model_unavailable_behavior"]
+
+
+def test_runtime_config_has_no_fallback_slots():
+    import dataclasses
+
+    names = {field.name for field in dataclasses.fields(RuntimeConfig)}
+
+    assert names == {
+        "primary_provider",
+        "primary_model",
+        "reasoning_effort",
+        "web_search_provider",
+    }
+
+
+def test_runtime_facts_name_no_other_model_provider():
+    serialized = json.dumps(build_runtime_facts(make_config())).lower()
+
+    for name in ("groq", "workers ai", "gpt-oss", "cloudflare"):
+        assert name not in serialized
 
 
 def test_search_provider_is_tavily():
     facts = build_runtime_facts(make_config())
 
     assert facts["web_search_provider"] == "Tavily"
+    assert "does not generate answers" in facts["web_search_provider_role"]
 
 
 def test_per_message_provider_is_not_claimed():

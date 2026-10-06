@@ -21,7 +21,22 @@ from .tool_contract import (
 
 
 class ToolLoopError(RuntimeError):
-    """Raised when the model/tool loop violates Kalillac's control contract."""
+    """Raised when the model/tool loop violates Kalillac's control contract.
+
+    Raised directly only for Kalillac-side defects (for example a tool
+    result that cannot be serialized). Model-caused failures use one of the
+    two subclasses below, so callers can tell them apart by type."""
+
+
+class ToolLoopOutputError(ToolLoopError):
+    """The model's response itself is unusable: not an object, without a
+    well-formed output item list, or completed without visible text."""
+
+
+class ToolLoopProtocolError(ToolLoopError):
+    """The model answered but broke the tool protocol: tools requested by
+    an incomplete response or while continuing, a malformed function call,
+    or more tool rounds/calls than allowed."""
 
 
 # Responses API incomplete_details.reason for an output-token cutoff.
@@ -178,7 +193,7 @@ def _response_output(
     output = response.get("output")
 
     if not isinstance(output, list):
-        raise ToolLoopError(
+        raise ToolLoopOutputError(
             "Model response is missing an output item list."
         )
 
@@ -186,7 +201,7 @@ def _response_output(
 
     for item in output:
         if not isinstance(item, Mapping):
-            raise ToolLoopError(
+            raise ToolLoopOutputError(
                 "Model output contains a non-object item."
             )
 
@@ -315,7 +330,7 @@ def run_tool_loop(
         )
 
         if not isinstance(response, Mapping):
-            raise ToolLoopError(
+            raise ToolLoopOutputError(
                 "Model caller returned a non-object response."
             )
 
@@ -331,7 +346,7 @@ def run_tool_loop(
         if function_calls and incomplete_reason is not None:
             # A cut-off response may carry truncated tool arguments.
             # Never execute tools requested by an incomplete response.
-            raise ToolLoopError(
+            raise ToolLoopProtocolError(
                 "Model response was incomplete during tool selection "
                 f"({incomplete_reason})."
             )
@@ -365,7 +380,7 @@ def run_tool_loop(
             text = partial_text.strip()
 
             if not text:
-                raise ToolLoopError(
+                raise ToolLoopOutputError(
                     "Model completed without visible output text."
                 )
 
@@ -378,12 +393,12 @@ def run_tool_loop(
             )
 
         if partial_text:
-            raise ToolLoopError(
+            raise ToolLoopProtocolError(
                 "Model requested a tool while continuing a cut-off answer."
             )
 
         if tool_rounds >= max_tool_rounds:
-            raise ToolLoopError(
+            raise ToolLoopProtocolError(
                 "Maximum tool rounds exceeded."
             )
 
@@ -392,7 +407,7 @@ def run_tool_loop(
             + len(function_calls)
             > max_tool_calls
         ):
-            raise ToolLoopError(
+            raise ToolLoopProtocolError(
                 "Maximum tool calls exceeded."
             )
 
@@ -411,12 +426,12 @@ def run_tool_loop(
             call_id = call.get("call_id")
 
             if not isinstance(name, str) or not name:
-                raise ToolLoopError(
+                raise ToolLoopProtocolError(
                     "Function call is missing a valid name."
                 )
 
             if not isinstance(call_id, str) or not call_id:
-                raise ToolLoopError(
+                raise ToolLoopProtocolError(
                     "Function call is missing a valid call_id."
                 )
 

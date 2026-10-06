@@ -19,6 +19,8 @@ if str(CANDIDATE_DIR) not in sys.path:
 from kalillac_routing.openai_tool_loop import (
     CONTINUATION_INSTRUCTION,
     ToolLoopError,
+    ToolLoopOutputError,
+    ToolLoopProtocolError,
     response_incomplete_reason,
     run_tool_loop,
 )
@@ -577,3 +579,74 @@ def test_incomplete_response_without_visible_text_is_an_error():
             call_model=call_model,
             execute_tool=no_tools,
         )
+
+
+# ---------------------------------------------------------------------------
+# Failure classification (OpenAI-only provider policy)
+# ---------------------------------------------------------------------------
+
+
+def _run(responses, execute_tool=no_tools, **limits):
+    queue = list(responses)
+
+    return run_tool_loop(
+        user_message="hello",
+        initial_input=[{"role": "user", "content": "hello"}],
+        call_model=lambda _items: queue.pop(0),
+        execute_tool=execute_tool,
+        **limits,
+    )
+
+
+def test_subclasses_keep_the_tool_loop_error_contract():
+    assert issubclass(ToolLoopOutputError, ToolLoopError)
+    assert issubclass(ToolLoopProtocolError, ToolLoopError)
+    assert not issubclass(ToolLoopOutputError, ToolLoopProtocolError)
+    assert not issubclass(ToolLoopProtocolError, ToolLoopOutputError)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "not an object",
+        {"status": "completed"},
+        {"output": ["not an object item"]},
+        completed(""),
+    ],
+    ids=["non_object", "missing_output_list", "non_object_item", "no_visible_text"],
+)
+def test_unusable_model_output_is_an_output_error(response):
+    with pytest.raises(ToolLoopOutputError):
+        _run([response])
+
+
+def _runtime_call(call_id="call_1"):
+    return function_call(call_id, "get_kalillac_runtime_facts", '{"topic": "models"}')
+
+
+@pytest.mark.parametrize(
+    "responses, limits",
+    [
+        ([{"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+           "output": [_runtime_call()]}], {}),
+        ([incomplete("partial"), {"output": [_runtime_call()]}], {}),
+        ([{"output": [_runtime_call()]}], {"max_tool_rounds": 0}),
+        ([{"output": [_runtime_call("a"), _runtime_call("b")]}], {"max_tool_calls": 1}),
+        ([{"output": [{"type": "function_call", "call_id": "c", "arguments": "{}"}]}], {}),
+        ([{"output": [{"type": "function_call", "name": "get_kalillac_runtime_facts",
+                       "arguments": "{}"}]}], {}),
+    ],
+    ids=["incomplete_tool_selection", "tool_during_continuation", "max_rounds",
+         "max_calls", "missing_name", "missing_call_id"],
+)
+def test_tool_protocol_violations_are_protocol_errors(responses, limits):
+    with pytest.raises(ToolLoopProtocolError):
+        _run(responses, execute_tool=lambda call: {"status": "ok"}, **limits)
+
+
+def test_unserializable_tool_result_is_a_plain_loop_error():
+    # A Kalillac-side defect: neither model output nor protocol.
+    with pytest.raises(ToolLoopError) as caught:
+        _run([{"output": [_runtime_call()]}], execute_tool=lambda call: object())
+
+    assert type(caught.value) is ToolLoopError

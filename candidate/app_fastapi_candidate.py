@@ -9,12 +9,12 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
-from groq import RateLimitError
 
 from kalillac_routing.openai_tool_loop import (
     CONTINUATION_INSTRUCTION,
     OUTPUT_TOKEN_LIMIT_REASON,
+    ToolLoopOutputError,
+    ToolLoopProtocolError,
     response_incomplete_reason,
     run_tool_loop,
     stitch_continuation,
@@ -26,7 +26,7 @@ from kalillac_routing.runtime_facts import (
 from kalillac_routing.source_policy import (
     get_authoritative_search_domains,
 )
-from kalillac_routing.tool_contract import OPENAI_TOOLS
+from kalillac_routing.tool_contract import OPENAI_TOOLS, ToolValidationError
 from kalillac_routing.request_budget import (
     CallBudgetExhausted,
     RequestBudget,
@@ -67,15 +67,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
 
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+# OpenAI is Kalillac's only model provider. There is no automatic fallback to
+# another model or provider: if OpenAI cannot answer, the request ends with a
+# temporary unavailable error instead of a silently substituted answer.
 
-CLOUDFLARE_AI_TOKEN = os.getenv("CLOUDFLARE_AI_TOKEN")
-CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
-CLOUDFLARE_MODEL = os.getenv(
-    "CLOUDFLARE_MODEL",
-    "@cf/openai/gpt-oss-120b",
-)
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # Diagnostic logging (routes, raw messages, memory counts) is off by
 # default on the public deployment so visitor messages are not logged.
@@ -147,31 +143,6 @@ def get_session_state(request):
     return get_session_state_by_id(session_id)
 
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY environment variable is not set. "
-        "Set it in the server environment before starting Kalillac AI."
-    )
-
-llm = ChatGroq(
-    model=GROQ_MODEL,
-    temperature=0.1,
-    max_tokens=MAX_RESPONSE_TOKENS,
-    api_key=GROQ_API_KEY,
-)
-
-FALLBACK_GROQ_MODEL = "openai/gpt-oss-20b"
-
-fallback_llm = ChatGroq(
-    model=FALLBACK_GROQ_MODEL,
-    temperature=0.1,
-    max_tokens=MAX_RESPONSE_TOKENS,
-    api_key=GROQ_API_KEY,
-)
-
-
 # --- request budget (KALILLAC_REQUEST_BUDGET_ENABLED) -------------------------
 #
 # When /api/chat runs a request under a RequestBudget, every model and
@@ -182,21 +153,8 @@ fallback_llm = ChatGroq(
 # Existing per-call timeouts, used as caps for budgeted calls (a budgeted
 # call never gets MORE time than today, only less when the deadline nears).
 OPENAI_CALL_TIMEOUT_SECONDS = 90          # _post_openai_responses default
-CLOUDFLARE_CALL_TIMEOUT_SECONDS = 90
 # tavily-python 0.7.26 TavilyClient.extract() default timeout.
 TAVILY_EXTRACT_TIMEOUT_SECONDS = 30
-
-
-def _admit_model_call(timeout_cap):
-    """Admit one model network attempt; returns its timeout, or None when
-    no budget applies (the caller then keeps its existing timeout)."""
-    budget = current_budget()
-
-    if budget is None:
-        return None
-
-    budget.admit_model_attempt()
-    return budget.call_timeout(timeout_cap)
 
 
 def _admit_search_call(timeout_cap):
@@ -209,51 +167,6 @@ def _admit_search_call(timeout_cap):
 
     budget.admit_search_attempt()
     return budget.call_timeout(timeout_cap)
-
-
-# The shared Groq clients keep the SDK's automatic retries (max_retries=2),
-# which would be hidden network attempts. Budgeted requests use separate
-# clients with identical settings and max_retries=0, so each admitted
-# attempt is exactly one request. The shared clients are never mutated.
-_NO_RETRY_GROQ = {}
-_NO_RETRY_GROQ_LOCK = _threading.Lock()
-
-
-def _no_retry_groq(model):
-    with _NO_RETRY_GROQ_LOCK:
-        client = _NO_RETRY_GROQ.get(model)
-
-        if client is None:
-            client = ChatGroq(
-                model=model,
-                temperature=0.1,
-                max_tokens=MAX_RESPONSE_TOKENS,
-                api_key=GROQ_API_KEY,
-                max_retries=0,
-            )
-            _NO_RETRY_GROQ[model] = client
-
-        return client
-
-
-def _groq_client_for_attempt(shared_client, model):
-    """The client for one Groq attempt: the shared client without a budget,
-    otherwise an admitted attempt on the no-retry client.
-
-    The Groq call's own duration is still bounded only by the SDK's
-    timeouts: ChatGroq has no verified per-call timeout argument, so the
-    remaining budget cannot be applied to it in this slice."""
-    budget = current_budget()
-
-    if budget is None:
-        return shared_client
-
-    # Resolve (possibly constructing) the client first; admission is the
-    # last step before the caller invokes it, so a cancellation or deadline
-    # reached during initialization prevents the request.
-    client = _no_retry_groq(model)
-    budget.admit_model_attempt()
-    return client
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -286,10 +199,10 @@ def _post_openai_bounded(payload, budget, timeout, request_selected):
     """The budgeted OpenAI request through the bounded transport.
 
     Local transport unavailability becomes ProviderTransportUnavailable and
-    a transport programming/configuration defect becomes ChatInternalError;
-    neither may reach another provider. Cancellation and deadline stops
-    propagate; remote failures propagate as their transport error so the
-    existing fallback applies. Logs carry fixed labels and class names only.
+    a transport programming/configuration defect becomes ChatInternalError.
+    Cancellation and deadline stops propagate; remote failures propagate as
+    their transport error, and the caller ends the request as provider
+    unavailable. Logs carry fixed labels and class names only.
     """
     limits = _request_limits
     was_quarantined = _OPENAI_TRANSPORT.quarantined
@@ -335,16 +248,31 @@ def _close_openai_transport():
 
 
 class ModelProviderUnavailable(RuntimeError):
-    """The configured model provider could not complete this request."""
+    """The configured model provider could not complete this request: a
+    remote OpenAI failure or unusable/empty output. The API answers 503
+    model_provider_unavailable. No other model or provider is tried."""
     pass
 
 
-class ProviderTransportUnavailable(ModelProviderUnavailable):
-    """The local bounded transport cannot serve the request (capacity,
-    quarantine, shutdown, or unconfirmed cleanup). Not provider exhaustion:
-    no other provider is tried, and the API answers 503
+class LocalModelServiceUnavailable(ModelProviderUnavailable):
+    """Kalillac's own side cannot reach the model (local transport state or
+    missing configuration). Not a provider failure: the API answers 503
     service_unavailable. Subclasses ModelProviderUnavailable so chat()
-    propagates it; the API handler must catch it before the broader class."""
+    propagates it; both API handlers must catch it before the broader
+    class."""
+    pass
+
+
+class ProviderTransportUnavailable(LocalModelServiceUnavailable):
+    """The local bounded transport cannot serve the request (capacity,
+    quarantine, shutdown, or unconfirmed cleanup)."""
+    pass
+
+
+class OpenAIConfigurationUnavailable(LocalModelServiceUnavailable):
+    """A required OpenAI setting (key, model or reasoning effort) is absent
+    or blank. Detected before any admission or request. A non-blank value
+    that OpenAI rejects is a remote failure, not this."""
     pass
 
 
@@ -359,55 +287,48 @@ class ChatInternalError(RuntimeError):
     pass
 
 
-# Never caught as a provider failure on the OpenAI path: request stops, a
-# local transport outage, and internal defects all end the request here.
+# Never swallowed or retried on the OpenAI path: request stops, provider
+# unavailability (including local outages and configuration), and internal
+# defects all end the request here.
 _OPENAI_PATH_STOPS = (
     RequestBudgetError,
-    ProviderTransportUnavailable,
+    ModelProviderUnavailable,
     ChatInternalError,
 )
 
 
-# OpenAI-compatible Chat Completions providers (Groq, Cloudflare Workers AI)
-# report an output-token cutoff as finish_reason "length". It is mapped onto
-# the same incomplete contract _invoke_openai returns, so every existing
-# is_incomplete_model_response() check covers the fallbacks too. No
-# continuation is attempted for them; only the OpenAI path has one.
-CHAT_COMPLETIONS_LENGTH_FINISH_REASON = "length"
+def _status_text(error):
+    """' status=N' for a numeric HTTP status on a provider error, else ''.
+    Never the message."""
+    for name in ("status_code", "code", "status"):
+        value = getattr(error, name, None)
+
+        if isinstance(value, int) and not isinstance(value, bool):
+            return f" status={value}"
+
+    return ""
 
 
-def _chat_completions_response(content, finish_reason):
-    truncated = finish_reason == CHAT_COMPLETIONS_LENGTH_FINISH_REASON
+def _raise_if_request_stopped():
+    """Before ending a failed model request as provider-unavailable: if the
+    request was already cancelled or its deadline has passed (by the
+    budget's own state and clock), that stop decides the outcome."""
+    budget = current_budget()
 
-    return SimpleNamespace(
-        content=content,
-        incomplete=truncated,
-        incomplete_reason=OUTPUT_TOKEN_LIMIT_REASON if truncated else None,
-    )
+    if budget is not None:
+        budget.ensure_open()
 
 
-def _groq_response_with_finish_reason(response, model):
-    """A Groq reply cut off at the output limit, typed as incomplete.
-
-    langchain-groq puts finish_reason in response_metadata. Any other
-    finish reason returns the response unchanged.
-    """
-    metadata = getattr(response, "response_metadata", None)
-    finish_reason = (
-        metadata.get("finish_reason")
-        if isinstance(metadata, dict)
-        else None
-    )
-
-    if finish_reason != CHAT_COMPLETIONS_LENGTH_FINISH_REASON:
-        return response
-
-    print(
-        "WARN: GROQ_RESPONSE_INCOMPLETE "
-        f"{model} {finish_reason}"
-    )
-
-    return _chat_completions_response(response.content, finish_reason)
+def _require_openai_configuration():
+    """Raise OpenAIConfigurationUnavailable unless the OpenAI key, model and
+    reasoning effort are all present and non-blank. Runs before any
+    admission or request. Logs a fixed label only, never a value."""
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (OPENAI_API_KEY, OPENAI_MODEL, OPENAI_REASONING_EFFORT)
+    ):
+        print("WARN: OPENAI_CONFIGURATION_UNAVAILABLE")
+        raise OpenAIConfigurationUnavailable()
 
 
 def _model_response_has_usable_text(response):
@@ -441,8 +362,8 @@ def _model_response_has_usable_text(response):
     return bool(str(content).strip())
 
 
-def _cloudflare_message_payload(messages):
-    """Convert Kalillac LangChain messages to OpenAI-compatible messages."""
+def _responses_input_items(messages):
+    """Convert Kalillac LangChain messages to OpenAI Responses input items."""
     payload = []
 
     for message in messages:
@@ -480,13 +401,10 @@ def _cloudflare_message_payload(messages):
 
 
 def _invoke_openai(messages, max_tokens=None):
-    """Invoke OpenAI GPT-5.6 Luna through the Responses API."""
-    if not OPENAI_API_KEY:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not configured."
-        )
+    """Invoke the configured OpenAI model through the Responses API."""
+    _require_openai_configuration()
 
-    input_items = _cloudflare_message_payload(messages)
+    input_items = _responses_input_items(messages)
 
     payload = {
         "model": OPENAI_MODEL,
@@ -541,6 +459,9 @@ def _invoke_openai(messages, max_tokens=None):
                 "WARN: OPENAI_CONTINUATION_FAILED "
                 f"{type(continuation_error).__name__}"
             )
+            # A cancellation or expired deadline already decides the
+            # request; only an open request keeps the typed partial.
+            _raise_if_request_stopped()
         else:
             text = stitch_continuation(
                 text,
@@ -657,298 +578,42 @@ def strip_incomplete_notice(reply):
     return text
 
 
-def _invoke_cloudflare(messages, max_tokens=None):
-    """Invoke Cloudflare Workers AI using GPT-OSS-120B."""
-    if (
-        not CLOUDFLARE_AI_TOKEN
-        or not CLOUDFLARE_ACCOUNT_ID
-    ):
-        raise RuntimeError(
-            "Cloudflare fallback credentials are not configured."
-        )
-
-    url = (
-        "https://api.cloudflare.com/client/v4/accounts/"
-        f"{CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions"
-    )
-
-    payload = {
-        "model": CLOUDFLARE_MODEL,
-        "messages": _cloudflare_message_payload(messages),
-        "temperature": 0.1,
-        "max_tokens": (
-            max_tokens
-            if max_tokens is not None
-            else MAX_RESPONSE_TOKENS
-        ),
-    }
-
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": (
-                f"Bearer {CLOUDFLARE_AI_TOKEN}"
-            ),
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    timeout = _admit_model_call(CLOUDFLARE_CALL_TIMEOUT_SECONDS)
-
-    with urllib.request.urlopen(
-        request,
-        timeout=(
-            CLOUDFLARE_CALL_TIMEOUT_SECONDS
-            if timeout is None
-            else timeout
-        ),
-    ) as response:
-        data = json.loads(
-            response.read().decode()
-        )
-
-    choices = data.get("choices") or []
-
-    if not choices:
-        return SimpleNamespace(content="")
-
-    message = choices[0].get("message") or {}
-    finish_reason = choices[0].get("finish_reason")
-
-    if finish_reason == CHAT_COMPLETIONS_LENGTH_FINISH_REASON:
-        print(
-            "WARN: CLOUDFLARE_RESPONSE_INCOMPLETE "
-            f"{CLOUDFLARE_MODEL} {finish_reason}"
-        )
-
-    return _chat_completions_response(
-        message.get("content") or "",
-        finish_reason,
-    )
-
-
-def _invoke_final_groq_fallback(messages, invoke_kwargs):
-    """Final same-provider fallback: Groq GPT-OSS-20B."""
-    client = _groq_client_for_attempt(fallback_llm, FALLBACK_GROQ_MODEL)
-
-    try:
-        response = client.invoke(
-            messages,
-            **invoke_kwargs,
-        )
-
-    except RequestBudgetError:
-        raise
-
-    except Exception as fallback_error:
-        status = getattr(
-            fallback_error,
-            "status_code",
-            None,
-        )
-
-        status_text = (
-            f" status={status}"
-            if status is not None
-            else ""
-        )
-
-        print(
-            "WARN: FINAL_GROQ_FALLBACK_UNAVAILABLE "
-            f"{type(fallback_error).__name__}"
-            f"{status_text}"
-        )
-
-        raise ModelProviderUnavailable() from None
-
-    if not _model_response_has_usable_text(response):
-        print(
-            "WARN: FINAL_GROQ_FALLBACK_EMPTY_RESPONSE "
-            f"{FALLBACK_GROQ_MODEL}"
-        )
-
-        raise ModelProviderUnavailable()
-
-    return _groq_response_with_finish_reason(response, FALLBACK_GROQ_MODEL)
-
-
-def _invoke_cross_provider_fallback(
-    messages,
-    invoke_kwargs,
-):
-    """Try Cloudflare GPT-OSS-120B, then Groq GPT-OSS-20B."""
-    try:
-        response = _invoke_cloudflare(
-            messages,
-            max_tokens=invoke_kwargs.get("max_tokens"),
-        )
-
-        if _model_response_has_usable_text(response):
-            print(
-                "INFO: CLOUDFLARE_FALLBACK_SUCCESS "
-                f"{CLOUDFLARE_MODEL}"
-            )
-
-            return response
-
-        print(
-            "WARN: CLOUDFLARE_FALLBACK_EMPTY_RESPONSE "
-            f"{CLOUDFLARE_MODEL} -> {FALLBACK_GROQ_MODEL}"
-        )
-
-    except RequestBudgetError:
-        raise
-
-    except Exception as cloudflare_error:
-        status = (
-            getattr(
-                cloudflare_error,
-                "status_code",
-                None,
-            )
-            or getattr(
-                cloudflare_error,
-                "code",
-                None,
-            )
-        )
-
-        status_text = (
-            f" status={status}"
-            if status is not None
-            else ""
-        )
-
-        print(
-            "WARN: CLOUDFLARE_FALLBACK_UNAVAILABLE "
-            f"{type(cloudflare_error).__name__}"
-            f"{status_text} -> {FALLBACK_GROQ_MODEL}"
-        )
-
-    return _invoke_final_groq_fallback(
-        messages,
-        invoke_kwargs,
-    )
-
-
-def _invoke_existing_provider_chain(messages, invoke_kwargs):
-    """Existing Groq 120B -> Cloudflare 120B -> Groq 20B chain."""
-    client = _groq_client_for_attempt(llm, GROQ_MODEL)
-
-    try:
-        response = client.invoke(
-            messages,
-            **invoke_kwargs,
-        )
-
-    except RequestBudgetError:
-        raise
-
-    except RateLimitError:
-        print(
-            "WARN: GROQ_FALLBACK_RATE_LIMITED "
-            f"{GROQ_MODEL} -> {CLOUDFLARE_MODEL}"
-        )
-
-        return _invoke_cross_provider_fallback(
-            messages,
-            invoke_kwargs,
-        )
-
-    except Exception as groq_error:
-        status = getattr(
-            groq_error,
-            "status_code",
-            None,
-        )
-
-        status_text = (
-            f" status={status}"
-            if status is not None
-            else ""
-        )
-
-        print(
-            "WARN: GROQ_FALLBACK_UNAVAILABLE "
-            f"{type(groq_error).__name__}"
-            f"{status_text} -> {CLOUDFLARE_MODEL}"
-        )
-
-        return _invoke_cross_provider_fallback(
-            messages,
-            invoke_kwargs,
-        )
-
-    if not _model_response_has_usable_text(response):
-        print(
-            "WARN: GROQ_FALLBACK_EMPTY_RESPONSE "
-            f"{GROQ_MODEL} -> {CLOUDFLARE_MODEL}"
-        )
-
-        return _invoke_cross_provider_fallback(
-            messages,
-            invoke_kwargs,
-        )
-
-    print(
-        "INFO: GROQ_FALLBACK_SUCCESS "
-        f"{GROQ_MODEL}"
-    )
-
-    return _groq_response_with_finish_reason(response, GROQ_MODEL)
-
-
 def invoke_llm(messages, max_tokens=None):
-    """OpenAI Luna -> Groq 120B -> Cloudflare 120B -> Groq 20B."""
-    invoke_kwargs = {}
+    """Generate with the configured OpenAI model. There is no fallback.
 
-    if max_tokens is not None:
-        invoke_kwargs["max_tokens"] = max_tokens
-
+    Returns the response: complete, or typed incomplete after at most one
+    continuation (a continuation that fails remotely keeps the partial).
+    Raises ModelProviderUnavailable for a remote OpenAI failure or for
+    unusable/empty output. Request stops, local outages (including missing
+    configuration) and internal defects propagate. No other model or
+    provider is ever called.
+    """
     try:
         response = _invoke_openai(
             messages,
             max_tokens=max_tokens,
         )
 
-        if _model_response_has_usable_text(response):
-            return response
-
-        print(
-            "WARN: OPENAI_PRIMARY_EMPTY_RESPONSE "
-            f"{OPENAI_MODEL} -> {GROQ_MODEL}"
-        )
-
     except _OPENAI_PATH_STOPS:
-        # Cancellation, deadline or attempt exhaustion, a local transport
-        # outage, or an internal defect stops the request; none is a reason
-        # to try the next provider.
         raise
 
     except Exception as openai_error:
-        status = (
-            getattr(openai_error, "status_code", None)
-            or getattr(openai_error, "code", None)
-        )
-
-        status_text = (
-            f" status={status}"
-            if status is not None
-            else ""
-        )
-
         print(
             "WARN: OPENAI_PRIMARY_UNAVAILABLE "
-            f"{type(openai_error).__name__}"
-            f"{status_text} -> {GROQ_MODEL}"
+            f"{type(openai_error).__name__}{_status_text(openai_error)}"
         )
+        _raise_if_request_stopped()
+        raise ModelProviderUnavailable() from None
 
-    return _invoke_existing_provider_chain(
-        messages,
-        invoke_kwargs,
-    )
+    if not _model_response_has_usable_text(response):
+        print(
+            "WARN: OPENAI_PRIMARY_EMPTY_RESPONSE "
+            f"{OPENAI_MODEL}"
+        )
+        _raise_if_request_stopped()
+        raise ModelProviderUnavailable()
+
+    return response
 
 
 _NEWS_TITLE_STOPWORDS = frozenset({
@@ -1803,7 +1468,7 @@ BOUNDARY EXPLANATIONS:
 - When a genuine boundary applies, name the specific limitation in one short, direct sentence, then immediately continue with everything you CAN help with.
 - Preferred structure: "Kalillac AI won't provide that specific portion, but I can explain the underlying concept, the relevant risks, defensive considerations, and related useful information" — then provide that information right away.
 - Do not moralize, shame, lecture, or attach generic ethical warnings to answers.
-- Attribute Kalillac AI's application-level boundaries to Kalillac AI, not to OpenAI, Groq, or another provider unless the user specifically asks about upstream model or provider constraints.
+- Attribute Kalillac AI's application-level boundaries to Kalillac AI, not to OpenAI or another provider unless the user specifically asks about upstream model or provider constraints.
 - Continue discussing the topic itself when it can be discussed safely, which is almost always.
 - If asked who sets Kalillac AI's application policies, or whether the developer told you to say something, explain that they are defined in Kalillac AI's system instructions, which are not independent proof of how the service actually operates. Providers may also have their own safeguards. Name the creator only if asked who that is.
 - Do not falsely claim that a refusal came from Kalillac AI if it is known to have been imposed specifically by an upstream provider or model.
@@ -1853,9 +1518,9 @@ SESSION PRIVACY AND PROVIDERS:
 - Session separation is logical, application-level separation by session identifier. Never claim per-user processes, sandboxes, containers, VMs, filesystems, or separate physical memory. Sessions may share server resources, which does not mean users can reach each other's state.
 - Never imply you can access or recover a previous session, and do not ask the user to re-supply information that came from one.
 - HTTPS encrypts traffic in transit to kalillac.com. That does not mean the server cannot read requests, that providers receive nothing, or that data is encrypted at rest.
-- OpenAI GPT-5.6 Luna provides primary model inference. If that path is unavailable or returns unusable output, Kalillac falls back in order to Groq GPT-OSS-120B, Cloudflare Workers AI GPT-OSS-120B, and finally Groq GPT-OSS-20B. When live search runs, Tavily receives what is needed to perform that search. Do not claim Tavily receives the whole conversation, and do not claim it receives nothing.
-- Kalillac AI's privacy design does not establish any provider's practices. Never state Groq's, Cloudflare's, or Tavily's retention, deletion, logging, storage, training, or analytics as fact unless that exact current policy was supplied or retrieved, and never say a provider does not retain content beyond the request. If asked, say that policy must be checked with the provider.
-- Browser developer tools show only browser-to-Kalillac requests, not server-side calls to Groq or Tavily. Never say the Network panel can verify provider traffic; that needs server-side configuration or provider documentation.
+- OpenAI __OPENAI_MODEL__ provides all model inference. There is no automatic fallback to another model or provider: if OpenAI is unavailable or returns unusable output, the request ends with a temporary unavailable error instead of an answer from a different model. When live search runs, Tavily receives what is needed to perform that search; Tavily does not generate answers. Do not claim Tavily receives the whole conversation, and do not claim it receives nothing.
+- Kalillac AI's privacy design does not establish any provider's practices. Never state OpenAI's or Tavily's retention, deletion, logging, storage, training, or analytics as fact unless that exact current policy was supplied or retrieved, and never say a provider does not retain content beyond the request. If asked, say that policy must be checked with the provider.
+- Browser developer tools show only browser-to-Kalillac requests, not server-side calls to OpenAI or Tavily. Never say the Network panel can verify provider traffic; that needs server-side configuration or provider documentation.
 - Kalillac AI does not train its own model on user conversations. Do not extend that into a guarantee about any provider.
 - Kalillac AI has no independent audit, penetration test, SOC 2 or ISO certification, transparency report, or public production repository; label any future-oriented wording as such. Avoid absolutes like "nothing is ever stored" or "no data can ever appear in a log", and never claim logs hold only operational metadata or can never contain user text.
 - If asked how privacy can be trusted, do not answer "trust us". Distinguish actual design, necessary third-party processing, what is independently verifiable, and what cannot be proven by assertion. Asking the AI is not verification.
@@ -1905,6 +1570,9 @@ ANTI-HALLUCINATION & TONE RULES:
 - Keep emotional support brief, natural, and conversational.
 """
 
+# The configured model is filled in from OPENAI_MODEL, never hard-coded.
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace("__OPENAI_MODEL__", OPENAI_MODEL)
+
 
 # Shared engagement-policy reminder injected into the free-form generation
 # routes (general, code, web_search) so a terse per-route "answer directly"
@@ -1930,8 +1598,7 @@ KALILLAC_SELF_KNOWLEDGE = {
     "provenance": {
         "application": "current Kalillac application code",
         "models": (
-            "GROQ_MODEL, CLOUDFLARE_MODEL, and "
-            "FALLBACK_GROQ_MODEL constants"
+            "OPENAI_MODEL and OPENAI_REASONING_EFFORT constants"
         ),
         "deployment": (
             "manually verified from current Nginx configuration and "
@@ -2097,10 +1764,9 @@ KALILLAC_SELF_KNOWLEDGE = {
             "OpenAI."
         ),
         (
-            "When provider fallback handling is needed, the configured "
-            f"chain proceeds to Groq {GROQ_MODEL}, then Cloudflare Workers AI "
-            f"{CLOUDFLARE_MODEL}, then the final Groq fallback "
-            f"{FALLBACK_GROQ_MODEL}."
+            "There is no automatic fallback to another model or provider; "
+            "if OpenAI cannot produce a usable answer, the request ends with "
+            "a temporary model-provider-unavailable error."
         ),
         "Response cleanup runs.",
         "Tavily source links are appended after model generation.",
@@ -2113,10 +1779,9 @@ KALILLAC_SELF_KNOWLEDGE = {
             "OpenAI."
         ),
         (
-            "When provider fallback handling is needed, the configured "
-            f"chain proceeds to Groq {GROQ_MODEL}, then Cloudflare Workers AI "
-            f"{CLOUDFLARE_MODEL}, then the final Groq fallback "
-            f"{FALLBACK_GROQ_MODEL}."
+            "There is no automatic fallback to another model or provider; "
+            "if OpenAI cannot produce a usable answer, the request ends with "
+            "a temporary model-provider-unavailable error."
         ),
         (
             "Response cleanup and route-appropriate code-quality handling "
@@ -2167,32 +1832,31 @@ KALILLAC_SELF_KNOWLEDGE = {
             "verified direct/no-model path."
         ),
         (
-            f"The primary model is {OPENAI_MODEL} through OpenAI."
+            f"The model is {OPENAI_MODEL} through OpenAI, with reasoning "
+            f"effort {OPENAI_REASONING_EFFORT}."
         ),
         (
-            "The first configured fallback is "
-            f"{GROQ_MODEL} through Groq."
+            "Kalillac has no automatic fallback model or provider. If OpenAI "
+            "cannot produce a usable answer, the request ends with a "
+            "temporary model-provider-unavailable error instead of an answer "
+            "from a different model. If Kalillac's own connection to the "
+            "model is unavailable or not configured, the request ends with a "
+            "temporary service-unavailable error."
         ),
         (
-            "The second configured fallback is Cloudflare Workers AI "
-            f"{CLOUDFLARE_MODEL}, followed by the final fallback "
-            f"{FALLBACK_GROQ_MODEL} through Groq."
+            "OpenAI receives information needed for inference. Tavily "
+            "receives information needed for search only when live web "
+            "search runs; Tavily does not generate answers."
         ),
         (
-            f"The current application provider chain is OpenAI "
-            f"{OPENAI_MODEL} -> Groq {GROQ_MODEL} -> Cloudflare Workers AI "
-            f"{CLOUDFLARE_MODEL} -> Groq {FALLBACK_GROQ_MODEL} final fallback."
-        ),
-        (
-            "OpenAI receives information needed when the primary inference "
-            "path is used. Groq receives information needed when either Groq "
-            "fallback path is used. Cloudflare Workers AI may receive information "
-            "needed when its fallback path is used. Tavily receives information "
-            "needed for search when search runs."
+            "Kalillac's response contract does not record per-message "
+            "provider metadata: the configured path is OpenAI only, but a "
+            "completed message does not itself prove which provider executed "
+            "it."
         ),
         (
             "Kalillac's application design does not by itself establish "
-            "OpenAI's, Groq's, Cloudflare's, or Tavily's retention, deletion, "
+            "OpenAI's or Tavily's retention, deletion, "
             "logging, storage, training, or analytics practices."
         ),
         (
@@ -2205,11 +1869,10 @@ KALILLAC_SELF_KNOWLEDGE = {
             f"{SESSION_SEARCH_WINDOW}-second window."
         ),
         (
-            "If the OpenAI primary path, Groq fallback, Cloudflare Workers "
-            "AI fallback, and final Groq fallback all fail or return unusable "
-            "model output, "
-            "the application raises ModelProviderUnavailable; chat then "
-            "returns a friendly temporary model-provider-unavailable message."
+            "If OpenAI fails or returns unusable model output, the "
+            "application raises ModelProviderUnavailable; the API answers "
+            "HTTP 503 with the error model_provider_unavailable, and the web "
+            "frontend shows a friendly temporary-unavailable message."
         ),
     ],
 
@@ -2252,8 +1915,7 @@ KALILLAC_SELF_KNOWLEDGE = {
         "temporary session state in RAM",
         "request classifier",
         "Tavily",
-        "Groq",
-        "Cloudflare Workers AI",
+        "OpenAI",
         "response cleanup",
         "Tavily source links",
         "JSON response",
@@ -2355,13 +2017,13 @@ def render_kalillac_code_reference_facts():
     return f"""VERIFIED KALILLAC BACKEND REFERENCE:
 - Network: Browser -> Cloudflare (public HTTPS) -> Nginx (origin HTTPS :443, Full strict) -> Uvicorn/FastAPI (local HTTP 127.0.0.1:8001).
 - Nginx terminates the separate Cloudflare-to-origin TLS connection using a Cloudflare Origin CA certificate. Nginx also listens on HTTP :80, but that is not the verified production Cloudflare origin path.
-- /api/chat validates message/history/session ID and resolves temporary session state in server RAM. A legacy classifier still runs as a transitional gate; selected semantic routes enter the V31 Luna-native tool path, while deterministic/application-controlled routes remain outside it.
+- /api/chat validates message/history/session ID and resolves temporary session state in server RAM. A legacy classifier still runs as a transitional gate; selected semantic routes enter the V31 native tool path ({OPENAI_MODEL}), while deterministic/application-controlled routes remain outside it.
 - Direct/no-model: deterministic calculator, session-memory writes, available temporary-state answers, and no-file-access response.
-- V31 native search: Luna may request search_web; application code validates the tool call, enforces search controls, executes Tavily, returns the results to Luna as untrusted data, and application code owns final source-link rendering.
-- Selected semantic requests may be answered directly by Luna or may use an approved native tool such as get_kalillac_runtime_facts. Routes not yet migrated continue through the legacy route-specific pipeline.
-- Provider behavior: the V31 native-tool path calls OpenAI {OPENAI_MODEL} directly. If that experimental path raises, chat continues through the legacy pipeline, whose configured inference chain is OpenAI {OPENAI_MODEL} -> Groq {GROQ_MODEL} -> Cloudflare Workers AI {CLOUDFLARE_MODEL} -> final Groq fallback {FALLBACK_GROQ_MODEL}.
+- V31 native search: the model may request search_web; application code validates the tool call, enforces search controls, executes Tavily, returns the results to the model as untrusted data, and application code owns final source-link rendering.
+- Selected semantic requests may be answered directly by the model or may use an approved native tool such as get_kalillac_runtime_facts. Routes not yet migrated continue through the legacy route-specific pipeline.
+- Provider behavior: every model request goes to OpenAI {OPENAI_MODEL}; there is no automatic fallback model or provider. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error. Only if the model breaks the native tool protocol does chat continue once through the legacy pipeline, which calls the same OpenAI model.
 - No account or intentionally persistent user-facing chat history/profile. Conversation state is temporary server-side RAM keyed by temporary ID; entries may remain until capacity eviction or service restart. The current web frontend keeps the temporary session identifier only in page memory, so refresh/reload resets the browser-side identifier and the refreshed page does not reconnect to the prior temporary session state. The old server RAM entry may still remain until capacity eviction or service restart.
-- OpenAI receives inference data when the primary path is used; Groq receives inference data when either Groq fallback path is used; Cloudflare Workers AI may receive inference data when its fallback path is used; Tavily receives search data when search runs. Provider retention/logging/storage/training/analytics and absence of user text from logs are not established by the application architecture alone.
+- OpenAI receives inference data for every model request; Tavily receives search data only when search runs and does not generate answers. Provider retention/logging/storage/training/analytics and absence of user text from logs are not established by the application architecture alone.
 - Do not infer RAG/Chroma/vector DB, per-user containers/VMs/filesystems, hosting scale, audit/certification status, or security guarantees."""
 
 def get_recent_user_messages(history, limit=3):
@@ -2429,7 +2091,7 @@ APPLICATION-CONTROLLED     V31 NATIVE SEMANTIC          LEGACY ROUTES
 PATHS                      PATH                         NOT YET MIGRATED
    |                           |                              |
 calculator                     v                              v
-session memory          OpenAI GPT-5.6 Luna          route-specific
+session memory          OpenAI {openai}          route-specific
 file-unavailable               |                      processing
 etc.                           |
                                +--> answer directly
@@ -2449,7 +2111,7 @@ etc.                           |
                                       Tavily
                                         |
                                         v
-                               results returned to Luna
+                               results returned to the model
                                as untrusted data
                                         |
                                         v
@@ -2458,22 +2120,17 @@ etc.                           |
                                         v
                                application-owned Sources
 
-If the experimental V31 native-tool path raises:
+If the model breaks the native tool protocol:
         |
         v
-legacy pipeline fallback
+legacy pipeline, once (same OpenAI model)
 
-Legacy inference chain:
+Model inference on every path:
 OpenAI {openai}
    |
    v
-Groq {primary}
-   |
-   v
-Cloudflare Workers AI {cloudflare}
-   |
-   v
-Groq {fallback}
+no automatic fallback model or provider;
+OpenAI failure -> temporary unavailable error
 
 The response contract does not currently prove which provider
 handled a particular completed response.
@@ -2484,9 +2141,6 @@ def kalillac_ascii_diagram():
     return (
         KALILLAC_ASCII_DIAGRAM
         .replace("{openai}", OPENAI_MODEL)
-        .replace("{primary}", GROQ_MODEL)
-        .replace("{cloudflare}", CLOUDFLARE_MODEL)
-        .replace("{fallback}", FALLBACK_GROQ_MODEL)
     )
 
 
@@ -2494,14 +2148,14 @@ KALILLAC_CANONICAL_DIFFERENCE = """Kalillac AI is built around a few deliberate 
 
 - **Privacy-first, no-account use.** No account is required, and Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles.
 - **Temporary session context.** Conversation state is kept as temporary server-side RAM state keyed to a temporary session identifier.
-- **Controlled request handling.** Deterministic/application-controlled tasks can bypass model generation. In V31, a transitional legacy classifier still gates requests while selected semantic routes use GPT-5.6 Luna native tool selection with application-controlled tool validation and execution.
+- **Controlled request handling.** Deterministic/application-controlled tasks can bypass model generation. In V31, a transitional legacy classifier still gates requests while selected semantic routes use the configured OpenAI model's native tool selection with application-controlled tool validation and execution.
 - **Sourced live web search.** When live search is used successfully, Tavily retrieves current information, the model works from that retrieved context, and the source links are included with the response.
 - **Direct, transparent behavior.** Kalillac is designed to answer helpfully and directly while being clear about its actual capabilities, limits, and necessary third-party processing.
 
 Those are Kalillac's design choices; they are not a claim that no other AI can offer similar features."""
 
 
-KALILLAC_CANONICAL_IDENTITY = f"""Kalillac AI is a privacy-first public AI assistant. No account is required. It uses temporary server-side RAM state for session context and controlled request handling. Its primary model is {OPENAI_MODEL} through OpenAI, with Groq {GROQ_MODEL}, Cloudflare Workers AI {CLOUDFLARE_MODEL}, and Groq {FALLBACK_GROQ_MODEL} configured as successive fallbacks. Tavily provides live web search when needed. Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles."""
+KALILLAC_CANONICAL_IDENTITY = f"""Kalillac AI is a privacy-first public AI assistant. No account is required. It uses temporary server-side RAM state for session context and controlled request handling. Its model is {OPENAI_MODEL} through OpenAI, with no automatic fallback to another model or provider. Tavily provides live web search when needed and does not generate answers. Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles."""
 
 
 KALILLAC_CANONICAL_HOW_IT_WORKS = f"""Kalillac AI's current request flow is:
@@ -2514,24 +2168,20 @@ Cloudflare handles the browser-facing HTTPS connection. The separately verified 
 
 **2. Request handling**
 
-`/api/chat` receives and validates the message, history, and session identifier. Kalillac resolves or creates the temporary session identifier and accesses that session's temporary state in server RAM. In V31, the legacy classifier still acts as a transitional gate: deterministic/application-controlled routes remain on their existing paths, while selected semantic routes enter the Luna-native tool path.
+`/api/chat` receives and validates the message, history, and session identifier. Kalillac resolves or creates the temporary session identifier and accesses that session's temporary state in server RAM. In V31, the legacy classifier still acts as a transitional gate: deterministic/application-controlled routes remain on their existing paths, while selected semantic routes enter the native tool path.
 
 **3. Processing paths**
 
 - **Direct / application-controlled:** deterministic calculator responses, session-memory writes, direct answers from temporary session state when available, and the no-file-access response.
-- **V31 native semantic path:** GPT-5.6 Luna may answer directly, request `get_kalillac_runtime_facts`, or request `search_web`. Application code validates and executes tool calls.
-- **Native web search:** `Luna tool decision -> application validation -> Tavily -> search results returned to Luna as untrusted data -> generated answer -> application-owned source links`.
-- **Legacy transitional paths:** routes not yet migrated continue through their existing route-specific instructions and provider pipeline.
+- **V31 native semantic path:** `{OPENAI_MODEL}` may answer directly, request `get_kalillac_runtime_facts`, or request `search_web`. Application code validates and executes tool calls.
+- **Native web search:** `model tool decision -> application validation -> Tavily -> search results returned to the model as untrusted data -> generated answer -> application-owned source links`.
+- **Legacy transitional paths:** routes not yet migrated continue through their existing route-specific instructions, using the same OpenAI model.
 
 **4. Model/provider behavior**
 
-The V31 native-tool path currently calls OpenAI `{OPENAI_MODEL}` directly. If that experimental native path raises an exception, Kalillac continues through the existing legacy pipeline rather than failing the chat immediately.
+Every model request goes to OpenAI `{OPENAI_MODEL}`. There is no automatic fallback to another model or provider: if OpenAI cannot produce a usable answer, the request ends with a temporary model-provider-unavailable error rather than an answer from a different model. If the model breaks the native tool protocol, Kalillac continues once through the legacy route-specific pipeline, which calls the same OpenAI model.
 
-The legacy pipeline's configured inference chain is:
-
-`OpenAI {OPENAI_MODEL} -> Groq {GROQ_MODEL} -> Cloudflare Workers AI {CLOUDFLARE_MODEL} -> Groq {FALLBACK_GROQ_MODEL} final fallback`
-
-The response contract does not currently preserve per-message provider metadata, so the configured order does not prove which provider handled a particular completed response.
+The response contract does not currently preserve per-message provider metadata, so a completed message does not itself prove which provider executed it.
 
 **5. Session/privacy design**
 
@@ -2544,26 +2194,21 @@ In the current web frontend, that session identifier exists only in page memory.
 
 Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles.
 
-OpenAI receives information needed when the primary inference path is used. Groq receives information needed when either Groq fallback path is used. Cloudflare Workers AI may receive information needed when its fallback path is used. Tavily receives information needed when live web search runs. The configured inference order is OpenAI primary -> Groq fallback -> Cloudflare Workers AI fallback -> Groq final fallback. Kalillac's application design does not by itself establish those providers' retention, deletion, logging, storage, training, or analytics practices, and it does not establish that user text can never appear in operational logs."""
+OpenAI receives information needed for inference. Tavily receives information needed only when live web search runs; it does not generate answers. Kalillac has no automatic fallback model or provider. Kalillac's application design does not by itself establish those providers' retention, deletion, logging, storage, training, or analytics practices, and it does not establish that user text can never appear in operational logs."""
 
 
-KALILLAC_CANONICAL_MODEL = f"""Kalillac's configured model/provider chain is:
+KALILLAC_CANONICAL_MODEL = f"""Kalillac's configured model is `{OPENAI_MODEL}` through OpenAI, with reasoning effort `{OPENAI_REASONING_EFFORT}`.
 
-1. **Primary:** `{OPENAI_MODEL}` through OpenAI, with reasoning effort `{OPENAI_REASONING_EFFORT}`.
-2. **First fallback:** `{GROQ_MODEL}` through Groq.
-3. **Cross-provider fallback:** `{CLOUDFLARE_MODEL}` through Cloudflare Workers AI.
-4. **Final fallback:** `{FALLBACK_GROQ_MODEL}` through Groq.
-
-The current application code attempts those inference paths in that order."""
+There is no automatic fallback to another model or provider. If OpenAI cannot produce a usable answer, the request ends with a temporary model-provider-unavailable error instead of an answer from a different model. Tavily is used only for live web search and does not generate answers."""
 
 
 KALILLAC_CANONICAL_SEARCH = f"""Yes. Kalillac AI has live web search.
 
-In V31, selected semantic requests enter the GPT-5.6 Luna native-tool path. When Luna requests `search_web`, application code validates the tool call, enforces the current search controls, calls Tavily server-side, and returns the retrieved results to Luna as untrusted data. Kalillac application code owns the final Sources rendering rather than relying on the model to invent or format a Sources section.
+In V31, selected semantic requests enter the `{OPENAI_MODEL}` native-tool path. When the model requests `search_web`, application code validates the tool call, enforces the current search controls, calls Tavily server-side, and returns the retrieved results to the model as untrusted data. Kalillac application code owns the final Sources rendering rather than relying on the model to invent or format a Sources section.
 
 A successful V31 native-search flow is:
 
-`Luna tool decision -> application validation -> Tavily -> retrieved results returned to Luna -> generated answer -> application-owned source links`
+`model tool decision -> application validation -> Tavily -> retrieved results returned to the model -> generated answer -> application-owned source links`
 
 If the experimental V31 native-tool path itself raises an exception, chat falls back into the existing legacy pipeline rather than immediately terminating the request."""
 
@@ -5897,11 +5542,9 @@ MODEL_ID_CONSTANT_RE = re.compile(
 
 
 def _verified_model_chain():
+    # OpenAI is the only configured model; there is no fallback model.
     return [
         OPENAI_MODEL,
-        GROQ_MODEL,
-        CLOUDFLARE_MODEL,
-        FALLBACK_GROQ_MODEL,
     ]
 
 
@@ -5951,19 +5594,13 @@ def kalillac_python_fidelity_errors(code):
         if model_id in chain:
             continue
 
-        if model_id in {"gpt-oss-120b", "gpt-oss-20b"}:
-            errors.append(
-                f"Short model id {model_id} is not the verified Kalillac "
-                f"model id; use openai/{model_id}."
-            )
-        else:
-            errors.append(
-                f"Model id {model_id} is not in Kalillac's verified "
-                f"configuration ({' -> '.join(chain)})."
-            )
+        errors.append(
+            f"Model id {model_id} is not in Kalillac's verified "
+            f"configuration ({' -> '.join(chain)})."
+        )
 
-    # Any literal sequence naming two or more chain models must keep the
-    # verified order: OpenAI primary -> Groq -> Cloudflare -> final Groq.
+    # Any literal sequence naming two or more verified models must keep the
+    # verified order (with a single configured model this never fires).
     for node in ast.walk(tree):
         if isinstance(node, (ast.List, ast.Tuple)):
             elements = node.elts
@@ -5989,9 +5626,6 @@ def kalillac_python_fidelity_errors(code):
                 + " -> ".join(chain)
                 + "."
             )
-
-    # Provider-specific exception mechanics are implementation details and
-    # must not be rewritten into the obsolete RateLimitError-only design.
 
     return list(dict.fromkeys(errors))
 
@@ -6031,14 +5665,12 @@ REPAIR RULES:
 - Preserve the existing backend's intended behavior and structure except where a fix is required.
 - Remove every actual eval() and exec() call.
 - For arithmetic or expression parsing, use ast.parse(..., mode="eval") with explicitly allowlisted AST nodes and operators; never execute parsed text dynamically.
-- The verified primary model id is exactly gpt-5.6-luna through OpenAI.
-- Preserve the verified provider order: OpenAI GPT-5.6 Luna primary -> Groq openai/gpt-oss-120b fallback -> Cloudflare Workers AI @cf/openai/gpt-oss-120b fallback -> Groq openai/gpt-oss-20b final fallback.
-- Do not shorten the Groq model ids to gpt-oss-120b or gpt-oss-20b.
-- Do not restore the obsolete RateLimitError-only fallback architecture.
+- The verified model id is exactly {OPENAI_MODEL} through OpenAI.
+- Kalillac has no fallback model or provider; do not add one, and do not present any other model id as Kalillac's configuration.
 - Preserve the existing provider invocation and exception-handling structure unless the user's request specifically requires changing it.
 - Do not introduce new databases, services, provider claims, Kalillac architecture claims, or API fields merely to perform the repair.
 - Keep temporary server-side session state bounded with explicit capacity or eviction.
-- When describing current V31 native search, preserve Luna tool decision -> application validation -> Tavily -> returned search data -> application-owned source rendering.
+- When describing current V31 native search, preserve model tool decision -> application validation -> Tavily -> returned search data -> application-owned source rendering.
 - Clearly label any unspecified implementation mechanism with a concise code comment such as: # Example implementation choice: ...
 - Keep the result complete, syntactically valid, and directly runnable.
 """
@@ -8289,10 +7921,9 @@ def build_messages(message, history, route, memory):
             "unless these facts establish that it is absent. For unverified areas, frame the "
             "idea conditionally, such as `consider X if it is not already present`, or say the "
             "current status must be verified first.\n"
-          + "- On privacy, never say all conversation data stays only in RAM. Groq receives "
-            "information needed when a Groq inference path is used, Cloudflare Workers AI may "
-            "receive information needed when its fallback path is used, and Tavily receives "
-            "information needed when live search runs.\n"
+          + "- On privacy, never say all conversation data stays only in RAM. OpenAI receives "
+            "information needed for inference, and Tavily receives information needed when "
+            "live search runs.\n"
           + "- Do not claim user text is retained only for immediate processing, cannot appear "
             "in logs, or is immediately erased after a response. Temporary session entries may "
             "remain in RAM until capacity eviction or service restart, and absence of user text "
@@ -8309,11 +7940,10 @@ def build_messages(message, history, route, memory):
             "secrets.token_urlsafe(32), independent of IP address, user agent, timestamp, "
             "or browser properties. Do not describe HMAC as encryption, and do not claim "
             "that adding an HMAC would encrypt or anonymize the current session token.\n"
-          + "- Preserve the complete model-failure sequence: OpenAI GPT-5.6 Luna primary -> "
-            "Groq GPT-OSS-120B fallback -> Cloudflare Workers AI GPT-OSS-120B fallback -> "
-            "Groq GPT-OSS-20B final fallback. Only after the final Groq fallback also fails "
-            "or returns unusable output is model-provider unavailability terminal; the current "
-            "chat path then returns a friendly temporary-unavailable message.\n"
+          + "- Kalillac has no automatic model fallback: every model request goes to OpenAI "
+            f"{OPENAI_MODEL}. If OpenAI fails or returns unusable output, model-provider "
+            "unavailability is terminal; the API returns a temporary-unavailable error, which "
+            "the web frontend shows as a friendly message.\n"
           "Do not silently omit one requested fact just because another part is more detailed.\n"
         + "- If the user asks which AI, LLM, or model Kalillac uses, state the verified "
           "current model information from the facts block rather than implying it is undisclosed.\n"
@@ -8495,20 +8125,20 @@ RULES:
   - When recommending improvements, never state or imply that a feature, protection, rate limit, accessibility control, logging control, monitoring system, or developer tool is currently absent unless the established facts explicitly show that absence. If its current status is not established, say so or make the suggestion conditional.
   - Kalillac already exposes GET /api/health as its minimal liveness endpoint. A recommendation for richer readiness, dependency, or provider health monitoring must be described as expanding the existing health capability, not adding Kalillac's first health endpoint.
   - Kalillac's production session identifier is already an opaque, unguessable CSPRNG token generated with secrets.token_urlsafe(32), not derived from IP address, user agent, timestamp, or browser properties. HMAC is not encryption; do not describe an HMAC as encrypting or anonymizing this token.
-  - Never describe provider failure as terminal before the complete configured chain has been attempted. Preserve the full chain: OpenAI GPT-5.6 Luna primary -> Groq GPT-OSS-120B fallback -> Cloudflare Workers AI GPT-OSS-120B fallback -> Groq GPT-OSS-20B final fallback. If all four stages fail or return unusable output, ModelProviderUnavailable is handled by chat with a friendly temporary-unavailable response.
-  - On privacy, do not say all conversation context or all user data stays only in RAM. Groq receives information needed when its inference paths are used; Cloudflare Workers AI may receive information needed on its fallback path; Tavily receives information needed when live search runs.
+  - Kalillac has no automatic model fallback: every model request goes to OpenAI {OPENAI_MODEL}. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error; do not describe any other model or provider as a backup.
+  - On privacy, do not say all conversation context or all user data stays only in RAM. OpenAI receives information needed for inference; Tavily receives information needed when live search runs.
   - Do not claim that Kalillac retains user text only for immediate processing, immediately erases it after a response, never places it in logs, or has no database/logging of any kind. Temporary session entries may remain in RAM until capacity eviction or service restart, and absence of user text from operational logs is not established.
   - Do not claim the design is easier to audit, independently auditable, or objectively more secure merely because sessions are RAM-backed, accounts are not required, or persistent user-facing history is absent.
   - For live search, say retrieved source links are included with successful live-search responses. Do not broaden that into `sources are always shown`.
-  - Do not state or imply that Groq, Cloudflare, or Tavily trains on user conversations. Their retention, deletion, logging, storage, training, and analytics practices are not established by Kalillac's application architecture and require separate current verification.
+  - Do not state or imply that OpenAI or Tavily trains on user conversations. Their retention, deletion, logging, storage, training, and analytics practices are not established by Kalillac's application architecture and require separate current verification.
 - Answer every explicit part of the user's current Kalillac question. Do not silently omit one requested part because another part is more detailed.
-  - If the user asks which AI, LLM, model, or provider Kalillac uses, state the verified current primary model and full fallback chain from the established facts. Do not imply that the model identity is undisclosed.
+  - If the user asks which AI, LLM, model, or provider Kalillac uses, state the verified current model and that there is no automatic fallback model or provider, from the established facts. Do not imply that the model identity is undisclosed.
 - Answer the user's actual question; do not dump unrelated facts.
 - When describing architecture, preserve the established sequence and do not invent additional named backend services, layers, or components.
 - A behavior implemented in code is not automatically a separate backend service.
-  - For a successful live-search request, preserve this sequence: Tavily search -> retrieved search context -> configured inference chain -> response cleanup -> append Tavily source links -> final response.
+  - For a successful live-search request, preserve this sequence: Tavily search -> retrieved search context -> OpenAI inference -> response cleanup -> append Tavily source links -> final response.
 - Do not describe Boolean/symbolic logic as a direct/no-model path.
-  - Preserve the verified inference order: OpenAI GPT-5.6 Luna primary -> Groq GPT-OSS-120B fallback -> Cloudflare Workers AI GPT-OSS-120B fallback -> Groq GPT-OSS-20B final fallback. Distinguish provider/client retries from this application-level fallback chain.
+  - Every model request goes to OpenAI {OPENAI_MODEL}; there is no application-level model fallback chain. If OpenAI fails, the request ends with a temporary unavailable error.
 - If asked what makes Kalillac different or unique, answer at the product level first: privacy-first design, no-account access, temporary RAM-backed session state, controlled routing, deterministic handling where appropriate, sourced live search, direct/helpful response design, and transparency about limits and necessary third-party processing.
 - Describe those as Kalillac design choices, not as features that no other AI can have.
 - When comparing Kalillac with another AI, ground every Kalillac claim in the facts above. Do not invent current capabilities, privacy policies, or architecture for the other AI. If a comparison depends on current facts about the other product, say those facts require live verification rather than guessing.
@@ -8757,7 +8387,7 @@ Revision behavior:
 - Never use action="#" or href="#" as pretend functionality.
 - If the complete revised page fits comfortably, use available detail on typography, spacing, responsive behavior, interaction states, and visual hierarchy before adding more sections.
 - If the revised full page is becoming too long, simplify decorative detail before sacrificing completion.
-- For Kalillac AI pages, write copy about intelligent request routing, per-session memory, the Groq API, FastAPI, Python, and controlled AI behavior.
+- For Kalillac AI pages, write copy about intelligent request routing, per-session memory, OpenAI model inference, FastAPI, Python, and controlled AI behavior.
 - Do not invent fake customers, fake review scores, fake uptime claims, fake revenue, fake certifications, or fake company metrics.
 - Preserve or improve the visual quality. Never downgrade the page from premium UI to basic tutorial structure.
 """
@@ -8825,11 +8455,11 @@ REFERENCE RULES:
 - Build a NEW illustrative implementation from only the verified behavior above; never claim it is Kalillac's exact/private source.
 - Never attribute unspecified components, schemas, persistence, lifecycle, logging/provider behavior, deployment, audit, or security properties to Kalillac.
 - Reasonable details needed by the NEW backend are allowed; when relevant, label an unverified choice in a code comment as an example implementation choice.
-- For V31 native search, preserve this order: Luna tool decision -> application validation -> Tavily -> search results returned to Luna as untrusted data -> application-owned source rendering. Do not describe current V31 native search as a Tavily-to-Groq pipeline.
+- For V31 native search, preserve this order: model tool decision -> application validation -> Tavily -> search results returned to the model as untrusted data -> application-owned source rendering. Do not describe current V31 native search as passing results to any model other than {OPENAI_MODEL}.
 - Never use eval() or exec() for arithmetic, expression parsing, or request handling; use explicit parsing/allowlisted operations.
 - Temporary server-side session state must be bounded with explicit capacity/eviction, never an unbounded global dictionary. Do not call Kalillac's temporary state a cache or claim refresh/tab/browser/session end erases it.
 - Use only response fields needed by the NEW implementation; do not imply Kalillac uses that schema.
-- Model ids are optional in the code: abstracting the provider call or reading ids from configuration is fine. Any model id the code does name must be exactly one of {OPENAI_MODEL}, {GROQ_MODEL}, {CLOUDFLARE_MODEL}, {FALLBACK_GROQ_MODEL}, and any fallback sequence must keep that order.
+- Model ids are optional in the code: abstracting the provider call or reading ids from configuration is fine. Any model id the code does name must be exactly {OPENAI_MODEL}; Kalillac has no fallback model, so do not present any other model as part of Kalillac's configuration.
 
 VERIFIED VALUES VS EXAMPLE VALUES:
 - The only verified numeric limit supplied here is live search: {SESSION_SEARCH_LIMIT} searches per rolling {SESSION_SEARCH_WINDOW}-second window per session. Use exactly that if the code includes a search limit.
@@ -8897,7 +8527,7 @@ MANDATORY UI RULES:
 - Avoid oversized typography that causes horizontal overflow.
 - Use polished spacing, readable contrast, strong visual hierarchy, premium cards, gradients or subtle background effects, and mobile-first layout rules.
 - For vague landing page requests, default the page topic to Kalillac AI unless the user gives a specific topic.
-- For Kalillac AI pages, write copy about intelligent request routing, per-session memory, the Groq API, FastAPI, Python, and controlled AI behavior.
+- For Kalillac AI pages, write copy about intelligent request routing, per-session memory, OpenAI model inference, FastAPI, Python, and controlled AI behavior.
 - Do not invent fake customers, fake review scores, fake uptime claims, fake revenue, fake certifications, or fake company metrics.
 - Never output comments like "<!-- Feature cards here -->" unless the actual feature cards are fully written below it.
 - Do not use placeholder copy like "Feature 1", "Feature 2", "Feature 3", "Service 1", "Lorem ipsum", "Welcome to our landing page", or "This is a simple HTML page".
@@ -9318,10 +8948,7 @@ TOOL CONTROL:
 def _invoke_openai_native_tools(input_items, instructions):
     """Raw OpenAI Responses API call for V31 native function calling."""
 
-    if not OPENAI_API_KEY:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not configured."
-        )
+    _require_openai_configuration()
 
     payload = {
         "model": OPENAI_MODEL,
@@ -9347,12 +8974,6 @@ def _v31_runtime_facts():
         primary_provider="OpenAI",
         primary_model=OPENAI_MODEL,
         reasoning_effort=OPENAI_REASONING_EFFORT,
-        first_fallback_provider="Groq",
-        first_fallback_model=GROQ_MODEL,
-        second_fallback_provider="Cloudflare Workers AI",
-        second_fallback_model=CLOUDFLARE_MODEL,
-        final_fallback_provider="Groq",
-        final_fallback_model=FALLBACK_GROQ_MODEL,
         web_search_provider="Tavily",
     )
 
@@ -9386,42 +9007,31 @@ def _v31_runtime_facts():
             "model_may_answer_directly": True,
         },
         "native_search_flow": [
-            "GPT-5.6 Luna decides whether search_web is needed",
+            f"{OPENAI_MODEL} decides whether search_web is needed",
             "application validates the tool request",
             "application enforces search limits",
             "application calls Tavily",
-            "Tavily results return to Luna as untrusted data",
-            "Luna generates the answer",
+            "Tavily results return to the model as untrusted data",
+            "the model generates the answer",
             "application owns final source-link rendering",
         ],
         "native_path_failure_behavior": (
-            "If the experimental V31 native-tool path raises an exception, "
-            "chat continues through the existing legacy pipeline."
+            "If OpenAI fails or returns unusable output on the native path, "
+            "the request ends with a temporary model-provider-unavailable "
+            "error. Only if the model breaks the native tool protocol does "
+            "chat continue once through the legacy pipeline, which calls "
+            "the same OpenAI model."
         ),
         "legacy_pipeline_provider_chain": [
             {
                 "provider": "OpenAI",
                 "model": OPENAI_MODEL,
             },
-            {
-                "provider": "Groq",
-                "model": GROQ_MODEL,
-            },
-            {
-                "provider": "Cloudflare Workers AI",
-                "model": CLOUDFLARE_MODEL,
-            },
-            {
-                "provider": "Groq",
-                "model": FALLBACK_GROQ_MODEL,
-            },
         ],
         "important_distinction": (
-            "The V31 native-tool path calls OpenAI directly. "
-            "The four-stage provider chain belongs to the legacy pipeline "
-            "that remains available during the transition; do not describe "
-            "every native-tool request as automatically traversing all four "
-            "providers."
+            "Both the V31 native-tool path and the legacy pipeline use "
+            "OpenAI only. There is no automatic fallback to another model "
+            "or provider."
         ),
     }
 
@@ -9491,7 +9101,7 @@ def _run_v31_native_tool_chat(
     history,
     state,
 ):
-    """Run the experimental Luna-native semantic/tool path.
+    """Run the experimental native semantic/tool path (configured OpenAI model).
 
     Application code still controls:
     - tool validation;
@@ -9519,12 +9129,38 @@ def _run_v31_native_tool_chat(
     )
 
     def call_model(input_items):
-        return _invoke_openai_native_tools(
-            input_items,
-            instructions,
-        )
+        # A remote failure in any native round ends the request as provider
+        # unavailable; it is never retried through the legacy pipeline.
+        try:
+            return _invoke_openai_native_tools(
+                input_items,
+                instructions,
+            )
+        except _OPENAI_PATH_STOPS:
+            raise
+        except Exception as openai_error:
+            print(
+                "WARN: V31_OPENAI_UNAVAILABLE "
+                f"{type(openai_error).__name__}{_status_text(openai_error)}"
+            )
+            _raise_if_request_stopped()
+            raise ModelProviderUnavailable() from None
 
     def execute_tool(call):
+        # Tool execution is Kalillac's own code: a failure is an internal
+        # defect, never a reason to retry through the legacy pipeline.
+        try:
+            return run_tool(call)
+        except _OPENAI_PATH_STOPS:
+            raise
+        except Exception as defect:
+            print(
+                "ERROR: V31_TOOL_EXECUTION_FAILED "
+                f"{type(defect).__name__}"
+            )
+            raise ChatInternalError() from None
+
+    def run_tool(call):
         nonlocal search_calls
 
         if (
@@ -9566,7 +9202,7 @@ def _run_v31_native_tool_chat(
 
         # A user-specified public domain always takes precedence.
         # Otherwise, apply the narrow first-party source policy after
-        # Luna has already decided that search is needed.
+        # the model has already decided that search is needed.
         explicit_domains = get_search_domain_filters(
             message
         )
@@ -9608,51 +9244,81 @@ def _run_v31_native_tool_chat(
             ],
         }
 
-    result = run_tool_loop(
-        user_message=str(message),
-        initial_input=_v31_input_items(
-            message,
-            history,
-        ),
-        call_model=call_model,
-        execute_tool=execute_tool,
-        max_tool_rounds=3,
-        max_tool_calls=4,
-        max_continuations=1,
-    )
-
-    reply = clean_ai_reply(
-        result.text
-    )
-
-    # Sources have exactly one owner: Kalillac application code.
-    reply = re.split(
-        r"\n\s*\*\*Sources\*\*\s*\n",
-        reply,
-        maxsplit=1,
-        flags=re.IGNORECASE,
-    )[0].rstrip()
-
-    if result.incomplete:
-        print(
-            "WARN: V31_NATIVE_RESPONSE_INCOMPLETE "
-            f"{result.incomplete_reason}"
+    try:
+        result = run_tool_loop(
+            user_message=str(message),
+            initial_input=_v31_input_items(
+                message,
+                history,
+            ),
+            call_model=call_model,
+            execute_tool=execute_tool,
+            max_tool_rounds=3,
+            max_tool_calls=4,
+            max_continuations=1,
         )
-        reply = mark_incomplete_reply(reply)
+    except _OPENAI_PATH_STOPS:
+        raise
+    except (ToolLoopProtocolError, ToolValidationError):
+        # The model broke the tool protocol; chat() may continue once
+        # through the legacy pipeline (the same OpenAI model).
+        raise
+    except ToolLoopOutputError as unusable:
+        print(
+            "WARN: V31_UNUSABLE_MODEL_OUTPUT "
+            f"{type(unusable).__name__}"
+        )
+        _raise_if_request_stopped()
+        raise ModelProviderUnavailable() from None
+    except Exception as defect:
+        # Tool-result serialization and any other Kalillac-side loop defect.
+        print(
+            "ERROR: V31_NATIVE_LOOP_DEFECT "
+            f"{type(defect).__name__}"
+        )
+        raise ChatInternalError() from None
 
-    if not search_results:
-        return reply
+    try:
+        reply = clean_ai_reply(
+            result.text
+        )
 
-    sources = "\n".join(
-        f"- [{item['title']}]({item['url']})"
-        for item in search_results
-    )
+        # Sources have exactly one owner: Kalillac application code.
+        reply = re.split(
+            r"\n\s*\*\*Sources\*\*\s*\n",
+            reply,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].rstrip()
 
-    return (
-        f"{reply}\n\n"
-        f"**Sources**\n\n"
-        f"{sources}"
-    )
+        if result.incomplete:
+            print(
+                "WARN: V31_NATIVE_RESPONSE_INCOMPLETE "
+                f"{result.incomplete_reason}"
+            )
+            reply = mark_incomplete_reply(reply)
+
+        if not search_results:
+            return reply
+
+        sources = "\n".join(
+            f"- [{item['title']}]({item['url']})"
+            for item in search_results
+        )
+
+        return (
+            f"{reply}\n\n"
+            f"**Sources**\n\n"
+            f"{sources}"
+        )
+    except Exception as defect:
+        # Cleaning, source rendering and incomplete labelling are Kalillac
+        # code: a failure is an internal defect, not a model failure.
+        print(
+            "ERROR: V31_RESPONSE_PROCESSING_FAILED "
+            f"{type(defect).__name__}"
+        )
+        raise ChatInternalError() from None
 
 
 
@@ -9821,19 +9487,27 @@ def chat(message, history, request=None, session_id=None):
                 )
 
             except _OPENAI_PATH_STOPS:
-                # Never fall through to the legacy pipeline after a stop, a
-                # local transport outage or an internal defect.
+                # Request stops, provider unavailability (remote, unusable
+                # output, local outage or configuration) and internal defects
+                # end the request: never a second OpenAI request via legacy.
                 raise
 
-            except Exception as native_error:
-                # Transitional safety behavior only:
-                # if the experimental V31 path itself fails, continue through
-                # the existing known-good pipeline rather than taking down chat.
+            except (ToolLoopProtocolError, ToolValidationError) as native_error:
+                # The model broke the native tool protocol. Continue once
+                # through the legacy pipeline: one more admitted request to
+                # the same OpenAI model, never another provider.
                 print(
-                    "WARN: V31_NATIVE_TOOL_ROUTING_FAILED "
+                    "WARN: V31_NATIVE_PROTOCOL_FAILED "
                     f"{type(native_error).__name__}; "
                     "continuing through legacy pipeline"
                 )
+
+            except Exception as native_error:
+                print(
+                    "ERROR: V31_NATIVE_PATH_DEFECT "
+                    f"{type(native_error).__name__}"
+                )
+                raise ChatInternalError() from None
 
 
         if route == "self_knowledge":
@@ -10884,14 +10558,13 @@ def run_deterministic_tests():
         str(model_family),
     )
     check(
-        "self-knowledge model provider chain",
+        "self-knowledge model is OpenAI-only",
         (
             OPENAI_MODEL in model_reply
-            and GROQ_MODEL in model_reply
-            and CLOUDFLARE_MODEL in model_reply
-            and FALLBACK_GROQ_MODEL in model_reply
             and "OpenAI" in model_reply
-            and "Cloudflare Workers AI" in model_reply
+            and "no automatic fallback" in model_reply
+            and "Workers AI" not in model_reply
+            and "Groq" not in model_reply
         ),
         model_reply,
     )
@@ -10906,7 +10579,10 @@ def run_deterministic_tests():
     )
     check(
         "self-knowledge identity provider disclosure",
-        "Cloudflare Workers AI" in identity_reply,
+        (
+            "no automatic fallback" in identity_reply
+            and "Workers AI" not in identity_reply
+        ),
         identity_reply,
     )
 
@@ -10928,12 +10604,11 @@ def run_deterministic_tests():
         works_reply,
     )
     check(
-        "self-knowledge how-it-works provider chain",
+        "self-knowledge how-it-works provider",
         (
             OPENAI_MODEL in works_reply
-            and GROQ_MODEL in works_reply
-            and CLOUDFLARE_MODEL in works_reply
-            and FALLBACK_GROQ_MODEL in works_reply
+            and "no automatic fallback" in works_reply
+            and "Groq" not in works_reply
         ),
         works_reply,
     )
@@ -10948,26 +10623,24 @@ def run_deterministic_tests():
         architecture_reply,
     )
     check(
-        "self-knowledge architecture provider chain",
+        "self-knowledge architecture provider",
         (
             "OpenAI" in architecture_reply
             and OPENAI_MODEL in architecture_reply
-            and "Cloudflare Workers AI" in architecture_reply
-            and GROQ_MODEL in architecture_reply
-            and CLOUDFLARE_MODEL in architecture_reply
-            and FALLBACK_GROQ_MODEL in architecture_reply
+            and "no automatic fallback" in architecture_reply
+            and "Workers AI" not in architecture_reply
+            and "Groq" not in architecture_reply
         ),
         architecture_reply,
     )
 
     rendered_facts = render_kalillac_facts()
     check(
-        "self-knowledge rendered provider chain",
+        "self-knowledge rendered provider",
         (
             OPENAI_MODEL in rendered_facts
-            and GROQ_MODEL in rendered_facts
-            and CLOUDFLARE_MODEL in rendered_facts
-            and FALLBACK_GROQ_MODEL in rendered_facts
+            and "no automatic fallback" in rendered_facts
+            and "Groq" not in rendered_facts
         ),
         rendered_facts,
     )
@@ -11045,13 +10718,11 @@ def run_deterministic_tests():
         rendered_facts,
     )
     check(
-        "self-knowledge rendered terminal fallback behavior",
+        "self-knowledge rendered terminal provider behavior",
         (
-            "OpenAI primary path, Groq fallback, Cloudflare Workers "
-            '"AI fallback, and final Groq fallback all fail or return unusable "'
-            '"model output" in rendered_facts'
+            "If OpenAI fails or returns unusable model output" in rendered_facts
             and "ModelProviderUnavailable" in rendered_facts
-            and "temporary model-provider-unavailable message" in rendered_facts
+            and "model_provider_unavailable" in rendered_facts
         ),
         rendered_facts,
     )
@@ -11066,12 +10737,10 @@ def run_deterministic_tests():
         reference_facts,
     )
     check(
-        "code-reference provider chain",
+        "code-reference provider",
         (
             OPENAI_MODEL in reference_facts
-            and GROQ_MODEL in reference_facts
-            and CLOUDFLARE_MODEL in reference_facts
-            and FALLBACK_GROQ_MODEL in reference_facts
+            and "Groq" not in reference_facts
         ),
         reference_facts,
     )
@@ -11460,8 +11129,8 @@ def _looks_substantive(reply):
 
 def run_engagement_live_tests():
     """Live behavioral test of the engagement policy against the real model.
-    Runs ONLY when RUN_ENGAGEMENT_TESTS=true and a real GROQ_API_KEY is
-    present. Each benign prompt consumes one Groq generation, so this is
+    Runs ONLY when RUN_ENGAGEMENT_TESTS=true and a real OPENAI_API_KEY is
+    present. Each benign prompt consumes one OpenAI generation, so this is
     opt-in and skipped by default to respect the free infrastructure.
 
     Benign prompts must produce a substantive answer with no canned dead-end
@@ -11471,12 +11140,12 @@ def run_engagement_live_tests():
     if os.getenv("RUN_ENGAGEMENT_TESTS", "false").lower() != "true":
         print(
             "ENGAGEMENT LIVE TESTS: skipped "
-            "(set RUN_ENGAGEMENT_TESTS=true to enable; consumes Groq calls)"
+            "(set RUN_ENGAGEMENT_TESTS=true to enable; consumes OpenAI calls)"
         )
         return None
 
-    if not GROQ_API_KEY:
-        print("ENGAGEMENT LIVE TESTS: skipped (no GROQ_API_KEY)")
+    if not OPENAI_API_KEY:
+        print("ENGAGEMENT LIVE TESTS: skipped (no OPENAI_API_KEY)")
         return None
 
     class _FakeRequest:
@@ -11768,7 +11437,7 @@ class ChatResponse(BaseModel):
 
 # --------------------------- concurrency policy ---------------------------
 # Gradio supplied an implicit queue with a visible UI. Removing it must not
-# mean unbounded simultaneous Groq/Tavily executions from a single worker.
+# mean unbounded simultaneous OpenAI/Tavily executions from a single worker.
 #
 # Two-level, in-process, no external broker:
 #   * MAX_CONCURRENT_CHATS  -- model/search executions running at once
@@ -12399,9 +12068,10 @@ async def _api_chat_with_budget(request, req, history, limits):
                 return _cancelled_response()
             except RequestDeadlineExceeded:
                 return _budget_error(504, "request_timeout")
-            except ProviderTransportUnavailable:
+            except LocalModelServiceUnavailable:
                 # Must precede the broader ModelProviderUnavailable handler:
-                # a local transport outage is not provider exhaustion.
+                # a local outage (transport or configuration) is not a
+                # provider failure.
                 return _budget_error(503, "service_unavailable")
             except (CallBudgetExhausted, ModelProviderUnavailable):
                 return _budget_error(503, "model_provider_unavailable")
@@ -12552,7 +12222,7 @@ async def api_chat(request: _FastAPIRequest):
         _chat_waiting -= 1
         waiting = False
 
-        # chat_core is synchronous and calls out to Groq/Tavily. Running it
+        # chat_core is synchronous and calls out to OpenAI/Tavily. Running it
         # directly here would block the event loop for the whole model call and
         # stall every other request including /api/health. run_in_threadpool
         # hands it to a worker thread and yields control back to the loop.
@@ -12562,8 +12232,16 @@ async def api_chat(request: _FastAPIRequest):
 
         try:
             reply, out_sid = await asyncio.shield(work)
+        except LocalModelServiceUnavailable:
+            # Must precede ModelProviderUnavailable: a local outage (missing
+            # OpenAI configuration) is not a provider failure.
+            return JSONResponse(
+                status_code=503,
+                content={"error": "service_unavailable"},
+                headers={"Cache-Control": "no-store"},
+            )
         except ModelProviderUnavailable:
-            # The complete configured provider chain was exhausted.
+            # OpenAI could not produce a usable answer; there is no fallback.
             # Surface temporary upstream unavailability honestly to the client.
             return JSONResponse(
                 status_code=503,

@@ -18,15 +18,6 @@ class RuntimeConfig:
     primary_model: str
     reasoning_effort: str
 
-    first_fallback_provider: str
-    first_fallback_model: str
-
-    second_fallback_provider: str
-    second_fallback_model: str
-
-    final_fallback_provider: str
-    final_fallback_model: str
-
     web_search_provider: str = "Tavily"
 
 
@@ -35,9 +26,9 @@ def build_runtime_facts(
 ) -> dict[str, Any]:
     """Return safe facts about Kalillac's configured runtime.
 
-    Important distinction:
-    configuration tells us the order Kalillac is designed to attempt.
-    It does not prove which provider handled a particular completed response.
+    Kalillac uses one configured model provider and never falls back to
+    another model or provider automatically. Configuration still does not
+    prove which provider handled a particular completed response.
     """
 
     return {
@@ -46,26 +37,21 @@ def build_runtime_facts(
             "model": config.primary_model,
             "reasoning_effort": config.reasoning_effort,
         },
-        "configured_fallback_chain": [
-            {
-                "provider": config.first_fallback_provider,
-                "model": config.first_fallback_model,
-            },
-            {
-                "provider": config.second_fallback_provider,
-                "model": config.second_fallback_model,
-            },
-            {
-                "provider": config.final_fallback_provider,
-                "model": config.final_fallback_model,
-            },
-        ],
+        "configured_fallback_chain": [],
+        "automatic_model_fallback": False,
+        "model_unavailable_behavior": (
+            "If the configured model provider cannot produce a usable answer, "
+            "the request ends with a temporary model-provider-unavailable "
+            "error instead of an answer from a different model."
+        ),
         "web_search_provider": config.web_search_provider,
+        "web_search_provider_role": (
+            "Used only when live web search runs; it does not generate answers."
+        ),
         "per_message_provider_identity_available": False,
         "per_message_provider_note": (
-            "Kalillac currently knows its configured primary and fallback "
-            "order, but its response contract does not yet preserve metadata "
-            "that proves which provider handled a particular completed "
-            "response."
+            "Kalillac's configured model path is a single provider, but its "
+            "response contract does not yet preserve metadata that proves "
+            "which provider handled a particular completed response."
         ),
     }
