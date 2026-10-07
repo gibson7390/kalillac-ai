@@ -22,6 +22,18 @@
      what the UI shows from what the backend receives. */
   var TURNS = [];
 
+  /* The one exchange whose send did not complete (failed or stopped), or null.
+     { text, history, userRow, shell, draftRevision, outcome }. It never enters
+     TURNS; it stays on screen until it is retried, a new message is sent, or
+     the conversation is reset. */
+  var failedExchange = null;
+
+  /* Bumped by every user edit of the composer (typing, paste, cut, a starter
+     chip). Programmatic clears and restores do not bump it, so a submitted
+     message is restored only while the composer is still the one its send
+     emptied. */
+  var draftRevision = 0;
+
   var conversation = document.getElementById("conversation");
   var thread = document.getElementById("thread");
   var emptyState = document.getElementById("empty");
@@ -316,13 +328,26 @@
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
 
+  var ICON_NEW =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 5v14"/><path d="M5 12h14"/></svg>';
+
   // ---- DOM builders --------------------------------------------------------
+  /* The empty-state node is detached, not discarded, so a new conversation
+     can show it again with its starter chips still wired. */
   function hideEmptyState() {
     if (emptyState && emptyState.parentNode) {
       emptyState.parentNode.removeChild(emptyState);
-      emptyState = null;
     }
     conversation.classList.remove("is-empty");
+  }
+
+  function showEmptyState() {
+    if (emptyState && !emptyState.parentNode) {
+      thread.appendChild(emptyState);
+    }
+    conversation.classList.add("is-empty");
   }
 
   function addUserMessage(text) {
@@ -429,6 +454,37 @@
     return bar;
   }
 
+  function clearActions(shell) {
+    var bars = shell.row.querySelectorAll(".msg-actions");
+    for (var i = 0; i < bars.length; i++) {
+      bars[i].parentNode.removeChild(bars[i]);
+    }
+  }
+
+  /* The single action under a failed or stopped exchange: Retry, or New
+     conversation when the conversation itself is too long. Always visible,
+     since there is no answer to hover over. */
+  function addFailureAction(shell, action, onClick) {
+    var bar = document.createElement("div");
+    bar.className = "msg-actions is-visible";
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "msg-action";
+
+    if (action === "new-conversation") {
+      btn.setAttribute("aria-label", "Start a new conversation");
+      btn.innerHTML = ICON_NEW + "<span>New conversation</span>";
+    } else {
+      btn.setAttribute("aria-label", "Retry this message");
+      btn.innerHTML = ICON_RETRY + "<span>Retry</span>";
+    }
+
+    btn.addEventListener("click", onClick);
+    bar.appendChild(btn);
+    shell.row.appendChild(bar);
+  }
+
   /* Clipboard API needs a secure context. Fall back to a temporary textarea +
      execCommand so copy still works over plain http on a LAN/staging host. */
   function copyText(text, btn) {
@@ -511,18 +567,202 @@
     return out;
   }
 
+  // ---- outcomes --------------------------------------------------------------
+  /* Every unsuccessful send ends in exactly one of these fixed outcomes. The
+     backend's fixed error code selects it; no other response text is ever
+     shown. action: "retry", "new-conversation" or null. */
+  var COPY_UNREACHABLE =
+    "Kalillac couldn't reach the server. Check your connection and try again.";
+  var COPY_INCOMPLETE = "Kalillac couldn't complete the request. Please try again.";
+  var COPY_UNREADABLE = "Kalillac couldn't read that request. Please try again.";
+  var COPY_BUSY = "Kalillac is busy right now. Please try again in a moment.";
+  var COPY_STOPPED = "Stopped.";
+
+  var OUTCOME_UNREACHABLE = { message: COPY_UNREACHABLE, kind: "error", action: "retry" };
+  var OUTCOME_INCOMPLETE = { message: COPY_INCOMPLETE, kind: "error", action: "retry" };
+  var OUTCOME_BUSY = { message: COPY_BUSY, kind: "error", action: "retry" };
+  var OUTCOME_STOPPED = { message: COPY_STOPPED, kind: "notice", action: "retry" };
+
+  var ERROR_OUTCOMES = {
+    invalid_json: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
+    invalid_body: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
+    invalid_request: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
+    empty_message: {
+      message: "Please type a message.", kind: "error", action: null
+    },
+    message_too_long: {
+      message: "That message is too long. Please shorten it and try again.",
+      kind: "error", action: null
+    },
+    history_too_long: {
+      message: "This conversation is too long to continue. " +
+               "Start a new conversation to keep going.",
+      kind: "error", action: "new-conversation"
+    },
+    processing_limit_reached: {
+      message: "This request needed more processing than Kalillac allows for one " +
+               "message. Try simplifying it or splitting it up.",
+      kind: "error", action: null
+    },
+    busy: OUTCOME_BUSY,
+    request_cancelled: OUTCOME_STOPPED,
+    service_unavailable: {
+      message: "Kalillac is temporarily unavailable. Please try again shortly.",
+      kind: "error", action: "retry"
+    },
+    model_provider_unavailable: {
+      message: "Kalillac couldn't get an answer from its AI model just now. " +
+               "Please try again shortly.",
+      kind: "error", action: "retry"
+    },
+    request_timeout: {
+      message: "That took too long and was stopped. Please try again, " +
+               "or try a simpler request.",
+      kind: "error", action: "retry"
+    },
+    internal_error: {
+      message: "Something went wrong on Kalillac's end. Please try again.",
+      kind: "error", action: "retry"
+    }
+  };
+
+  /* An HTTP response arrived but was not a usable reply. A recognized fixed
+     code wins; a bare 429 is busy; anything else could not be completed. */
+  function outcomeForResponse(status, data) {
+    var code = data && typeof data.error === "string" ? data.error : null;
+
+    if (code && Object.prototype.hasOwnProperty.call(ERROR_OUTCOMES, code)) {
+      return ERROR_OUTCOMES[code];
+    }
+
+    if (status === 429) return OUTCOME_BUSY;
+    return OUTCOME_INCOMPLETE;
+  }
+
+  function isAbort(err) {
+    return !!err && err.name === "AbortError";
+  }
+
+  function parseJson(body) {
+    try { return JSON.parse(body); } catch (e) { return null; }
+  }
+
+  // ---- composer ownership -----------------------------------------------------
+  /* Put an unsuccessful exchange's text back in the composer only while the
+     composer is still the empty one its send left behind. Newer text is never
+     overwritten. */
+  function restoreDraft(exchange) {
+    if (input.value !== "" || draftRevision !== exchange.draftRevision) return;
+    input.value = exchange.text;
+    autoGrow();
+    syncSendEnabled();
+  }
+
+  /* A Retry takes its own restored text back out of the composer, but only if
+     the user has not changed it since it was restored. */
+  function reclaimDraft(exchange) {
+    if (input.value !== exchange.text || draftRevision !== exchange.draftRevision) return;
+    input.value = "";
+    autoGrow();
+    syncSendEnabled();
+  }
+
   // ---- core request --------------------------------------------------------
-  /* history is captured BEFORE the request so a retry replays the exact
-     conversation state that preceded the turn being regenerated. */
-  function requestReply(text, history, shell, userRow) {
+  /* One exchange: the submitted text, the completed-history snapshot taken
+     before it was sent, its user row and its assistant shell. Retrying it
+     reuses all four. */
+  function newExchange(text, history, userRow, shell) {
+    return {
+      text: text,
+      history: history,
+      userRow: userRow,
+      shell: shell,
+      draftRevision: draftRevision,
+      outcome: null
+    };
+  }
+
+  function failExchange(exchange, outcome) {
+    exchange.outcome = outcome;
+    clearActions(exchange.shell);
+    showNote(exchange.shell, outcome.message, outcome.kind);
+
+    if (outcome.action === "retry") {
+      addFailureAction(exchange.shell, "retry", function () { retryExchange(exchange); });
+    } else if (outcome.action === "new-conversation") {
+      addFailureAction(exchange.shell, "new-conversation", startNewConversation);
+    }
+
+    failedExchange = exchange;
+    restoreDraft(exchange);
+  }
+
+  /* Render the reply and its actions first; only a fully rendered answer
+     becomes a completed turn. */
+  function completeExchange(exchange, reply, sessionId) {
+    var index = TURNS.length;
+
+    try {
+      renderAssistantText(exchange.shell, reply);
+      clearActions(exchange.shell);
+      addActions(exchange.shell, index);
+    } catch (e) {
+      failExchange(exchange, OUTCOME_INCOMPLETE);
+      return;
+    }
+
+    if (typeof sessionId === "string" && sessionId) SESSION_ID = sessionId;
+
+    TURNS.push({
+      user: exchange.text,
+      assistant: reply,
+      userRow: exchange.userRow,
+      row: exchange.shell.row
+    });
+
+    if (failedExchange === exchange) failedExchange = null;
+    scrollToBottom();
+  }
+
+  function handleResponse(exchange, res) {
+    return res.text().then(function (body) {
+      var data = parseJson(body);
+
+      if (!res.ok) {
+        failExchange(exchange, outcomeForResponse(res.status, data));
+        return;
+      }
+
+      // A 2xx that also carries an error code is ambiguous, not a reply.
+      if (data && typeof data.error === "string") {
+        failExchange(exchange, OUTCOME_INCOMPLETE);
+        return;
+      }
+
+      var reply = data && typeof data.reply === "string" ? data.reply : "";
+
+      if (!reply.trim()) {
+        failExchange(exchange, OUTCOME_INCOMPLETE);
+        return;
+      }
+
+      completeExchange(exchange, reply, data.session_id);
+    }, function (err) {
+      // The response arrived but its body could not be read.
+      failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
+    });
+  }
+
+  function requestReply(exchange) {
     setBusy(true);
-    setThinking(shell);
+    clearActions(exchange.shell);
+    setThinking(exchange.shell);
 
     controller = new AbortController();
 
     var payload = {
-      message: text,
-      history: history,
+      message: exchange.text,
+      history: exchange.history,
       session_id: SESSION_ID
     };
 
@@ -535,72 +775,46 @@
       signal: controller.signal
     })
       .then(function (res) {
-        return res.json().catch(function () { return {}; })
-          .then(function (data) {
-            return { ok: res.ok, status: res.status, data: data };
-          });
+        return handleResponse(exchange, res);
+      }, function (err) {
+        /* No HTTP response was received. A user Stop is "Stopped."; only a
+           genuine fetch rejection means the server could not be reached.
+           NOTE: /api/chat is a non-streaming provider call, so aborting the
+           browser request does not guarantee the upstream model computation
+           stops at that instant; the server may still finish generating and
+           discard the result. */
+        failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
       })
-      .then(function (r) {
-        if (r.ok && r.data && typeof r.data.reply === "string") {
-          if (r.data.session_id) SESSION_ID = r.data.session_id;
-          renderAssistantText(shell, r.data.reply);
-
-          // Commit the completed exchange only now.
-          var index = TURNS.length;
-          TURNS.push({
-            user: text,
-            assistant: r.data.reply,
-            userRow: userRow,
-            row: shell.row
-          });
-          addActions(shell, index);
-          scrollToBottom();
-          return true;
-        }
-        showNote(shell, mapError(r.status, r.data && r.data.error), "error");
-        return false;
+      .then(null, function () {
+        // A failure after the response arrived (processing or rendering).
+        failExchange(exchange, OUTCOME_INCOMPLETE);
       })
-      .catch(function (err) {
-        if (err && err.name === "AbortError") {
-          /* Cancelled by the user. The browser request is aborted immediately.
-             NOTE: /api/chat is a non-streaming provider call, so aborting the
-             browser request does not guarantee the upstream model computation
-             stops at that instant; the server may still finish generating and
-             discard the result. This is an honest description of the current
-             backend, not a claim of upstream cancellation. */
-          showNote(shell, "Stopped.", "notice");
-          // No turn is recorded, so history stays consistent for the next send.
-          return false;
-        }
-        showNote(shell,
-          "Kalillac couldn't reach the server. Check your connection and try again.",
-          "error");
-        return false;
-      })
-      .then(function (result) {
+      .then(function () {
         controller = null;
         setBusy(false);
-        return result;
+        autoGrow();
       });
   }
 
-  function mapError(status, code) {
-    if (code === "empty_message") return "Please type a message.";
-    if (code === "message_too_long")
-      return "That message is too long. Please shorten it and try again.";
-    if (code === "history_too_long")
-      return "This conversation is very long. Reload the page to start a fresh session.";
-    if (code === "model_provider_unavailable" && status === 503)
-      return "Kalillac's AI model provider is temporarily unavailable. Please try again shortly.";
-    if (code === "busy" || status === 429)
-      return "Kalillac is handling several requests right now. Please try again in a moment.";
-    return "Something went wrong on Kalillac's end. Please try again.";
+  /* Remove the failed exchange's rows; it never entered TURNS. */
+  function discardFailedExchange() {
+    if (!failedExchange) return;
+
+    var rows = [failedExchange.userRow, failedExchange.shell.row];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].parentNode) rows[i].parentNode.removeChild(rows[i]);
+    }
+
+    failedExchange = null;
   }
 
   // ---- send ----------------------------------------------------------------
   function send() {
     var text = input.value.trim();
     if (!text || inFlight) return;
+
+    // A deliberate new message replaces any failed exchange still on screen.
+    discardFailedExchange();
 
     // Snapshot history BEFORE this turn: prior completed exchanges only.
     var history = buildHistory();
@@ -612,7 +826,24 @@
 
     stickToBottom = true;
     var shell = addAssistantShell();
-    requestReply(text, history, shell, userRow).then(function () {
+    requestReply(newExchange(text, history, userRow, shell)).then(function () {
+      if (!inFlight) input.focus();
+    });
+  }
+
+  /* Retry a failed or stopped exchange: the same text, the same pre-send
+     history and the same rows. Nothing new is added to the thread. */
+  function retryExchange(exchange) {
+    if (inFlight || failedExchange !== exchange) return;
+
+    /* Ownership is not renewed here: the exchange may restore its text again
+       only if this reclaim emptied the composer itself, which leaves the
+       revision unchanged. A user edit since the restore -- including clearing
+       the composer -- has advanced the revision and is kept. */
+    reclaimDraft(exchange);
+
+    stickToBottom = true;
+    requestReply(exchange).then(function () {
       if (!inFlight) input.focus();
     });
   }
@@ -638,13 +869,38 @@
     }
 
     TURNS.length = index;
+    failedExchange = null;
 
     var history = buildHistory();
     stickToBottom = true;
     var shell = addAssistantShell();
-    requestReply(turn.user, history, shell, turn.userRow).then(function () {
+    requestReply(newExchange(turn.user, history, turn.userRow, shell)).then(function () {
       if (!inFlight) input.focus();
     });
+  }
+
+  /* Start a new conversation in place: forget every completed turn and the
+     server session, remove all rendered messages and show the empty state
+     again. The composer draft is kept. No request is sent; the next message
+     starts a new server session because no session id is sent. */
+  function startNewConversation() {
+    if (inFlight) return;
+
+    TURNS.length = 0;
+    SESSION_ID = null;
+    failedExchange = null;
+    controller = null;
+
+    while (thread.firstChild) {
+      thread.removeChild(thread.firstChild);
+    }
+    showEmptyState();
+
+    stickToBottom = true;
+    setBusy(false);
+    autoGrow();
+    syncSendEnabled();
+    input.focus();
   }
 
   function stop() {
@@ -660,6 +916,8 @@
   }
 
   input.addEventListener("input", function () {
+    // Any user edit (typing, paste, cut) makes this a newer draft.
+    draftRevision++;
     autoGrow();
     syncSendEnabled();
   });
@@ -819,6 +1077,7 @@
       var group = this.getAttribute("data-hint-group") || "";
       var fallback = this.getAttribute("data-prompt") || "";
       input.value = chooseHintPrompt(group, fallback);
+      draftRevision++;   // the user chose new composer text
       autoGrow();
       syncSendEnabled();
       input.focus();
