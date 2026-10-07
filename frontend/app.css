@@ -1,0 +1,1026 @@
+/* ==========================================================================
+   Kalillac AI — native chat interface
+   Design language inherited from the production homepage (index.html/styles.css):
+   light "paper" palette, ink text, Kalillac blue, live-green, mono technical
+   labels, thin borders, restrained shadows. Purpose-built for chat.
+   Mobile-first. No remote fonts, no CDN, no tracking.
+   ========================================================================== */
+
+:root {
+  --paper: #fafbfd;
+  --panel: #ffffff;
+  --panel-2: #f1f4fa;
+  --ink: #0e1526;
+  --muted: #5c677e;
+  --line: #e2e7f1;
+  --line-strong: #cfd7e6;
+  --blue: #3e5bff;
+  --blue-deep: #2a41c8;
+  --blue-soft: #e7ecfd;
+  --live: #12a15c;
+  --live-soft: #e3f7ec;
+  --danger: #b42318;
+  --danger-soft: #fdeceb;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --radius: 12px;
+  --radius-sm: 9px;
+  --shadow: 0 1px 2px rgba(14, 21, 38, 0.05), 0 8px 24px rgba(14, 21, 38, 0.07);
+  --shadow-soft: 0 1px 2px rgba(14, 21, 38, 0.04);
+  --ease: 160ms ease;
+  --rail: clamp(14px, 4vw, 22px);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;              /* the thread scrolls, never the page */
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* App shell fills the dynamic viewport so it works full-page AND in the
+   homepage iframe, and adapts to Safari's changing chrome / keyboard. */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;          /* fallback */
+  height: 100dvh;         /* dynamic viewport for mobile Safari */
+  max-width: 900px;
+  margin: 0 auto;
+  background: var(--paper);
+  padding-top: env(safe-area-inset-top, 0);
+  overflow: hidden;
+}
+
+/* ---------------- Header ----------------
+   Deliberately low-profile: 52px of chrome, one hairline, no shadow. The
+   conversation is the product; the header just labels it. */
+.app-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px var(--rail);
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.brand-logo {
+  height: 24px;
+  width: auto;
+  max-width: 130px;
+  object-fit: contain;
+  display: block;
+}
+
+.brand-logo[hidden] { display: none !important; }
+
+.brand-name {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  font-size: 15.5px;
+  white-space: nowrap;
+}
+
+/* When the logo image loads, the wordmark is redundant. */
+.brand.has-logo .brand-name { display: none; }
+
+.brand-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--blue);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.session-pill {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.session-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--blue);
+  flex: 0 0 auto;
+}
+
+/* ---------------- Conversation ----------------
+   THE LAYOUT FIX: .conversation is the scroll container, and .thread carries
+   margin-top:auto. With one exchange the content sits directly above the
+   composer; as the thread grows past the viewport it scrolls normally. This
+   removes the large dead band the previous build left mid-screen. */
+.conversation {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  scroll-behavior: smooth;
+}
+
+.thread {
+  margin-top: auto;             /* bottom-anchored short conversations */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px var(--rail) 12px;
+  min-width: 0;
+}
+
+/* ---------------- Empty state ----------------
+   Restrained: mark, name, one factual privacy line, three quiet starters.
+   No slogans, no feature grid. */
+/* While the thread is empty it centres in the viewport; margin-top:auto on
+   .thread is neutralised so the intro does not sit against the composer. */
+.conversation.is-empty .thread {
+  margin-top: 0;
+  flex: 1 1 auto;
+  justify-content: center;
+}
+
+.empty {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px 4px 8px;
+}
+
+.empty-mark {
+  width: 124px;
+  height: 124px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255,255,255,0.98) 0 17%, transparent 18%),
+    radial-gradient(circle at 50% 50%, rgba(62,91,255,0.18) 0 42%, transparent 66%),
+    radial-gradient(circle at 50% 50%, rgba(18,161,92,0.10) 0 55%, transparent 74%);
+  color: var(--blue);
+  margin-bottom: 18px;
+  isolation: isolate;
+  box-shadow: 0 0 34px rgba(62,91,255,0.10);
+  animation: signal-breathe 4.8s ease-in-out infinite;
+}
+
+.empty-mark::before {
+  content: "";
+  position: absolute;
+  inset: -34px;
+  z-index: -2;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle,
+      rgba(62,91,255,0.16) 0%,
+      rgba(62,91,255,0.07) 34%,
+      rgba(18,161,92,0.035) 54%,
+      transparent 74%);
+  filter: blur(8px);
+}
+
+.empty-mark::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  z-index: -1;
+  border: 1px solid rgba(62,91,255,0.26);
+  border-radius: 50%;
+  opacity: 0;
+  animation: signal-radar 4.6s ease-out infinite;
+  pointer-events: none;
+}
+
+.signal-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(62,91,255,0.32);
+  box-shadow: inset 0 0 12px rgba(62,91,255,0.05);
+}
+
+.signal-ring-one {
+  inset: 7px;
+  animation: signal-spin 15s linear infinite;
+}
+
+.signal-ring-two {
+  inset: 18px;
+  border-color: rgba(18,161,92,0.32);
+  animation: signal-spin-reverse 10s linear infinite;
+}
+
+.signal-ring-three {
+  inset: 30px;
+  border-style: dashed;
+  border-color: rgba(62,91,255,0.40);
+  animation: signal-spin 7s linear infinite;
+}
+
+.signal-node {
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 11px rgba(62,91,255,0.85);
+}
+
+.signal-ring-two .signal-node {
+  background: var(--live);
+  box-shadow: 0 0 11px rgba(18,161,92,0.8);
+}
+
+.signal-ring-three .signal-node {
+  width: 5px;
+  height: 5px;
+  top: -3px;
+  margin-left: -2.5px;
+  background: #fff;
+  border: 1px solid rgba(62,91,255,0.7);
+  box-shadow: 0 0 9px rgba(62,91,255,0.75);
+}
+
+.signal-center {
+  position: absolute;
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #ffffff 0%, #eef2ff 100%);
+  border: 1px solid rgba(62,91,255,0.25);
+  box-shadow: 0 5px 18px rgba(42,65,200,0.16), inset 0 0 0 1px rgba(255,255,255,0.7);
+  transform: rotate(45deg);
+}
+
+.signal-center-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--blue), var(--live));
+  box-shadow: 0 0 14px rgba(62,91,255,0.72);
+  animation: signal-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes signal-spin { to { transform: rotate(360deg); } }
+@keyframes signal-spin-reverse { to { transform: rotate(-360deg); } }
+
+@keyframes signal-pulse {
+  0%, 100% { transform: scale(0.82); opacity: 0.72; }
+  50% { transform: scale(1.16); opacity: 1; }
+}
+
+@keyframes signal-breathe {
+  0%, 100% { box-shadow: 0 0 30px rgba(62,91,255,0.10); }
+  50% { box-shadow: 0 0 50px rgba(62,91,255,0.22); }
+}
+
+@keyframes signal-radar {
+  0% {
+    transform: scale(0.92);
+    opacity: 0;
+  }
+  14% {
+    opacity: 0.42;
+  }
+  72%, 100% {
+    transform: scale(1.72);
+    opacity: 0;
+  }
+}
+
+.empty-title {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.empty-line {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.empty-hints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.hint {
+  appearance: none;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: border-color var(--ease), color var(--ease), background var(--ease);
+}
+.hint:hover, .hint:focus-visible {
+  border-color: var(--blue);
+  color: var(--blue-deep);
+  background: var(--blue-soft);
+}
+
+/* Empty-state guide: one quiet glow moves across the starter chips until
+   the visitor begins interacting. Kept deliberately softer than the core. */
+.hint.hint-guide-active {
+  border-color: rgba(62, 91, 255, 0.58);
+  color: var(--blue-deep);
+  background: rgba(231, 236, 253, 0.72);
+  box-shadow:
+    0 0 0 3px rgba(62, 91, 255, 0.055),
+    0 0 17px rgba(62, 91, 255, 0.15);
+}
+
+/* ---------------- Message rows ---------------- */
+.msg {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+.msg-user { align-items: flex-end; }
+.msg-assistant { align-items: flex-start; }
+
+.bubble {
+  max-width: min(88%, 660px);
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+
+/* User: compact blue chip, right-aligned. Distinct without being cartoonish. */
+.msg-user .bubble {
+  background: var(--blue);
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 14px 14px 4px 14px;
+  box-shadow: 0 1px 2px rgba(42, 65, 200, 0.22);
+  font-size: 15.5px;
+}
+
+/* Assistant: full-width reading surface with a Kalillac-blue rule on the left.
+   Borrowed from the homepage data-path nodes rather than a chat bubble, which
+   is what keeps this from reading as a generic assistant UI. */
+.msg-assistant .bubble {
+  max-width: 100%;
+  width: 100%;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: 4px var(--radius) var(--radius) 4px;
+  padding: 13px 16px;
+  box-shadow: var(--shadow-soft);
+}
+
+.msg-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.msg-user .msg-role { display: none; }   /* alignment already says who spoke */
+
+/* ---------------- Message actions (Copy / Retry) ---------------- */
+.msg-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 6px;
+  padding-left: 3px;
+  opacity: 0;
+  transition: opacity var(--ease);
+}
+/* Always visible on touch devices, which have no hover. */
+.msg-assistant:hover .msg-actions,
+.msg-actions:focus-within,
+.msg-actions.is-visible { opacity: 1; }
+@media (hover: none) {
+  .msg-actions { opacity: 1; }
+}
+
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color var(--ease), background var(--ease), border-color var(--ease);
+}
+.msg-action svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.msg-action:hover,
+.msg-action:focus-visible {
+  color: var(--blue-deep);
+  background: var(--blue-soft);
+  border-color: rgba(62, 91, 255, 0.2);
+}
+.msg-action.is-done { color: var(--live); background: var(--live-soft); }
+.msg-action:disabled { opacity: 0.4; cursor: default; }
+
+/* ---------------- Rendered Markdown inside assistant bubbles ---------------- */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 10px; }
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 16px 0 8px;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+.md h1 { font-size: 19px; }
+.md h2 { font-size: 17px; }
+.md h3 { font-size: 15.5px; }
+.md ul, .md ol { margin: 0 0 10px; padding-left: 22px; }
+.md li { margin: 3px 0; }
+.md a { color: var(--blue-deep); text-decoration: underline; }
+.msg-user .md a { color: #fff; }
+.md blockquote {
+  margin: 0 0 10px;
+  padding: 4px 12px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
+}
+.md hr { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
+
+/* Inline code + fenced blocks: scroll independently, never widen the page. */
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: 5px;
+  overflow-wrap: break-word;
+}
+.md pre {
+  margin: 0 0 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+.md pre code {
+  display: block;
+  background: none;
+  padding: 0;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* Long unbroken strings (e.g. giant URLs) must not blow out the layout. */
+.md .longword,
+.md a { overflow-wrap: anywhere; }
+
+/* ----- TABLE FIX (the core mobile bug) -----
+   Wrapper scrolls horizontally; page does not. Cells keep a sane min width
+   and DO NOT break ordinary words into one-character-per-line. */
+.md .table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.md table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.md th, .md td {
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+  min-width: 84px;           /* reasonable minimum column width */
+  word-break: normal;        /* never 1-char-per-line */
+  overflow-wrap: normal;
+  white-space: normal;
+}
+.md th { background: var(--panel-2); font-weight: 650; }
+
+/* ---------------- Thinking state ---------------- */
+.thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.thinking .dots span {
+  display: inline-block;
+  width: 5px; height: 5px;
+  margin-right: 3px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: blink 1.2s infinite both;
+}
+.thinking .dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking .dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+
+/* Error / cancellation note */
+.error-note {
+  background: var(--danger-soft);
+  border: 1px solid #f3c9c5;
+  color: var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  font-size: 14px;
+}
+.notice-note {
+  color: var(--muted);
+  font-size: 13.5px;
+  font-style: normal;
+}
+
+/* ---------------- Dock: composer + footer ----------------
+   Composer and footer share one surface so the input reads as attached to the
+   conversation rather than floating at the bottom of an empty page. */
+.dock {
+  flex: 0 0 auto;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.composer {
+  padding: 12px var(--rail) 8px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* Single bordered shell containing textarea + action button, so they read as
+   one control instead of two separate boxes. */
+.composer-shell {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow-soft);
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+.composer-shell:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-soft);
+}
+
+.composer textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  border: none;
+  outline: none;
+  background: none;
+  min-height: 38px;
+  max-height: 168px;
+  padding: 8px 6px 8px 12px;
+  font-family: var(--font-ui);
+  font-size: 16px;          /* >=16px prevents iOS auto-zoom on focus */
+  line-height: 1.45;
+  color: var(--ink);
+  overflow-y: auto;
+}
+.composer textarea::placeholder { color: var(--muted); }
+
+/* One button, two states. */
+.action-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 12px;
+  background: var(--blue);
+  color: #fff;
+  cursor: pointer;
+  transition: background var(--ease), opacity var(--ease), transform var(--ease);
+}
+.action-btn svg { width: 19px; height: 19px; }
+.action-btn:hover { background: var(--blue-deep); }
+.action-btn:active { transform: scale(0.94); }
+.action-btn:focus-visible { outline: 3px solid var(--blue-soft); outline-offset: 2px; }
+.action-btn:disabled { opacity: 0.35; cursor: default; }
+.action-btn:disabled:hover { background: var(--blue); }
+
+.action-btn .icon-stop { display: none; }
+.action-btn.is-stop { background: var(--ink); }
+.action-btn.is-stop:hover { background: #000; }
+.action-btn.is-stop .icon-send { display: none; }
+.action-btn.is-stop .icon-stop { display: block; }
+
+/* ---------------- Footer (privacy / terms / 18+) ---------------- */
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 12px;
+  padding: 0 var(--rail) 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.app-footer a { color: var(--muted); text-decoration: underline; }
+.app-footer a:hover { color: var(--ink); }
+.app-footer .dot-sep { opacity: 0.5; }
+
+/* ---------------- Embedded mode ----------------
+   Set by app.js when the page is framed by the Kalillac homepage. The homepage
+   already supplies the logo, the Privacy/Terms links, and the 18+ notice, so
+   repeating them inside the frame is duplicate chrome that costs vertical
+   space. The private-session indicator STAYS: it describes the app, not the
+   site, and it is the one piece of privacy signalling the homepage does not
+   already carry next to the chat. */
+.is-embedded .brand-logo { display: none; }
+.is-embedded .brand.has-logo .brand-name { display: inline; }
+.is-embedded .app-header { display: none; }
+.is-embedded .app-footer { display: none; }
+.is-embedded .composer { padding-bottom: 12px; }
+
+/* Narrow containers (a slim iframe, a split view). Below this the header
+   cannot hold a wordmark and a pill side by side. */
+@media (max-width: 380px) {
+  .brand-name { font-size: 14px; }
+  .session-pill span:last-child { display: none; }
+  .session-pill { padding: 6px; gap: 0; }
+}
+
+/* ---------------- Responsive ---------------- */
+@media (max-width: 560px) {
+  .empty-mark {
+    width: 108px;
+    height: 108px;
+  }
+  .empty-mark::before {
+    inset: -24px;
+  }
+  .thread { gap: 16px; padding-top: 16px; }
+  .msg-user .bubble { max-width: 90%; font-size: 15px; }
+  .msg-assistant .bubble { padding: 12px 13px; }
+  .brand-name { font-size: 15px; }
+  .empty-title { font-size: 19px; }
+  .empty-hints { gap: 7px; }
+  .hint { font-size: 13px; padding: 7px 12px; }
+  .app-footer { font-size: 11px; gap: 3px 9px; }
+}
+
+/* Landscape phones: reclaim vertical space. */
+@media (max-height: 460px) and (orientation: landscape) {
+  .app-header { padding-top: 6px; padding-bottom: 6px; }
+  .empty { padding-top: 8px; }
+  .empty-mark { display: none; }
+  .composer { padding-top: 8px; }
+  .app-footer { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+
+/* ---------------- Mathematical notation (KaTeX) ----------------
+   KaTeX itself is locally vendored. These rules only integrate its output
+   with the existing assistant bubble and mobile overflow behavior. */
+.md .katex {
+  font-size: 1em;
+}
+
+.md .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  margin: 0.8em 0 1em;
+  padding: 2px 0;
+}
+
+/* Long equations scroll inside the answer instead of widening the page. */
+.md .katex-display > .katex {
+  max-width: none;
+}
+
+/* ===== C24 RESPONSE TYPOGRAPHY — PATCH 1 =====
+   Refines the reading surface without redesigning the chat shell.
+   Existing table/code overflow protections remain authoritative. */
+
+.msg-assistant .md {
+  font-size: 15.5px;
+  line-height: 1.66;
+  letter-spacing: -0.004em;
+}
+
+/* Paragraph rhythm: enough separation to scan, without making replies feel
+   like documents or blog posts. */
+.msg-assistant .md p {
+  margin: 0 0 11px;
+}
+
+.msg-assistant .md > p:last-child {
+  margin-bottom: 0;
+}
+
+/* Headings are deliberately restrained. Kalillac should read like a precise
+   assistant, not a documentation portal. */
+.msg-assistant .md h1,
+.msg-assistant .md h2,
+.msg-assistant .md h3,
+.msg-assistant .md h4,
+.msg-assistant .md h5,
+.msg-assistant .md h6 {
+  color: var(--ink);
+  line-height: 1.28;
+  letter-spacing: -0.018em;
+  margin: 18px 0 8px;
+  text-wrap: balance;
+}
+
+.msg-assistant .md h1 {
+  font-size: 20px;
+  font-weight: 720;
+}
+
+.msg-assistant .md h2 {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.msg-assistant .md h3 {
+  font-size: 16.5px;
+  font-weight: 680;
+}
+
+.msg-assistant .md h4,
+.msg-assistant .md h5,
+.msg-assistant .md h6 {
+  font-size: 15.5px;
+  font-weight: 680;
+}
+
+.msg-assistant .md > h1:first-child,
+.msg-assistant .md > h2:first-child,
+.msg-assistant .md > h3:first-child,
+.msg-assistant .md > h4:first-child {
+  margin-top: 0;
+}
+
+/* Lists should read as grouped ideas rather than a dense text stack. */
+.msg-assistant .md ul,
+.msg-assistant .md ol {
+  margin: 4px 0 12px;
+  padding-left: 24px;
+}
+
+.msg-assistant .md li {
+  margin: 5px 0;
+  padding-left: 2px;
+}
+
+.msg-assistant .md li::marker {
+  color: var(--muted);
+}
+
+.msg-assistant .md li > p {
+  margin: 5px 0;
+}
+
+/* Emphasis stays useful without turning every bold phrase into a visual block. */
+.msg-assistant .md strong {
+  font-weight: 690;
+  color: var(--ink);
+}
+
+/* Links remain obvious, but slightly cleaner than a continuous default
+   underline through descenders. */
+.msg-assistant .md a {
+  color: var(--blue-deep);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--blue-deep) 55%, transparent);
+}
+
+.msg-assistant .md a:hover,
+.msg-assistant .md a:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+/* Inline code should be visually distinct without looking like a badge. */
+.msg-assistant .md :not(pre) > code {
+  font-size: 0.87em;
+  line-height: 1.45;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+/* Fenced code keeps the existing independent horizontal scrolling behavior.
+   These rules change only its visual treatment and reading comfort. */
+.msg-assistant .md pre {
+  margin: 12px 0 14px;
+  padding: 14px 15px;
+  line-height: 1.55;
+  background: var(--panel-2);
+  border-color: var(--line-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.msg-assistant .md pre code {
+  font-size: 13.5px;
+  line-height: inherit;
+}
+
+/* Quotes are intentionally understated rather than callout-card styled. */
+.msg-assistant .md blockquote {
+  margin: 12px 0 14px;
+  padding: 7px 13px;
+  border-left: 3px solid var(--blue);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--blue-soft) 46%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+
+.msg-assistant .md blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Horizontal rules should separate substantial sections without becoming
+   visually dominant. */
+.msg-assistant .md hr {
+  margin: 20px 0;
+  border-top-color: var(--line);
+}
+
+/* Slightly more comfortable tabular reading while preserving the existing
+   width/max-content/mobile-scroll implementation. */
+.msg-assistant .md table {
+  line-height: 1.45;
+}
+
+.msg-assistant .md th {
+  font-weight: 680;
+}
+
+.msg-assistant .md th,
+.msg-assistant .md td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+/* Keep consecutive structured blocks from colliding visually. */
+.msg-assistant .md pre + p,
+.msg-assistant .md .table-wrap + p,
+.msg-assistant .md blockquote + p {
+  margin-top: 2px;
+}
+
+/* Mobile reading surface: retain usable line length and avoid oversized
+   document-style hierarchy on narrow screens. */
+@media (max-width: 560px) {
+  .msg-assistant .md {
+    font-size: 15px;
+    line-height: 1.64;
+  }
+
+  .msg-assistant .md p {
+    margin-bottom: 10px;
+  }
+
+  .msg-assistant .md h1,
+  .msg-assistant .md h2,
+  .msg-assistant .md h3 {
+    margin-top: 16px;
+    margin-bottom: 7px;
+  }
+
+  .msg-assistant .md h1 {
+    font-size: 18px;
+  }
+
+  .msg-assistant .md h2 {
+    font-size: 16.75px;
+  }
+
+  .msg-assistant .md h3 {
+    font-size: 15.75px;
+  }
+
+  .msg-assistant .md ul,
+  .msg-assistant .md ol {
+    padding-left: 21px;
+    margin-bottom: 11px;
+  }
+
+  .msg-assistant .md li {
+    margin: 4px 0;
+  }
+
+  .msg-assistant .md pre {
+    margin: 10px 0 12px;
+    padding: 12px 13px;
+  }
+
+  .msg-assistant .md pre code {
+    font-size: 13px;
+  }
+
+  .msg-assistant .md blockquote {
+    margin: 10px 0 12px;
+    padding: 6px 11px;
+  }
+
+  .msg-assistant .md th,
+  .msg-assistant .md td {
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+}

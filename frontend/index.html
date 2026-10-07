@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- viewport-fit=cover enables env(safe-area-inset-*) on iOS notch devices -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="same-origin">
+  <meta name="robots" content="noindex, follow">
+  <title>Kalillac AI</title>
+  <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
+  <link rel="stylesheet" href="app.css?v=20260924-product">
+</head>
+<body>
+  <!-- Direct full-page use at /app/ and same-origin iframe embed on the
+       homepage both render this same shell. No framework branding. -->
+  <div class="app" role="application" aria-label="Kalillac AI chat">
+
+    <header class="app-header">
+      <div class="brand">
+        <!-- Uses the production logo; falls back to a wordmark if it 404s. -->
+        <img src="/assets/kalillac-ai-logo.png?v=20260820-logo1" alt="" class="brand-logo" id="brand-logo" hidden>
+        <span class="brand-name" id="brand-name">Kalillac AI</span>
+      </div>
+      <span class="session-pill" title="Session memory is temporary. Reloading this page starts a new session.">
+        <span class="session-dot" aria-hidden="true"></span>
+        <span>Session</span>
+      </span>
+    </header>
+
+    <main class="conversation" id="conversation">
+      <!-- The thread carries margin-top:auto so a short conversation sits just
+           above the composer instead of stranding hundreds of pixels of dead
+           space between the last message and the input. -->
+      <div class="thread" id="thread" aria-live="polite" aria-atomic="false">
+
+        <div class="empty" id="empty">
+          <div class="empty-mark signal-core" aria-hidden="true">
+            <span class="signal-ring signal-ring-one"><span class="signal-node"></span></span>
+            <span class="signal-ring signal-ring-two"><span class="signal-node"></span></span>
+            <span class="signal-ring signal-ring-three"><span class="signal-node"></span></span>
+            <span class="signal-center"><span class="signal-center-dot"></span></span>
+          </div>
+          <h1 class="empty-title">Kalillac AI</h1>
+          <p class="empty-line">
+            Ask about research, writing, code, or the current web.
+          </p>
+          <div class="empty-hints">
+            <button type="button" class="hint" data-hint-group="explain" data-prompt="Explain how HTTPS certificate validation works.">Explain a concept</button>
+            <button type="button" class="hint" data-hint-group="code" data-prompt="Write Python that extracts IOCs from a log.">Write some code</button>
+            <button type="button" class="hint" data-hint-group="search" data-prompt="Find and summarize the latest major cybersecurity developments.">Search the web</button>
+          </div>
+        </div>
+
+      </div>
+
+    </main>
+
+    <div class="dock">
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="composer-shell" id="composer-shell">
+          <label for="composer-input" class="sr-only">Message Kalillac AI</label>
+          <textarea id="composer-input" rows="1"
+            placeholder="Message Kalillac AI…"
+            aria-label="Message Kalillac AI"
+            enterkeyhint="send"></textarea>
+
+          <!-- One control, two states. type=button so Stop never submits. -->
+          <button type="button" class="action-btn" id="send-btn"
+                  aria-label="Send message" title="Send">
+            <svg class="icon-send" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>
+            </svg>
+            <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="2"/>
+            </svg>
+          </button>
+        </div>
+      </form>
+
+      <footer class="app-footer">
+        <span>Free · adults 18+</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <a href="/privacy" target="_blank" rel="noopener">Privacy</a>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <a href="/terms" target="_blank" rel="noopener">Terms</a>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Local vendored libraries only; no CDN, no remote runtime fetches. -->
+  <script src="vendor/marked/marked.min.js"></script>
+  <script src="vendor/dompurify/purify.min.js"></script>
+  <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
+  <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
+  <script src="app.js?v=20260827-math1"></script>
+</body>
+</html>
