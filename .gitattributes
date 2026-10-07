@@ -1,0 +1,9 @@
+# Frontend source is LF in the repository and in working copies, regardless
+# of core.autocrlf. Fonts are binary.
+frontend/**/*.html text eol=lf
+frontend/**/*.css text eol=lf
+frontend/**/*.js text eol=lf
+frontend/**/LICENSE text eol=lf
+frontend/**/*.ttf -text
+frontend/**/*.woff -text
+frontend/**/*.woff2 -text
