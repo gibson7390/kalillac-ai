@@ -1,5 +1,6 @@
 import ast
 import json
+import math
 import operator
 import os
 import re
@@ -4136,6 +4137,88 @@ SAFE_MATH_OPS = {
     ast.UAdd: operator.pos,
 }
 
+_CALCULATOR_NODE_TYPES = (
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Constant,
+    *SAFE_MATH_OPS,
+)
+
+# Deterministic-calculator complexity limits. Each is checked before the work
+# it guards, so one request can neither pin the single worker nor build a
+# number too large to format.
+#
+# - CALCULATOR_MAX_EXPRESSION_CHARS bounds the cleaned expression before
+#   ast.parse. MAX_INPUT_CHARS alone is not enough: CPython raises
+#   RecursionError while parsing a 4,000-character unary chain. 256 fits a
+#   31-term chain of five-digit numbers.
+# - CALCULATOR_MAX_AST_DEPTH and CALCULATOR_MAX_AST_NODES bound the recursive
+#   evaluator, which uses one frame per level: a 2,000-term sum parses at
+#   2,000 levels, past the 1,000-frame recursion limit. 32 levels allow a
+#   31-term chain, and 128 nodes cover it at three nodes per term.
+# - CALCULATOR_MAX_RESULT_DIGITS keeps every literal, intermediate and result
+#   within 10**100: at most 101 digits to format (Python refuses int-to-str
+#   beyond 4,300 digits), inside float range, and operands of at most about
+#   333 bits for any single operation. A power is checked against it from
+#   logarithms before it is computed, and a power inside another power's
+#   operand (9**9**9) is rejected outright.
+CALCULATOR_MAX_EXPRESSION_CHARS = 256
+CALCULATOR_MAX_AST_DEPTH = 32
+CALCULATOR_MAX_AST_NODES = 128
+CALCULATOR_MAX_RESULT_DIGITS = 100
+CALCULATOR_MAX_ABS_VALUE = 10 ** CALCULATOR_MAX_RESULT_DIGITS
+
+# One trailing answer-format instruction ("Reply with only the number.",
+# "Please just the result?", "answer with only the answer, please") may
+# follow an arithmetic request. Matched once, at the end of the message only.
+CALCULATOR_ANSWER_FORMAT_SUFFIX = re.compile(
+    r"\b(?:please\s+)?(?:(?:reply|respond|answer)\s+with\s+)?(?:only|just)\s+the\s+"
+    r"(?:number|result|answer)\b(?:\s*,?\s*please\b)?[\s.!?]*$",
+    re.IGNORECASE,
+)
+
+# The only wording a calculator request may carry besides the arithmetic
+# itself: one leading request wrapper, and a trailing "=", "equals" or
+# "equal to" with ordinary final punctuation. Every other word must be a
+# recognized number word or arithmetic phrase (preprocess_calculator_input).
+CALCULATOR_REQUEST_PREFIX = re.compile(
+    r"^(?:what\s+is|what['’]?s|wat\s+is|how\s+much\s+is|calculate|solve)\b\s*"
+)
+CALCULATOR_REQUEST_ENDING = re.compile(
+    r"(?:\s*(?:=|\bequals\b|\bequal\s+to\b|\bequal\b))?[\s?.!,;:]*$"
+)
+
+# Whole expressions shaped like a date or a version range rather than
+# arithmetic, with or without spaces around the separators. They go through
+# normal routing instead of being calculated. These are shape checks, not
+# calendar validation: 2026-13-40 and 3000-3001 are declined too. Other
+# subtraction stays arithmetic, including 2025 - 1, 5000 - 100, 3.12 - 1,
+# 1-2-3 and 100-20-5.
+CALCULATOR_DATE_OR_VERSION_SHAPES = (
+    # year range: 2024-2025, 1850 - 1900 (any four digits minus four digits)
+    re.compile(r"\d{4}\s*-\s*\d{4}"),
+    # day/month/year: 1/2/2026, 12 / 31 / 26
+    re.compile(r"\d{1,2}\s*/\s*\d{1,2}\s*/\s*(?:\d{2}|\d{4})"),
+    # year-month-day: 2026-1-2, 2026-01-02, 2026 - 1 - 2
+    re.compile(r"\d{4}\s*-\s*\d{1,2}\s*-\s*\d{1,2}"),
+    # day-month-year: 1-2-2026, 01-02-2026, 1 - 2 - 2026
+    re.compile(r"\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{4}"),
+    # version range with the same major number: 3.12-3.13, 3.12 - 3.13
+    re.compile(r"(\d+)\.\d+\s*-\s*\1\.\d+"),
+)
+
+# A standalone 0 followed by a numeric-base letter (0x10, 0XFF, 0b1010, 0o10)
+# is base notation, not "0 times ...". Requests containing one are declined
+# before digit-x-digit becomes multiplication; base literals are unsupported.
+CALCULATOR_NUMERIC_BASE_PREFIX = re.compile(r"(?<![\w.])0[xbo][0-9a-z]", re.IGNORECASE)
+
+# Comma-containing numbers. Their commas are removed only when every such
+# number uses thousands grouping (1,000 / 12,345.6); anything else (1,5 /
+# 1,2,3 / 1000,000) keeps its commas, so the request is not pure arithmetic.
+CALCULATOR_COMMA_NUMBER = re.compile(r"\d+(?:,\d+)+")
+CALCULATOR_THOUSANDS_GROUPING = re.compile(r"\d{1,3}(?:,\d{3})+")
+
 
 NUMBER_WORDS = {
     "zero": 0,
@@ -4234,34 +4317,20 @@ def replace_number_words(text):
 
 
 def preprocess_calculator_input(message):
+    """Remove one recognized request wrapper and translate recognized spoken
+    arithmetic. Nothing else is removed: any other word or symbol stays in
+    the text, so the caller can see that the request is not pure arithmetic.
+    """
     text = str(message).strip().lower()
-    text = re.sub(r"(?<=\d),(?=\d)", "", text)
-
-    phrases_to_remove = [
-        "what is",
-        "what's",
-        "whats",
-        "wat is",
-        "what does",
-        "how much is",
-        "calculate",
-        "solve",
-        "what about",
-        "how about",
-        "and what about",
-        "equal",
-        "equals",
-        "equal to",
-    ]
-
-    for phrase in phrases_to_remove:
-        text = text.replace(phrase, " ")
+    text = remove_thousands_separators(text)
+    text = CALCULATOR_REQUEST_PREFIX.sub("", text, count=1)
+    text = CALCULATOR_REQUEST_ENDING.sub("", text, count=1)
 
     text = replace_number_words(text)
 
     # Spoken exponent and percentage-of phrasing.
-    text = re.sub(r"\bto the power of\b", "**", text)
     text = re.sub(r"\braised to the power of\b", "**", text)
+    text = re.sub(r"\bto the power of\b", "**", text)
     text = re.sub(r"\bsquared\b", "**2", text)
     text = re.sub(r"\bcubed\b", "**3", text)
     text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:%|percent)\s+of\b", r"(\1/100)*", text)
@@ -4273,211 +4342,192 @@ def preprocess_calculator_input(message):
     text = re.sub(r"\bplus\b", "+", text)
     text = re.sub(r"\bminus\b", "-", text)
 
-    text = re.sub(r"(?<=\d)\s*[xX]\s*(?=\d)", "*", text)
-    text = re.sub(r"[^0-9+\-*/().\s]", " ", text)
+    text = re.sub(r"(?<=\d)\s*x\s*(?=\d)", "*", text)
     text = re.sub(r"\*\s+\*", "**", text)
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
 
 
+def remove_thousands_separators(text):
+    """Text with thousands-grouping commas removed, or unchanged when any
+    comma-containing number is not valid grouping (including grouping inside
+    a decimal part, as in 1.000,5)."""
+    numbers = list(CALCULATOR_COMMA_NUMBER.finditer(text))
+
+    for number in numbers:
+        start = number.start()
+
+        if (start and text[start - 1] == ".") or not (
+            CALCULATOR_THOUSANDS_GROUPING.fullmatch(number.group(0))
+        ):
+            return text
+
+    return CALCULATOR_COMMA_NUMBER.sub(lambda number: number.group(0).replace(",", ""), text)
+
+
+def calculator_expression_from(cleaned_message):
+    """The arithmetic expression a suffix-cleaned message reduces to through
+    recognized wrappers and translations alone, or None when anything else
+    (a word, a currency or percent sign, a second clause, base notation, a
+    non-grouping comma) remains."""
+    if CALCULATOR_NUMERIC_BASE_PREFIX.search(str(cleaned_message)):
+        return None
+
+    text = preprocess_calculator_input(cleaned_message)
+
+    if not re.fullmatch(r"[0-9+\-*/().\s]+", text) or not re.search(r"\d", text):
+        return None
+
+    return text
+
+
+def strip_calculator_answer_format(message):
+    return CALCULATOR_ANSWER_FORMAT_SUFFIX.sub("", str(message), count=1).strip()
+
+
+def parse_safe_math_expression(text):
+    """The allowlisted arithmetic AST for text, or None. Parse only: nothing
+    is evaluated, compiled or executed."""
+    if not text or len(text) > CALCULATOR_MAX_EXPRESSION_CHARS:
+        return None
+
+    try:
+        tree = ast.parse(text, mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+
+    for node in ast.walk(tree):
+        if type(node) not in _CALCULATOR_NODE_TYPES:
+            return None
+
+        if isinstance(node, ast.Constant) and type(node.value) not in (int, float):
+            return None
+
+    return tree
+
+
+def is_safe_math_expression(text):
+    return parse_safe_math_expression(text) is not None
+
+
+def check_calculator_complexity(tree):
+    """Reject an expression whose evaluation could be unbounded, before any
+    of it is evaluated."""
+    node_count = 0
+    pending = [(tree, 1, False)]
+
+    while pending:
+        node, depth, inside_power = pending.pop()
+        node_count += 1
+
+        if node_count > CALCULATOR_MAX_AST_NODES:
+            raise ValueError("Expression has too many parts")
+
+        if depth > CALCULATOR_MAX_AST_DEPTH:
+            raise ValueError("Expression is nested too deeply")
+
+        is_power = isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow)
+
+        if is_power and inside_power:
+            raise ValueError("Nested exponentiation is not supported")
+
+        if isinstance(node, ast.Constant):
+            bounded_calculator_value(node.value)
+
+        for child in ast.iter_child_nodes(node):
+            pending.append((child, depth + 1, inside_power or is_power))
+
+
+def bounded_calculator_value(value):
+    if type(value) not in (int, float):
+        raise ValueError("Result is not a real number")
+
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("Result is not finite")
+
+    if abs(value) > CALCULATOR_MAX_ABS_VALUE:
+        raise ValueError("Result is too large")
+
+    return value
+
+
+def check_power_bounds(base, exponent):
+    # 0**n and (+/-1)**n never grow (0 to a negative power raises
+    # ZeroDivisionError); otherwise the result has about
+    # exponent * log10(|base|) digits.
+    if base == 0 or abs(base) == 1:
+        return
+
+    if exponent * math.log10(abs(base)) > CALCULATOR_MAX_RESULT_DIGITS:
+        raise ValueError("Power is too large")
+
+
 def safe_eval_math_node(node):
     if isinstance(node, ast.Expression):
         return safe_eval_math_node(node.body)
 
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return bounded_calculator_value(node.value)
 
     if isinstance(node, ast.BinOp) and type(node.op) in SAFE_MATH_OPS:
         left = safe_eval_math_node(node.left)
         right = safe_eval_math_node(node.right)
-        return SAFE_MATH_OPS[type(node.op)](left, right)
+
+        if isinstance(node.op, ast.Pow):
+            check_power_bounds(left, right)
+
+        return bounded_calculator_value(SAFE_MATH_OPS[type(node.op)](left, right))
 
     if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_MATH_OPS:
         operand = safe_eval_math_node(node.operand)
-        return SAFE_MATH_OPS[type(node.op)](operand)
+        return bounded_calculator_value(SAFE_MATH_OPS[type(node.op)](operand))
 
     raise ValueError("Unsafe or unsupported expression")
 
 
 def is_calculator_request(message):
-    raw = str(message).strip().lower()
-    processed = preprocess_calculator_input(message)
+    cleaned = strip_calculator_answer_format(message)
+    expression = calculator_expression_from(cleaned)
 
-    # Writing ranges ("2-3 sentences", "3-5 examples") are not arithmetic.
-    if re.search(
-        r"\b\d+\s*-\s*\d+\s*"
-        r"(sentence|paragraph|word|line|bullet|point|item|example|question|page|step|row|column|section)s?\b",
-        raw,
-    ):
+    # Ownership needs the whole request to reduce, through recognized
+    # wrappers and arithmetic phrases only, to an expression with an
+    # operator. Any remaining word or symbol ("half", "percent" without
+    # "of", "and", "dollars", "season", "python") means the message is not
+    # pure arithmetic and continues through normal routing.
+    if expression is None or not re.search(r"[+\-*/]", expression):
         return False
 
-    if not processed or len(processed) < 2:
+    if any(shape.fullmatch(expression) for shape in CALCULATOR_DATE_OR_VERSION_SHAPES):
         return False
 
-    conceptual_words = [
-        "explain",
-        "why",
-        "boolean",
-        "logic",
-        "algebra",
-        "theory",
-    ]
-
-    if any(word in raw for word in conceptual_words):
-        return False
-
-    # Prevent calculator from hijacking long formatting prompts,
-    # logic prompts, code prompts, or normal explanation requests.
-    non_math_indicators = [
-        "explain",
-        "formatting rules",
-        "response must",
-        "include",
-        "heading",
-        "bullet",
-        "table",
-        "code block",
-        "plaintext",
-        "json response",
-        "authentication",
-        "boolean",
-        "logic",
-        "paradox",
-        "statement",
-        "rule",
-        "rules",
-        "question:",
-    ]
-
-    if len(raw) > 80 and any(indicator in raw for indicator in non_math_indicators):
-        return False
-
-    math_question_starters = (
-        "what is ",
-        "what's ",
-        "whats ",
-        "wat is ",
-        "calculate ",
-        "solve ",
-        "how much is ",
-    )
-
-    explicit_math_words = [
-        "plus",
-        "minus",
-        "times",
-        "divided",
-        "multiplied",
-        "over",
-        "to the power of",
-        "percent of",
-        "% of",
-    ]
-
-    digit_count = len(re.findall(r"\d", processed))
-    operator_count = len(re.findall(r"[\+\-\*\/]", processed))
-
-    if digit_count == 0:
-        return False
-
-    if raw.startswith(math_question_starters) and operator_count >= 1:
+    # Letter-free input is unmistakably an attempted calculation, so it stays
+    # calculator-owned even when malformed and gets the parser-error reply.
+    # A worded request is claimed only when it yields one structurally safe
+    # expression: "what is 2 plus" continues through normal routing instead.
+    if not re.search(r"[a-z]", cleaned.lower()):
         return True
 
-    if any(word in raw for word in explicit_math_words) and digit_count >= 1:
-        return True
-
-    # The bare-expression branch below inspects `processed`, which has had
-    # every non-math character replaced with a space. A sentence containing
-    # digits with slashes or dots therefore survives as pseudo-arithmetic:
-    # "fix this fetch call to https://api.example.com/v1 in my script" and
-    # "update the price to 19.99/month in styles.css" both matched, and
-    # calculator outranks code in the route priority. Only allow the bare
-    # branch when the original message contains no substantive non-math
-    # words, so version paths, URLs, CSS values, and prices fall through
-    # to their correct routes.
-    arithmetic_vocabulary = {
-        "what",
-        "whats",
-        "wat",
-        "is",
-        "the",
-        "a",
-        "an",
-        "of",
-        "to",
-        "and",
-        "by",
-        "how",
-        "much",
-        "plus",
-        "minus",
-        "times",
-        "divided",
-        "multiplied",
-        "over",
-        "calculate",
-        "solve",
-        "equal",
-        "equals",
-        "percent",
-        "half",
-        "squared",
-        "cubed",
-        "power",
-        "raised",
-        "zero",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-        "ten",
-        "eleven",
-        "twelve",
-        "thirteen",
-        "fourteen",
-        "fifteen",
-        "sixteen",
-        "seventeen",
-        "eighteen",
-        "nineteen",
-        "twenty",
-        "thirty",
-        "forty",
-        "fifty",
-        "sixty",
-        "seventy",
-        "eighty",
-        "ninety",
-        "hundred",
-        "thousand",
-        "million",
-        "billion",
-    }
-
-    residual_words = re.findall(r"[a-z]{2,}", raw)
-
-    if any(word not in arithmetic_vocabulary for word in residual_words):
+    try:
+        return is_safe_math_expression(expression)
+    except Exception:
+        # User text must never turn routing into an application error.
         return False
-
-    return bool(
-        re.fullmatch(r"[0-9\s\+\-\*\/\.\()]+", processed) and operator_count >= 1
-    )
 
 
 def calculate_expression(message):
-    text = preprocess_calculator_input(message)
-
-    if not text:
-        return None
-
     try:
-        parsed = ast.parse(text, mode="eval")
+        expression = calculator_expression_from(strip_calculator_answer_format(message))
+
+        if expression is None:
+            return None
+
+        parsed = parse_safe_math_expression(expression)
+
+        if parsed is None:
+            return None
+
+        check_calculator_complexity(parsed)
         return safe_eval_math_node(parsed)
     except ZeroDivisionError:
         return "division_by_zero"
