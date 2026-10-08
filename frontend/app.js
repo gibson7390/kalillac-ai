@@ -767,7 +767,9 @@
     };
 
     // Same-origin: the frontend is served at /app/ and the API at /api/, so no
-    // CORS is involved and no credentials/cookies are sent.
+    // CORS is involved. fetch's default credentials mode ("same-origin") lets
+    // the browser attach any same-origin cookie; this app never sets or reads
+    // one.
     return fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -812,6 +814,11 @@
   function send() {
     var text = input.value.trim();
     if (!text || inFlight) return;
+
+    // Framed as the compact homepage card: ask the homepage to present this
+    // chat full-screen. The message carries no text; this send continues
+    // below either way, exactly once.
+    notifyPromptSubmitted();
 
     // A deliberate new message replaces any failed exchange still on screen.
     discardFailedExchange();
@@ -1106,6 +1113,57 @@
   var isEmbedded = false;
   try { isEmbedded = window.self !== window.top; } catch (e) { isEmbedded = true; }
   if (isEmbedded) document.body.classList.add("is-embedded");
+
+  /* Homepage handoff (site/src/embed-protocol.ts defines the same protocol).
+     Two messages, neither carrying any prompt or conversation text:
+     - to the parent: { type: EMBED_PROMPT_SUBMITTED, version: 1 } when a
+       valid prompt is being sent while this chat is the compact card;
+     - from the parent: { type: EMBED_PRESENTATION, version: 1,
+       expanded: boolean }, its current presentation.
+     Messages go only to this exact origin, never "*", and an incoming message
+     counts only from this exact origin, from the parent window itself, with
+     the exact type, version and keys. Expanded, the chat shows its standalone
+     chrome; its prompt submission never depends on the parent answering. */
+  var EMBED_PROTOCOL_VERSION = 1;
+  var EMBED_PROMPT_SUBMITTED = "kalillac:embed:prompt-submitted";
+  var EMBED_PRESENTATION = "kalillac:embed:presentation";
+  var embedExpanded = false;
+
+  function notifyPromptSubmitted() {
+    if (!isEmbedded || embedExpanded) return;
+    try {
+      window.parent.postMessage(
+        { type: EMBED_PROMPT_SUBMITTED, version: EMBED_PROTOCOL_VERSION },
+        window.location.origin
+      );
+    } catch (e) { /* no reachable parent: the send continues regardless */ }
+  }
+
+  function isPresentationMessage(event) {
+    if (event.origin !== window.location.origin) return false;
+    if (event.source !== window.parent || window.parent === window) return false;
+
+    var data = event.data;
+    if (!data || typeof data !== "object" ||
+        Object.getPrototypeOf(data) !== Object.prototype) return false;
+
+    var keys = Object.keys(data).sort();
+    return keys.length === 3 && keys[0] === "expanded" && keys[1] === "type" &&
+           keys[2] === "version" &&
+           data.type === EMBED_PRESENTATION &&
+           data.version === EMBED_PROTOCOL_VERSION &&
+           typeof data.expanded === "boolean";
+  }
+
+  if (isEmbedded) {
+    window.addEventListener("message", function (event) {
+      if (!isPresentationMessage(event)) return;
+
+      embedExpanded = event.data.expanded;
+      document.body.classList.toggle("is-expanded", embedExpanded);
+      if (stickToBottom) scrollToBottom(true);
+    });
+  }
 
   if (emptyState) conversation.classList.add("is-empty");
   syncSendEnabled();
