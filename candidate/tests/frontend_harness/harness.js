@@ -10,6 +10,10 @@
    - /app/?scenario=<name>: run one scenario against the real app.
    - /__harness__/runner?scenarios=a,b,...: run each scenario in a fresh
      same-origin iframe and write every result, as JSON, into <pre id="results">.
+     The runner is each scenario's parent window, so it also records every
+     message the framed chat posts to its parent (the homepage handoff
+     protocol). It never answers them, so the chat stays in its compact
+     embedded presentation throughout.
 
    No request leaves the page: fetch is replaced before app.js loads. */
 (function () {
@@ -32,6 +36,12 @@
         chain = chain.then(function () {
           return new Promise(function (resolve) {
             var frame = document.createElement("iframe");
+            var messages = [];
+            var onMessage = function (event) {
+              if (event.source !== frame.contentWindow) return;
+              messages.push({ origin: event.origin, data: event.data });
+            };
+            window.addEventListener("message", onMessage);
             frame.setAttribute("allow", "clipboard-write");
             frame.src = "/app/?scenario=" + encodeURIComponent(name);
             document.body.appendChild(frame);
@@ -42,7 +52,10 @@
               var done = win && win.__HARNESS_RESULT__;
 
               if (done || waited >= 20000) {
+                window.removeEventListener("message", onMessage);
                 results[name] = done || { error: "timeout" };
+                results[name].parentMessages = messages;
+                results[name].runnerOrigin = location.origin;
                 frame.parentNode.removeChild(frame);
                 resolve();
                 return;
@@ -424,6 +437,14 @@
     a.snap("regenerated");
     await a.send("question three");
     a.snap("after-next");
+  };
+
+  // One character over the backend's 4,000-character limit: the client sends
+  // it unchanged, once, and shows the fixed message_too_long copy.
+  SCENARIOS.message_too_long_4001 = async function (a) {
+    a.respondWith({ status: 422, json: { error: "message_too_long" } });
+    await a.send(new Array(4002).join("x"));
+    a.snap("failed");
   };
 
   SCENARIOS.history_too_long_new_conversation = async function (a) {

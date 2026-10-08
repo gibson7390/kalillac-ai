@@ -7,3 +7,14 @@ frontend/**/LICENSE text eol=lf
 frontend/**/*.ttf -text
 frontend/**/*.woff -text
 frontend/**/*.woff2 -text
+
+# The marketing site source is LF as well. Images are binary.
+site/**/*.ts text eol=lf
+site/**/*.tsx text eol=lf
+site/**/*.css text eol=lf
+site/**/*.html text eol=lf
+site/**/*.json text eol=lf
+site/**/*.svg text eol=lf
+site/**/*.txt text eol=lf
+site/.gitignore text eol=lf
+site/**/*.png -text

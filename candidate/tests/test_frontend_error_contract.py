@@ -35,8 +35,10 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261006-error-contract1"
-# The baseline this slice started from; only app.js and index.html may differ
+CACHE_KEY = "20261008-homepage-handoff1"
+CSS_CACHE_KEY = "20261008-homepage-handoff1"
+# The baseline the error-contract slice started from; only app.js, app.css
+# (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
 BASELINE_COMMIT = "973e2c9099ca9f44d17821d33b94b849e1fbd749"
 # Edge writes internal diagnostics to stderr that vary from run to run (for
@@ -111,6 +113,7 @@ SCENARIOS = (
         "newer_draft_during_request", "edited_draft_then_retry", "unedited_draft_retry",
         "history_too_long_new_conversation", "success_copy_and_retry",
         "cleared_draft_then_retry", "retry_completed_with_later_failure",
+        "message_too_long_4001",
     ]
 )
 
@@ -643,6 +646,40 @@ def test_history_too_long_offers_a_real_new_conversation(browser_results):
     assert after["emptyShown"] is False
 
 
+# --- input limit and the embedded handoff signal ---------------------------------------------------
+
+
+def test_input_over_4000_characters_is_sent_once_and_refused_with_fixed_copy(browser_results):
+    result = scenario(browser_results, "message_too_long_4001")
+    failed = step(result, "failed")
+    (body,) = bodies(result)
+
+    # The client neither truncates nor blocks it; the backend's 4,000-character
+    # limit answers message_too_long and the fixed copy is shown.
+    assert body == {"message": "x" * 4001, "history": [], "session_id": None}
+    assert_failed(failed, COPY["message_too_long"], retry=False, user="x" * 4001)
+    assert_idle(failed, composer="x" * 4001)
+
+
+def test_embedded_chat_signals_its_parent_once_per_send_and_never_with_text(browser_results):
+    """Every scenario runs framed by the runner, which never answers, so the
+    chat stays compact: each new send (not a Retry) posts exactly one
+    {type, version} message to the exact runner origin, before or alongside
+    its request, and no message carries any text."""
+    for name, result in browser_results["results"].items():
+        for message in result["parentMessages"]:
+            assert message["origin"] == result["runnerOrigin"], name
+            assert message["data"] == {"type": "kalillac:embed:prompt-submitted", "version": 1}, name
+
+    counts = {name: len(browser_results["results"][name]["parentMessages"])
+              for name in ("success", "stop_then_retry", "retry_success", "code_busy",
+                           "history_too_long_new_conversation", "message_too_long_4001")}
+    # success: two sends. stop_then_retry: one send + Retry. retry_success:
+    # three sends + Retry. code_*: two sends. history reset: three sends.
+    assert counts == {"success": 2, "stop_then_retry": 1, "retry_success": 3, "code_busy": 2,
+                      "history_too_long_new_conversation": 3, "message_too_long_4001": 1}
+
+
 # --- static contract (always runs) -----------------------------------------------------------------
 
 
@@ -708,7 +745,7 @@ def test_app_js_cache_key():
     page = INDEX_HTML.read_text(encoding="utf-8")
 
     assert re.findall(r'src="app\.js\?v=([^"]+)"', page) == [CACHE_KEY]
-    assert 'href="app.css?v=20260924-product"' in page
+    assert re.findall(r'href="app\.css\?v=([^"]+)"', page) == [CSS_CACHE_KEY]
     assert page.count("?v=0.18.4") == 3
 
 
@@ -727,9 +764,9 @@ def test_production_and_storage_boundaries():
         assert not re.search(forbidden, source), forbidden
 
 
-def test_only_app_js_and_index_html_changed_in_the_frontend():
+def test_only_app_js_app_css_and_index_html_changed_in_the_frontend():
     """Relative to the imported baseline, the frontend source changed only in
-    app.js and index.html (CSS and vendored assets are untouched)."""
+    app.js, app.css and index.html (vendored assets are untouched)."""
     git = shutil.which("git")
     assert git, "git is required for this check"
 
@@ -742,4 +779,6 @@ def test_only_app_js_and_index_html_changed_in_the_frontend():
         cwd=REPO, capture_output=True, text=True, check=True,
     ).stdout.split()
 
-    assert set(changed) | set(untracked) <= {"frontend/app.js", "frontend/index.html"}
+    assert set(changed) | set(untracked) <= {
+        "frontend/app.js", "frontend/app.css", "frontend/index.html",
+    }
