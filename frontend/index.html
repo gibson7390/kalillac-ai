@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261009-chat-workspace1">
+  <link rel="stylesheet" href="app.css?v=20261009-homepage-redesign1">
 </head>
 <body>
   <!-- Direct full-page use at /app/ and same-origin iframe embed on the
@@ -35,20 +35,17 @@
       <div class="thread" id="thread" aria-live="polite" aria-atomic="false">
 
         <div class="empty" id="empty">
-          <div class="empty-mark signal-core" aria-hidden="true">
-            <span class="signal-ring signal-ring-one"><span class="signal-node"></span></span>
-            <span class="signal-ring signal-ring-two"><span class="signal-node"></span></span>
-            <span class="signal-ring signal-ring-three"><span class="signal-node"></span></span>
-            <span class="signal-center"><span class="signal-center-dot"></span></span>
-          </div>
-          <h1 class="empty-title">Kalillac AI</h1>
+          <h2 class="empty-title">What are you working on?</h2>
           <p class="empty-line">
-            Ask about research, writing, code, or the current web.
+            Bring a difficult question, a rough draft, broken code, or something current.
           </p>
-          <div class="empty-hints">
-            <button type="button" class="hint" data-hint-group="explain" data-prompt="Explain how HTTPS certificate validation works.">Explain a concept</button>
-            <button type="button" class="hint" data-hint-group="code" data-prompt="Write Python that extracts IOCs from a log.">Write some code</button>
-            <button type="button" class="hint" data-hint-group="search" data-prompt="Find and summarize the latest major cybersecurity developments.">Search the web</button>
+          <!-- Each example only fills the composer; nothing is sent until the
+               visitor sends it. -->
+          <div class="empty-hints" role="group" aria-label="Example prompts">
+            <button type="button" class="hint" data-prompt="Help me reason through a difficult decision">Help me reason through a difficult decision</button>
+            <button type="button" class="hint" data-prompt="Rewrite this without losing my voice">Rewrite this without losing my voice</button>
+            <button type="button" class="hint" data-prompt="Explain why this code fails">Explain why this code fails</button>
+            <button type="button" class="hint" data-prompt="Research this and show me the sources">Research this and show me the sources</button>
           </div>
         </div>
 
@@ -94,6 +91,6 @@
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
-  <script src="app.js?v=20261009-chat-workspace1"></script>
+  <script src="app.js?v=20261009-homepage-redesign1"></script>
 </body>
 </html>

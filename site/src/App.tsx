@@ -1,5 +1,5 @@
-import { type MouseEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, BookOpen, Code2, Compass, FileText, Menu, MessageSquare, Search, Sparkles, X } from 'lucide-react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowRight, Code2, FileText, Menu, Search, Sparkles, X } from 'lucide-react';
 import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
@@ -16,10 +16,9 @@ const IS_FRAMED = (() => {
   try { return window.self !== window.top; } catch { return true; }
 })();
 
-function SiteHeader({ onTryKalillac }: { onTryKalillac?: (event: MouseEvent<HTMLAnchorElement>) => void }) {
+function SiteHeader() {
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
-  const tryKalillac = (event: MouseEvent<HTMLAnchorElement>) => { close(); onTryKalillac?.(event); };
   return (
     <header className="site-header">
       <div className="container-wide site-header-inner">
@@ -28,9 +27,8 @@ function SiteHeader({ onTryKalillac }: { onTryKalillac?: (event: MouseEvent<HTML
         </Link>
         <nav className="site-nav" aria-label="Site navigation">
           <a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>
-          <Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>
+          <a href="/#privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</a>
           <a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>
-          <a href="/#chat" className="nav-cta" data-testid="link-try-nav" onClick={tryKalillac}>Try Kalillac</a>
           <button type="button" className="mobile-nav-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-site-menu" aria-label={open ? 'Close navigation menu' : 'Open navigation menu'} data-testid="button-mobile-menu">
             {open ? <X size={19} /> : <Menu size={19} />}
           </button>
@@ -39,9 +37,8 @@ function SiteHeader({ onTryKalillac }: { onTryKalillac?: (event: MouseEvent<HTML
       {open && (
         <nav id="mobile-site-menu" className="mobile-site-menu" aria-label="Mobile navigation">
           <a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>
-          <Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>
+          <a href="/#privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</a>
           <a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>
-          <a href="/#chat" onClick={tryKalillac} data-testid="link-mobile-try">Try Kalillac</a>
         </nav>
       )}
     </header>
@@ -81,7 +78,7 @@ function OrbitalAssistant() {
   );
 }
 
-// Space kept between the sticky site header and the chat workspace when a
+// Space kept between the sticky site header and the chat workspace when the
 // CTA brings it into view.
 const COMPOSER_GAP_BELOW_HEADER = 16;
 
@@ -122,10 +119,10 @@ function useChatWorkspace() {
     }
   }, []);
 
-  /* Both CTAs ("Try Kalillac", "Start a private session") land here: the
-     workspace is brought into view, then the real message input inside the
-     same-origin chat is focused with preventScroll, so focusing never causes
-     a second, browser-generated jump. */
+  /* "Start a private session" lands here: the workspace is brought into
+     view, then the real message input inside the same-origin chat is focused
+     with preventScroll, so focusing never causes a second, browser-generated
+     jump. */
   const focusChat = useCallback(() => {
     bringIntoView();
 
@@ -151,11 +148,414 @@ function EmbeddedChat({ workspace }: { workspace: ReturnType<typeof useChatWorks
   );
 }
 
+/* ---------------- Privacy and provider-flow diagram ----------------
+   One inline SVG per layout: a horizontal drawing for wide screens and a
+   vertical one for narrow screens (CSS shows exactly one, so assistive
+   technology meets exactly one). Both have the same four primary stages.
+   The text inside each SVG is part of the image; its accessible title and
+   description point to the semantic list that follows it. */
+
+function FlowMarkers({ suffix }: { suffix: string }) {
+  return (
+    <defs>
+      <marker id={`flow-arrow-${suffix}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="#5b93ff" />
+      </marker>
+      <marker id={`flow-arrow-teal-${suffix}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="#35c9a7" />
+      </marker>
+    </defs>
+  );
+}
+
+function BrowserIcon({ x, y }: { x: number; y: number }) {
+  return (
+    <g className="flow-icon" transform={`translate(${x} ${y})`}>
+      <circle r="36" className="flow-node" />
+      <rect x="-19" y="-14" width="38" height="28" rx="5" className="flow-glyph" />
+      <line x1="-19" y1="-6" x2="19" y2="-6" className="flow-glyph" />
+      <circle cx="-13" cy="-10" r="1.6" className="flow-glyph-fill" />
+      <circle cx="-8" cy="-10" r="1.6" className="flow-glyph-fill" />
+      <line x1="-11" y1="3" x2="9" y2="3" className="flow-glyph-soft" />
+      <line x1="-11" y1="8" x2="3" y2="8" className="flow-glyph-soft" />
+    </g>
+  );
+}
+
+function MemoryIcon({ x, y }: { x: number; y: number }) {
+  return (
+    <g className="flow-icon" transform={`translate(${x} ${y})`}>
+      <circle r="36" className="flow-node" />
+      <rect x="-16" y="-15" width="32" height="8" rx="3" className="flow-glyph" />
+      <rect x="-16" y="-4" width="32" height="8" rx="3" className="flow-glyph" />
+      <rect x="-16" y="7" width="32" height="8" rx="3" className="flow-glyph flow-glyph-temporary" />
+      <circle cx="21" cy="-17" r="6" className="flow-glyph-teal" />
+    </g>
+  );
+}
+
+function ModelIcon({ x, y }: { x: number; y: number }) {
+  return (
+    <g className="flow-icon" transform={`translate(${x} ${y})`}>
+      <circle r="36" className="flow-node" />
+      <path d="M0 -17 L15 -8.5 L15 8.5 L0 17 L-15 8.5 L-15 -8.5 Z" className="flow-glyph" />
+      <circle r="4.5" className="flow-glyph-fill" />
+      <line x1="0" y1="-4.5" x2="0" y2="-17" className="flow-glyph-soft" />
+      <line x1="3.9" y1="2.3" x2="15" y2="8.5" className="flow-glyph-soft" />
+      <line x1="-3.9" y1="2.3" x2="-15" y2="8.5" className="flow-glyph-soft" />
+    </g>
+  );
+}
+
+function SearchIcon({ x, y }: { x: number; y: number }) {
+  return (
+    <g className="flow-icon" transform={`translate(${x} ${y})`}>
+      <circle r="24" className="flow-node flow-node-teal" />
+      <circle r="11" className="flow-glyph-teal-line" />
+      <ellipse rx="5" ry="11" className="flow-glyph-teal-line" />
+      <line x1="-11" y1="0" x2="11" y2="0" className="flow-glyph-teal-line" />
+    </g>
+  );
+}
+
+function ExitIcon({ x, y }: { x: number; y: number }) {
+  return (
+    <g className="flow-icon" transform={`translate(${x} ${y})`}>
+      <circle r="36" className="flow-node flow-node-quiet" />
+      <path d="M-4 -16 H-16 V16 H-4" className="flow-glyph" />
+      <line x1="-6" y1="0" x2="16" y2="0" className="flow-glyph" />
+      <path d="M9 -7 L16 0 L9 7" className="flow-glyph" />
+    </g>
+  );
+}
+
+function ReturnIcon({ x, y }: { x: number; y: number }) {
+  return (
+    <g className="flow-icon" transform={`translate(${x} ${y})`}>
+      <circle r="18" className="flow-node" />
+      <path d="M8 -6 H-4 A6 6 0 0 0 -4 6 H6" className="flow-glyph" />
+      <path d="M-8 -10 L-12 -6 L-8 -2" className="flow-glyph" transform="translate(16 0) scale(-1 1)" />
+    </g>
+  );
+}
+
+function FlowDiagramWide() {
+  return (
+    <svg className="flow-svg flow-svg-wide" viewBox="0 0 1120 420" role="img" aria-labelledby="flow-title-wide" aria-describedby="flow-desc-wide" data-testid="flow-svg-wide">
+      <title id="flow-title-wide">How a Kalillac conversation moves</title>
+      <desc id="flow-desc-wide">A diagram with four stages: you ask, temporary session, answer or search, and you move on. The stages are described in the list that follows.</desc>
+      <FlowMarkers suffix="wide" />
+
+      {/* Answer path: you -> temporary session -> answer. */}
+      <line x1="188" y1="130" x2="390" y2="130" className="flow-path" markerEnd="url(#flow-arrow-wide)" />
+      <line x1="468" y1="130" x2="670" y2="130" className="flow-path" markerEnd="url(#flow-arrow-wide)" />
+      {/* The result returns through Kalillac to you. */}
+      <path d="M710 92 C710 48 600 36 430 36 C260 36 150 48 150 90" className="flow-path flow-path-return" markerEnd="url(#flow-arrow-wide)" />
+      <text x="430" y="26" textAnchor="middle" className="flow-label">Answers return to you through Kalillac</text>
+      {/* Web search: a separate, conditional branch. */}
+      <path d="M744 146 C800 158 834 196 834 250 L834 296" className="flow-path-search" markerStart="url(#flow-arrow-teal-wide)" markerEnd="url(#flow-arrow-teal-wide)" />
+      {/* Later, the visitor moves on. */}
+      <line x1="748" y1="130" x2="950" y2="130" className="flow-path-later" />
+      <text x="850" y="118" textAnchor="middle" className="flow-label flow-label-quiet">Later</text>
+
+      <g className="flow-stage" data-stage="1">
+        <BrowserIcon x={150} y={130} />
+        <text x="150" y="198" textAnchor="middle" className="flow-stage-title">YOU ASK</text>
+        <text x="150" y="226" textAnchor="middle" className="flow-stage-body">No account or</text>
+        <text x="150" y="248" textAnchor="middle" className="flow-stage-body">profile required.</text>
+      </g>
+      <g className="flow-stage" data-stage="2">
+        <MemoryIcon x={430} y={130} />
+        <text x="430" y="198" textAnchor="middle" className="flow-stage-title">TEMPORARY SESSION</text>
+        <text x="430" y="226" textAnchor="middle" className="flow-stage-body">Kalillac keeps the current</text>
+        <text x="430" y="248" textAnchor="middle" className="flow-stage-body">conversation context</text>
+        <text x="430" y="270" textAnchor="middle" className="flow-stage-body">in server memory.</text>
+      </g>
+      <g className="flow-stage" data-stage="3">
+        <ModelIcon x={710} y={130} />
+        <text x="710" y="198" textAnchor="middle" className="flow-stage-title">ANSWER OR SEARCH</text>
+        <text x="710" y="226" textAnchor="middle" className="flow-stage-body">OpenAI produces</text>
+        <text x="710" y="248" textAnchor="middle" className="flow-stage-body">the answer.</text>
+        <SearchIcon x={834} y={326} />
+        <text x="872" y="320" className="flow-stage-body flow-search-text">Tavily searches when current</text>
+        <text x="872" y="342" className="flow-stage-body flow-search-text">web information is needed.</text>
+      </g>
+      <g className="flow-stage" data-stage="4">
+        <ExitIcon x={990} y={130} />
+        <text x="990" y="198" textAnchor="middle" className="flow-stage-title">YOU MOVE ON</text>
+        <text x="990" y="226" textAnchor="middle" className="flow-stage-body">Refreshing or leaving ends</text>
+        <text x="990" y="248" textAnchor="middle" className="flow-stage-body">this browser’s access to</text>
+        <text x="990" y="270" textAnchor="middle" className="flow-stage-body">the conversation.</text>
+      </g>
+
+      <g className="flow-legend" transform="translate(40 392)">
+        <line x1="0" y1="0" x2="34" y2="0" className="flow-path" />
+        <text x="44" y="5" className="flow-legend-text">Answer path</text>
+        <line x1="170" y1="0" x2="204" y2="0" className="flow-path-search" />
+        <text x="214" y="5" className="flow-legend-text">Web search, only when needed</text>
+      </g>
+    </svg>
+  );
+}
+
+function FlowDiagramNarrow() {
+  return (
+    <svg className="flow-svg flow-svg-narrow" viewBox="0 0 360 920" role="img" aria-labelledby="flow-title-narrow" aria-describedby="flow-desc-narrow" data-testid="flow-svg-narrow">
+      <title id="flow-title-narrow">How a Kalillac conversation moves</title>
+      <desc id="flow-desc-narrow">A diagram with four stages: you ask, temporary session, answer or search, and you move on. The stages are described in the list that follows.</desc>
+      <FlowMarkers suffix="narrow" />
+
+      <line x1="48" y1="98" x2="48" y2="176" className="flow-path" markerEnd="url(#flow-arrow-narrow)" />
+      <line x1="48" y1="258" x2="48" y2="366" className="flow-path" markerEnd="url(#flow-arrow-narrow)" />
+      <path d="M70 434 C96 462 108 486 108 520" className="flow-path-search" markerStart="url(#flow-arrow-teal-narrow)" markerEnd="url(#flow-arrow-teal-narrow)" />
+      <line x1="48" y1="448" x2="48" y2="620" className="flow-path flow-path-return" markerEnd="url(#flow-arrow-narrow)" />
+      <line x1="48" y1="676" x2="48" y2="738" className="flow-path-later" />
+
+      <g className="flow-stage" data-stage="1">
+        <BrowserIcon x={48} y={60} />
+        <text x="100" y="50" className="flow-stage-title">YOU ASK</text>
+        <text x="100" y="74" className="flow-stage-body">No account or profile</text>
+        <text x="100" y="94" className="flow-stage-body">required.</text>
+      </g>
+      <g className="flow-stage" data-stage="2">
+        <MemoryIcon x={48} y={220} />
+        <text x="100" y="206" className="flow-stage-title">TEMPORARY SESSION</text>
+        <text x="100" y="230" className="flow-stage-body">Kalillac keeps the current</text>
+        <text x="100" y="250" className="flow-stage-body">conversation context in</text>
+        <text x="100" y="270" className="flow-stage-body">server memory.</text>
+      </g>
+      <g className="flow-stage" data-stage="3">
+        <ModelIcon x={48} y={410} />
+        <text x="100" y="398" className="flow-stage-title">ANSWER OR SEARCH</text>
+        <text x="100" y="422" className="flow-stage-body">OpenAI produces the answer.</text>
+        <SearchIcon x={128} y={548} />
+        <text x="164" y="534" className="flow-stage-body flow-search-text">Tavily searches when</text>
+        <text x="164" y="554" className="flow-stage-body flow-search-text">current web information</text>
+        <text x="164" y="574" className="flow-stage-body flow-search-text">is needed.</text>
+      </g>
+      <ReturnIcon x={48} y={648} />
+      <text x="80" y="644" className="flow-label">Answers return to you</text>
+      <text x="80" y="664" className="flow-label">through Kalillac.</text>
+      <g className="flow-stage" data-stage="4">
+        <ExitIcon x={48} y={776} />
+        <text x="100" y="764" className="flow-stage-title">YOU MOVE ON</text>
+        <text x="100" y="788" className="flow-stage-body">Refreshing or leaving ends</text>
+        <text x="100" y="808" className="flow-stage-body">this browser’s access to</text>
+        <text x="100" y="828" className="flow-stage-body">the conversation.</text>
+      </g>
+
+      <g className="flow-legend" transform="translate(20 876)">
+        <line x1="0" y1="0" x2="30" y2="0" className="flow-path" />
+        <text x="40" y="5" className="flow-legend-text">Answer path</text>
+        <line x1="0" y1="26" x2="30" y2="26" className="flow-path-search" />
+        <text x="40" y="31" className="flow-legend-text">Web search, only when needed</text>
+      </g>
+    </svg>
+  );
+}
+
+function PrivacyFlow() {
+  return (
+    <section className="flow-section" id="how-it-works" aria-labelledby="flow-heading" data-testid="section-flow">
+      <div className="container-wide">
+        <div className="flow-panel">
+          <div className="flow-intro">
+            <span className="eyebrow eyebrow-on-dark">PRIVATE BY STRUCTURE</span>
+            <h2 id="flow-heading">Your conversation has boundaries.</h2>
+            <p>No account. No permanent chat history. Clear provider roles.</p>
+          </div>
+          <figure className="flow-figure">
+            <FlowDiagramWide />
+            <FlowDiagramNarrow />
+            <figcaption className="sr-only">
+              <ol data-testid="flow-summary">
+                <li>You ask. No account or profile is required, and Kalillac does not provide permanent chat history.</li>
+                <li>Temporary session. Kalillac keeps the current conversation context in server memory for the active temporary session.</li>
+                <li>Answer or search. OpenAI produces the answer. Tavily searches when current web information is needed. The answer returns to you through Kalillac.</li>
+                <li>You move on. Refreshing or leaving ends this browser’s access to the conversation. That is not immediate deletion from the server.</li>
+              </ol>
+            </figcaption>
+          </figure>
+          <p className="flow-note" data-testid="flow-memory-note">
+            <strong>Temporary session data can remain in server memory until capacity limits or a restart clear it.</strong>{' '}
+            Ending this browser’s access is not the same as deleting it from the server.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ---------------- See Kalillac at work ----------------
+   Four illustrative product fragments (not live output and not
+   testimonials), each composed differently. */
+
+function DemoThink() {
+  return (
+    <article className="demo demo-think" data-testid="demo-think" aria-labelledby="demo-think-title">
+      <header className="demo-head"><span className="demo-kicker">01 · Think</span><h3 id="demo-think-title">Turn a tangled question into a clear way to decide.</h3></header>
+      <div className="demo-surface">
+        <p className="demo-ask">I’ve been offered a team-lead role at a smaller company. More pay, less stability. I keep going back and forth.</p>
+        <div className="think-answer">
+          <div className="think-row think-decision"><span className="think-label">The real decision</span><p>Whether you want to trade stability for faster growth over the next two years — not only whether this offer pays more.</p></div>
+          <div className="think-columns">
+            <div className="think-row"><span className="think-label">What you know</span><ul><li>The salary increase is confirmed.</li><li>You would lead a team of five.</li></ul></div>
+            <div className="think-row"><span className="think-label">What you’re assuming</span><ul><li>The company will still be funded in two years.</li><li>Leading people will suit you.</li></ul></div>
+          </div>
+          <div className="think-row"><span className="think-label">Tradeoffs</span>
+            <table className="think-table">
+              <thead><tr><th scope="col"><span className="sr-only">Factor</span></th><th scope="col">New role</th><th scope="col">Stay</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Growth</th><td>Faster, broader</td><td>Steady, deeper</td></tr>
+                <tr><th scope="row">Stability</th><td>Lower</td><td>Higher</td></tr>
+                <tr><th scope="row">New skill</th><td>Managing people</td><td>Technical depth</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="think-row think-next"><span className="think-label">A useful next step</span><p>Ask the founder how long the current funding lasts. If the answer changes your assumptions, the decision gets easier. The choice stays yours.</p></div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function DemoWrite() {
+  return (
+    <article className="demo demo-write" data-testid="demo-write" aria-labelledby="demo-write-title">
+      <header className="demo-head"><span className="demo-kicker">02 · Write</span><h3 id="demo-write-title">Clearer writing that still sounds like you.</h3></header>
+      <div className="write-pair">
+        <div className="write-col write-before"><span className="write-tag">Your draft</span><p>I am writing to let you know that the project is going to be delayed because there were some issues with the vendor that we didn’t really know about until last week, so the new date is probably going to be the end of next month.</p></div>
+        <div className="write-col write-after"><span className="write-tag">Revised</span><p>The project is delayed. Last week we learned about vendor issues we hadn’t known of, and we now expect to finish at the end of next month.</p></div>
+      </div>
+      <ul className="write-notes">
+        <li><strong>Leads with the news</strong> instead of the preamble.</li>
+        <li><strong>Keeps your uncertainty</strong> — “we now expect,” not a promise.</li>
+        <li><strong>Same plain, direct voice</strong>, with the filler removed.</li>
+      </ul>
+    </article>
+  );
+}
+
+function DemoCode() {
+  return (
+    <article className="demo demo-code" data-testid="demo-code" aria-labelledby="demo-code-title">
+      <header className="demo-head"><span className="demo-kicker">03 · Build and debug</span><h3 id="demo-code-title">See why it breaks, then fix it.</h3></header>
+      <p className="demo-ask">Why does my list keep growing between calls?</p>
+      <div className="code-block code-broken" aria-label="Original code">
+        <span className="code-tag">Before</span>
+        <pre><code>{`def add_tag(tag, tags=[]):
+    tags.append(tag)
+    return tags
+
+add_tag("draft")   # ['draft']
+add_tag("final")   # ['draft', 'final']`}</code></pre>
+      </div>
+      <p className="code-diagnosis"><strong>Why it fails:</strong> Python creates the default list once, when the function is defined, so every call that omits <code>tags</code> appends to the same list.</p>
+      <div className="code-block code-fixed" aria-label="Repaired code">
+        <span className="code-tag">After</span>
+        <pre><code>{`def add_tag(tag, tags=None):
+    if tags is None:
+        tags = []
+    tags.append(tag)
+    return tags`}</code></pre>
+      </div>
+      <p className="code-why"><strong>Why the fix works:</strong> <code>None</code> is a safe default, and a new list is created on each call unless you pass one in.</p>
+    </article>
+  );
+}
+
+function DemoSearch() {
+  return (
+    <article className="demo demo-search" data-testid="demo-search" aria-labelledby="demo-search-title">
+      <header className="demo-head"><span className="demo-kicker">04 · Search the current web</span><h3 id="demo-search-title">Current answers with their sources in view.</h3></header>
+      <div className="demo-surface search-surface">
+        <p className="demo-ask">Is the open-source library we depend on still actively maintained?</p>
+        <div className="search-answer">
+          <span className="search-badge"><Search size={14} aria-hidden="true" /> Searched the current web</span>
+          <p>It appears to be actively maintained: the project’s release notes and repository activity show ongoing releases, and maintainers are responding to new issues. Check the changelog for breaking changes before you upgrade.</p>
+        </div>
+        <div className="search-sources" aria-label="Sources">
+          <span className="search-sources-label">Sources</span>
+          <ul>
+            <li><span className="source-chip">Project repository</span></li>
+            <li><span className="source-chip">Release notes</span></li>
+            <li><span className="source-chip">Issue tracker</span></li>
+          </ul>
+        </div>
+        <p className="search-caption">An example of how sourced answers appear. Real answers link the pages that were actually searched.</p>
+      </div>
+    </article>
+  );
+}
+
+function Demonstrations() {
+  return (
+    <section className="demos-section" id="product" aria-labelledby="demos-heading" data-testid="section-demos">
+      <div className="container-wide">
+        <div className="demos-intro">
+          <span className="eyebrow">THE WORK</span>
+          <h2 id="demos-heading">See Kalillac at work.</h2>
+          <p>Illustrative examples of the kinds of help you can ask for.</p>
+        </div>
+        <div className="demos-grid">
+          <DemoThink />
+          <DemoWrite />
+          <DemoCode />
+          <DemoSearch />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SessionExplanation() {
+  return (
+    <section className="explain-section" id="privacy" aria-labelledby="explain-heading" data-testid="section-explain">
+      <div className="container-wide">
+        <h2 id="explain-heading" className="sr-only">Your session and providers in plain language</h2>
+        <div className="explain-grid">
+          <div className="explain-block" data-testid="explain-session">
+            <h3>Your temporary session</h3>
+            <p>Kalillac doesn’t require an account and doesn’t offer permanent chat history. Your conversation lasts for the active temporary session. Refreshing or leaving the page ends your browser’s access to it. Temporary session data can remain in server memory until capacity limits or a restart clear it.</p>
+          </div>
+          <div className="explain-block" data-testid="explain-providers">
+            <h3>Who processes what</h3>
+            <p>OpenAI produces the answer. Tavily searches when a search is needed. Both process what Kalillac sends them under their own policies.</p>
+          </div>
+        </div>
+        <Link href="/privacy" className="text-link explain-link" data-testid="link-full-privacy">Read the full Privacy page <ArrowRight size={16} aria-hidden="true" /></Link>
+      </div>
+    </section>
+  );
+}
+
+function MobileAppSection() {
+  return (
+    <section className="mobile-app-section" aria-labelledby="mobile-app-title" data-testid="section-mobile-app">
+      <div className="container-wide mobile-app-panel">
+        <div className="app-copy">
+          <span className="section-label">ON THE GO <span className="label-rule"/></span>
+          <h2 id="mobile-app-title">Kalillac AI app<br/><span>in development.</span></h2>
+          <p>We’re building a dedicated Kalillac mobile experience for questions, writing, coding, and ideas wherever you are.</p>
+          <div className="development-badge"><span className="badge-mark"><Sparkles size={17}/></span><span><strong>Mobile app in progress</strong><small>Coming soon · No release date announced</small></span></div>
+        </div>
+        <div className="phone-stage" aria-label="Illustration of the Kalillac mobile app in development">
+          <div className="phone-halo"/><div className="phone-halo second"/>
+          <div className="phone">
+            <div className="phone-island"/><div className="phone-content"><div className="phone-head"><strong>Kalillac <span>AI</span></strong><span className="phone-head-mark">✦</span></div><small>Your workspace, wherever you are.</small><div className="phone-input">Ask Kalillac anything… <span>↑</span></div><div className="phone-card"><Search size={15}/><div><strong>Research</strong><small>Explore what matters</small></div><ArrowRight size={13}/></div><div className="phone-card"><Code2 size={15}/><div><strong>Code</strong><small>Work through a problem</small></div><ArrowRight size={13}/></div><div className="phone-card"><FileText size={15}/><div><strong>Writing</strong><small>Find your next sentence</small></div><ArrowRight size={13}/></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function HomePage() {
   const workspace = useChatWorkspace();
   const { focusChat } = workspace;
 
-  // Section links (/#product, /#chat ...) arriving from another page.
+  // Section links (/#product, /#privacy, /#how-it-works, /#chat) arriving
+  // from another page.
   useEffect(() => {
     const id = window.location.hash.slice(1);
     if (!id) return;
@@ -163,88 +563,30 @@ function HomePage() {
     document.getElementById(id)?.scrollIntoView();
   }, [focusChat]);
 
-  const tryKalillac = (event: MouseEvent<HTMLAnchorElement>) => {
-    event.preventDefault();
-    focusChat();
-  };
-
   return (
     <div className="site-shell">
-      <SiteHeader onTryKalillac={tryKalillac} />
+      <SiteHeader />
       <main>
-        <section className="hero" aria-labelledby="hero-title">
+        <section className="hero" aria-labelledby="hero-title" data-testid="section-hero">
           <div className="hero-signal-line" aria-hidden="true" />
-          <div className="container-wide hero-layout">
-            <div className="hero-grid">
-              <div className="hero-copy">
-                <span className="eyebrow">MEET KALILLAC AI</span>
-                <h1 id="hero-title">Private by design.<br /><span>Powerful when it matters.</span></h1>
-                <p className="hero-description">Ask questions, develop ideas, write and troubleshoot code, or search the current web—without creating an account or building a permanent chat history.</p>
-                <button type="button" className="primary-link hero-action" onClick={focusChat} data-testid="button-start-session">Start a private session <ArrowRight size={16} /></button>
-              </div>
-              <OrbitalAssistant />
+          <div className="container-wide hero-stage">
+            <div className="hero-copy">
+              <span className="eyebrow">PRIVATE BY DESIGN</span>
+              <h1 id="hero-title"><span className="h1-phrase">Think clearly.</span>{' '}<span className="h1-phrase">Write well.</span>{' '}<span className="h1-phrase">Build and debug.</span>{' '}<span className="h1-phrase h1-accent">Search the current web.</span></h1>
+              <p className="hero-description">Work through difficult questions, draft and revise writing, explain and repair code, or research current information with sources—without creating an account or building a permanent chat history.</p>
+              <button type="button" className="primary-link hero-action" onClick={focusChat} data-testid="button-start-session">Start a private session <ArrowRight size={16} aria-hidden="true" /></button>
+              <p className="hero-under-note"><span className="trust-item"><span className="live-dot" /> Temporary sessions</span> <span className="note-divider" aria-hidden="true">·</span> <span className="trust-item">No account required</span> <span className="note-divider" aria-hidden="true">·</span> <Link href="/privacy" className="note-link trust-item">Clear provider disclosure</Link></p>
             </div>
-            <EmbeddedChat workspace={workspace} />
-            <p className="hero-under-note"><span className="trust-item"><span className="live-dot" /> Temporary sessions</span> <span className="note-divider" aria-hidden="true">·</span> <span className="trust-item">No account required</span> <span className="note-divider" aria-hidden="true">·</span> <Link href="/privacy" className="note-link trust-item">Clear provider disclosure</Link></p>
+            <div className="hero-workspace">
+              <OrbitalAssistant />
+              <EmbeddedChat workspace={workspace} />
+            </div>
           </div>
         </section>
-        <div>
-          <section className="quick-capabilities container-wide" aria-label="Kalillac at a glance">
-            <article><span className="quick-icon"><MessageSquare size={20}/></span><div><h3>Questions, unpacked</h3><p>Work through ideas and difficult topics.</p></div></article>
-            <article><span className="quick-icon mint"><FileText size={20}/></span><div><h3>Words and code</h3><p>Draft, rewrite, explain, and troubleshoot.</p></div></article>
-            <article><span className="quick-icon cobalt"><Search size={20}/></span><div><h3>Current when it counts</h3><p>Use web information when a question needs it.</p></div></article>
-          </section>
-
-          <section className="capabilities-section" id="product" aria-labelledby="capabilities-title">
-            <div className="container-wide">
-              <div className="section-heading"><div><span className="section-label">MADE FOR THE WAY YOU THINK</span><h2 className="section-title" id="capabilities-title">One place for the work<br />that doesn’t fit in a box.</h2></div><p className="section-copy">A flexible place for everyday questions and deeper work. Move between tasks in the same conversation.</p></div>
-              <div className="capability-grid">
-                <article className="capability-panel capability-feature"><div className="capability-icon"><Compass size={23}/></div><span className="capability-index">01 / THINK</span><h3>Make sense of<br />the complicated.</h3><p>Work through questions, concepts, and difficult topics one step at a time.</p><div className="capability-art" aria-hidden="true"><span/><span/><span/><i/></div></article>
-                <article className="capability-panel"><div className="capability-icon"><FileText size={22}/></div><span className="capability-index">02 / WRITE</span><h3>Find the right words.</h3><p>Draft, rewrite, organize, summarize, and brainstorm when the blank page gets in the way.</p></article>
-                <article className="capability-panel"><div className="capability-icon"><Code2 size={22}/></div><span className="capability-index">03 / BUILD</span><h3>Get unstuck in code.</h3><p>Write, explain, troubleshoot, and improve code with a conversational collaborator.</p></article>
-                <article className="capability-panel capability-web"><div className="capability-icon"><Search size={22}/></div><span className="capability-index">04 / DISCOVER</span><h3>Go beyond what’s already known.</h3><p>When a question calls for up-to-date information, Kalillac can search the current web and include sources.</p><span className="web-path" aria-hidden="true"><i/><i/><i/><i/></span></article>
-              </div>
-            </div>
-          </section>
-
-          <section className="mobile-app-section" aria-labelledby="mobile-app-title">
-            <div className="container-wide mobile-app-panel">
-              <div className="app-copy">
-                <span className="section-label">ON THE GO <span className="label-rule"/></span>
-                <h2 id="mobile-app-title">Kalillac AI app<br/><span>in development.</span></h2>
-                <p>We’re building a dedicated Kalillac mobile experience for questions, writing, coding, and ideas wherever you are.</p>
-                <div className="development-badge"><span className="badge-mark"><Sparkles size={17}/></span><span><strong>Mobile app in progress</strong><small>Coming soon · No release date announced</small></span></div>
-              </div>
-              <div className="phone-stage" aria-label="Illustration of the Kalillac mobile app in development">
-                <div className="phone-halo"/><div className="phone-halo second"/>
-                <div className="phone">
-                  <div className="phone-island"/><div className="phone-content"><div className="phone-head"><strong>Kalillac <span>AI</span></strong><span className="phone-head-mark">✦</span></div><small>Your workspace, wherever you are.</small><div className="phone-input">Ask Kalillac anything… <span>↑</span></div><div className="phone-card"><Search size={15}/><div><strong>Research</strong><small>Explore what matters</small></div><ArrowRight size={13}/></div><div className="phone-card"><Code2 size={15}/><div><strong>Code</strong><small>Work through a problem</small></div><ArrowRight size={13}/></div><div className="phone-card"><FileText size={15}/><div><strong>Writing</strong><small>Find your next sentence</small></div><ArrowRight size={13}/></div></div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className="works-section" id="how-it-works" aria-labelledby="works-title">
-            <div className="container-wide works-layout">
-              <div className="works-intro"><span className="section-label">THE SIGNAL, SIMPLIFIED</span><h2 className="section-title" id="works-title">How Kalillac<br/>works</h2><p className="section-copy">One temporary conversation. Clear about who processes what.</p></div>
-              <div className="steps">
-                <article className="step-card"><div className="step-top"><span className="step-number">01</span><MessageSquare size={21}/></div><h3>Ask</h3><p>Type a question or choose a starting prompt. No account is needed.</p></article>
-                <span className="step-connector" aria-hidden="true"><ArrowRight size={17}/></span>
-                <article className="step-card"><div className="step-top"><span className="step-number">02</span><Sparkles size={21}/></div><h3>Kalillac works through it</h3><p>Model responses come from OpenAI. When a question needs the current web, the search runs through Tavily.</p></article>
-                <span className="step-connector" aria-hidden="true"><ArrowRight size={17}/></span>
-                <article className="step-card"><div className="step-top"><span className="step-number">03</span><BookOpen size={21}/></div><h3>Continue, then move on</h3><p>Keep working in the current temporary session. Refreshing or leaving the page ends your browser’s access to it.</p></article>
-              </div>
-            </div>
-          </section>
-
-          <section className="privacy-band" id="sessions" aria-labelledby="memory-title">
-            <div className="container-wide privacy-inner">
-              <div className="privacy-orbit" aria-hidden="true"><span/><span/><i/></div>
-              <div><span className="section-label">A NOTE ON YOUR SESSION</span><h2 id="memory-title">A conversation for now.</h2><p>Kalillac keeps context for the active temporary session and does not offer a saved chat history. Refreshing or leaving the page ends your browser’s access to the conversation. Temporary session data can remain in server memory until capacity limits or a restart clear it.</p></div>
-              <Link href="/privacy" className="text-link" data-testid="link-full-privacy">How Kalillac handles data <ArrowRight size={16}/></Link>
-            </div>
-          </section>
-        </div>
+        <PrivacyFlow />
+        <Demonstrations />
+        <SessionExplanation />
+        <MobileAppSection />
       </main>
       <SiteFooter />
     </div>
