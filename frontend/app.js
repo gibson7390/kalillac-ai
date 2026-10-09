@@ -949,6 +949,24 @@
     if (!inFlight) send();
   });
 
+  /* The composer box's own padding is part of the typing area: pressing on
+     it -- not on the field, Send, or any other control -- focuses the message
+     field without scrolling the page. The default is prevented only for those
+     padding presses, so focus never leaves the field and no stray selection
+     starts. The field and every control keep their native behavior; nothing
+     is sent and the text is not changed. */
+  var composerShell = document.getElementById("composer-shell");
+  var COMPOSER_CONTROLS = 'button, a[href], input, textarea, select, label, ' +
+                          '[contenteditable]:not([contenteditable="false"])';
+
+  composerShell.addEventListener("mousedown", function (e) {
+    if (e.button !== 0) return;
+    var target = e.target;
+    if (target && target.closest && target.closest(COMPOSER_CONTROLS)) return;
+    e.preventDefault();
+    input.focus({ preventScroll: true });
+  });
+
   // Empty-state starter chips. Each chip draws from its own prompt pool and
   // never repeats the same prompt twice in a row. Clicking only fills the
   // composer; the user can edit before sending.

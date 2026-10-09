@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261008-homepage-handoff1"
-CSS_CACHE_KEY = "20261008-homepage-handoff1"
+CACHE_KEY = "20261009-composer-focus1"
+CSS_CACHE_KEY = "20261009-composer-focus1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
