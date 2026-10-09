@@ -1,27 +1,27 @@
-import { type CSSProperties, type MouseEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type MouseEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, BookOpen, Code2, Compass, FileText, Menu, MessageSquare, Search, Sparkles, X } from 'lucide-react';
 import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
-import { CHAT_PATH, isPromptSubmittedMessage, postPresentation } from './embed-protocol';
 
 const brandLogoUrl = '/assets/kalillac-ai-logo.png';
 
-/* The path this document was first loaded at. Inside this site, /app/ is only
-   ever reached through the chat handoff's history.pushState; a real load of
-   /app/ (direct visit or refresh) is the canonical chat in ../frontend. If
-   this site were ever served at /app/ anyway, it must not frame itself. */
-const INITIAL_PATH = window.location.pathname;
+// The canonical chat workspace (../frontend), served at /app/ and embedded
+// here as a same-origin iframe.
+const CHAT_PATH = '/app/';
+
+// A real load of /app/ is the canonical chat in ../frontend; this site must
+// never frame itself if it is ever served there.
 const IS_FRAMED = (() => {
   try { return window.self !== window.top; } catch { return true; }
 })();
 
-function SiteHeader({ inert, onTryKalillac }: { inert?: boolean; onTryKalillac?: (event: MouseEvent<HTMLAnchorElement>) => void }) {
+function SiteHeader({ onTryKalillac }: { onTryKalillac?: (event: MouseEvent<HTMLAnchorElement>) => void }) {
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
   const tryKalillac = (event: MouseEvent<HTMLAnchorElement>) => { close(); onTryKalillac?.(event); };
   return (
-    <header className="site-header" inert={inert}>
+    <header className="site-header">
       <div className="container-wide site-header-inner">
         <Link href="/" className="brand" data-testid="link-home-brand" onClick={close} aria-label="Kalillac AI home">
           <img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" />
@@ -48,9 +48,9 @@ function SiteHeader({ inert, onTryKalillac }: { inert?: boolean; onTryKalillac?:
   );
 }
 
-function SiteFooter({ inert }: { inert?: boolean }) {
+function SiteFooter() {
   return (
-    <footer className="site-footer" inert={inert}>
+    <footer className="site-footer">
       <div className="container-wide footer-inner">
         <div><Link href="/" className="brand" data-testid="link-footer-home"><img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" /></Link><p>AI for the questions and work in front of you.</p></div>
         <div className="footer-links"><Link href="/privacy" data-testid="link-footer-privacy">Privacy</Link><Link href="/terms" data-testid="link-footer-terms">Terms</Link><a href="https://www.linkedin.com/in/kalillacai" target="_blank" rel="noopener noreferrer" data-testid="link-footer-linkedin">LinkedIn</a></div>
@@ -81,8 +81,8 @@ function OrbitalAssistant() {
   );
 }
 
-// Space kept between the sticky site header and the composer card when a CTA
-// brings the card into view.
+// Space kept between the sticky site header and the chat workspace when a
+// CTA brings it into view.
 const COMPOSER_GAP_BELOW_HEADER = 16;
 
 function prefersReducedMotion(): boolean {
@@ -90,97 +90,44 @@ function prefersReducedMotion(): boolean {
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-/* The homepage chat card and its handoff into the full /app/ workspace.
-
-   The card is the canonical /app/ client in a same-origin iframe, shown at a
-   FIXED height: it never grows with the conversation. When the framed chat
-   reports that a valid prompt is being submitted (embed-protocol.ts), the
-   card expands to the full viewport, the URL becomes /app/ through
-   history.pushState, and the iframe is told its new presentation. The iframe
-   is never navigated, re-parented or remounted, so the prompt it is already
-   sending and the reply stay in place. Back (popstate to a non-/app/ entry)
-   returns to the card; it sends nothing to the chat except the presentation
-   message, so no prompt is ever resent. */
-function useChatHandoff() {
+/* The homepage chat workspace: the canonical /app/ client in a same-origin
+   iframe, at one stable height from the first render onward. It is a full
+   conversation workspace before, during and after a conversation; nothing
+   resizes, expands or navigates when a prompt is sent, and the homepage and
+   the chat exchange no messages. */
+function useChatWorkspace() {
   const slotRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
-  const [expanded, setExpanded] = useState(() => window.location.pathname === CHAT_PATH);
-  const [fromClip, setFromClip] = useState<string | null>(null);
 
-  const present = useCallback((next: boolean) => {
-    if (next) {
-      // Reveal from the card's current on-screen rectangle.
-      const slot = slotRef.current;
-      if (slot) {
-        const r = slot.getBoundingClientRect();
-        const right = Math.max(0, window.innerWidth - r.right);
-        const bottom = Math.max(0, window.innerHeight - r.bottom);
-        setFromClip(`inset(${Math.max(0, r.top)}px ${right}px ${bottom}px ${Math.max(0, r.left)}px round 21px)`);
-      }
+  /* Move the workspace to just below the sticky site header when it is not
+     already fully visible there -- smoothly, or instantly when reduced
+     motion is requested. Never moves the page when it is already in view. */
+  const bringIntoView = useCallback(() => {
+    const slot = slotRef.current;
+    if (!slot) return;
+
+    const header = document.querySelector('.site-header');
+    const headerBottom = header ? header.getBoundingClientRect().bottom : 0;
+    const card = slot.getBoundingClientRect();
+    const fullyVisible = card.top >= headerBottom && card.bottom <= window.innerHeight;
+
+    if (!fullyVisible) {
+      window.scrollTo({
+        top: Math.max(0, window.scrollY + card.top - headerBottom - COMPOSER_GAP_BELOW_HEADER),
+        // 'auto' (not the newer 'instant', which older browsers reject with
+        // a TypeError) is immediate here: under reduced motion the site CSS
+        // forces scroll-behavior: auto.
+        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+      });
     }
-    setExpanded(next);
-    postPresentation(frameRef.current?.contentWindow ?? null, window.location.origin, next);
   }, []);
 
-  useEffect(() => {
-    const origin = window.location.origin;
-    const frame = frameRef.current;
-
-    const onMessage = (event: MessageEvent) => {
-      if (!isPromptSubmittedMessage(event, frameRef.current?.contentWindow ?? null, origin)) return;
-      if (window.location.pathname !== CHAT_PATH) {
-        window.history.pushState({ kalillac: 'chat' }, '', CHAT_PATH);
-      }
-      present(true);
-    };
-
-    const onPopState = () => present(window.location.pathname === CHAT_PATH);
-
-    // A (re)loaded chat document learns the current presentation.
-    const onFrameLoad = () => postPresentation(frame?.contentWindow ?? null, origin, window.location.pathname === CHAT_PATH);
-
-    window.addEventListener('message', onMessage);
-    window.addEventListener('popstate', onPopState);
-    frame?.addEventListener('load', onFrameLoad);
-
-    return () => {
-      window.removeEventListener('message', onMessage);
-      window.removeEventListener('popstate', onPopState);
-      frame?.removeEventListener('load', onFrameLoad);
-    };
-  }, [present]);
-
-  // Only the expanded chat scrolls while it covers the page.
-  useEffect(() => {
-    document.documentElement.classList.toggle('chat-expanded', expanded);
-    return () => document.documentElement.classList.remove('chat-expanded');
-  }, [expanded]);
-
-  /* Both CTAs ("Try Kalillac", "Start a private session") land here. The card
-     moves to just below the sticky site header only when it is not already
-     fully visible there -- smoothly, or instantly when reduced motion is
-     requested -- and then the real message input inside the same-origin chat
-     is focused with preventScroll, so focusing never causes a second,
-     browser-generated jump. */
+  /* Both CTAs ("Try Kalillac", "Start a private session") land here: the
+     workspace is brought into view, then the real message input inside the
+     same-origin chat is focused with preventScroll, so focusing never causes
+     a second, browser-generated jump. */
   const focusChat = useCallback(() => {
-    const slot = slotRef.current;
-
-    if (slot) {
-      const header = document.querySelector('.site-header');
-      const headerBottom = header ? header.getBoundingClientRect().bottom : 0;
-      const card = slot.getBoundingClientRect();
-      const fullyVisible = card.top >= headerBottom && card.bottom <= window.innerHeight;
-
-      if (!fullyVisible) {
-        window.scrollTo({
-          top: Math.max(0, window.scrollY + card.top - headerBottom - COMPOSER_GAP_BELOW_HEADER),
-          // 'auto' (not the newer 'instant', which older browsers reject with
-          // a TypeError) is immediate here: under reduced motion the site CSS
-          // forces scroll-behavior: auto.
-          behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-        });
-      }
-    }
+    bringIntoView();
 
     const frame = frameRef.current;
     let input: HTMLElement | null = null;
@@ -188,17 +135,16 @@ function useChatHandoff() {
 
     if (input) input.focus({ preventScroll: true });
     else frame?.focus({ preventScroll: true });
-  }, []);
+  }, [bringIntoView]);
 
-  return { slotRef, frameRef, expanded, fromClip, focusChat };
+  return { slotRef, frameRef, focusChat };
 }
 
-function EmbeddedChat({ handoff }: { handoff: ReturnType<typeof useChatHandoff> }) {
-  const { slotRef, frameRef, expanded, fromClip } = handoff;
-  const style = fromClip ? ({ '--chat-from-clip': fromClip } as CSSProperties) : undefined;
+function EmbeddedChat({ workspace }: { workspace: ReturnType<typeof useChatWorkspace> }) {
+  const { slotRef, frameRef } = workspace;
   return (
     <div id="chat" className="embedded-chat-slot" ref={slotRef}>
-      <div className={`embedded-chat${expanded ? ' is-expanded' : ''}`} style={style} data-testid="embedded-chat">
+      <div className="embedded-chat" data-testid="embedded-chat">
         <iframe ref={frameRef} src={CHAT_PATH} title="Chat with Kalillac AI" loading="eager" />
       </div>
     </div>
@@ -206,8 +152,8 @@ function EmbeddedChat({ handoff }: { handoff: ReturnType<typeof useChatHandoff> 
 }
 
 function HomePage() {
-  const handoff = useChatHandoff();
-  const { expanded, focusChat } = handoff;
+  const workspace = useChatWorkspace();
+  const { focusChat } = workspace;
 
   // Section links (/#product, /#chat ...) arriving from another page.
   useEffect(() => {
@@ -224,25 +170,25 @@ function HomePage() {
 
   return (
     <div className="site-shell">
-      <SiteHeader inert={expanded} onTryKalillac={tryKalillac} />
+      <SiteHeader onTryKalillac={tryKalillac} />
       <main>
         <section className="hero" aria-labelledby="hero-title">
           <div className="hero-signal-line" aria-hidden="true" />
           <div className="container-wide hero-layout">
-            <div className="hero-grid" inert={expanded}>
+            <div className="hero-grid">
               <div className="hero-copy">
-                <span className="eyebrow"><span className="eyebrow-dot" /> MEET KALILLAC AI</span>
+                <span className="eyebrow">MEET KALILLAC AI</span>
                 <h1 id="hero-title">Private by design.<br /><span>Powerful when it matters.</span></h1>
                 <p className="hero-description">Ask questions, develop ideas, write and troubleshoot code, or search the current web—without creating an account or building a permanent chat history.</p>
                 <button type="button" className="primary-link hero-action" onClick={focusChat} data-testid="button-start-session">Start a private session <ArrowRight size={16} /></button>
               </div>
               <OrbitalAssistant />
             </div>
-            <EmbeddedChat handoff={handoff} />
-            <p className="hero-under-note" inert={expanded}><span className="trust-item"><span className="live-dot" /> Temporary sessions</span> <span className="note-divider" aria-hidden="true">·</span> <span className="trust-item">No account required</span> <span className="note-divider" aria-hidden="true">·</span> <Link href="/privacy" className="note-link trust-item">Clear provider disclosure</Link></p>
+            <EmbeddedChat workspace={workspace} />
+            <p className="hero-under-note"><span className="trust-item"><span className="live-dot" /> Temporary sessions</span> <span className="note-divider" aria-hidden="true">·</span> <span className="trust-item">No account required</span> <span className="note-divider" aria-hidden="true">·</span> <Link href="/privacy" className="note-link trust-item">Clear provider disclosure</Link></p>
           </div>
         </section>
-        <div inert={expanded}>
+        <div>
           <section className="quick-capabilities container-wide" aria-label="Kalillac at a glance">
             <article><span className="quick-icon"><MessageSquare size={20}/></span><div><h3>Questions, unpacked</h3><p>Work through ideas and difficult topics.</p></div></article>
             <article><span className="quick-icon mint"><FileText size={20}/></span><div><h3>Words and code</h3><p>Draft, rewrite, explain, and troubleshoot.</p></div></article>
@@ -300,7 +246,7 @@ function HomePage() {
           </section>
         </div>
       </main>
-      <SiteFooter inert={expanded} />
+      <SiteFooter />
     </div>
   );
 }
@@ -339,7 +285,7 @@ function PrivacyPage() {
     <DocSection id="not-persisted" title="What Kalillac does not save"><p>Kalillac does not save chat transcripts as persistent conversations in its own application database. In its own application, Kalillac does not:</p><ul><li>store chat history across visits</li><li>keep a user profile tied to you</li><li>keep search results in a Kalillac database after using them to write an answer</li></ul><p>Those statements describe Kalillac’s own application. They do not mean that no copy, log, or metadata can exist anywhere else. OpenAI, Tavily, Cloudflare, and the hosting provider handle what they receive under their own policies.</p></DocSection>
     <DocSection id="session-state" title="Temporary session state"><p>Kalillac’s session state is an entry in the memory of the running application process. It is not written to a database.</p><p>The entry holds two things:</p><ol><li>memory facts from that session</li><li>timestamps of recent searches in that session</li></ol><p>The application keeps at most 200 session entries at once and at most 50 memory entries per session. When a new session arrives and the store is full, the oldest entry is removed.</p><h3>How this state ends</h3><ul><li>Refreshing or closing the page removes the browser’s access to that session. The chat interface does not keep the thread in saved browser storage, and a new page starts a new, empty session that cannot read the previous entry.</li><li>That does not promise immediate deletion of the server-memory entry. Active-session context may remain in server memory until eviction or service restart.</li><li>When the application process restarts, the in-memory store is gone, because it existed only in that process.</li></ul></DocSection>
     <DocSection id="isolation" title="Session isolation"><p>Each session is stored under its own identifier. A request looks up only the matching entry. There is no shared conversation buffer and no cross-session lookup, so one visitor’s memory entries are not read into another visitor’s context.</p><p>Capacity is shared. With a limit of 200 sessions, heavy traffic can evict older sessions sooner. That affects when state disappears, not who can read it.</p></DocSection>
-    <DocSection id="browser" title="Browser storage"><p>The chat interface keeps the session identifier and the completed turns of the open conversation in page memory only. It does not write them to localStorage, sessionStorage, IndexedDB, cookies, or the page address.</p><p>When you start a chat from the homepage, the homepage and the chat exchange only a signal that the chat should open full-screen. Your message is not copied into the page address, browser storage, or a cookie to make that transition.</p><p>The site and the chat interface use your device’s own fonts and load no fonts, stylesheets, or scripts from other websites. They do not include advertising or analytics scripts.</p></DocSection>
+    <DocSection id="browser" title="Browser storage"><p>The chat interface keeps the session identifier and the completed turns of the open conversation in page memory only. It does not write them to localStorage, sessionStorage, IndexedDB, cookies, or the page address.</p><p>The homepage embeds the same chat application that is served at <span className="mono">/app/</span>. Your messages and Kalillac’s responses are not passed through the page address, browser storage, or messages between browser windows. The embedded chat application sends each chat request itself, under the same temporary session behavior described above.</p><p>The site and the chat interface use your device’s own fonts and load no fonts, stylesheets, or scripts from other websites. They do not include advertising or analytics scripts.</p></DocSection>
     <DocSection id="logging" title="Logging"><p>The application writes operational output used to run and diagnose the service. Kalillac does not use that output as a conversation archive. This page does not claim that message content can never appear in server logs.</p><p>The web server, the operating system, Cloudflare, and the hosting provider can create their own request, operational, and security records, which can include data such as IP address, time, and user agent. Those records are governed by the policies of the systems and providers that create them.</p></DocSection>
     <DocSection id="model-inference" title="Model inference: OpenAI"><p>OpenAI may process requests sent for model inference. Kalillac does not run its model on the Kalillac server. OpenAI is Kalillac’s only model provider, and there is no automatic fallback to another model or provider: if OpenAI cannot return a usable answer, the request ends with an error instead of being sent elsewhere.</p><p>Some requests never go to OpenAI. For example, deterministic arithmetic and some temporary session-memory requests are handled by Kalillac’s own code.</p><p>A request sent to OpenAI can include, as applicable:</p><ul><li>your current message</li><li>relevant recent turns</li><li>relevant temporary session-memory entries</li><li>the instructions Kalillac assembles for the request</li><li>retrieved web-search text, when the answer uses a search</li></ul><p>Cloudflare Workers AI and Groq are not part of the current active model-provider path.</p><p>OpenAI handles what it receives under its own terms and policies, which Kalillac does not control: <a href="https://openai.com/policies/" target="_blank" rel="noopener noreferrer">OpenAI policies</a>.</p></DocSection>
     <DocSection id="tavily" title="Web search: Tavily"><p>When web search is used, relevant query text may be sent to Tavily. Most messages do not use web search, and Tavily does not write Kalillac’s answers.</p><p>When a search runs:</p><ul><li>Kalillac builds the query from the current request. For a follow-up question, the query can also include the earlier topic needed to understand it. The query sent to Tavily is limited to 400 characters.</li><li>Tavily returns up to four titles, links, and text snippets. When a request is about a specific public web page, Kalillac can also ask Tavily for that page’s text.</li><li>Kalillac uses those results for the response. When the model writes the answer, the results are sent to OpenAI as described above.</li><li>Kalillac does not keep those results in a Kalillac database.</li><li>Each session is limited to five searches in a ten-minute window.</li></ul><p>Tavily handles what it receives under its own terms and privacy policy, which Kalillac does not control: <a href="https://www.tavily.com/privacy" target="_blank" rel="noopener noreferrer">Tavily Privacy Policy</a>.</p></DocSection>
@@ -386,10 +332,7 @@ function FramedNotice() {
 function Router() {
   const [location] = useLocation();
 
-  // "/" and an in-page handoff to /app/ render the SAME HomePage element in
-  // the same position, so the chat iframe is never remounted by the URL
-  // change. A real load at /app/ is not this site's page.
-  const isHome = location === '/' || (location === CHAT_PATH && INITIAL_PATH !== CHAT_PATH);
+  const isHome = location === '/';
 
   return (
     <ErrorBoundary resetKey={location}>

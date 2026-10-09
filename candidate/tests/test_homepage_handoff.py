@@ -1,16 +1,19 @@
-"""Homepage -> /app/ handoff: executable browser tests and static checks.
+"""Homepage site and its embedded chat: shared browser harness, the direct
+/app/ visit, and static checks.
 
-The browser tests serve, from loopback only, the BUILT marketing site
+The browser harness serves, from loopback only, the BUILT marketing site
 (site/dist/public) at "/" and the canonical chat (frontend/) at "/app/" --
-the routing production's web server is expected to provide -- plus a second
-loopback origin that plays the cross-origin attacker. Headless Microsoft Edge
-(or another Chromium-family browser), driven over the DevTools protocol at an
-exact 1440 x 900 desktop and 390 x 844 touch-phone viewport, runs the real
-pages with
-frontend_harness/handoff_parent.js injected into the site and
-frontend_harness/handoff_child.js injected into the chat. Nothing leaves the
+the routing production's web server provides -- with
+frontend_harness/handoff_child.js injected into the chat (scripted fetch,
+storage-write recording). Headless Microsoft Edge (or another
+Chromium-family browser) is driven over the DevTools protocol at an exact
+1440 x 900 desktop and 390 x 844 touch-phone viewport. Nothing leaves the
 machine: the chat's fetch is scripted, every non-loopback connection goes to a
-dead proxy, and no other host name resolves.
+dead proxy, and no other host name resolves. test_homepage_interaction.py
+uses this harness for the homepage chat workspace itself.
+
+The homepage chat is one stable in-page workspace: there is no full-screen
+handoff, no URL change and no message between the homepage and the chat.
 
 Build the site first (cd site && npm run build). Without a build the browser
 tests skip; with a build older than the site sources they fail.
@@ -47,20 +50,14 @@ APP_JS = FRONTEND / "app.js"
 APP_CSS = FRONTEND / "app.css"
 INDEX_HTML = FRONTEND / "index.html"
 APP_TSX = SITE_SRC / "App.tsx"
-PROTOCOL_TS = SITE_SRC / "embed-protocol.ts"
 SITE_CSS = SITE_SRC / "index.css"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
-PROMPT = "kalillac:embed:prompt-submitted"
-PRESENTATION = "kalillac:embed:presentation"
-
 VIEWPORTS = {"desktop": (1440, 900), "mobile": (390, 844)}
 # The compact card's fixed height (site/src/index.css), by viewport.
-CARD_HEIGHT = {"desktop": 164, "mobile": 200}
-
-FIRST = "What is 2 + 2?"
-SECOND = "And 3 + 3?"
-PROMPT_FRAGMENTS = ("2 + 2", "2+%2B", "2%20%2B", "What", "3 + 3", "And%203")
+# The homepage chat workspace's one stable height (site/src/index.css):
+# clamp(560px, 70vh, 720px) on desktop, clamp(520px, 72svh, 680px) on phones.
+WORKSPACE_HEIGHT = {"desktop": round(0.70 * 900), "mobile": round(0.72 * 844)}
 
 
 # --- loopback servers --------------------------------------------------------------------------
@@ -137,22 +134,13 @@ class Site:
     production web server routes them), and the test helpers."""
 
     def __init__(self):
-        self.mode = ""
-        self.cross_origin = ""
         # When set, a top-level /app/ does not run handoff_child.js's own
         # standalone check; the test drives the page instead.
         self.child_passive = False
         self.http = LoopbackServer(self.route)
 
     def site_page(self) -> bytes:
-        page = (SITE_DIST / "index.html").read_text(encoding="utf-8")
-        probe = (
-            f"<script>window.__HANDOFF_MODE__ = {json.dumps(self.mode)};"
-            f" window.__HANDOFF_CROSS_ORIGIN__ = {json.dumps(self.cross_origin)};</script>"
-            '<script src="/__handoff__/parent.js"></script>'
-        )
-        assert page.count("<head>") == 1
-        return page.replace("<head>", "<head>" + probe, 1).encode("utf-8")
+        return (SITE_DIST / "index.html").read_bytes()
 
     def chat_page(self) -> bytes:
         page = INDEX_HTML.read_text(encoding="utf-8")
@@ -172,48 +160,12 @@ class Site:
             return 200, "text/html; charset=utf-8", self.chat_page()
         if path.startswith("/app/"):
             return serve_file(FRONTEND, path[len("/app/"):])
-        if path == "/__handoff__/parent.js":
-            return 200, "text/javascript", (HARNESS / "handoff_parent.js").read_bytes()
         if path == "/__handoff__/child.js":
             return 200, "text/javascript", (HARNESS / "handoff_child.js").read_bytes()
-        if path == "/__handoff__/blank":
-            return 200, "text/html; charset=utf-8", b"<!DOCTYPE html><html><body></body></html>"
         if path.startswith("/__"):
             return 404, "text/plain", b""
 
         return serve_file(SITE_DIST, path.lstrip("/"))
-
-
-class CrossOrigin:
-    """Origin B: pages that send protocol messages from the wrong origin."""
-
-    def __init__(self, site_origin: str):
-        self.site_origin = site_origin
-        self.http = LoopbackServer(self.route)
-
-    def route(self, raw_path: str):
-        path = raw_path.split("?", 1)[0]
-        valid_prompt = json.dumps({"type": PROMPT, "version": 1})
-        valid_expand = json.dumps({"type": PRESENTATION, "version": 1, "expanded": True})
-
-        if path == "/__handoff__/xorigin-sender":
-            page = ("<!DOCTYPE html><html><body><script>"
-                    f"for (var i = 0; i < 5; i++) parent.postMessage({valid_prompt}, '*');"
-                    "</script></body></html>")
-            return 200, "text/html; charset=utf-8", page.encode("utf-8")
-
-        if path == "/__handoff__/xorigin-parent":
-            page = ("<!DOCTYPE html><html><body>"
-                    f'<iframe id="f" src="{self.site_origin}/app/" style="width:380px;height:240px"></iframe>'
-                    "<script>var f = document.getElementById('f');"
-                    "f.addEventListener('load', function () { var n = 0;"
-                    " var t = setInterval(function () {"
-                    f" f.contentWindow.postMessage({valid_expand}, '*');"
-                    " if (++n >= 100) clearInterval(t); }, 100); });"
-                    "</script></body></html>")
-            return 200, "text/html; charset=utf-8", page.encode("utf-8")
-
-        return 404, "text/plain", b""
 
 
 # --- browser (DevTools protocol for exact device metrics) ------------------------------------------
@@ -382,42 +334,6 @@ def require_browser_and_build() -> Path:
     return browser
 
 
-@pytest.fixture(scope="module", params=list(VIEWPORTS))
-def handoff_run(request, tmp_path_factory):
-    browser = require_browser_and_build()
-    viewport = request.param
-    profile = tmp_path_factory.mktemp(f"edge-handoff-{viewport}")
-
-    site = Site()
-    with site.http:
-        cross = CrossOrigin(site.http.origin)
-        with cross.http:
-            site.mode = "main"
-            site.cross_origin = cross.http.origin
-            result = run_browser(
-                browser, site.http.origin + "/", profile, VIEWPORTS[viewport],
-                mobile=viewport == "mobile", done=lambda: len(site.http.reports) >= 2,
-            )
-            reports = list(site.http.reports)
-            paths = list(site.http.paths)
-
-    shutil.rmtree(profile, ignore_errors=True)
-    diagnostics = (f"viewport={viewport}\ntimed_out={result['timed_out']}\n"
-                   f"stderr={result['stderr'][-3000:]}\n"
-                   f"paths={paths}\nreports={json.dumps(reports)[:6000]}")
-
-    assert result["timed_out"] is False, diagnostics
-    parent = [r for r in reports if r.get("phase") == "parent"]
-    standalone = [r for r in reports if r.get("phase") == "standalone"]
-    assert len(parent) == 1 and len(standalone) == 1, diagnostics
-    assert parent[0]["errors"] == [], diagnostics
-    assert standalone[0]["errors"] == [], diagnostics
-
-    return {"viewport": viewport, "size": VIEWPORTS[viewport], "parent": parent[0],
-            "refreshed": standalone[0], "paths": paths, "origin": site.http.origin,
-            "cross_origin": cross.http.origin, "diagnostics": diagnostics}
-
-
 @pytest.fixture(scope="module")
 def direct_visit(tmp_path_factory):
     browser = require_browser_and_build()
@@ -436,177 +352,7 @@ def direct_visit(tmp_path_factory):
     return reports[0]
 
 
-def step(run, label):
-    return next(s for s in run["parent"]["steps"] if s["label"] == label)
-
-
-def assert_collapsed(snap, run, requests):
-    assert snap["path"] == "/"
-    assert snap["cardExpanded"] is False
-    assert snap["childExpanded"] is False
-    assert snap["childEmbedded"] is True
-    assert snap["childHeaderShown"] is False and snap["childFooterShown"] is False
-    # The card never grows with the conversation.
-    assert snap["cardRect"]["height"] == CARD_HEIGHT[run["viewport"]], snap["cardRect"]
-    assert len(snap["requests"]) == requests
-
-
-def assert_expanded(snap, run, requests, settled=False):
-    """Expanded: the frame covers the full viewport from the first frame of
-    the transition. Its clip-path reveal runs for 320 ms, so only a settled
-    snapshot must also be the topmost element at the very top edge (proving
-    the sticky site header cannot cover the chat)."""
-    width, height = run["size"]
-    assert snap["path"] == "/app/"
-    assert snap["cardExpanded"] is True
-    assert snap["childExpanded"] is True
-    assert snap["childHeaderShown"] is True and snap["childFooterShown"] is True
-    assert snap["viewport"] == {"width": width, "height": height}
-    assert snap["cardRect"] == {"top": 0, "left": 0, "width": width, "height": height,
-                                "bottom": height, "right": width}
-    assert snap["frameIsTopAtCenter"] is True
-    if settled:
-        assert snap["frameIsTopAtTop"] is True and snap["elementAtTop"] == "iframe"
-    assert snap["htmlOverflow"] == "hidden" and snap["bodyOverflow"] == "hidden"
-    assert len(snap["requests"]) == requests
-
-
-def assert_same_iframe(snap, run):
-    assert snap["sameFrameWindow"] is True
-    assert snap["childLoadedAt"] == step(run, "loaded")["childLoadedAt"]
-
-
-# --- handoff ---------------------------------------------------------------------------------------
-
-
-def test_homepage_starts_as_a_fixed_compact_card(handoff_run):
-    loaded = step(handoff_run, "loaded")
-
-    assert_collapsed(loaded, handoff_run, requests=0)
-    assert loaded["search"] == "" and loaded["hash"] == ""
-    assert loaded["users"] == []
-    # The composer and Send are visible and on top inside the card.
-    assert loaded["composerHit"] is True and loaded["sendHit"] is True
-    assert 0 <= loaded["composerRect"]["top"] and loaded["composerRect"]["bottom"] <= loaded["childViewportHeight"]
-
-
-def test_first_prompt_expands_immediately_and_is_sent_exactly_once(handoff_run):
-    submitted = step(handoff_run, "submitted")
-
-    # 60 ms after Send, before the scripted 300 ms reply: already expanded.
-    assert_expanded(submitted, handoff_run, requests=1)
-    assert_same_iframe(submitted, handoff_run)
-    assert "Reply 1." not in submitted["assistants"]
-    assert submitted["users"] == [FIRST]
-    (request,) = submitted["requests"]
-    assert request["url"] == "/api/chat" and request["method"] == "POST"
-    assert request["body"] == {"message": FIRST, "history": [], "session_id": None}
-    assert submitted["historyLength"] == step(handoff_run, "after-control-back")["historyLength"]
-
-
-def test_reply_stays_in_the_same_iframe_with_a_usable_composer(handoff_run):
-    replied = step(handoff_run, "replied")
-    probes = handoff_run["parent"]["probes"]
-
-    assert_expanded(replied, handoff_run, requests=1, settled=True)
-    assert_same_iframe(replied, handoff_run)
-    assert replied["users"] == [FIRST]
-    assert replied["assistants"] == ["Reply 1."]
-    # Composer and Send are inside the viewport and not covered.
-    assert replied["childViewportHeight"] == handoff_run["size"][1]
-    assert 0 <= replied["composerRect"]["top"] < replied["composerRect"]["bottom"] <= replied["childViewportHeight"]
-    assert replied["sendRect"]["bottom"] <= replied["childViewportHeight"]
-    assert replied["composerHit"] is True and replied["sendHit"] is True
-    assert probes["composerFocused"] is True and probes["sendEnabledWithDraft"] is True
-
-
-def test_no_nested_scroll_container(handoff_run):
-    for label in ("submitted", "replied", "forward", "second-replied"):
-        snap = step(handoff_run, label)
-        # The homepage behind the chat cannot scroll; inside the chat only the
-        # conversation scrolls, never the chat document itself.
-        assert snap["htmlOverflow"] == "hidden" and snap["bodyOverflow"] == "hidden", label
-        assert snap["childDocScroll"]["scrollHeight"] <= snap["childDocScroll"]["clientHeight"], label
-        assert snap["conversationOverflowY"] == "auto", label
-
-    collapsed = step(handoff_run, "back")
-    assert collapsed["htmlOverflow"] != "hidden"
-    assert collapsed["childDocScroll"]["scrollHeight"] <= collapsed["childDocScroll"]["clientHeight"]
-
-
-def test_back_returns_to_the_homepage_without_resending(handoff_run):
-    back = step(handoff_run, "back")
-
-    assert_collapsed(back, handoff_run, requests=1)
-    assert_same_iframe(back, handoff_run)
-    assert back["users"] == [FIRST]                  # shown once, never duplicated
-    assert back["assistants"] == ["Reply 1."]
-
-    forward = step(handoff_run, "forward")
-    assert_expanded(forward, handoff_run, requests=1)
-    assert_same_iframe(forward, handoff_run)
-    assert forward["users"] == [FIRST]
-
-    again = step(handoff_run, "back-again")
-    assert_collapsed(again, handoff_run, requests=1)
-    assert again["users"] == [FIRST]
-
-
-def test_a_later_prompt_from_the_card_hands_off_again(handoff_run):
-    submitted = step(handoff_run, "second-submitted")
-    replied = step(handoff_run, "second-replied")
-
-    assert_expanded(submitted, handoff_run, requests=2)
-    assert_expanded(replied, handoff_run, requests=2, settled=True)
-    assert_same_iframe(replied, handoff_run)
-    assert submitted["requests"][1]["body"] == {
-        "message": SECOND,
-        "history": [{"role": "user", "content": FIRST}, {"role": "assistant", "content": "Reply 1."}],
-        "session_id": "s-1",
-    }
-    assert replied["users"] == [FIRST, SECOND]
-    assert replied["assistants"] == ["Reply 1.", "Reply 2."]
-    assert len(replied["requests"]) == 2           # every prompt exactly once, in total
-
-
-def test_prompt_never_enters_the_url_or_history_state(handoff_run):
-    for snap in handoff_run["parent"]["steps"]:
-        assert snap["search"] == "" and snap["hash"] == "", snap["label"]
-        assert snap["childSearch"] == "" and snap["childHash"] == "", snap["label"]
-        assert snap["childPath"] == "/app/", snap["label"]
-        for fragment in PROMPT_FRAGMENTS:
-            assert fragment not in snap["href"], (snap["label"], fragment)
-            assert fragment not in snap["historyState"], (snap["label"], fragment)
-
-    for url in handoff_run["parent"]["visitedUrls"]:
-        assert url in (handoff_run["origin"] + "/", handoff_run["origin"] + "/app/"), url
-
-    # Nothing the server saw carries the prompt either.
-    for path in handoff_run["paths"]:
-        for fragment in PROMPT_FRAGMENTS:
-            assert fragment not in path, path
-
-
-def test_no_browser_storage_or_cookie_writes(handoff_run):
-    parent = handoff_run["parent"]
-
-    assert parent["parentWrites"] == [] and parent["childWrites"] == []
-    assert parent["parentLocalStorage"] == 0 and parent["parentSessionStorage"] == 0
-    assert parent["childLocalStorage"] == 0 and parent["childSessionStorage"] == 0
-    assert parent["parentCookie"] == "" and parent["childCookie"] == ""
-    assert parent["databases"] == []
-
-    refreshed = handoff_run["refreshed"]
-    assert refreshed["writes"] == []
-    assert refreshed["localStorageLength"] == 0 and refreshed["sessionStorageLength"] == 0
-    assert refreshed["cookie"] == "" and refreshed["databases"] == []
-
-
-def test_refreshed_app_is_a_fresh_standalone_session(handoff_run):
-    refreshed = handoff_run["refreshed"]
-    assert_fresh_standalone(refreshed)
-    # The refresh really was a top-level load of /app/ served as the chat.
-    assert handoff_run["paths"].count("/app/") >= 2
+# --- direct /app/ ----------------------------------------------------------------------------------
 
 
 def test_direct_app_visit_is_a_fresh_standalone_session(direct_visit):
@@ -620,65 +366,13 @@ def assert_fresh_standalone(report):
     before, after = report["before"], report["after"]
 
     assert before["path"] == "/app/" and before["search"] == "" and before["hash"] == ""
-    assert before["embedded"] is False and before["expanded"] is False
+    assert before["embedded"] is False
     assert before["headerShown"] is True
     assert before["emptyShown"] is True and before["conversationEmpty"] is True
     assert before["users"] == [] and before["requests"] == []
     (request,) = after["requests"]
     assert request["body"] == {"message": "after refresh", "history": [], "session_id": None}
     assert after["users"] == ["after refresh"]
-
-
-# --- protocol rejection ------------------------------------------------------------------------------
-
-
-def test_parent_rejects_every_unexpected_sender(handoff_run):
-    loaded = step(handoff_run, "loaded")
-    received = handoff_run["parent"]["received"]
-    origin, cross = handoff_run["origin"], handoff_run["cross_origin"]
-
-    for label in ("parent-own-window", "parent-sibling-window", "parent-cross-origin",
-                  "parent-invalid-payloads"):
-        snap = step(handoff_run, label)
-        assert_collapsed(snap, handoff_run, requests=0)
-        assert snap["historyLength"] == loaded["historyLength"], label
-
-    # Each rejected message really was delivered.
-    assert any(m["fromSelf"] and m["type"] == PROMPT for m in received)
-    assert any(m["origin"] == origin and not m["fromChat"] and not m["fromSelf"]
-               and m["type"] == PROMPT for m in received)
-    assert any(m["origin"] == cross and m["type"] == PROMPT for m in received)
-    assert sum(1 for m in received if m["fromChat"]) >= 12
-
-
-def test_parent_accepts_the_exact_message_and_it_sends_nothing(handoff_run):
-    control = step(handoff_run, "parent-valid-message-only")
-
-    assert_expanded(control, handoff_run, requests=0)
-    assert control["historyLength"] == step(handoff_run, "loaded")["historyLength"] + 1
-    assert_collapsed(step(handoff_run, "after-control-back"), handoff_run, requests=0)
-
-
-def test_chat_rejects_every_unexpected_sender(handoff_run):
-    probes = handoff_run["parent"]["probes"]
-    received = handoff_run["parent"]["childReceived"]
-    origin = handoff_run["origin"]
-
-    assert probes["childInvalidFromParent"] is False         # bad type/version/keys
-    assert probes["childFromSibling"] is False               # same origin, wrong window
-    assert probes["childFromItself"] is False                # same origin, its own window
-    assert probes["childFromCrossOriginParent"] is False     # wrong origin
-    assert probes["crossOriginParentDelivered"] >= 1
-
-    # Each rejected message really was delivered.
-    assert any(m["fromSelf"] and m["type"] == PRESENTATION for m in received)
-    assert any(m["origin"] == origin and not m["fromParent"] and not m["fromSelf"]
-               and m["type"] == PRESENTATION for m in received)
-    assert sum(1 for m in received if m["fromParent"]) >= 9
-
-    # Positive control: the exact message from the real parent is honoured.
-    assert probes["childFromRealParent"] is True
-    assert probes["childCollapsedByRealParent"] is True
 
 
 # --- static contract (always runs) ---------------------------------------------------------------------
@@ -689,34 +383,21 @@ def site_sources() -> dict[Path, str]:
             if p.suffix in (".ts", ".tsx", ".css")}
 
 
-def test_protocol_constants_match_on_both_sides():
+def test_homepage_and_chat_exchange_no_messages_and_change_no_url():
+    app = APP_TSX.read_text(encoding="utf-8")
     js = APP_JS.read_text(encoding="utf-8")
-    ts = PROTOCOL_TS.read_text(encoding="utf-8")
 
-    assert f'EMBED_PROMPT_SUBMITTED = "{PROMPT}"' in js
-    assert f'EMBED_PRESENTATION = "{PRESENTATION}"' in js
-    assert "EMBED_PROTOCOL_VERSION = 1;" in js
-    assert f"PROMPT_SUBMITTED = '{PROMPT}'" in ts
-    assert f"PRESENTATION = '{PRESENTATION}'" in ts
-    assert "EMBED_PROTOCOL_VERSION = 1;" in ts
-
-
-def test_messages_are_posted_only_to_the_exact_origin():
-    js = APP_JS.read_text(encoding="utf-8")
-    ts = PROTOCOL_TS.read_text(encoding="utf-8")
-
-    for source in [js, ts, *site_sources().values()]:
-        assert not re.search(r"""postMessage\([^;]*['"]\*['"]""", source)
-
-    assert js.count("postMessage(") == 1
-    assert re.search(r"postMessage\(\s*\{ type: EMBED_PROMPT_SUBMITTED, version: EMBED_PROTOCOL_VERSION \},\s*"
-                     r"window\.location\.origin\s*\)", js)
-    assert ts.count("postMessage(") == 1 and "origin," in ts
-    # The incoming checks: exact origin and exact window on both sides.
-    assert "event.origin !== window.location.origin" in js
-    assert "event.source !== window.parent" in js
-    assert "event.origin !== origin" in ts
-    assert "event.source !== frameWindow" in ts
+    for source in (app, js):
+        assert "postMessage" not in source
+        assert 'addEventListener("message"' not in source and "addEventListener('message'" not in source
+    assert "pushState" not in app and "replaceState" not in app and "popstate" not in app
+    assert "is-expanded" not in app and "is-active" not in app and "chat-expanded" not in app
+    assert "is-expanded" not in APP_CSS.read_text(encoding="utf-8")
+    # The iframe is the canonical chat at the fixed /app/ path.
+    assert "const CHAT_PATH = '/app/';" in app
+    assert not (SITE_SRC / "embed-protocol.ts").exists()
+    assert not (HARNESS / "handoff_parent.js").exists()
+    assert "<iframe ref={frameRef} src={CHAT_PATH}" in app
 
 
 def test_no_mutation_observer_storage_or_url_transfer():
@@ -730,11 +411,6 @@ def test_no_mutation_observer_storage_or_url_transfer():
                           r"location\.hash\s*=", r"location\.search\s*=", r"[?&#]prompt="):
             assert not re.search(forbidden, source), (path, forbidden)
 
-    app = APP_TSX.read_text(encoding="utf-8")
-    # The URL change is exactly a pushState to the fixed /app/ path.
-    assert app.count("pushState(") == 1
-    assert "window.history.pushState({ kalillac: 'chat' }, '', CHAT_PATH);" in app
-    assert "CHAT_PATH = '/app/'" in PROTOCOL_TS.read_text(encoding="utf-8")
 
 
 def test_site_contains_no_duplicate_chat_or_replit_leftovers():
@@ -807,6 +483,19 @@ def test_privacy_wording_boundaries():
     ):
         assert required in text, required
 
+
+
+def test_privacy_describes_the_embedded_chat_accurately():
+    app = APP_TSX.read_text(encoding="utf-8")
+    text = re.sub(r"<[^>]+>", "", app)
+
+    assert ("The homepage embeds the same chat application that is served at /app/. Your messages and "
+            "Kalillac’s responses are not passed through the page address, browser storage, or messages between "
+            "browser windows. The embedded chat application sends each chat request itself, under the same "
+            "temporary session behavior described above.") in text
+    # The full-screen handoff no longer exists, so nothing may describe it.
+    assert "full-screen" not in text and "open full-screen" not in text
+    assert "exchange only a signal" not in text
 
 # --- no automatic third-party resources ---------------------------------------------------------
 

@@ -11,9 +11,8 @@
    - /__harness__/runner?scenarios=a,b,...: run each scenario in a fresh
      same-origin iframe and write every result, as JSON, into <pre id="results">.
      The runner is each scenario's parent window, so it also records every
-     message the framed chat posts to its parent (the homepage handoff
-     protocol). It never answers them, so the chat stays in its compact
-     embedded presentation throughout.
+     message the framed chat posts to its parent -- which must be none: the
+     chat never messages the page that embeds it.
 
    No request leaves the page: fetch is replaced before app.js loads. */
 (function () {

@@ -1,6 +1,7 @@
-"""Homepage quick-start composer: CTA scrolling, focus, pointer/caret,
-responsive layout, and the chat composer's whole typing area -- both inside
-the homepage iframe and on a direct /app/ visit.
+"""Homepage chat workspace: one stable full-height workspace from the first
+render, CTA scrolling and focus, the editorial eyebrow, pointer/caret, the
+chat composer's whole typing area, and multi-turn conversations -- both
+inside the homepage iframe and on a direct /app/ visit.
 
 Browser tests drive the BUILT site (site/dist/public) with the canonical
 frontend/ chat at /app/, served from loopback only by the same harness as
@@ -31,6 +32,7 @@ from test_homepage_handoff import (
     SITE,
     SITE_CSS,
     VIEWPORTS,
+    WORKSPACE_HEIGHT,
     Site,
     browser_page,
     require_browser_and_build,
@@ -116,6 +118,15 @@ def run_scenario(page: Page, reduced: bool) -> dict:
         hintsShown: shown('.empty-hints'), messages: d.querySelectorAll('#thread .msg').length,
         input: ix.childRect(ix.input()), send: ix.childRect(d.getElementById('send-btn')),
         frame: ix.rect(ix.frame()),
+        eyebrow: (() => { const e = document.querySelector('.eyebrow'), s = getComputedStyle(e),
+                                 b = getComputedStyle(e, '::before');
+          return { text: e.textContent, rect: ix.rect(e), children: e.children.length,
+                   background: s.backgroundColor, backgroundImage: s.backgroundImage, radius: s.borderRadius,
+                   padding: s.padding, borderTopWidth: s.borderTopWidth, letterSpacing: s.letterSpacing,
+                   fontSize: s.fontSize, ruleContent: b.content, ruleWidth: b.width, ruleHeight: b.height,
+                   ruleColor: b.backgroundColor }; })(),
+        headline: ix.rect(document.querySelector('.hero h1')),
+        eyebrowDots: document.querySelectorAll('.eyebrow-dot').length,
       };""")
 
     # ---- pointer, caret, decorative layers -------------------------------------------
@@ -146,7 +157,11 @@ def run_scenario(page: Page, reduced: bool) -> dict:
 
     # ---- the visible typing area focuses the real input (trusted clicks) -----------------
     hits = []
-    box = r["landing"]["input"]
+    # The full workspace extends below the first screen; bring it into view.
+    page.eval("""const ix = window.__ix, c = ix.card().getBoundingClientRect(), h = ix.header().getBoundingClientRect();
+      window.scrollTo({top: window.scrollY + c.top - h.bottom - 16, behavior: 'instant'});
+      await ix.wait(150); return true;""")
+    box = page.eval("return window.__ix.childRect(window.__ix.input());")
     points = [(box["left"] + box["width"] * fx, box["top"] + box["height"] * fy)
               for fx in (0.04, 0.5, 0.96) for fy in (0.2, 0.5, 0.8)]
     for x, y in points:
@@ -168,7 +183,7 @@ def run_scenario(page: Page, reduced: bool) -> dict:
     cta = r["landing"]["cta"]
     page.click(cta["left"] + cta["width"] / 2, cta["top"] + cta["height"] / 2)
     r["ctaFromTop"] = page.eval("""
-      const ix = window.__ix, samples = await ix.sample(900, 60);
+      const ix = window.__ix, samples = await ix.sample(1800, 60);
       return { samples, header: ix.rect(ix.header()), card: ix.rect(ix.card()), ...ix.focusState() };""")
 
     # ---- CTA 2: header "Try Kalillac" from the bottom of the page ----------------------------
@@ -251,6 +266,17 @@ def run_composer_scenario(page: Page) -> dict:
                innerWidth, docScrollWidth: document.documentElement.scrollWidth };""")
     shell, field, send = (r["geometry"][k] for k in ("shell", "input", "send"))
     mid_x, mid_y = field["left"] + field["width"] / 2, field["top"] + field["height"] / 2
+
+    # A restrained hover cue: the box's border changes while the pointer is
+    # over its padding (and never the cursor of Send).
+    border = "return window.__cx.win().getComputedStyle(window.__cx.el('composer-shell')).borderTopColor;"
+    page.eval("window.__cx.blurAll(); return true;")
+    page.dt.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 1, "y": 1}, page.session)
+    r["borderIdle"] = page.eval(border)
+    page.dt.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": shell["left"] + 6, "y": mid_y}, page.session)
+    time.sleep(0.25)
+    r["borderHover"] = page.eval(border)
+    page.dt.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 1, "y": 1}, page.session)
     points = {
         "above": (mid_x, shell["top"] + 4),
         "below": (mid_x, shell["bottom"] - 4),
@@ -358,21 +384,35 @@ def test_lands_at_the_top_with_the_header_visible_and_no_horizontal_overflow(int
     assert interaction["final"]["docScrollWidth"] <= width
 
 
-def test_empty_composer_is_compact_without_a_transcript_scrollbar(interaction):
+def test_initial_workspace_is_full_height_without_a_transcript_scrollbar(interaction):
     landing = interaction["landing"]
 
     assert landing["messages"] == 0
-    # No redundant intro inside the card: only the starters and the composer.
-    assert not landing["markShown"] and not landing["titleShown"] and not landing["lineShown"]
-    assert landing["hintsShown"]
-    # Nothing in the empty card overflows, so no scrollbar can appear.
+    # One stable full workspace from the first render: no compact state.
+    assert abs(landing["card"]["height"] - WORKSPACE_HEIGHT[interaction["viewport"]]) <= 1, landing["card"]
+    assert landing["card"]["height"] >= (560 if interaction["viewport"] == "desktop" else 520)
+    # The existing introduction and starters sit in the workspace...
+    assert landing["markShown"] and landing["titleShown"] and landing["lineShown"] and landing["hintsShown"]
+    # ...without overflowing it, so no empty-history scrollbar can appear.
     scroll_height, client_height = landing["convScroll"]
     assert scroll_height <= client_height, landing["convScroll"]
     assert landing["childDocScroll"][0] <= landing["childDocScroll"][1]
-    # No large empty transcript area is reserved: the transcript region is at
-    # most the starters' height plus their padding.
-    assert client_height <= 130, client_height
-    assert landing["card"]["height"] == (164 if interaction["viewport"] == "desktop" else 200)
+
+
+def test_eyebrow_is_editorial_text_with_a_short_blue_rule(interaction):
+    eyebrow = interaction["landing"]["eyebrow"]
+
+    assert eyebrow["text"] == "MEET KALILLAC AI" and eyebrow["children"] == 0
+    assert interaction["landing"]["eyebrowDots"] == 0
+    # No capsule: no background, border, rounding or padding.
+    assert eyebrow["background"] == "rgba(0, 0, 0, 0)" and eyebrow["backgroundImage"] == "none"
+    assert eyebrow["radius"] == "0px" and eyebrow["padding"] == "0px" and eyebrow["borderTopWidth"] == "0px"
+    # One short blue rule beside the text.
+    assert eyebrow["ruleContent"] == '""' and eyebrow["ruleHeight"] == "2px"
+    assert eyebrow["ruleWidth"] in ("28px", "22px") and eyebrow["ruleColor"] == "rgb(50, 102, 216)"
+    assert float(eyebrow["fontSize"].rstrip("px")) >= 10 and float(eyebrow["letterSpacing"].rstrip("px")) > 0
+    # Aligned with the headline's left edge.
+    assert abs(eyebrow["rect"]["left"] - interaction["landing"]["headline"]["left"]) <= 1
 
 
 def test_composer_controls_are_fully_visible_and_tappable(interaction):
@@ -444,13 +484,15 @@ def test_clicking_anywhere_in_the_visible_input_focuses_the_real_field(interacti
 # --- CTAs ----------------------------------------------------------------------------------------
 
 
-def test_cta_from_the_landing_position_focuses_without_moving_the_page(interaction):
+def test_cta_from_the_landing_position_brings_the_workspace_below_the_header(interaction):
     run = interaction["ctaFromTop"]
 
-    # The card is already fully visible below the header on both viewports,
-    # so the page does not move at all; the real input is focused.
-    assert set(run["samples"]) == {0}
+    # The full workspace extends below the first screen, so the CTA moves it
+    # just below the sticky header and focuses the real input.
+    assert run["samples"][-1] > 0                                   # the page moved
+    assert run["samples"][-6:] == [run["samples"][-1]] * 6           # and settled
     assert run["header"]["top"] == 0
+    assert abs(run["card"]["top"] - expected_card_top(interaction)) <= 1, run["card"]
     assert run["parentActive"] and run["childActive"]
 
 
@@ -556,6 +598,10 @@ def check_composer_cursor_and_caret_are_explicit_and_visible(composer):
     assert (dark + 0.05) / (light + 0.05) >= 7
 
 
+def check_composer_box_has_a_hover_cue(composer):
+    assert composer["borderIdle"] != composer["borderHover"], (composer["borderIdle"], composer["borderHover"])
+
+
 def check_composer_pages_have_no_horizontal_overflow(composer):
     for snapshot in (composer["geometry"], composer["afterSend"]):
         assert snapshot["docScrollWidth"] <= snapshot["innerWidth"] == composer["size"][0]
@@ -609,6 +655,14 @@ def test_composer_pages_have_no_horizontal_overflow_on_direct_app(app_composer):
     check_composer_pages_have_no_horizontal_overflow(app_composer)
 
 
+def test_composer_box_has_a_hover_cue_in_homepage_iframe(homepage_composer):
+    check_composer_box_has_a_hover_cue(homepage_composer)
+
+
+def test_composer_box_has_a_hover_cue_on_direct_app(app_composer):
+    check_composer_box_has_a_hover_cue(app_composer)
+
+
 def test_padding_handler_is_scoped_and_never_intercepts_controls():
     source = (REPO / "frontend" / "app.js").read_text(encoding="utf-8")
     css = (REPO / "frontend" / "app.css").read_text(encoding="utf-8")
@@ -628,6 +682,296 @@ def test_padding_handler_is_scoped_and_never_intercepts_controls():
     field_rule = css[css.index(".composer textarea {"):]
     field_rule = field_rule[: field_rule.index("}")]
     assert "caret-color: var(--ink);" in field_rule and "cursor: text;" in field_rule
+
+
+# --- the conversation workspace (stable size, no handoff) ------------------------------------------
+
+# Records, in the homepage window, every message the chat iframe posts (there
+# must be none: the workspace never resizes or hands off).
+PARENT_LOG = r"""
+window.__parentLog = [];
+window.addEventListener('message', e => window.__parentLog.push({
+  type: e.data && typeof e.data === 'object' ? e.data.type : String(e.data), origin: e.origin }));
+return true;
+"""
+
+LAYOUT = r"""
+const c = window.__cx, d = c.doc(), w = c.win(), f = document.querySelector('[data-testid="embedded-chat"] iframe');
+const conv = d.getElementById('conversation'), slot = document.querySelector('.embedded-chat-slot');
+const cs = el => w.getComputedStyle(el);
+const rect = el => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+const header = document.querySelector('.site-header'), trust = document.querySelector('.hero-under-note');
+return {
+  path: location.pathname, href: location.href, historyLength: history.length,
+  scrollY: Math.round(window.scrollY), innerWidth, innerHeight,
+  docScrollWidth: document.documentElement.scrollWidth,
+  slot: slot ? rect(slot) : null, frame: f ? rect(f) : null,
+  slotClass: slot ? slot.className : null,
+  frameHeight: f ? Math.round(f.getBoundingClientRect().height) : innerHeight,
+  header: header ? rect(header) : null, trust: trust ? rect(trust) : null,
+  appHeight: Math.round(d.querySelector('.app').getBoundingClientRect().height), childInnerHeight: w.innerHeight,
+  users: [...d.querySelectorAll('#thread .msg-user .bubble')].map(b => b.textContent),
+  assistantRows: d.querySelectorAll('#thread .msg-assistant').length,
+  notes: [...d.querySelectorAll('#thread .error-note, #thread .notice-note')].map(n => n.textContent),
+  actions: [...d.querySelectorAll('#thread .msg-action span')].map(s => s.textContent),
+  conv: { overflowY: cs(conv).overflowY, scrollHeight: conv.scrollHeight, clientHeight: conv.clientHeight,
+          scrollTop: Math.round(conv.scrollTop), rect: rect(conv) },
+  childDocScroll: [d.scrollingElement.scrollHeight, d.scrollingElement.clientHeight],
+  composer: c.abs(d.getElementById('composer-shell')), send: c.abs(d.getElementById('send-btn')),
+  sendIsStop: d.getElementById('send-btn').classList.contains('is-stop'),
+  sendCursor: cs(d.getElementById('send-btn')).cursor,
+  requests: (w.__HANDOFF_CHILD__ || {requests: []}).requests.map(r => r.body.message),
+  parentLog: (window.__parentLog || []).slice(),
+};
+"""
+
+LABELS = ("idle", "afterInvalid", "firstImmediate", "firstReplied", "longReplied", "afterError",
+          "inFlight", "afterStop", "readingEarlier")
+
+
+def send_prompt(page: "Page", text: str):
+    page.eval(f"window.__cx.setValue({json.dumps(text)}); return true;")
+    box = page.eval("return window.__cx.abs(window.__cx.el('send-btn'));")
+    page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
+
+
+def run_conversation_scenario(page: "Page", homepage: bool) -> dict:
+    r: dict = {}
+    page.eval(COMPOSER_HELPERS)
+    if homepage:
+        page.eval(PARENT_LOG)
+    page.eval("""for (let i = 0; i < 400 && !(window.__cx.doc() && window.__cx.el('composer-input')); i++)
+        await window.__cx.wait(25);
+      await window.__cx.wait(400); return true;""")
+    layout = lambda: page.eval(LAYOUT)
+    r["initial"] = layout()                                   # first render, page at the top
+
+    if homepage:
+        # Put the whole workspace in view (as the CTAs do) so the composer can
+        # be clicked like a user would.
+        page.eval("""const s = document.querySelector('.embedded-chat-slot').getBoundingClientRect();
+          const h = document.querySelector('.site-header').getBoundingClientRect();
+          window.scrollTo({top: window.scrollY + s.top - h.bottom - 16, behavior: 'instant'});
+          await window.__cx.wait(200); return true;""")
+    r["idle"] = layout()
+
+    # ---- invalid submissions send nothing ------------------------------------------------------
+    send_prompt(page, "")                                     # disabled Send, empty composer
+    time.sleep(0.2)
+    page.eval("window.__cx.setValue('   '); window.__cx.el('composer-input').focus(); return true;")
+    for kind in ("keyDown", "keyUp"):
+        page.dt.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
+                                                "windowsVirtualKeyCode": 13}, page.session)
+    page.eval("window.__cx.el('send-btn').click(); return true;")  # whitespace-only via the button
+    time.sleep(0.3)
+    r["afterInvalid"] = layout()
+
+    # ---- a real multi-turn conversation in the same workspace -----------------------------------
+    send_prompt(page, "First question")
+    time.sleep(0.06)
+    r["firstImmediate"] = layout()                            # the scripted reply takes 300 ms
+    time.sleep(0.7)
+    r["firstReplied"] = layout()
+
+    send_prompt(page, "LONG: please write a long answer")
+    time.sleep(0.9)
+    r["longReplied"] = layout()
+
+    send_prompt(page, "ERROR: this one fails")
+    time.sleep(0.9)
+    r["afterError"] = layout()
+
+    send_prompt(page, "HANG: wait for Stop")
+    time.sleep(0.3)
+    r["inFlight"] = layout()
+    stop = r["inFlight"]["send"]
+    page.click(stop["left"] + stop["width"] / 2, stop["top"] + stop["height"] / 2)
+    time.sleep(0.4)
+    r["afterStop"] = layout()
+
+    # Reading earlier messages is not interrupted: no new message, no yank.
+    page.eval("window.__cx.doc().getElementById('conversation').scrollTop = 0; return true;")
+    time.sleep(0.5)
+    r["readingEarlier"] = layout()
+    return r
+
+
+@pytest.fixture(scope="module", params=[
+    ("desktop", False), ("desktop", True), ("mobile", False), ("mobile", True),
+], ids=["desktop", "desktop-reduced-motion", "mobile", "mobile-reduced-motion"])
+def homepage_conversation(request, tmp_path_factory):
+    browser = require_browser_and_build()
+    viewport, reduced = request.param
+    profile = tmp_path_factory.mktemp(f"edge-conversation-{viewport}-{int(reduced)}")
+    site = Site()
+
+    with site.http:
+        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile",
+                          reduced_motion=reduced) as (devtools, session):
+            page = Page(devtools, session)
+            devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
+            time.sleep(0.5)
+            result = run_conversation_scenario(page, homepage=True)
+
+    shutil.rmtree(profile, ignore_errors=True)
+    result["viewport"], result["size"], result["reduced"] = viewport, VIEWPORTS[viewport], reduced
+    return result
+
+
+@pytest.fixture(scope="module", params=["desktop", "mobile"])
+def app_conversation(request, tmp_path_factory):
+    browser = require_browser_and_build()
+    viewport = request.param
+    profile = tmp_path_factory.mktemp(f"edge-app-conversation-{viewport}")
+    site = Site()
+    site.child_passive = True
+
+    with site.http:
+        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile") as (devtools, session):
+            page = Page(devtools, session)
+            devtools.call("Page.navigate", {"url": site.http.origin + "/app/"}, session)
+            time.sleep(0.5)
+            result = run_conversation_scenario(page, homepage=False)
+
+    shutil.rmtree(profile, ignore_errors=True)
+    result["viewport"], result["size"] = viewport, VIEWPORTS[viewport]
+    return result
+
+
+def min_height(viewport: str) -> int:
+    return 560 if viewport == "desktop" else 520
+
+
+def assert_usable_workspace(snap):
+    # The chat fills its frame; the transcript is the only vertical scroller
+    # and the composer sits fully visible at the bottom.
+    assert abs(snap["appHeight"] - snap["childInnerHeight"]) <= 1
+    assert snap["conv"]["overflowY"] == "auto"
+    assert snap["childDocScroll"][0] <= snap["childDocScroll"][1]
+    frame_top, frame_height = (snap["frame"][1], snap["frame"][3]) if snap["frame"] else (0, snap["innerHeight"])
+    composer = snap["composer"]                                     # top-level coordinates
+    assert frame_top <= composer["top"] and composer["bottom"] <= frame_top + frame_height + 1
+    assert composer["bottom"] <= snap["innerHeight"] + 1
+    # The transcript ends above the composer (both in the chat's coordinates).
+    conv_bottom = snap["conv"]["rect"][1] + snap["conv"]["rect"][3]
+    assert conv_bottom <= composer["top"] - frame_top + 1, (conv_bottom, composer, frame_top)
+    assert snap["docScrollWidth"] <= snap["innerWidth"]
+
+
+def test_workspace_is_full_height_from_the_first_render(homepage_conversation):
+    run = homepage_conversation
+    first = run["initial"]
+    target = WORKSPACE_HEIGHT[run["viewport"]]
+
+    assert first["scrollY"] == 0 and first["requests"] == [] and first["users"] == []
+    assert abs(first["slot"][3] - target) <= 1 and first["slot"][3] >= min_height(run["viewport"])
+    assert abs(first["frameHeight"] - (first["slot"][3] - 2)) <= 1          # the frame fills the card
+    assert first["slotClass"] == "embedded-chat-slot"
+    # No empty-history scrollbar before the first message.
+    assert first["conv"]["scrollHeight"] <= first["conv"]["clientHeight"]
+
+
+def test_workspace_height_is_stable_before_and_after_submission(homepage_conversation):
+    run = homepage_conversation
+    height, frame_height = run["initial"]["slot"][3], run["initial"]["frameHeight"]
+
+    for label in LABELS:
+        snap = run[label]
+        assert snap["slot"][3] == height and snap["frameHeight"] == frame_height, (label, snap["slot"])
+        assert snap["slotClass"] == "embedded-chat-slot", label
+        assert snap["slot"][2] == run["initial"]["slot"][2], label               # width too
+
+
+def test_sending_never_moves_navigates_or_signals(homepage_conversation):
+    run = homepage_conversation
+    base = run["idle"]
+
+    for label in LABELS[1:]:
+        snap = run[label]
+        assert snap["path"] == "/" and snap["href"] == base["href"], label       # no URL change
+        assert snap["historyLength"] == base["historyLength"], label             # no history entry
+        assert snap["scrollY"] == base["scrollY"], label                         # no page jump or hijack
+        assert snap["slot"][1] == base["slot"][1], label                         # no layout shift
+        assert snap["parentLog"] == [], label                                    # no message at all
+
+
+def test_invalid_or_empty_submissions_send_nothing(homepage_conversation):
+    snap = homepage_conversation["afterInvalid"]
+    assert snap["requests"] == [] and snap["users"] == [] and snap["assistantRows"] == 0
+
+
+def test_first_prompt_is_sent_once_and_answered_in_place(homepage_conversation):
+    run = homepage_conversation
+    assert run["firstImmediate"]["requests"] == ["First question"]
+    assert run["firstImmediate"]["users"] == ["First question"] and run["firstImmediate"]["assistantRows"] == 1
+    assert run["firstReplied"]["requests"] == ["First question"]
+    assert run["firstReplied"]["actions"][:2] == ["Copy", "Retry"]
+
+
+def test_multi_turn_conversation_with_copy_retry_stop_and_errors(homepage_conversation):
+    run = homepage_conversation
+    assert run["afterError"]["notes"][-1] == "Kalillac is temporarily unavailable. Please try again shortly."
+    assert run["afterError"]["users"] == ["First question", "LONG: please write a long answer",
+                                          "ERROR: this one fails"]
+    assert run["afterError"]["assistantRows"] == 3
+    # A new send replaces a failed exchange on screen (existing chat behavior);
+    # the stopped exchange then stays with its notice and Retry.
+    assert run["afterStop"]["notes"][-1] == "Stopped."
+    assert run["afterStop"]["users"] == ["First question", "LONG: please write a long answer",
+                                         "HANG: wait for Stop"]
+    assert run["afterStop"]["assistantRows"] == 3
+    assert run["afterStop"]["actions"].count("Copy") == 2 and "Retry" in run["afterStop"]["actions"]
+    assert run["afterStop"]["requests"] == ["First question", "LONG: please write a long answer",
+                                            "ERROR: this one fails", "HANG: wait for Stop"]
+
+
+def test_only_message_history_scrolls_and_the_composer_stays_visible(homepage_conversation):
+    run = homepage_conversation
+    for label in ("idle", "firstReplied", "longReplied", "afterError", "afterStop", "readingEarlier"):
+        assert_usable_workspace(run[label])
+    long = run["longReplied"]
+    assert long["conv"]["scrollHeight"] > long["conv"]["clientHeight"]           # it overflows...
+    assert long["conv"]["scrollTop"] + long["conv"]["clientHeight"] >= long["conv"]["scrollHeight"] - 2
+    # ...and the trust line stays below the workspace, never overlapping it.
+    snap = run["afterStop"]
+    assert snap["trust"][1] >= snap["slot"][1] + snap["slot"][3]
+
+
+def test_reading_earlier_messages_is_not_interrupted(homepage_conversation):
+    assert homepage_conversation["readingEarlier"]["conv"]["scrollTop"] == 0
+
+
+def test_stop_keeps_the_pointer_cursor(homepage_conversation):
+    in_flight = homepage_conversation["inFlight"]
+    assert in_flight["sendIsStop"] is True and in_flight["sendCursor"] == "pointer"
+
+
+def test_direct_app_is_a_full_height_conversation(app_conversation):
+    run = app_conversation
+    width, height = run["size"]
+    snap = run["afterStop"]
+
+    assert run["initial"]["frame"] is None and run["initial"]["appHeight"] == height
+    assert snap["appHeight"] == height and snap["childInnerHeight"] == height
+    for label in ("idle", "longReplied", "afterStop"):
+        assert_usable_workspace(run[label])
+    assert snap["assistantRows"] == 3 and snap["requests"][0] == "First question"
+    assert run["longReplied"]["conv"]["scrollHeight"] > run["longReplied"]["conv"]["clientHeight"]
+    assert run["readingEarlier"]["conv"]["scrollTop"] == 0
+    assert run["inFlight"]["sendIsStop"] is True and run["inFlight"]["sendCursor"] == "pointer"
+    assert run["afterInvalid"]["requests"] == []
+
+
+def test_workspace_css_is_one_stable_size():
+    css = SITE_CSS.read_text(encoding="utf-8")
+
+    assert ("height: 640px; height: clamp(560px, 70vh, 720px); margin: 8px auto 0;" in css)
+    assert ("  .embedded-chat-slot { width: 100%; height: 600px; height: clamp(520px, 72vh, 680px); "
+            "height: clamp(520px, 72svh, 680px); margin-top: 22px; }") in css
+    # No other height for the workspace, and no state that could resize it.
+    assert len(re.findall(r"\.embedded-chat-slot[^{]*\{[^}]*\bheight:", css)) == 2
+    for gone in ("is-expanded", "is-active", "chat-expanded", "chat-expand"):
+        assert gone not in css, gone
 
 
 # --- static contract (always runs) -----------------------------------------------------------------

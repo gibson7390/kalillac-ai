@@ -101,8 +101,10 @@
 .hero-grid { position: relative; display: grid; grid-template-columns: minmax(0, 1.03fr) minmax(370px,.97fr); align-items: center; gap: 36px; }
 .hero-content { position: relative; z-index: 2; min-width: 0; padding-left: 40px; }
 .hero-copy { position: relative; z-index: 2; }
-.eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px; background: rgba(231,239,255,.86); color: #5670b5; font-family: var(--app-font-mono); font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
-.eyebrow-dot { width: 7px; height: 7px; border-radius: 50%; background: #8b9ef5; }
+/* Editorial eyebrow: plain text led by one short blue rule -- no capsule,
+   border, dot or padding. Its left edge aligns with the headline. */
+.eyebrow { display: inline-flex; align-items: center; gap: 12px; padding: 0; color: #3f5aa3; font-family: var(--app-font-mono); font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+.eyebrow::before { content: ''; flex: none; width: 28px; height: 2px; border-radius: 1px; background: #3266d8; }
 .hero h1 { margin: 18px 0 14px; max-width: 620px; color: #101d44; font-family: var(--app-font-serif); font-size: clamp(42px, 5.8vw, 70px); font-weight: 800; letter-spacing: -.072em; line-height: .98; }
 .hero h1 span { color: #3568df; }
 .hero-description { max-width: 520px; margin: 0; color: #657087; font-size: 16px; line-height: 1.58; }
@@ -256,8 +258,6 @@
 .hero-layout { position: relative; }
 .hero-grid { min-height: 268px; grid-template-columns: minmax(0, 1fr) minmax(340px, .8fr); gap: 18px; }
 .hero-copy { z-index: 2; padding-left: 26px; }
-.eyebrow { padding: 8px 12px; background: #eaf1ff; color: #526eaa; font-size: 10px; font-weight: 700; letter-spacing: .15em; }
-.eyebrow-dot { width: 6px; height: 6px; background: #4e7ae4; box-shadow: 0 0 0 3px #d8e5ff; }
 .hero h1 { max-width: 750px; margin: 24px 0 16px; font-size: clamp(43px, 4.3vw, 68px); line-height: 1.02; letter-spacing: -.067em; color: #15213d; white-space: nowrap; }
 .hero h1 span { color: #3266d8; }
 .hero-description { max-width: 545px; font-size: 16px; line-height: 1.63; color: #647089; }
@@ -391,7 +391,8 @@
   .hero { padding-top: 25px; }
   .hero h1 { font-size: clamp(32px, 8vw, 41px); line-height: 1.07; letter-spacing: -.065em; }
   .hero-description { font-size: 12.5px; }
-  .eyebrow { font-size: 8px; padding: 7px 10px; }
+  .eyebrow { font-size: 10px; letter-spacing: .14em; }
+  .eyebrow::before { width: 22px; }
   .hero-under-note { font-size: 10px; }
   .section-title { font-size: 34px; }
   .capability-grid { grid-template-columns: 1fr; }
@@ -439,26 +440,20 @@
   .quick-icon { flex-basis: 37px; height: 37px; }
 }
 
-/* ---------------- Homepage chat card and the /app/ handoff ----------------
-   The card has a FIXED height at every width: it never grows with the
-   conversation. Full-screen is a separate, explicit presentation state set by
-   the handoff in App.tsx (useChatHandoff) -- never by watching the iframe.
-   The slot keeps the card's place in the page, so expanding does not shift
-   the content behind it, and the iframe element is never moved or reloaded. */
-.embedded-chat-slot { position: relative; z-index: 4; width: min(960px, calc(100% - 90px)); height: 188px; margin: 8px auto 0; scroll-margin-top: 96px; }
+/* ---------------- Homepage chat workspace ----------------
+   A full conversation workspace from the first render onward, at ONE stable
+   height: it never resizes when a prompt is sent, while the reply is
+   pending, or after replies and errors. Inside, the chat's transcript is the
+   only scroller and its composer stays at the bottom. Fixed fallbacks
+   precede the dynamic units. */
+.embedded-chat-slot { position: relative; z-index: 4; width: min(960px, calc(100% - 90px)); height: 640px; height: clamp(560px, 70vh, 720px); margin: 8px auto 0; scroll-margin-top: 96px; }
 .embedded-chat { position: absolute; inset: 0; overflow: hidden; border: 1px solid #e7ecf7; border-radius: 21px; background: #fff; box-shadow: 0 21px 54px rgba(64,98,170,.14), 0 2px 6px rgba(50,89,165,.05); }
 .embedded-chat:focus-within { box-shadow: 0 21px 54px rgba(64,98,170,.14), 0 0 0 3px rgba(58,105,226,.09); }
 .embedded-chat iframe { display: block; width: 100%; height: 100%; border: 0; }
-.embedded-chat.is-expanded { position: fixed; inset: 0; z-index: 1000; width: 100%; height: 100vh; height: 100dvh; border: 0; border-radius: 0; box-shadow: none; animation: chat-expand .32s cubic-bezier(.2,.7,.2,1); }
-@keyframes chat-expand { from { clip-path: var(--chat-from-clip, inset(0 round 0)); } to { clip-path: inset(0 round 0); } }
-/* While expanded, only the chat scrolls (inside its own .conversation), and no
-   ancestor stacking context may trap the overlay under the sticky header. */
-html.chat-expanded, html.chat-expanded body { overflow: hidden; }
-html.chat-expanded .hero { isolation: auto; }
-html.chat-expanded .embedded-chat-slot { z-index: auto; }
-@media (prefers-reduced-motion: reduce) { .embedded-chat.is-expanded { animation: none; } }
 @media (max-width: 1000px) { .embedded-chat-slot { width: min(900px, 94%); } }
-@media (max-width: 720px) { .embedded-chat-slot { width: 100%; height: 232px; margin-top: 22px; } }
+@media (max-width: 720px) {
+  .embedded-chat-slot { width: 100%; height: 600px; height: clamp(520px, 72vh, 680px); height: clamp(520px, 72svh, 680px); margin-top: 22px; }
+}
 
 .hero h1 { white-space: normal; }
 .hero-action { margin-top: 24px; border: 0; cursor: pointer; font-family: inherit; }
@@ -490,11 +485,6 @@ html.chat-expanded .embedded-chat-slot { z-index: auto; }
    clip keep the hidden fallback. */
 .site-shell { overflow-x: hidden; overflow-x: clip; }
 
-/* The empty quick-start card holds only the starter prompts and the composer,
-   so no empty transcript area is reserved and nothing inside it scrolls. Once
-   a conversation exists, the chat's own transcript scrolling applies. */
-.embedded-chat-slot { height: 164px; }
-
 /* Decorative layers never take pointer input from the content around them. */
 .orbital-wrap, .orbital-glow, .hero-signal-line, .capability-art, .web-path,
 .privacy-orbit, .phone-stage { pointer-events: none; }
@@ -517,7 +507,7 @@ html.chat-expanded .embedded-chat-slot { z-index: auto; }
   .hero h1 span { display: block; text-wrap: balance; }
   .hero-description { line-height: 1.5; }
   .hero-action { margin-top: 18px; min-height: 46px; padding: 12px 20px; }
-  .embedded-chat-slot { height: 200px; margin-top: 18px; }
+  .embedded-chat-slot { margin-top: 18px; }
   .hero-under-note { flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; font-size: 12px; line-height: 1.4; }
   .hero-under-note .note-divider { display: none; }
 }
