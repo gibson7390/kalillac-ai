@@ -7,7 +7,8 @@
    - records every attempted browser-storage or cookie write;
    - when the chat is a top-level page (a direct visit or a refresh of
      /app/), checks that it starts empty and standalone, sends one message,
-     and reports the result to the loopback test server. */
+     and reports the result to the loopback test server -- unless the page
+     is marked passive, when the test drives it directly. */
 (function () {
   "use strict";
 
@@ -108,7 +109,8 @@
 
   var topLevel;
   try { topLevel = window.self === window.top; } catch (e) { topLevel = false; }
-  if (!topLevel) return;
+  // A passive page (window.__HANDOFF_PASSIVE__) is driven by the test itself.
+  if (!topLevel || window.__HANDOFF_PASSIVE__) return;
 
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 

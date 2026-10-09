@@ -21,6 +21,7 @@ The static checks always run.
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.server
 import json
 import os
@@ -55,7 +56,7 @@ PRESENTATION = "kalillac:embed:presentation"
 
 VIEWPORTS = {"desktop": (1440, 900), "mobile": (390, 844)}
 # The compact card's fixed height (site/src/index.css), by viewport.
-CARD_HEIGHT = {"desktop": 188, "mobile": 232}
+CARD_HEIGHT = {"desktop": 164, "mobile": 200}
 
 FIRST = "What is 2 + 2?"
 SECOND = "And 3 + 3?"
@@ -138,6 +139,9 @@ class Site:
     def __init__(self):
         self.mode = ""
         self.cross_origin = ""
+        # When set, a top-level /app/ does not run handoff_child.js's own
+        # standalone check; the test drives the page instead.
+        self.child_passive = False
         self.http = LoopbackServer(self.route)
 
     def site_page(self) -> bytes:
@@ -154,8 +158,9 @@ class Site:
         page = INDEX_HTML.read_text(encoding="utf-8")
         marker = "<!-- Local vendored libraries only"
         assert page.count(marker) == 1
+        passive = "<script>window.__HANDOFF_PASSIVE__ = true;</script>" if self.child_passive else ""
         return page.replace(
-            marker, '<script src="/__handoff__/child.js"></script>\n  ' + marker, 1
+            marker, passive + '<script src="/__handoff__/child.js"></script>\n  ' + marker, 1
         ).encode("utf-8")
 
     def route(self, raw_path: str):
@@ -252,11 +257,12 @@ class DevTools:
             pass
 
 
-def run_browser(browser: Path, url: str, profile: Path, size: tuple[int, int], mobile: bool,
-                done, timeout: float = 120, screenshot: Path | None = None) -> dict:
-    """Open url at exactly `size` CSS pixels and wait until done() is true.
-    Returns {"stderr", "timed_out", "requests"} -- requests is every URL the
-    page and its frames asked the network for; optionally saves a PNG."""
+@contextlib.contextmanager
+def browser_page(browser: Path, profile: Path, size: tuple[int, int], mobile: bool,
+                 reduced_motion: bool = False):
+    """Launch an isolated headless browser with one blank page at exactly
+    `size` CSS pixels (touch emulation when mobile; prefers-reduced-motion
+    emulated on request). Yields (devtools, session); always closes it."""
     args = [
         str(browser),
         "--headless=new",
@@ -282,13 +288,10 @@ def run_browser(browser: Path, url: str, profile: Path, size: tuple[int, int], m
     if os.name != "nt":
         args.insert(1, "--no-sandbox")
 
-    stderr_path = profile / "browser-stderr.txt"
-    with open(stderr_path, "wb") as stderr:
+    with open(profile / "browser-stderr.txt", "wb") as stderr:
         process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=stderr)
 
     devtools = None
-    timed_out = False
-    requests: list[str] = []
 
     try:
         port_file = profile / "DevToolsActivePort"
@@ -308,8 +311,34 @@ def run_browser(browser: Path, url: str, profile: Path, size: tuple[int, int], m
         if mobile:
             devtools.call("Emulation.setTouchEmulationEnabled",
                           {"enabled": True, "maxTouchPoints": 5}, session)
+        devtools.call("Emulation.setEmulatedMedia", {"features": [
+            {"name": "prefers-reduced-motion", "value": "reduce" if reduced_motion else "no-preference"},
+        ]}, session)
         devtools.call("Page.enable", {}, session)
         devtools.call("Network.enable", {}, session)
+        yield devtools, session
+    finally:
+        if devtools is not None:
+            try:
+                devtools.call("Browser.close", timeout=10)
+            except Exception:
+                pass
+            devtools.close()
+        try:
+            process.wait(20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(10)
+
+
+def run_browser(browser: Path, url: str, profile: Path, size: tuple[int, int], mobile: bool,
+                done, timeout: float = 120, screenshot: Path | None = None) -> dict:
+    """Open url at exactly `size` CSS pixels and wait until done() is true.
+    Returns {"stderr", "timed_out", "requests"} -- requests is every URL the
+    page and its frames asked the network for; optionally saves a PNG."""
+    timed_out = False
+
+    with browser_page(browser, profile, size, mobile) as (devtools, session):
         devtools.call("Page.navigate", {"url": url}, session)
 
         deadline = time.monotonic() + timeout
@@ -327,20 +356,8 @@ def run_browser(browser: Path, url: str, profile: Path, size: tuple[int, int], m
         devtools.call("Runtime.evaluate", {"expression": "1"}, session)
         requests = [e["params"]["request"]["url"] for e in devtools.events
                     if e.get("method") == "Network.requestWillBeSent"]
-    finally:
-        if devtools is not None:
-            try:
-                devtools.call("Browser.close", timeout=10)
-            except Exception:
-                pass
-            devtools.close()
-        try:
-            process.wait(20)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(10)
 
-    return {"stderr": stderr_path.read_text(encoding="utf-8", errors="replace"),
+    return {"stderr": (profile / "browser-stderr.txt").read_text(encoding="utf-8", errors="replace"),
             "timed_out": timed_out, "requests": requests}
 
 
@@ -746,8 +763,9 @@ def test_homepage_copy_and_navigation():
     assert ("Ask questions, develop ideas, write and troubleshoot code, or search the current "
             "web—without creating an account or building a permanent chat history.") in app
     assert "Start a private session" in app
-    assert ("Temporary sessions <span className=\"note-divider\">·</span> No account required "
-            "<span className=\"note-divider\">·</span>") in app and ">Clear provider disclosure<" in app
+    assert ('<span className="trust-item"><span className="live-dot" /> Temporary sessions</span>' in app
+            and '<span className="trust-item">No account required</span>' in app
+            and ">Clear provider disclosure<" in app)
     for item in (">Product<", ">Privacy<", ">How it works<", ">Try Kalillac<"):
         assert item in app, item
     for unfinished in ("Pricing", "Sign in", "Sign up", "Create account", "Log in"):

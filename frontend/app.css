@@ -646,6 +646,9 @@ body {
   background: var(--panel);
   box-shadow: var(--shadow-soft);
   transition: border-color var(--ease), box-shadow var(--ease);
+  /* The whole box is the typing area: its padding shows the text cursor and
+     a click there focuses the field (app.js). Send keeps its own cursor. */
+  cursor: text;
 }
 
 .composer-shell:focus-within {
@@ -667,6 +670,8 @@ body {
   font-size: 16px;          /* >=16px prevents iOS auto-zoom on focus */
   line-height: 1.45;
   color: var(--ink);
+  caret-color: var(--ink);  /* dark caret, clearly visible on the white field */
+  cursor: text;
   overflow-y: auto;
 }
 .composer textarea::placeholder { color: var(--muted); }

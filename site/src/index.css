@@ -482,3 +482,42 @@ html.chat-expanded .embedded-chat-slot { z-index: auto; }
   .hero-grid { grid-template-columns: minmax(0, 1fr); }
   .hero h1 { white-space: nowrap; }
 }
+
+/* ---------------- Composer interaction and responsive fixes ----------------
+   overflow-x: hidden made .site-shell a scroll container, which silently
+   disabled the sticky header (it scrolled away with the page). clip hides
+   horizontal overflow without creating a scroll container; browsers without
+   clip keep the hidden fallback. */
+.site-shell { overflow-x: hidden; overflow-x: clip; }
+
+/* The empty quick-start card holds only the starter prompts and the composer,
+   so no empty transcript area is reserved and nothing inside it scrolls. Once
+   a conversation exists, the chat's own transcript scrolling applies. */
+.embedded-chat-slot { height: 164px; }
+
+/* Decorative layers never take pointer input from the content around them. */
+.orbital-wrap, .orbital-glow, .hero-signal-line, .capability-art, .web-path,
+.privacy-orbit, .phone-stage { pointer-events: none; }
+
+/* Controls keep a pointer cursor (Tailwind's preflight gives buttons the
+   default arrow). */
+.hero-action, .nav-cta, .site-nav a, .mobile-nav-toggle, .mobile-site-menu a,
+.note-link, .text-link { cursor: pointer; }
+
+.hero h1 { text-wrap: balance; }
+
+/* Trust line: each statement stays whole; on narrow screens the statements
+   wrap as units instead of breaking into narrow columns. */
+.trust-item { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+
+@media (max-width: 720px) {
+  .hero { padding: 22px 0 26px; }
+  .hero h1 { margin: 12px 0 10px; }
+  /* Balance the second headline sentence on its own line(s). */
+  .hero h1 span { display: block; text-wrap: balance; }
+  .hero-description { line-height: 1.5; }
+  .hero-action { margin-top: 18px; min-height: 46px; padding: 12px 20px; }
+  .embedded-chat-slot { height: 200px; margin-top: 18px; }
+  .hero-under-note { flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; font-size: 12px; line-height: 1.4; }
+  .hero-under-note .note-divider { display: none; }
+}

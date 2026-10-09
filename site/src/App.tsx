@@ -81,6 +81,15 @@ function OrbitalAssistant() {
   );
 }
 
+// Space kept between the sticky site header and the composer card when a CTA
+// brings the card into view.
+const COMPOSER_GAP_BELOW_HEADER = 16;
+
+function prefersReducedMotion(): boolean {
+  return typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
 /* The homepage chat card and its handoff into the full /app/ workspace.
 
    The card is the canonical /app/ client in a same-origin iframe, shown at a
@@ -147,9 +156,38 @@ function useChatHandoff() {
     return () => document.documentElement.classList.remove('chat-expanded');
   }, [expanded]);
 
+  /* Both CTAs ("Try Kalillac", "Start a private session") land here. The card
+     moves to just below the sticky site header only when it is not already
+     fully visible there -- smoothly, or instantly when reduced motion is
+     requested -- and then the real message input inside the same-origin chat
+     is focused with preventScroll, so focusing never causes a second,
+     browser-generated jump. */
   const focusChat = useCallback(() => {
-    slotRef.current?.scrollIntoView({ block: 'center' });
-    frameRef.current?.focus();
+    const slot = slotRef.current;
+
+    if (slot) {
+      const header = document.querySelector('.site-header');
+      const headerBottom = header ? header.getBoundingClientRect().bottom : 0;
+      const card = slot.getBoundingClientRect();
+      const fullyVisible = card.top >= headerBottom && card.bottom <= window.innerHeight;
+
+      if (!fullyVisible) {
+        window.scrollTo({
+          top: Math.max(0, window.scrollY + card.top - headerBottom - COMPOSER_GAP_BELOW_HEADER),
+          // 'auto' (not the newer 'instant', which older browsers reject with
+          // a TypeError) is immediate here: under reduced motion the site CSS
+          // forces scroll-behavior: auto.
+          behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+        });
+      }
+    }
+
+    const frame = frameRef.current;
+    let input: HTMLElement | null = null;
+    try { input = frame?.contentDocument?.getElementById('composer-input') ?? null; } catch { input = null; }
+
+    if (input) input.focus({ preventScroll: true });
+    else frame?.focus({ preventScroll: true });
   }, []);
 
   return { slotRef, frameRef, expanded, fromClip, focusChat };
@@ -201,7 +239,7 @@ function HomePage() {
               <OrbitalAssistant />
             </div>
             <EmbeddedChat handoff={handoff} />
-            <p className="hero-under-note" inert={expanded}><span className="live-dot" /> Temporary sessions <span className="note-divider">·</span> No account required <span className="note-divider">·</span> <Link href="/privacy" className="note-link">Clear provider disclosure</Link></p>
+            <p className="hero-under-note" inert={expanded}><span className="trust-item"><span className="live-dot" /> Temporary sessions</span> <span className="note-divider" aria-hidden="true">·</span> <span className="trust-item">No account required</span> <span className="note-divider" aria-hidden="true">·</span> <Link href="/privacy" className="note-link trust-item">Clear provider disclosure</Link></p>
           </div>
         </section>
         <div inert={expanded}>
