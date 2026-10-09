@@ -512,13 +512,90 @@ def test_privacy_wording_boundaries():
         "OpenAI may process requests sent for model inference.",
         "When web search is used, relevant query text may be sent to Tavily.",
         "Cloudflare provides edge delivery and security for",
-        "may process network metadata",
+        "Cloudflare can process request content while proxying it, including chat requests",
         "Cloudflare Workers AI and Groq are not part of the current active model-provider path.",
         "Do not submit information you cannot allow OpenAI, Tavily, or Cloudflare to process.",
         "No account or paid subscription is currently offered.",
     ):
         assert required in text, required
 
+
+
+def privacy_page_text() -> str:
+    app = APP_TSX.read_text(encoding="utf-8")
+    page = app[app.index("const privacyToc"):app.index("const termsToc")]
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", page))
+
+
+def test_privacy_discloses_cloudflare_edge_security_and_analytics_precisely():
+    text = privacy_page_text()
+
+    for required in (
+        # Edge processing: TLS terminates at Cloudflare; content is visible to it while proxied.
+        "Traffic to kalillac.com passes through Cloudflare before reaching Kalillac’s server.",
+        "Cloudflare terminates the browser-facing HTTPS connection",
+        "forwards the request to Kalillac’s origin over a separate encrypted connection.",
+        "This means Cloudflare can process request content while proxying it, including chat requests, along with "
+        "ordinary network information such as IP address, request headers, requested path, browser information, "
+        "and time.",
+        "Cloudflare handles what it receives under its own policies.",
+        # Security code and the cf_clearance cookie.
+        "Cloudflare may add security code used to detect automated or abusive traffic.",
+        "Cloudflare may set an HttpOnly cf_clearance cookie showing that the browser passed a security check.",
+        "Kalillac does not use this cookie to store, reconstruct, or identify prompts, responses, or conversation "
+        "history.",
+        # Browser RUM is disabled; edge statistics are not.
+        "Cloudflare Web Analytics and Real User Measurements are disabled for kalillac.com.",
+        "Kalillac does not load Cloudflare’s browser RUM beacon or send prompts, responses, or conversation content "
+        "to that beacon.",
+        "Cloudflare still produces traffic, operational, performance, and security information from requests "
+        "handled at its edge.",
+        "are separate from the disabled browser RUM beacon and are handled under Cloudflare’s own policies.",
+        # The precise replacement for the old sweeping statement.
+        "Kalillac’s own frontend uses your device’s fonts and does not include advertising code, browser analytics "
+        "code, remote fonts, or third-party asset dependencies. Cloudflare may separately add the security code "
+        "described below at its edge.",
+    ):
+        assert required in text, required
+    # Stated once, not repeated within the Cloudflare section.
+    assert text.count("Cloudflare handles what it receives under its own policies") == 1
+
+    # Each new section is reachable from the page's own navigation.
+    app = APP_TSX.read_text(encoding="utf-8")
+    toc = app[app.index("const privacyToc"):app.index("];", app.index("const privacyToc"))]
+    for section_id, label in (("infrastructure", "Network infrastructure: Cloudflare"),
+                              ("cloudflare-security", "Cloudflare security checks"),
+                              ("analytics", "Analytics and performance measurement")):
+        assert f"['{section_id}', '{label}']" in toc, section_id
+        assert f'<DocSection id="{section_id}" title="{label}">' in app, section_id
+    assert 'href="#cloudflare-security"' in app
+
+
+def test_privacy_makes_no_global_cloudflare_cookie_or_tracking_claims():
+    lower = privacy_page_text().lower()
+
+    for claim in (
+        # The old sweeping statement.
+        "load no fonts, stylesheets, or scripts from other websites",
+        "do not include advertising or analytics scripts",
+        # Cloudflare cannot see content / receives no chat requests.
+        "cloudflare cannot access", "cloudflare cannot see", "cloudflare cannot read", "cloudflare does not see",
+        "cloudflare never sees", "cloudflare does not receive chat", "cloudflare receives no chat",
+        "chat requests do not pass through cloudflare", "bypass cloudflare",
+        # No cookies of any kind.
+        "uses no cookies", "no cookies of any kind", "does not use cookies", "never sets a cookie",
+        "sets no cookies", "cookie-free", "cookieless",
+        # Nothing tracked / no metadata.
+        "nothing is tracked", "no tracking", "not tracked", "never tracked",
+        "no request metadata", "no metadata",
+        # Cloudflare creates no logs or analytics.
+        "creates no logs", "keeps no logs", "no logs", "no analytics", "no statistics",
+        "cloudflare does not log", "cloudflare does not produce",
+        # Disabling RUM disables security or edge processing.
+        "disabling rum disables", "disabled cloudflare security", "security is disabled",
+        "security checks are disabled", "cloudflare no longer processes",
+    ):
+        assert claim not in lower, claim
 
 
 def test_privacy_describes_the_embedded_chat_accurately():
