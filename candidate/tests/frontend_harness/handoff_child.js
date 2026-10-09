@@ -42,11 +42,33 @@
       return Promise.reject(new TypeError("HANDOFF: unexpected request"));
     }
 
-    var tooLong = body && typeof body.message === "string" && body.message.length > 4000;
+    var message = body && typeof body.message === "string" ? body.message : "";
+    var tooLong = message.length > 4000;
     replies++;
     var status = tooLong ? 422 : 200;
     var json = tooLong ? { error: "message_too_long" }
                        : { reply: "Reply " + replies + ".", session_id: "s-1" };
+
+    // Prefix-scripted outcomes for the conversation-layout tests.
+    if (message.indexOf("ERROR:") === 0) {
+      status = 503;
+      json = { error: "service_unavailable" };
+    } else if (message.indexOf("LONG:") === 0) {
+      var paragraphs = [];
+      for (var p = 1; p <= 14; p++) {
+        paragraphs.push("Paragraph " + p + " of a long reply, long enough to need the transcript to scroll.");
+      }
+      json = { reply: paragraphs.join("\n\n") + "\n\n```python\nfor i in range(3):\n    print(i)\n```",
+               session_id: "s-1" };
+    } else if (message.indexOf("HANG:") === 0) {
+      return new Promise(function (resolve, reject) {
+        if (init && init.signal) {
+          init.signal.addEventListener("abort", function () {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }
+      });
+    }
 
     return new Promise(function (resolve, reject) {
       var timer = setTimeout(function () {
@@ -130,7 +152,6 @@
     return {
       path: location.pathname, search: location.search, hash: location.hash,
       embedded: document.body.classList.contains("is-embedded"),
-      expanded: document.body.classList.contains("is-expanded"),
       headerShown: getComputedStyle(document.querySelector(".app-header")).display !== "none",
       emptyShown: !!(empty && empty.isConnected),
       conversationEmpty: document.getElementById("conversation").classList.contains("is-empty"),

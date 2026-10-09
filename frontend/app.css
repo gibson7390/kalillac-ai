@@ -651,6 +651,12 @@ body {
   cursor: text;
 }
 
+/* A restrained hover cue that the whole box is an input; the focus ring
+   below (declared later, same specificity) takes over once it has focus. */
+.composer-shell:hover {
+  border-color: rgba(62, 91, 255, 0.45);
+}
+
 .composer-shell:focus-within {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px var(--blue-soft);
@@ -726,23 +732,11 @@ body {
    space. The private-session indicator STAYS: it describes the app, not the
    site, and it is the one piece of privacy signalling the homepage does not
    already carry next to the chat. */
-.is-embedded:not(.is-expanded) .brand-logo { display: none; }
-.is-embedded:not(.is-expanded) .brand.has-logo .brand-name { display: inline; }
-.is-embedded:not(.is-expanded) .app-header { display: none; }
-.is-embedded:not(.is-expanded) .app-footer { display: none; }
-.is-embedded:not(.is-expanded) .composer { padding-bottom: 12px; }
-
-/* The compact homepage card has a fixed height, so its empty state keeps
-   only the starters above the composer; the mark, title and line would be
-   clipped. Once the homepage expands the frame (body.is-expanded, set only
-   by a verified presentation message), the chat is the full standalone
-   workspace again: header, footer, empty state and all. */
-.is-embedded:not(.is-expanded) .empty-mark,
-.is-embedded:not(.is-expanded) .empty-title,
-.is-embedded:not(.is-expanded) .empty-line { display: none; }
-.is-embedded:not(.is-expanded) .empty { padding: 12px 4px 0; }
-.is-embedded:not(.is-expanded) .empty-hints { margin-top: 0; }
-.is-embedded:not(.is-expanded) .thread { padding-top: 12px; }
+.is-embedded .brand-logo { display: none; }
+.is-embedded .brand.has-logo .brand-name { display: inline; }
+.is-embedded .app-header { display: none; }
+.is-embedded .app-footer { display: none; }
+.is-embedded .composer { padding-bottom: 12px; }
 
 /* Narrow containers (a slim iframe, a split view). Below this the header
    cannot hold a wordmark and a pill side by side. */

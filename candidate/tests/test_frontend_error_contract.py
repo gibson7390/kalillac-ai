@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261009-composer-focus1"
-CSS_CACHE_KEY = "20261009-composer-focus1"
+CACHE_KEY = "20261009-chat-workspace1"
+CSS_CACHE_KEY = "20261009-chat-workspace1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -661,23 +661,16 @@ def test_input_over_4000_characters_is_sent_once_and_refused_with_fixed_copy(bro
     assert_idle(failed, composer="x" * 4001)
 
 
-def test_embedded_chat_signals_its_parent_once_per_send_and_never_with_text(browser_results):
-    """Every scenario runs framed by the runner, which never answers, so the
-    chat stays compact: each new send (not a Retry) posts exactly one
-    {type, version} message to the exact runner origin, before or alongside
-    its request, and no message carries any text."""
+def test_embedded_chat_never_messages_its_parent(browser_results):
+    """Every scenario runs framed by the runner (its parent window). The chat
+    posts nothing to its parent: the homepage workspace has one stable size,
+    so there is no resize or handoff signal of any kind."""
     for name, result in browser_results["results"].items():
-        for message in result["parentMessages"]:
-            assert message["origin"] == result["runnerOrigin"], name
-            assert message["data"] == {"type": "kalillac:embed:prompt-submitted", "version": 1}, name
+        assert result["parentMessages"] == [], name
 
-    counts = {name: len(browser_results["results"][name]["parentMessages"])
-              for name in ("success", "stop_then_retry", "retry_success", "code_busy",
-                           "history_too_long_new_conversation", "message_too_long_4001")}
-    # success: two sends. stop_then_retry: one send + Retry. retry_success:
-    # three sends + Retry. code_*: two sends. history reset: three sends.
-    assert counts == {"success": 2, "stop_then_retry": 1, "retry_success": 3, "code_busy": 2,
-                      "history_too_long_new_conversation": 3, "message_too_long_4001": 1}
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "postMessage" not in source
+    assert 'addEventListener("message"' not in source
 
 
 # --- static contract (always runs) -----------------------------------------------------------------
