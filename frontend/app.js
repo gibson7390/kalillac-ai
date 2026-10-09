@@ -962,52 +962,8 @@
     input.focus({ preventScroll: true });
   });
 
-  // Empty-state starter chips. Each chip draws from its own prompt pool and
-  // never repeats the same prompt twice in a row. Clicking only fills the
-  // composer; the user can edit before sending.
-  var HINT_PROMPTS = {
-    explain: [
-      "Explain how HTTPS certificate validation works.",
-      "Explain what happens during a DNS lookup.",
-      "Explain the difference between hashing and encryption.",
-      "Explain how a reverse proxy works.",
-      "Explain public-key cryptography in plain English.",
-      "Explain the difference between RAM and persistent storage."
-    ],
-    code: [
-      "Write Python that extracts IOCs from a log.",
-      "Write Bash that shows listening ports and owning processes.",
-      "Write PowerShell that lists established TCP connections and process names.",
-      "Write Python that parses Nmap XML into CSV.",
-      "Write a Bash script that checks ports 22, 80, 443, and 445 on a list of hosts.",
-      "Write Python that deduplicates SHA-256 hashes from a text file."
-    ],
-    search: [
-      "Find and summarize the latest major cybersecurity developments.",
-      "Find the latest major open-source AI model releases.",
-      "Find recent Linux security advisories and summarize the important ones.",
-      "Find the current official Nmap documentation and summarize recent changes.",
-      "Find the latest major browser privacy developments.",
-      "Find today's important AI and cybersecurity news."
-    ]
-  };
-
-  var lastHintIndex = Object.create(null);
-
-  function chooseHintPrompt(group, fallback) {
-    var pool = HINT_PROMPTS[group];
-    if (!pool || pool.length === 0) return fallback || "";
-    if (pool.length === 1) return pool[0];
-
-    var index;
-    do {
-      index = Math.floor(Math.random() * pool.length);
-    } while (index === lastHintIndex[group]);
-
-    lastHintIndex[group] = index;
-    return pool[index];
-  }
-
+  // Empty-state example prompts. Clicking one puts exactly its own text in
+  // the composer; it never sends. The visitor can edit before sending.
   var hints = document.querySelectorAll(".hint");
 
   // Quietly guide the eye across the three starters while the composer is
@@ -1094,9 +1050,7 @@
     hints[h].addEventListener("click", function () {
       stopHintGuide();
 
-      var group = this.getAttribute("data-hint-group") || "";
-      var fallback = this.getAttribute("data-prompt") || "";
-      input.value = chooseHintPrompt(group, fallback);
+      input.value = this.getAttribute("data-prompt") || "";
       draftRevision++;   // the user chose new composer text
       autoGrow();
       syncSendEnabled();

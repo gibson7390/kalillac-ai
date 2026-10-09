@@ -27,6 +27,7 @@ import base64
 import contextlib
 import http.server
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -55,9 +56,11 @@ BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 VIEWPORTS = {"desktop": (1440, 900), "mobile": (390, 844)}
 # The compact card's fixed height (site/src/index.css), by viewport.
-# The homepage chat workspace's one stable height (site/src/index.css):
-# clamp(560px, 70vh, 720px) on desktop, clamp(520px, 72svh, 680px) on phones.
-WORKSPACE_HEIGHT = {"desktop": round(0.70 * 900), "mobile": round(0.72 * 844)}
+# The homepage chat workspace's one stable height (site/src/index.css). At
+# 1180px and wider it sits beside the headline and fills the first screen:
+# clamp(560px, 100svh - 128px, 760px), i.e. 760px at 1440 x 900. Phones use
+# clamp(520px, 72svh, 680px), i.e. 608px at 390 x 844.
+WORKSPACE_HEIGHT = {"desktop": 760, "mobile": round(0.72 * 844)}
 
 
 # --- loopback servers --------------------------------------------------------------------------
@@ -211,10 +214,22 @@ class DevTools:
 
 @contextlib.contextmanager
 def browser_page(browser: Path, profile: Path, size: tuple[int, int], mobile: bool,
-                 reduced_motion: bool = False):
+                 reduced_motion: bool = False, zoom_percent: int | None = None):
     """Launch an isolated headless browser with one blank page at exactly
     `size` CSS pixels (touch emulation when mobile; prefers-reduced-motion
-    emulated on request). Yields (devtools, session); always closes it."""
+    emulated on request). Yields (devtools, session); always closes it.
+
+    With `zoom_percent`, `size` is instead the browser WINDOW, and the page is
+    shown at that real browser page zoom: the profile's default zoom level
+    (the setting Ctrl+Plus and Settings > Page zoom change) is set before
+    launch, and no viewport or device-pixel emulation is applied, so the
+    browser's own zoom decides the CSS viewport."""
+    if zoom_percent is not None:
+        # Chromium stores page zoom as a level: percent = 100 * 1.2 ** level.
+        level = math.log(zoom_percent / 100) / math.log(1.2)
+        (profile / "Default").mkdir(parents=True, exist_ok=True)
+        (profile / "Default" / "Preferences").write_text(
+            json.dumps({"partition": {"default_zoom_level": {"x": level}}}), encoding="utf-8")
     args = [
         str(browser),
         "--headless=new",
@@ -229,6 +244,7 @@ def browser_page(browser: Path, profile: Path, size: tuple[int, int], mobile: bo
         "--hide-scrollbars",
         f"--user-data-dir={profile}",
         "--remote-debugging-port=0",
+        *([f"--window-size={size[0]},{size[1]}"] if zoom_percent is not None else []),
         # Every non-loopback connection goes to a dead proxy; only 127.0.0.1
         # (any port) bypasses it, and no other host name resolves.
         "--proxy-server=http://127.0.0.1:9",
@@ -257,9 +273,10 @@ def browser_page(browser: Path, profile: Path, size: tuple[int, int], mobile: bo
         target = devtools.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         session = devtools.call("Target.attachToTarget",
                                 {"targetId": target, "flatten": True})["sessionId"]
-        devtools.call("Emulation.setDeviceMetricsOverride",
-                      {"width": size[0], "height": size[1], "deviceScaleFactor": 1,
-                       "mobile": mobile}, session)
+        if zoom_percent is None:
+            devtools.call("Emulation.setDeviceMetricsOverride",
+                          {"width": size[0], "height": size[1], "deviceScaleFactor": 1,
+                           "mobile": mobile}, session)
         if mobile:
             devtools.call("Emulation.setTouchEmulationEnabled",
                           {"enabled": True, "maxTouchPoints": 5}, session)
@@ -432,18 +449,33 @@ def test_site_contains_no_duplicate_chat_or_replit_leftovers():
     assert "PORT" not in (SITE / "vite.config.ts").read_text(encoding="utf-8")
 
 
+HERO_H1 = "Think clearly. Write well. Build and debug. Search the current web."
+HERO_COPY = ("Work through difficult questions, draft and revise writing, explain and repair code, or "
+             "research current information with sources—without creating an account or building a "
+             "permanent chat history.")
+
+
 def test_homepage_copy_and_navigation():
     app = APP_TSX.read_text(encoding="utf-8")
+    home = app[app.index("function HomePage()"):app.index("type DocSectionProps")]
+    text = re.sub(r"\{' '\}", " ", home)
+    text = re.sub(r"<[^>]+>", "", text)
 
-    assert "Private by design.<br /><span>Powerful when it matters.</span>" in app
-    assert ("Ask questions, develop ideas, write and troubleshoot code, or search the current "
-            "web—without creating an account or building a permanent chat history.") in app
-    assert "Start a private session" in app
-    assert ('<span className="trust-item"><span className="live-dot" /> Temporary sessions</span>' in app
-            and '<span className="trust-item">No account required</span>' in app
-            and ">Clear provider disclosure<" in app)
-    for item in (">Product<", ">Privacy<", ">How it works<", ">Try Kalillac<"):
-        assert item in app, item
+    # Exactly one hero h1, with the exact wording; PRIVATE BY DESIGN is an eyebrow.
+    assert home.count("<h1") == 1 and HERO_H1 in text
+    assert '<span className="eyebrow">PRIVATE BY DESIGN</span>' in home
+    assert not re.search(r"<h[1-6][^>]*>\s*PRIVATE BY DESIGN", app)
+    assert HERO_COPY in text
+    assert ">Start a private session <ArrowRight" in home
+    assert ('<span className="trust-item"><span className="live-dot" /> Temporary sessions</span>' in home
+            and '<span className="trust-item">No account required</span>' in home
+            and ">Clear provider disclosure<" in home)
+    # Restrained navigation: no second filled button in the header.
+    header = app[app.index("function SiteHeader()"):app.index("function SiteFooter()")]
+    for item in ('href="/#product"', 'href="/#privacy"', 'href="/#how-it-works"'):
+        assert item in header, item
+    assert "Try Kalillac" not in app and "nav-cta" not in app
+    assert app.count('className="primary-link') == 1
     for unfinished in ("Pricing", "Sign in", "Sign up", "Create account", "Log in"):
         assert unfinished not in app, unfinished
 
@@ -455,8 +487,12 @@ def test_privacy_wording_boundaries():
 
     for claim in ("completely private", "nothing is stored", "nobody else",
                   "refresh deletes", "refreshing deletes", "refresh erases",
-                  # Carried-over claims this repository cannot prove.
-                  "debug", "zero data retention", "zero-retention", "retention marketing",
+                  # Carried-over claims this repository cannot prove: any
+                  # statement about the production debug switch. ("Build and
+                  # debug" is the product's coding capability, not that switch.)
+                  "debug mode", "debug switch", "debug logging", "debug log", "debug_mode",
+                  "debugging is", "debugging disabled", "debugging off", "debugging turned",
+                  "zero data retention", "zero-retention", "retention marketing",
                   "google", "legal approval", "legally approved", "lawyer"):
         assert claim not in lower, claim
     # "anonymous" only in the explicit disclaimer.
