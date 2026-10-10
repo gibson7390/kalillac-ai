@@ -472,8 +472,16 @@ def test_homepage_copy_and_navigation():
             and ">Clear provider disclosure<" in home)
     # Restrained navigation: no second filled button in the header.
     header = app[app.index("function SiteHeader()"):app.index("function SiteFooter()")]
-    for item in ('href="/#product"', 'href="/#privacy"', 'href="/#how-it-works"'):
+    # Product opens the homepage and Privacy the full Privacy page (in-app links);
+    # How it works is the one header section link.
+    for item in ('<Link href="/" className="nav-link" data-testid="link-product-nav">Product</Link>',
+                 '<Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>',
+                 '<a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>',
+                 '<Link href="/" onClick={close} data-testid="link-mobile-product">Product</Link>',
+                 '<Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>',
+                 '<a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>'):
         assert item in header, item
+    assert 'href="/#product"' not in header and 'href="/#privacy"' not in header
     assert "Try Kalillac" not in app and "nav-cta" not in app
     assert app.count('className="primary-link') == 1
     for unfinished in ("Pricing", "Sign in", "Sign up", "Create account", "Log in"):

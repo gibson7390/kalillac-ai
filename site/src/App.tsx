@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, Code2, FileText, Menu, Search, Sparkles, X } from 'lucide-react';
-import { Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
+import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
 
@@ -26,8 +26,8 @@ function SiteHeader() {
           <img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" />
         </Link>
         <nav className="site-nav" aria-label="Site navigation">
-          <a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>
-          <a href="/#privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</a>
+          <Link href="/" className="nav-link" data-testid="link-product-nav">Product</Link>
+          <Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>
           <a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>
           <button type="button" className="mobile-nav-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-site-menu" aria-label={open ? 'Close navigation menu' : 'Open navigation menu'} data-testid="button-mobile-menu">
             {open ? <X size={19} /> : <Menu size={19} />}
@@ -36,8 +36,8 @@ function SiteHeader() {
       </div>
       {open && (
         <nav id="mobile-site-menu" className="mobile-site-menu" aria-label="Mobile navigation">
-          <a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>
-          <a href="/#privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</a>
+          <Link href="/" onClick={close} data-testid="link-mobile-product">Product</Link>
+          <Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>
           <a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>
         </nav>
       )}
@@ -390,119 +390,56 @@ function PrivacyFlow() {
    Four illustrative product fragments (not live output and not
    testimonials), each composed differently. */
 
-function DemoThink() {
+type TranscriptTurn = { speaker: 'you' | 'kalillac'; text: string };
+
+/* One real Kalillac session, shown in two phases. Text is verbatim from the
+   session; the final response is excerpted (see the disclosure below). */
+const MEMORY_SAME_SESSION: TranscriptTurn[] = [
+  { speaker: 'you', text: 'Remember for me that my business name is Kalillac AI.' },
+  { speaker: 'kalillac', text: 'I’ll remember that your business name is Kalillac AI for this conversation.' },
+  { speaker: 'you', text: 'What is my business name?' },
+  { speaker: 'kalillac', text: 'Your business name is Kalillac AI.' },
+];
+
+const MEMORY_AFTER_REFRESH: TranscriptTurn[] = [
+  { speaker: 'you', text: 'Do you remember me telling you what my business name was?' },
+  { speaker: 'kalillac', text: 'No. I don’t see your business name in the current session, so I can’t recover it.' },
+];
+
+function Transcript({ turns, labelledBy }: { turns: TranscriptTurn[]; labelledBy: string }) {
   return (
-    <article className="demo demo-think" data-testid="demo-think" aria-labelledby="demo-think-title">
-      <header className="demo-head"><span className="demo-kicker">01 · Think</span><h3 id="demo-think-title">Turn a tangled question into a clear way to decide.</h3></header>
-      <div className="demo-surface">
-        <p className="demo-ask">I’ve been offered a team-lead role at a smaller company. More pay, less stability. I keep going back and forth.</p>
-        <div className="think-answer">
-          <div className="think-row think-decision"><span className="think-label">The real decision</span><p>Whether you want to trade stability for faster growth over the next two years — not only whether this offer pays more.</p></div>
-          <div className="think-columns">
-            <div className="think-row"><span className="think-label">What you know</span><ul><li>The salary increase is confirmed.</li><li>You would lead a team of five.</li></ul></div>
-            <div className="think-row"><span className="think-label">What you’re assuming</span><ul><li>The company will still be funded in two years.</li><li>Leading people will suit you.</li></ul></div>
-          </div>
-          <div className="think-row"><span className="think-label">Tradeoffs</span>
-            <table className="think-table">
-              <thead><tr><th scope="col"><span className="sr-only">Factor</span></th><th scope="col">New role</th><th scope="col">Stay</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">Growth</th><td>Faster, broader</td><td>Steady, deeper</td></tr>
-                <tr><th scope="row">Stability</th><td>Lower</td><td>Higher</td></tr>
-                <tr><th scope="row">New skill</th><td>Managing people</td><td>Technical depth</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div className="think-row think-next"><span className="think-label">A useful next step</span><p>Ask the founder how long the current funding lasts. If the answer changes your assumptions, the decision gets easier. The choice stays yours.</p></div>
-        </div>
-      </div>
-    </article>
+    <ol className="memory-transcript" aria-labelledby={labelledBy}>
+      {turns.map((turn, index) => (
+        <li key={index} className={`memory-msg memory-msg-${turn.speaker}`}>
+          <span className="memory-speaker">{turn.speaker === 'you' ? 'You' : 'Kalillac'}<span className="sr-only">:</span></span>
+          <p>{turn.text}</p>
+        </li>
+      ))}
+    </ol>
   );
 }
 
-function DemoWrite() {
+function MemoryDemonstration() {
   return (
-    <article className="demo demo-write" data-testid="demo-write" aria-labelledby="demo-write-title">
-      <header className="demo-head"><span className="demo-kicker">02 · Write</span><h3 id="demo-write-title">Clearer writing that still sounds like you.</h3></header>
-      <div className="write-pair">
-        <div className="write-col write-before"><span className="write-tag">Your draft</span><p>I am writing to let you know that the project is going to be delayed because there were some issues with the vendor that we didn’t really know about until last week, so the new date is probably going to be the end of next month.</p></div>
-        <div className="write-col write-after"><span className="write-tag">Revised</span><p>The project is delayed. Last week we learned about vendor issues we hadn’t known of, and we now expect to finish at the end of next month.</p></div>
-      </div>
-      <ul className="write-notes">
-        <li><strong>Leads with the news</strong> instead of the preamble.</li>
-        <li><strong>Keeps your uncertainty</strong> — “we now expect,” not a promise.</li>
-        <li><strong>Same plain, direct voice</strong>, with the filler removed.</li>
-      </ul>
-    </article>
-  );
-}
-
-function DemoCode() {
-  return (
-    <article className="demo demo-code" data-testid="demo-code" aria-labelledby="demo-code-title">
-      <header className="demo-head"><span className="demo-kicker">03 · Build and debug</span><h3 id="demo-code-title">See why it breaks, then fix it.</h3></header>
-      <p className="demo-ask">Why does my list keep growing between calls?</p>
-      <div className="code-block code-broken" aria-label="Original code">
-        <span className="code-tag">Before</span>
-        <pre><code>{`def add_tag(tag, tags=[]):
-    tags.append(tag)
-    return tags
-
-add_tag("draft")   # ['draft']
-add_tag("final")   # ['draft', 'final']`}</code></pre>
-      </div>
-      <p className="code-diagnosis"><strong>Why it fails:</strong> Python creates the default list once, when the function is defined, so every call that omits <code>tags</code> appends to the same list.</p>
-      <div className="code-block code-fixed" aria-label="Repaired code">
-        <span className="code-tag">After</span>
-        <pre><code>{`def add_tag(tag, tags=None):
-    if tags is None:
-        tags = []
-    tags.append(tag)
-    return tags`}</code></pre>
-      </div>
-      <p className="code-why"><strong>Why the fix works:</strong> <code>None</code> is a safe default, and a new list is created on each call unless you pass one in.</p>
-    </article>
-  );
-}
-
-function DemoSearch() {
-  return (
-    <article className="demo demo-search" data-testid="demo-search" aria-labelledby="demo-search-title">
-      <header className="demo-head"><span className="demo-kicker">04 · Search the current web</span><h3 id="demo-search-title">Current answers with their sources in view.</h3></header>
-      <div className="demo-surface search-surface">
-        <p className="demo-ask">Is the open-source library we depend on still actively maintained?</p>
-        <div className="search-answer">
-          <span className="search-badge"><Search size={14} aria-hidden="true" /> Searched the current web</span>
-          <p>It appears to be actively maintained: the project’s release notes and repository activity show ongoing releases, and maintainers are responding to new issues. Check the changelog for breaking changes before you upgrade.</p>
-        </div>
-        <div className="search-sources" aria-label="Sources">
-          <span className="search-sources-label">Sources</span>
-          <ul>
-            <li><span className="source-chip">Project repository</span></li>
-            <li><span className="source-chip">Release notes</span></li>
-            <li><span className="source-chip">Issue tracker</span></li>
-          </ul>
-        </div>
-        <p className="search-caption">An example of how sourced answers appear. Real answers link the pages that were actually searched.</p>
-      </div>
-    </article>
-  );
-}
-
-function Demonstrations() {
-  return (
-    <section className="demos-section" id="product" aria-labelledby="demos-heading" data-testid="section-demos">
+    <section className="demos-section" id="product" aria-labelledby="memory-heading" data-testid="section-demos">
       <div className="container-wide">
         <div className="demos-intro">
-          <span className="eyebrow">THE WORK</span>
-          <h2 id="demos-heading">See Kalillac at work.</h2>
-          <p>Illustrative examples of the kinds of help you can ask for.</p>
+          <span className="eyebrow">SEE IT IN ACTION</span>
+          <h2 id="memory-heading">Temporary memory you can test yourself.</h2>
+          <p>Kalillac can remember information during your active conversation. Refreshing starts a new browser session that cannot reopen the previous conversation.</p>
         </div>
-        <div className="demos-grid">
-          <DemoThink />
-          <DemoWrite />
-          <DemoCode />
-          <DemoSearch />
-        </div>
+        <ol className="memory-phases">
+          <li className="memory-phase memory-phase-during" data-testid="memory-phase-during">
+            <h3 className="memory-phase-label" id="memory-phase-during-label">1 · DURING THE SAME SESSION</h3>
+            <Transcript turns={MEMORY_SAME_SESSION} labelledBy="memory-phase-during-label" />
+          </li>
+          <li className="memory-phase memory-phase-after" data-testid="memory-phase-after">
+            <h3 className="memory-phase-label" id="memory-phase-after-label">2 · AFTER REFRESHING</h3>
+            <Transcript turns={MEMORY_AFTER_REFRESH} labelledBy="memory-phase-after-label" />
+          </li>
+        </ol>
+        <p className="memory-explain" data-testid="memory-explain">Refreshing ends that browser’s access to the previous temporary conversation. The old session data may remain temporarily in server memory until capacity limits or a restart clear it, but the refreshed browser cannot retrieve it.</p>
+        <p className="memory-disclosure" data-testid="memory-disclosure">Real Kalillac session example. The final response was excerpted, and formatting was condensed for display.</p>
       </div>
     </section>
   );
@@ -584,7 +521,7 @@ function HomePage() {
           </div>
         </section>
         <PrivacyFlow />
-        <Demonstrations />
+        <MemoryDemonstration />
         <SessionExplanation />
         <MobileAppSection />
       </main>
@@ -691,9 +628,40 @@ function Router() {
   );
 }
 
+/* Every in-app navigation (<Link> and navigate()) passes through here. The new
+   page starts at its top, or at its #fragment target when the link has one,
+   instead of inheriting the previous page's scroll position. The jump is
+   immediate: an inline scroll-behavior briefly overrides the site's smooth
+   scrolling (not the newer 'instant' value, which older browsers reject). Browser
+   Back/Forward does not pass through here, so its scroll restoration is kept. */
+const jumpTo = (scroll: () => void) => {
+  const root = document.documentElement;
+  const previous = root.style.scrollBehavior;
+  root.style.scrollBehavior = 'auto';
+  // Read it back so the browser applies the override before scrolling;
+  // otherwise it scrolls with the stale (smooth) computed value.
+  void getComputedStyle(root).scrollBehavior;
+  scroll();
+  root.style.scrollBehavior = previous;
+};
+
+const startNavigationAtTop: AroundNavHandler = (navigate, to, options) => {
+  navigate(to, options);
+  const fragment = to.includes('#') ? decodeURIComponent(to.slice(to.indexOf('#') + 1)) : '';
+  if (!fragment) {
+    jumpTo(() => window.scrollTo(0, 0));
+    return;
+  }
+  // The target section belongs to the page being rendered; scroll once it exists.
+  requestAnimationFrame(() => {
+    const target = document.getElementById(fragment);
+    jumpTo(() => (target ? target.scrollIntoView() : window.scrollTo(0, 0)));
+  });
+};
+
 function App() {
   if (IS_FRAMED) return <FramedNotice />;
-  return <WouterRouter><Router /></WouterRouter>;
+  return <WouterRouter aroundNav={startNavigationAtTop}><Router /></WouterRouter>;
 }
 
 export default App;
