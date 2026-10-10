@@ -100,6 +100,9 @@ V31_NATIVE_TOOL_ROUTES = {
     "unclear",
     "web_search",
     "self_knowledge",
+    "debug",
+    "logic",
+    "code_history",
 }
 
 
@@ -2094,6 +2097,61 @@ KALILLAC_SELF_KNOWLEDGE = {
 }
 
 
+def current_runtime_configuration():
+    """Safe facts from this application process, not a deployment probe."""
+    return {
+        "scope": "current application process",
+        "model": OPENAI_MODEL,
+        "reasoning_effort": OPENAI_REASONING_EFFORT,
+        "native_tool_routing_enabled": bool(V31_NATIVE_TOOL_ROUTING),
+        "native_tool_routes": sorted(V31_NATIVE_TOOL_ROUTES),
+        "limits": {
+            "message_characters": MAX_INPUT_CHARS,
+            "default_output_tokens": MAX_RESPONSE_TOKENS,
+            "legacy_self_knowledge_output_tokens": SELF_KNOWLEDGE_RESPONSE_TOKENS,
+            "code_output_tokens": CODE_RESPONSE_TOKENS,
+            "code_continuation_output_tokens": CODE_CONTINUATION_RESPONSE_TOKENS,
+            "history_turns": MAX_HISTORY_TURNS,
+            "history_user_characters": MAX_HISTORY_USER_CHARS,
+            "history_assistant_characters": MAX_HISTORY_ASSISTANT_CHARS,
+            "history_total_characters": MAX_HISTORY_TOTAL_CHARS,
+        },
+    }
+
+
+def render_current_runtime_configuration():
+    config = current_runtime_configuration()
+    enabled = config["native_tool_routing_enabled"]
+    routing = (
+        "For eligible semantic requests, the model can answer directly or "
+        "request validated search/runtime-facts tools. Debug explanations, "
+        "logic, and code-history questions with retained code examples are eligible."
+        if enabled else
+        "Requests currently use the legacy handling paths. The optional "
+        "native model tool path shown in the architecture is disabled."
+    )
+    return (
+        f"Configured primary model: OpenAI {config['model']}; reasoning effort: "
+        f"{config['reasoning_effort']}. Native model tool routing is "
+        + ("enabled. " if enabled else "disabled. ")
+        + routing
+        + " Exact code generation, revision, and code-remainder contracts "
+          "remain on their existing paths. Deterministic controls and "
+          "application-enforced limits remain in force. These facts describe "
+          "the current application process, not a live deployment check or "
+          "proof of which provider handled a completed response."
+    )
+
+
+def runtime_configuration_context():
+    return (
+        "\n\nCURRENT APPLICATION CONFIGURATION:\n"
+        "Use these facts only when the current question concerns Kalillac. "
+        "Do not volunteer configuration details on other topics.\n"
+        + render_current_runtime_configuration()
+    )
+
+
 def render_kalillac_facts():
     """Render the current source of truth for model-backed self-description."""
 
@@ -2105,8 +2163,8 @@ def render_kalillac_facts():
         ("NETWORK", a["network"]),
         ("REQUEST HANDLING", a["request_handling"]),
         ("DIRECT / NO-MODEL PATHS", a["direct_paths"]),
-        ("WEB SEARCH PATH - IN ORDER", a["web_search_path"]),
-        ("MODEL-BACKED PATH - IN ORDER", a["model_path"]),
+        ("LEGACY WEB SEARCH PATH - IN ORDER", a["web_search_path"]),
+        ("LEGACY MODEL-BACKED PATH - IN ORDER", a["model_path"]),
         ("SESSION STATE", a["session_state"]),
         ("PROVIDERS AND LIMITS", a["providers_and_limits"]),
         ("PRODUCT ROADMAP - PLANNED, NOT LAUNCHED UNLESS STATED", a["product_roadmap"]),
@@ -2114,7 +2172,15 @@ def render_kalillac_facts():
         ("NOT ESTABLISHED - DO NOT INFER", a["not_established"]),
     ]
 
-    lines = ["ESTABLISHED CURRENT KALILLAC AI FACTS:"]
+    lines = [
+        "ESTABLISHED CURRENT KALILLAC AI FACTS:",
+        "", "CURRENT APPLICATION CONFIGURATION:",
+        render_current_runtime_configuration(),
+        "", "PROVENANCE:",
+        "Configuration is read from the current application process. Network "
+        "and deployment statements below are separately recorded deployment "
+        "facts, not freshly verified by this request.",
+    ]
 
     for title, items in sections:
         lines.append("")
@@ -2239,13 +2305,13 @@ KALILLAC_ASCII_DIAGRAM = """```text
 Browser
    |
    v
-Cloudflare
+Cloudflare (public HTTPS; Full (strict) to origin)
    |
    v
-Nginx
+Nginx (origin HTTPS :443)
    |
    v
-Uvicorn / FastAPI
+Uvicorn / FastAPI (local HTTP 127.0.0.1:8001)
    |
    v
 /api/chat
@@ -2312,6 +2378,7 @@ def kalillac_ascii_diagram():
     return (
         KALILLAC_ASCII_DIAGRAM
         .replace("{openai}", OPENAI_MODEL)
+        + "\n\n" + render_current_runtime_configuration()
     )
 
 
@@ -2341,7 +2408,7 @@ Cloudflare handles the browser-facing HTTPS connection. The separately verified 
 
 `/api/chat` receives and validates the message, history, and session identifier. Kalillac resolves or creates the temporary session identifier and accesses that session's temporary state in server RAM. In V31, the legacy classifier still acts as a transitional gate: deterministic/application-controlled routes remain on their existing paths, while selected semantic routes enter the native tool path.
 
-**3. Processing paths**
+**3. Implementation paths (the native path is optional)**
 
 - **Direct / application-controlled:** deterministic calculator responses, session-memory writes, direct answers from temporary session state when available, and the no-file-access response.
 - **V31 native semantic path:** `{OPENAI_MODEL}` may answer directly, request `get_kalillac_runtime_facts`, or request `search_web`. Application code validates and executes tool calls.
@@ -2538,7 +2605,7 @@ CANONICAL_IDENTITY_FAMILY_HINT_RE = re.compile(
 )
 
 
-def get_canonical_self_knowledge_response(message):
+def _get_canonical_self_knowledge_response(message):
     """Return (family, reply) for fixed factual self-knowledge families.
 
     Questions that require reasoning, comparison with a named external AI,
@@ -2681,6 +2748,33 @@ def get_canonical_self_knowledge_response(message):
         return "identity", KALILLAC_CANONICAL_IDENTITY
 
     return None, None
+
+
+def get_canonical_self_knowledge_response(message):
+    # A factual shortcut must not discard a separate task in the same
+    # request. Recognized self-knowledge clauses can still be combined.
+    text = normalize_for_router(message)
+    for clause in re.split(r"\b(?:and|also|then)\b", text)[1:]:
+        if re.match(r"\s*(?:please\s+)?(?:write|create|make|summarize|explain|compare|list|teach|show)\b", clause):
+            if not is_self_knowledge_request(clause):
+                return None, None
+    family, reply = _get_canonical_self_knowledge_response(message)
+    if family == "model":
+        # Read the configured model at answer time, rather than relying on
+        # an import-time string if configuration is replaced in a process.
+        reply = (
+            f"Kalillac's configured model is `{OPENAI_MODEL}` through OpenAI, "
+            f"with reasoning effort `{OPENAI_REASONING_EFFORT}`.\n\n"
+            "There is no automatic fallback to another model or provider. "
+            "If OpenAI cannot produce a usable answer, the request ends with "
+            "a temporary model-provider-unavailable error. Tavily is used "
+            "only for live web search and does not generate answers."
+        )
+    if reply is not None and family in {
+        "how_it_works", "difference", "identity", "model", "compound",
+    }:
+        reply += "\n\nCurrent application configuration:\n" + render_current_runtime_configuration()
+    return family, reply
 
 
 ENGAGEMENT_REMINDER = (
@@ -3537,16 +3631,25 @@ def is_code_generation_intent(message):
         r"|component|app|dashboard|landing page|ui|interface)\b"
     )
 
+    programming_context = bool(re.search(
+        r"\b(python|javascript|typescript|java|c\+\+|c#|ruby|rust|php|html|css"
+        r"|sql|bash|shell|code|script|program|programming|software)\b", text,
+    ))
+
     for generation_match in re.finditer(generation_pattern, text):
         matched_text = generation_match.group(0)
 
         if re.match(r"\bbuild\s+options?\b", matched_text):
             continue
+        # Tables, examples, forms and mathematical functions are ordinary
+        # language artifacts too. Let the model resolve ambiguous intent.
+        if re.search(r"\b(example|table|form|function)\b$", matched_text) and not programming_context:
+            continue
 
         return True
 
     # Noun-first phrasings: "python function to catch X", "code that does Y"
-    if re.search(
+    if programming_context and re.search(
         r"\b(code|function|script|program|snippet|example)\b\s+(that|to|which)\b",
         text,
     ):
@@ -3570,9 +3673,6 @@ def is_code_generation_intent(message):
         r"(python|javascript|typescript|html|css|bash|sql|java)\b",
         text,
     ):
-        return True
-
-    if "show me how to" in text:
         return True
 
     # "How do I search the web in Python?" — how-to questions anchored
@@ -4537,6 +4637,15 @@ def calculate_expression(message):
 
 def is_file_reference_request(message):
     text = normalize_for_router(message)
+
+    # Supplied text is usable conversation content, not inaccessible file
+    # access. A path/filename after a colon is not document content.
+    supplied = re.search(
+        r"\b(?:my notes|my document|the document|the file|study notes|class notes|the pdf)"
+        r"\s*:\s*(\S[\s\S]*)", str(message), re.IGNORECASE,
+    )
+    if supplied and len(supplied.group(1).split()) >= 3:
+        return False
 
     # FUTURE / PLANNING intent is NOT a file reference
     planning_phrases = [
@@ -6405,26 +6514,157 @@ def is_revision_followup(message):
     return any(phrase in text for phrase in revision_phrases)
 
 
+# Code evidence is syntax, not vocabulary: prose such as "A function is a
+# rule" or a fenced equation is not code.
+CODE_SYNTAX_LINE_RE = re.compile(
+    r"^[ \t]*(?:def\s+\w+\s*\(|class\s+\w+\s*[(:{]|(?:async\s+)?function\s*\w*\s*\([^\n)]*(?:\)[ \t]*(?:\{|$)|$)"
+    r"|(?:const|let|var)\s+[\w$]+\s*=|import\s+[\w{*]|from\s+[\w.]+\s+import\b"
+    r"|console\.log\(|print\(|#include\b|<svg\b|<script\b"
+    r"|[.#]?[a-z][\w-]*(?:\s*[,>]\s*[.#]?[\w-]+)*\s*\{[ \t]*$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Fence labels that hold prose or mathematics rather than code.
+NON_CODE_FENCE_LABELS = {"text", "txt", "plaintext", "markdown", "md", "latex", "tex", "math", "katex"}
+LATEX_SYNTAX_RE = re.compile(r"\\[A-Za-z]+|\\[\[\]()]|[\^_]\{")
+
+
+def _continuation_syntax_context(history):
+    recent = get_recent_user_messages(history, limit=1)
+    if not recent:
+        return None
+    text = normalize_for_router(recent[-1])
+    if is_code_generation_intent(text):
+        return "html" if re.search(r"\b(html|website|webpage)\b", text) else "code"
+    if re.search(r"\b(python|javascript|typescript|programming|software|code|script)\b", text):
+        return "code"
+    if re.search(r"\b(math|mathematics|mathematical|calculus|algebra|equation|derivative|integral|latex|function)\b", text):
+        return "math"
+    return None
+
+
+def _symbolic_math_body(content):
+    # Positive expression evidence, not a caret or backslash on its own.
+    return bool(
+        re.fullmatch(r"[\w \t\n.+*/^=(){}\[\]\\,\-]+", content.strip())
+        and re.search(r"[=+*/^]|\\[A-Za-z]+", content)
+    )
+
+
+def _python_code_syntax(content, context=None):
+    """Parse syntax without executing it. Strings/comments stay Python data;
+    their backslashes and bitwise operators cannot establish LaTeX intent."""
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError, RecursionError):
+        # A cutoff may leave an RHS or string unfinished. Only accept a real
+        # assignment target, with either string syntax or programming context.
+        for line in content.splitlines():
+            assignment = re.match(
+                r"^[ \t]*([^\W\d]\w*(?:\.[^\W\d]\w*|\[[^\]\n]+\])*)"
+                r"[ \t]*(=(?!=)|[+*/%&|^\-]=)[ \t]*(.*)$", line,
+            )
+            if assignment and (
+                assignment.group(2) != "="
+                or context in {"code", "html"}
+                or re.match(r"(?:[rubf]{0,2})['\"]", assignment.group(3), re.IGNORECASE)
+            ):
+                return True
+        return False
+    if context == "math" and _symbolic_math_body(content):
+        # A plain assignment can also be an equation, but imports, returns,
+        # compound assignments and other imperative statements are code.
+        return any(not isinstance(node, (ast.Expr, ast.Assign)) for node in tree.body)
+    return bool(
+        any(not isinstance(node, ast.Expr) for node in tree.body)
+        or any(isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+               and isinstance(node.value.value, (str, bytes)) for node in tree.body)
+        or (context in {"code", "html"} and (tree.body or content.lstrip().startswith("#")))
+    )
+
+
+def _html_document_start(text, context=None):
+    """Locate document syntax on its own line, not HTML names in prose.
+    A complete opener needs document structure or a bare header cutoff."""
+    last = None
+    for marker in re.finditer(r"^[ \t]*(?:<!doctype[ \t]+html\b|<html(?=[\s>/]|\Z))", text, re.IGNORECASE | re.MULTILINE):
+        end = text.find(">", marker.start())
+        if end == -1:
+            last = marker.start()  # cutoff inside the opening tag/attributes
+            continue
+        remainder = text[end + 1:]
+        if not remainder.strip() or context == "html" or re.match(
+            r"\s*(?:<!--|</html\s*>|<(?:html|head|body|title|meta|link|main|div|p|script|style)(?=[\s>/]))",
+            remainder, re.IGNORECASE,
+        ):
+            last = marker.start()
+    return last
+
+
+def _is_code_fence(block, context=None):
+    first_line, _, content = str(block).lstrip(" \t").partition("\n")
+    label = first_line.strip()[3:].strip().lower()
+    if label in NON_CODE_FENCE_LABELS:
+        return False
+    if label:
+        return True
+    body = re.sub(r"\n[ \t]*```[ \t]*\Z", "", content.rstrip())
+    symbolic = _symbolic_math_body(body)
+    if CODE_SYNTAX_LINE_RE.search(body) or _python_code_syntax(body, context):
+        return True
+    if context == "math" and symbolic:
+        return False
+    if LATEX_SYNTAX_RE.search(body) or (symbolic and "=" in body):
+        return False
+    return True
+
+
 def previous_answer_looks_like_code(answer):
-    text = str(answer).lower()
+    text = str(answer)
+    parts = CODE_FENCE_BLOCK_RE.split(text)
+    # An output cutoff can occur before the fence header's first newline.
+    header = re.search(r"^[ \t]*```[^\n]*\Z", parts[-1], re.MULTILINE)
+    if header and _is_code_fence(header.group()):
+        return True
+    # split() with one capture group alternates prose, fence, prose, ...
+    if any(_is_code_fence(block) for block in parts[1::2]):
+        return True
+    prose = "".join(parts[0::2])
+    return bool(
+        CODE_SYNTAX_LINE_RE.search(prose)
+        or _html_document_start(prose) is not None
+    )
 
-    code_markers = [
-        "```",
-        "<!doctype html",
-        "<html",
-        "<svg",
-        "def ",
-        "function ",
-        "const ",
-        "let ",
-        "var ",
-        "body {",
-        ".container",
-        "console.log",
-        "print(",
-    ]
 
-    return any(marker in text for marker in code_markers)
+def previous_answer_stopped_inside_code(answer, context=None):
+    """True when the (notice-stripped) answer ends inside code: an open code
+    fence, an unfinished unfenced HTML document, or, for a cut-off answer with
+    no fences at all, unfenced code."""
+    cut_off = has_incomplete_notice(answer)
+    text = strip_incomplete_notice(answer) if cut_off else str(answer).rstrip()
+    if not text:
+        return False
+
+    parts = CODE_FENCE_BLOCK_RE.split(text)
+    header = re.search(r"^[ \t]*```[^\n]*\Z", parts[-1], re.MULTILINE)
+    if header:
+        return _is_code_fence(header.group(), context)
+    if len(parts) > 1:
+        body = parts[-2].partition("\n")[2]
+        if not re.search(r"^[ \t]*```[ \t]*$", body, re.MULTILINE):
+            return _is_code_fence(parts[-2], context)                 # the last fence is still open
+
+    # Closed examples and prose tag mentions are not unfinished documents.
+    prose = "".join(parts[0::2])
+    html_start = _html_document_start(prose, context)
+    if html_start is not None:
+        return not bool(re.search(r"</html\s*>", prose[html_start:], re.IGNORECASE))
+
+    if context == "math" and _symbolic_math_body(text):
+        return False
+    return cut_off and len(parts) == 1 and bool(
+        CODE_SYNTAX_LINE_RE.search(text)
+        or (context in {"code", "html"} and _python_code_syntax(text, context))
+    )
 
 
 def get_recent_code_answers(history, limit=4):
@@ -6439,34 +6679,11 @@ def get_recent_code_answers(history, limit=4):
     return code_answers[-limit:]
 
 
-def previous_code_answer_looks_incomplete(answer):
-    """Return True only when a previous code answer has strong evidence
-    that generation ended before the code itself was complete."""
-    if has_incomplete_notice(answer):
-        return previous_answer_looks_like_code(
-            strip_incomplete_notice(answer)
-        )
-
-    text = str(answer).rstrip()
-
-    if not text or not previous_answer_looks_like_code(text):
-        return False
-
-    # A normal fenced code response has an even number of fence markers.
-    # Token-limit truncation commonly leaves only the opening fence.
-    if text.count("```") % 2 == 1:
-        return True
-
-    lowered = text.lower()
-
-    # Also catch unfenced/truncated full HTML documents.
-    if (
-        ("<!doctype html" in lowered or "<html" in lowered)
-        and "</html>" not in lowered
-    ):
-        return True
-
-    return False
+def previous_code_answer_looks_incomplete(answer, history=None):
+    """Return True only when a previous answer has strong evidence that
+    generation ended inside code. An explanation cut off in prose or math,
+    even one with complete code examples earlier, is not code."""
+    return previous_answer_stopped_inside_code(answer, _continuation_syntax_context(history))
 
 
 def is_code_continuation_request(message, history):
@@ -6474,9 +6691,35 @@ def is_code_continuation_request(message, history):
     the previous assistant response appears to have cut off."""
     last_answer = get_last_assistant_message(history)
 
-    if not previous_code_answer_looks_incomplete(last_answer):
+    if not previous_code_answer_looks_incomplete(last_answer, history):
         return False
 
+    return is_continuation_signal(message)
+
+
+def is_explanation_continuation_request(message, history):
+    """A request to continue a previous answer that was cut off outside code
+    (prose, a table, or mathematics)."""
+    last_answer = get_last_assistant_message(history)
+
+    return (
+        has_incomplete_notice(last_answer)
+        and not previous_code_answer_looks_incomplete(last_answer, history)
+        and is_continuation_signal(message)
+    )
+
+
+EXPLANATION_CONTINUATION_RULES = """\
+CONTINUING A CUT-OFF ANSWER:
+- The previous assistant answer was cut off by the output limit; the user wants the rest.
+- Continue from where it stopped. Do not restart, summarize, or repeat completed parts.
+- Write normal prose and Markdown, not a code block. Do not wrap the continuation in a code fence.
+- Preserve the topic and surrounding explanation. Do not invent missing mathematics or merely append a closing delimiter.
+- If it stopped inside a math expression, write that expression again in full from its opening delimiter, then finish it, so it renders as one complete expression. Use \\( ... \\) for inline math and \\[ ... \\] for display math."""
+
+
+def is_continuation_signal(message):
+    """An explicit request for the rest of a cut-off answer."""
     text = normalize_for_router(message)
 
     exact_signals = {
@@ -7944,7 +8187,10 @@ def classify_request(message, history):
         else:
             matches.append("code")
 
-    if is_general_followup(message) and history:
+    if history and (
+        is_general_followup(message)
+        or is_explanation_continuation_request(message, history)
+    ):
         matches.append("followup")
 
     if is_targeted_clarification_needed(message) or (
@@ -8325,6 +8571,11 @@ RULES:
 
     elif route == "followup":
         recent_context = get_recent_conversation_context(history, limit=12)
+        continuation_rules = (
+            "\n" + EXPLANATION_CONTINUATION_RULES + "\n"
+            if is_explanation_continuation_request(message, history)
+            else ""
+        )
 
         prompt = f"""
 You are Kalillac AI.
@@ -8345,7 +8596,7 @@ Rules:
 - If the conversation was discussing notes or documents, continue within that context.
 - Answer naturally, directly, and concisely.
 - Do not add unnecessary introductions or closings.
-"""
+{continuation_rules}"""
 
     elif route == "unclear":
         prompt = f"""
@@ -9158,7 +9409,22 @@ def _v31_runtime_facts():
 
     facts = build_runtime_facts(config)
 
+    runtime = current_runtime_configuration()
     facts["routing_mode"] = "transitional_v31"
+    facts["configuration_provenance"] = {
+        "scope": runtime["scope"],
+        "configuration_source": "current application constants and routing flag",
+        "deployment_facts": "separately recorded; not verified live by this tool",
+    }
+    facts["limits"] = runtime["limits"]
+    facts["recorded_deployment"] = {
+        "provenance": KALILLAC_SELF_KNOWLEDGE["provenance"]["deployment"],
+        "recorded_verification_date": KALILLAC_SELF_KNOWLEDGE["verified_on"],
+        "verified_live_this_request": False,
+        "network": list(KALILLAC_SELF_KNOWLEDGE["network"]),
+    }
+    facts["session_state"] = list(KALILLAC_SELF_KNOWLEDGE["session_state"])
+    facts["product_design"] = list(KALILLAC_SELF_KNOWLEDGE["product_design"])
 
     facts["product_roadmap"] = list(
         KALILLAC_SELF_KNOWLEDGE["product_roadmap"]
@@ -9169,7 +9435,9 @@ def _v31_runtime_facts():
 
     facts["request_handling"] = {
         "legacy_classifier_gate": True,
-        "native_tool_routes": sorted(V31_NATIVE_TOOL_ROUTES),
+        "native_tool_routing_enabled": runtime["native_tool_routing_enabled"],
+        "active_mode": "native_tools" if runtime["native_tool_routing_enabled"] else "legacy",
+        "native_tool_routes": runtime["native_tool_routes"],
         "application_controlled_paths": [
             "deterministic calculator handling",
             "session-memory writes and reads",
@@ -9177,6 +9445,7 @@ def _v31_runtime_facts():
             "other deterministic hard controls",
         ],
         "native_tool_path": {
+            "enabled": runtime["native_tool_routing_enabled"],
             "model_provider": "OpenAI",
             "model": OPENAI_MODEL,
             "tools": [
@@ -9275,6 +9544,19 @@ def _v31_input_items(message, history):
     return items
 
 
+def native_semantic_route_eligible(route, history):
+    if route not in V31_NATIVE_TOOL_ROUTES:
+        return False
+    if route == "code_history":
+        # Preserve the legacy code-history context if its examples do not
+        # fit the native path's existing window. Do not change either limit.
+        native_context = "\n".join(
+            item.get("content", "") for item in _v31_input_items("", history)
+        )
+        return all(answer in native_context for answer in get_recent_code_answers(history))
+    return True
+
+
 def _run_v31_native_tool_chat(
     message,
     history,
@@ -9305,9 +9587,14 @@ def _run_v31_native_tool_chat(
         + current_date
         + "\n\n"
         + V31_NATIVE_TOOL_POLICY
+        + runtime_configuration_context()
         + "\n\n"
         + render_kalillac_product_roadmap()
     )
+
+    explanation_continuation = is_explanation_continuation_request(message, history)
+    if explanation_continuation:
+        instructions += "\n\n" + EXPLANATION_CONTINUATION_RULES
 
     def call_model(input_items):
         # A remote failure in any native round ends the request as provider
@@ -9483,6 +9770,9 @@ def _run_v31_native_tool_chat(
         reply = clean_ai_reply(
             result.text
         )
+
+        if explanation_continuation:
+            reply = unwrap_accidental_prose_fence(reply, "followup")
 
         # Sources have exactly one owner: Kalillac application code.
         reply = re.split(
@@ -9866,9 +10156,20 @@ def chat(message, history, request=None, session_id=None):
             return f"Got it. I’ll remember that for this session: {clean_fact}."
 
 
+        if route == "self_knowledge" and normalize_for_router(message).rstrip(" .?!") in {
+            "what model do you use", "what model are you using",
+            "what model are you running", "which model powers you",
+            "who created you", "who built you", "who is your developer",
+            "what is your architecture", "how does kalillac ai work",
+            "how does kalillac work", "how do you work",
+        }:
+            _, factual_reply = get_canonical_self_knowledge_response(message)
+            if factual_reply is not None:
+                return factual_reply
+
         if (
             V31_NATIVE_TOOL_ROUTING
-            and route in V31_NATIVE_TOOL_ROUTES
+            and native_semantic_route_eligible(route, history)
         ):
             try:
                 log("V31 NATIVE TOOL ROUTING: enabled")

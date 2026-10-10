@@ -150,16 +150,84 @@
       return token;
     }
 
-    // Protect display forms first, then inline form.
-    source = source.replace(/\\\[[\s\S]*?\\\]/g, stash);
-    source = source.replace(/\$\$[\s\S]*?\$\$/g, stash);
-    source = source.replace(/\\\([\s\S]*?\\\)/g, stash);
+    // Match math only outside code, including multi-backtick spans and
+    // tilde fences. Never pair delimiters across an actual code block.
+    source = mapOutsideCode(source, function (part) {
+      part = part.replace(/\\\[[\s\S]*?\\\]/g, stash);
+      part = part.replace(/\$\$[\s\S]*?\$\$/g, stash);
+      part = part.replace(/\\\([\s\S]*?\\\)/g, stash);
+      return protectUnfinishedMath(part, stash, prefix);
+    });
 
     return {
       text: source,
       items: items,
       prefix: prefix
     };
+  }
+
+  /*
+   * A reply cut off inside mathematics ends with an opening delimiter that
+   * has no closer, and the continuation can begin with a closer that has no
+   * opener. After complete pairs are protected, keep such a fragment as
+   * literal text: Marked would otherwise drop its backslashes, and it is
+   * never closed or completed here. Fenced and inline code are left alone.
+   */
+  function mapOutsideCode(source, transform) {
+    function mapped(part) {
+      // A placeholder must not consume the line break that introduces the
+      // next code fence, or Markdown would stop recognizing that fence.
+      var suffix = /\n+$/.exec(part);
+      var end = suffix ? part.length - suffix[0].length : part.length;
+      return transform(part.slice(0, end)) + part.slice(end);
+    }
+    var boundaries = /^[ \t]*(`{3,}|~{3,})[^\n]*(?:\n|$)|(`+)/gm;
+    var result = "";
+    var last = 0;
+    var match;
+    while ((match = boundaries.exec(source)) !== null) {
+      var marker = match[1] || match[2];
+      var end;
+      if (match[1]) {
+        var closeFence = new RegExp("^[ \\t]*" + marker[0] + "{" + marker.length + ",}[ \\t]*(?:\\n|$)", "gm");
+        closeFence.lastIndex = boundaries.lastIndex;
+        var close = closeFence.exec(source);
+        end = close ? closeFence.lastIndex : source.length;
+      } else {
+        var closeSpan = new RegExp("(^|[^`])`{" + marker.length + "}(?!`)", "g");
+        closeSpan.lastIndex = boundaries.lastIndex;
+        var span = closeSpan.exec(source);
+        if (!span) continue;
+        end = closeSpan.lastIndex;
+      }
+      result += mapped(source.slice(last, match.index)) + source.slice(match.index, end);
+      last = end;
+      boundaries.lastIndex = end;
+    }
+    return result + mapped(source.slice(last));
+  }
+
+  function protectUnfinishedMath(source, stash, prefix) {
+    // Complete expressions already have placeholders. Leave an unmatched
+    // opener literal, without manufacturing a closer or missing content.
+    var opener = source.search(/\\\[|\\\(|\$\$/);
+    if (opener !== -1) {
+      var tail = source.slice(opener);
+      var nextMath = tail.indexOf(prefix);
+      var end = nextMath === -1 ? source.length : opener + nextMath;
+      source = source.slice(0, opener) + stash(source.slice(opener, end)) + source.slice(end);
+    }
+    // Preserve a leading orphan fragment, without consuming completed math.
+    var closer = /\\\]|\\\)/.exec(source);
+    if (closer) {
+      var head = source.slice(0, closer.index + closer[0].length);
+      if (head.indexOf(prefix) === -1) {
+        source = stash(head) + source.slice(head.length);
+      } else {
+        source = source.slice(0, closer.index) + stash(closer[0]) + source.slice(closer.index + closer[0].length);
+      }
+    }
+    return source;
   }
 
   /*
