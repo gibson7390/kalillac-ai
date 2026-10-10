@@ -6873,6 +6873,10 @@ PRIVATE_CONTEXT_PATTERNS = (
     r"(?:conversation|chat|session|memory|thread|history)\b",
     r"\bsearch (?:through )?(?:my|our|this)\s+"
     r"(?:memory|memories|conversation|chat|session|thread|history)\b",
+    # Direct references to the user's own earlier messages.
+    r"\b(?:my (?:previous|prior|last|earlier)|the (?:previous|prior)) message\b",
+    r"\bwhat (?:i|we) (?:pasted|sent|wrote|shared|typed) "
+    r"(?:above|earlier|before|previously)\b",
 )
 
 
@@ -6881,6 +6885,19 @@ def is_private_context_request(text):
     current session, saved memory, or prior statements. Such a request
     must never be sent to Tavily, even when it names a domain."""
     return any(re.search(pattern, text) for pattern in PRIVATE_CONTEXT_PATTERNS)
+
+
+def is_private_search_target(raw_text):
+    """True when the raw text (a user message or a model-generated search
+    query) points at the user's own session, memory, earlier messages or
+    prior conversation. Composes the existing deterministic checks; such a
+    target must never be sent to external search."""
+    return (
+        is_private_context_request(normalize_for_router(raw_text))
+        or is_memory_recall_request(raw_text)
+        or is_previous_conversation_reference(raw_text)
+        or is_explicit_previous_session_reference(raw_text)
+    )
 
 # Conceptual questions about search are not search requests.
 CONCEPTUAL_QUESTION_PREFIXES = (
@@ -9343,6 +9360,7 @@ def _run_v31_native_tool_chat(
     search_results = []
     search_calls = 0
     search_coverage_limited = False
+    private_request = is_private_search_target(message)
 
     current_date = (
         datetime.now().date().isoformat()
@@ -9406,6 +9424,22 @@ def _run_v31_native_tool_chat(
             return {
                 "status": "rejected",
                 "reason": "Unknown tool.",
+            }
+
+        # Private session, memory or conversation context never goes to
+        # Tavily: checked against the user's request and, because model
+        # output is untrusted, the generated query, before any search
+        # count, session allowance or domain selection. Neither text is
+        # logged.
+        if private_request or is_private_search_target(call.arguments.get("query", "")):
+            log("V31 SEARCH: rejected (private context)")
+            return {
+                "status": "rejected",
+                "reason": (
+                    "External search is unavailable for private session, "
+                    "memory or conversation context. Answer from the "
+                    "conversation provided."
+                ),
             }
 
         # Preserve the current one-search-per-request behavior during
