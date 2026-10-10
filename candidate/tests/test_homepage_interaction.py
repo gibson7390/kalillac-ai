@@ -3,7 +3,7 @@ render, the starting state and its example prompts, CTA scrolling and focus,
 the editorial eyebrow, pointer/caret, the chat composer's whole typing area,
 and multi-turn conversations -- both inside the homepage iframe and on a
 direct /app/ visit. Also the page structure below the hero (privacy diagram,
-demonstrations, the two-block explanation, the mobile-app section) at every
+temporary-memory demonstration, the two-block explanation, the mobile-app section) at every
 required viewport and at 200% zoom.
 
 Browser tests drive the BUILT site (site/dist/public) with the canonical
@@ -690,10 +690,21 @@ return {
   note: (() => { const n = q('[data-testid="flow-memory-note"]'); return { text: n.textContent.replace(/\s+/g, ' ').trim(),
     rect: rect(n), visible: visible(n), fontSize: parseFloat(getComputedStyle(n).fontSize) }; })(),
   flowHeading: [q('#how-it-works h2').textContent.trim(), q('#how-it-works .eyebrow').textContent.trim()],
-  demos: qa('[data-testid="section-demos"] [data-testid^="demo-"]').map(e => e.getAttribute('data-testid')),
-  demoText: Object.fromEntries(qa('[data-testid^="demo-"]').map(e => [e.getAttribute('data-testid'),
-    e.textContent.replace(/\s+/g, ' ')])),
   demosHeading: q('#product h2').textContent.trim(),
+  memory: (() => { const s = q('[data-testid="section-demos"]'), phases = [...s.querySelectorAll('.memory-phase')];
+    return { id: s.id, tag: s.tagName, labelledby: s.getAttribute('aria-labelledby'), headingId: s.querySelector('h2').id,
+      eyebrow: s.querySelector('.eyebrow').innerText.trim(), intro: s.querySelector('.demos-intro p').textContent.trim(),
+      phasesListTag: phases.length ? phases[0].parentElement.tagName : null,
+      phases: phases.map(ph => { const h = ph.querySelector('h3'), list = ph.querySelector('.memory-transcript');
+        return { tag: ph.tagName, label: h.innerText.trim(), labelTag: h.tagName, labelId: h.id, listTag: list.tagName,
+                 listLabelledby: list.getAttribute('aria-labelledby'), rect: rect(ph),
+                 turns: [...list.children].map(m => [m.tagName, m.className, m.querySelector('.memory-speaker').textContent.trim(),
+                                                     m.querySelector('p').textContent.trim()]) }; }),
+      explain: q('[data-testid="memory-explain"]').textContent.trim(),
+      disclosure: q('[data-testid="memory-disclosure"]').textContent.trim(),
+      overflowing: [...s.querySelectorAll('*')].filter(e => { const b = e.getBoundingClientRect();
+        return b.width > 0 && (b.right > innerWidth + 1 || b.left < -1); }).length,
+      text: s.innerText.replace(/\s+/g, ' ') }; })(),
   explainBlocks: qa('[data-testid="section-explain"] .explain-block').map(b => [b.getAttribute('data-testid'),
     b.querySelector('h3').textContent.trim(), b.textContent.replace(/\s+/g, ' ').trim()]),
   privacyLink: (q('[data-testid="link-full-privacy"]') || {}).getAttribute
@@ -745,7 +756,7 @@ def test_structure_has_one_h1_and_one_filled_call_to_action(structure):
     assert structure["heroEyebrow"] == ["SPAN", "PRIVATE BY DESIGN"]
     assert [t.replace("\u00a0", " ") for t in structure["filled"]] == ["Start a private session"], structure["filled"]
     if not structure["mobile"] and structure["innerWidth"] >= 1024:
-        assert structure["navLinks"] == [["Product", "/#product"], ["Privacy", "/#privacy"],
+        assert structure["navLinks"] == [["Product", "/"], ["Privacy", "/privacy"],
                                          ["How it works", "/#how-it-works"]]
 
 
@@ -810,14 +821,66 @@ def test_privacy_diagram_has_a_semantic_summary_and_the_memory_sentence_beneath(
     assert note["fontSize"] >= 14
 
 
-def test_demonstrations_are_four_distinct_compositions(structure):
-    assert structure["demosHeading"] == "See Kalillac at work."
-    assert structure["demos"] == ["demo-think", "demo-write", "demo-code", "demo-search"]
-    text = structure["demoText"]
-    assert "What you know" in text["demo-think"] and "assuming" in text["demo-think"]
-    assert "def add_tag(tag, tags=[])" in text["demo-code"] and "tags=None" in text["demo-code"]
-    assert "Searched the current web" in text["demo-search"]
-    assert len(set(text.values())) == 4
+MEMORY_TRANSCRIPT = {
+    "1 · DURING THE SAME SESSION": [
+        ("you", "Remember for me that my business name is Kalillac AI."),
+        ("kalillac", "I’ll remember that your business name is Kalillac AI for this conversation."),
+        ("you", "What is my business name?"),
+        ("kalillac", "Your business name is Kalillac AI."),
+    ],
+    "2 · AFTER REFRESHING": [
+        ("you", "Do you remember me telling you what my business name was?"),
+        ("kalillac", "No. I don’t see your business name in the current session, so I can’t recover it."),
+    ],
+}
+REMOVED_DEMONSTRATION_TEXT = (
+    "See Kalillac at work.", "Illustrative examples of the kinds of help you can ask for.",
+    "01 · Think", "02 · Write", "03 · Build and debug", "04 · Search the current web",
+    "Turn a tangled question into a clear way to decide.", "Clearer writing that still sounds like you.",
+    "See why it breaks, then fix it.", "Current answers with their sources in view.",
+    "Searched the current web", "Project repository", "Release notes", "Issue tracker",
+    "def add_tag(tag, tags=[])",
+)
+
+
+def test_memory_demonstration_replaces_the_four_handcrafted_cards(structure):
+    memory = structure["memory"]
+
+    # The legacy #product target still reaches this section.
+    assert memory["id"] == "product" and memory["tag"] == "SECTION"
+    assert memory["labelledby"] == memory["headingId"] == "memory-heading"
+    assert memory["eyebrow"] == "SEE IT IN ACTION"
+    assert structure["demosHeading"] == "Temporary memory you can test yourself."
+    assert memory["intro"] == ("Kalillac can remember information during your active conversation. Refreshing starts "
+                               "a new browser session that cannot reopen the previous conversation.")
+    # Two chronological phases, each a labelled, ordered transcript of user and Kalillac turns.
+    assert memory["phasesListTag"] == "OL"
+    assert [p["label"] for p in memory["phases"]] == list(MEMORY_TRANSCRIPT)
+    for phase in memory["phases"]:
+        assert phase["tag"] == "LI" and phase["labelTag"] == "H3" and phase["listTag"] == "OL"
+        assert phase["listLabelledby"] == phase["labelId"]
+        expected = MEMORY_TRANSCRIPT[phase["label"]]
+        assert [(t[0], t[2], t[3]) for t in phase["turns"]] == [
+            ("LI", "You:" if who == "you" else "Kalillac:", text) for who, text in expected]
+        assert [t[1] for t in phase["turns"]] == [f"memory-msg memory-msg-{who}" for who, _ in expected]
+    # The accurate server-memory caveat and the excerpt disclosure.
+    assert memory["explain"] == (
+        "Refreshing ends that browser’s access to the previous temporary conversation. The old session data may "
+        "remain temporarily in server memory until capacity limits or a restart clear it, but the refreshed browser "
+        "cannot retrieve it.")
+    assert memory["disclosure"] == ("Real Kalillac session example. The final response was excerpted, and formatting "
+                                    "was condensed for display.")
+    # The handcrafted cards and their generic sources are gone from the whole page.
+    page = structure["pageText"].lower()
+    for removed in REMOVED_DEMONSTRATION_TEXT:
+        assert removed.lower() not in page, removed
+    # Chronology: side by side on wide screens, phase 1 above phase 2 when stacked.
+    first, second = (p["rect"] for p in memory["phases"])
+    if structure["innerWidth"] > 1000:
+        assert second["left"] >= first["right"] and abs(second["top"] - first["top"]) <= 1
+    else:
+        assert second["top"] >= first["bottom"]
+    assert memory["overflowing"] == 0
 
 
 def test_explanation_has_exactly_two_blocks_with_the_required_meaning(structure):
