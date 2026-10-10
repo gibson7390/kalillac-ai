@@ -5219,6 +5219,102 @@ def _map_outside_code_fences(text, transform):
     )
 
 
+def strip_model_source_footer(reply):
+    """Remove only a trailing citation-only Sources footer outside code.
+
+    Preserve source-like prose, mathematics, and literal source lists in
+    closed or unfinished fences. A heading followed by substantive text is
+    part of the answer, not a removable footer.
+    """
+    text = str(reply)
+    lines = text.splitlines(keepends=True)
+    protected = []
+    marker = None
+    for line in lines:
+        content = line.rstrip("\r\n")
+        if marker is None:
+            opener = re.fullmatch(r"[ \t]*(`{3,}|~{3,}).*", content)
+            marker = opener.group(1) if opener else None
+            protected.append(marker is not None)
+        else:
+            protected.append(True)
+            if re.fullmatch(
+                r"[ \t]*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}[ \t]*",
+                content,
+            ):
+                marker = None
+
+    # Matching inline backticks stay within prose blocks; never pair them
+    # across fenced/indented code or blank-line paragraph boundaries.
+    inline_code = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", re.DOTALL)
+    math_lines = list(lines)
+    start = 0
+    for index in range(len(lines) + 1):
+        if (index == len(lines) or protected[index] or not lines[index].strip()
+                or lines[index].startswith(("    ", "\t"))):
+            if start < index:
+                masked = inline_code.sub(
+                    lambda span: re.sub(r"[^\r\n\v\f\x1c-\x1e\x85\u2028\u2029]", " ", span.group(0)),
+                    "".join(lines[start:index]),
+                )
+                math_lines[start:index] = masked.splitlines(keepends=True)
+            start = index + 1
+
+    math_end = None
+    math_closers = {r"\[": r"\]", r"\(": r"\)", "$$": "$$"}
+    for index, (line, math_content) in enumerate(zip(lines, math_lines)):
+        if not protected[index]:
+            in_math = math_end is not None
+            for token in re.findall(r"(?<!\\)(?:\\[\[\]()]|\$\$)", math_content):
+                if math_end is None and token in math_closers:
+                    math_end = math_closers[token]
+                    in_math = True
+                elif token == math_end:
+                    math_end = None
+            protected[index] = in_math or line.startswith(("    ", "\t"))
+
+    heading = re.compile(
+        r"^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*Sources:?\*\*:?[ \t]*"
+        r"|Sources(?:[ \t]*:[ \t]*|[ \t]+|$))(.*?)[ \t]*$",
+        re.IGNORECASE,
+    )
+    citation = re.compile(
+        r"\[[^\]\r\n]+\]\(https?://[^\s\r\n]+?\)"
+        r"|\[(?:[A-Za-z][A-Za-z0-9 .&_-]{1,}|[0-9]+)\]"
+        r"|https?://[^\s]+",
+        re.IGNORECASE,
+    )
+    for start, line in enumerate(lines):
+        if protected[start] or not heading.fullmatch(line.rstrip("\r\n")):
+            continue
+        citation_count = 0
+        has_content = False
+        for index in range(start, len(lines)):
+            if protected[index]:
+                break
+            content = lines[index].rstrip("\r\n")
+            match = heading.fullmatch(content)
+            if match:
+                content = match.group(1)
+            # A numbered list marker is removable only before a citation,
+            # never as arbitrary numeric content elsewhere in the answer.
+            content = re.sub(
+                r"^[ \t]*[0-9]+[.)][ \t]+(?=\[|https?://)",
+                "",
+                content,
+                flags=re.IGNORECASE,
+            )
+            has_content = has_content or bool(content.strip())
+            residue, count = citation.subn("", content)
+            citation_count += count
+            if residue.strip(" \t\r\n-*\u00b7\u2022|,;:.()"):
+                break
+        else:
+            if citation_count or not has_content:
+                return "".join(lines[:start]).rstrip()
+    return text
+
+
 def clean_ai_reply(reply):
     cleaned = str(reply)
     pre_context_cleanup = cleaned
@@ -5341,7 +5437,12 @@ def unwrap_accidental_prose_fence(reply, route):
     if label not in {"markdown", "md", "text", "plaintext"}:
         return reply
 
-    return "\n".join(lines[1:-1]).strip()
+    body = "\n".join(lines[1:-1]).strip()
+    # A literal source-list example is copy-paste content. Unwrapping its
+    # Markdown fence would expose it to application source-footer cleanup.
+    if strip_model_source_footer(body) != body:
+        return reply
+    return body
 
 
 def extract_fenced_code(reply):
@@ -8258,6 +8359,23 @@ def classify_request(message, history):
     return "general"
 
 
+QUANTITATIVE_GROUNDING_RULES = r"""QUANTITATIVE GROUNDING:
+- Preserve the quantities, variable definitions, units, and scaling explicitly supplied by the user or problem statement. Do not invent units, scale factors, or conversions; a prior assistant guess does not establish them.
+- If units or scaling were not supplied, the physical units remain unspecified. Give the mathematical result without turning it into an unsupported real-world quantity.
+- Clearly introduced hypothetical examples are allowed. State their assumptions explicitly and distinguish them from established facts about the original problem.
+- Verify derived values against the stated formula, domain, and constraints; distinguish a mathematical extremum from a physical interpretation that needs additional assumptions.
+- For velocity v(t), \int_a^b v(t)\,dt gives signed displacement; total distance is \int_a^b |v(t)|\,dt. If velocity changes sign, split at the sign changes or integrate speed; do not call signed displacement total distance in general."""
+
+
+WEB_EVIDENCE_TIME_RULES = """WEATHER AND EVIDENCE TIMES:
+- For weather measurements, identify the applicable observation/update time when supplied, including the supplied date and timezone. Distinguish observation/update time, forecast update time, page publication time, and retrieval/search time; one does not establish another.
+- In WeatherAPI evidence, current.last_updated is the reading's update time; location.localtime is the location's clock time, not the observation update time. Do not substitute it for last_updated or invent a timezone when none is supplied.
+- Do not combine differently timed observations as though they describe one current measurement. Keep each temperature, condition, wind direction, and wind speed attached to its own source and observation time. Prefer the most recent applicable observation supported by the evidence, and label older observations as such when useful.
+- A forecast update does not refresh an older observation. A long-range or monthly outlook is not a current observation. Page publication or retrieval today does not establish that the measurement was taken today.
+- When freshness is unavailable, state that limitation naturally while providing useful supported information; do not assert an unverified reading is current or refuse to report supported data solely because its observation time is missing.
+- After a successful search, never write a source footer or Sources section, including inline Sources: links. Kalillac appends the application-owned source list from the returned search URLs."""
+
+
 KALILLAC_VOICE_AND_FORMAT_ROUTES = frozenset({
     "general",
     "followup",
@@ -9214,6 +9332,10 @@ Rules:
     )
 
 
+    if route not in {"code", "revision", "code_continuation", "calculator"}:
+        prompt += "\n\n" + QUANTITATIVE_GROUNDING_RULES
+        prompt += "\n\n" + WEB_EVIDENCE_TIME_RULES
+
     prompt = apply_kalillac_voice_and_format(prompt, route)
 
     return [
@@ -9621,6 +9743,8 @@ def _run_v31_native_tool_chat(
         + current_date
         + "\n\n"
         + V31_NATIVE_TOOL_POLICY
+        + "\n\n" + QUANTITATIVE_GROUNDING_RULES
+        + "\n\n" + WEB_EVIDENCE_TIME_RULES
         + runtime_configuration_context()
         + "\n\n"
         + render_kalillac_product_roadmap()
@@ -9809,12 +9933,7 @@ def _run_v31_native_tool_chat(
             reply = unwrap_accidental_prose_fence(reply, "followup")
 
         # Sources have exactly one owner: Kalillac application code.
-        reply = re.split(
-            r"\n\s*\*\*Sources\*\*\s*\n",
-            reply,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0].rstrip()
+        reply = strip_model_source_footer(reply)
 
         if result.incomplete:
             print(
@@ -10442,6 +10561,8 @@ Rules:
 - If the results do not contain the answer, say so plainly.
 - Never invent URLs, dates, prices, quotations, or additional sources.
 - Do not mention retrieval systems or internal processing.
+{QUANTITATIVE_GROUNDING_RULES}
+{WEB_EVIDENCE_TIME_RULES}
 {ENGAGEMENT_REMINDER}
 - Be direct and concise.
 - Stop when answered.
@@ -10463,6 +10584,7 @@ Rules:
             reply = extract_response_text(response.content)
             reply = clean_ai_reply(reply)
             reply = unwrap_accidental_prose_fence(reply, route)
+            reply = strip_model_source_footer(reply)
 
             if is_incomplete_model_response(response):
                 reply = mark_incomplete_reply(reply)
