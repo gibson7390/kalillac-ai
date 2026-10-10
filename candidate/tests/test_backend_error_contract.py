@@ -788,3 +788,53 @@ def test_task_cancellation_is_not_converted(monkeypatch):
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(app.api_chat(object()))
+
+
+# --- explicit code continuation: fence markers are not a usable remainder ---
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("model_text", [
+    "```text\n\n```",
+    "```python\n \t \n```",
+    "```\n\n```",
+    "```rust\n\n```",
+    "```python\n```",
+    "```python",
+    "```python\n \t",
+    "```text\n\n```\n\n```python\n \t\n```",
+    "````python\n \t\n````",
+    "~~~python\n \t\n~~~",
+    "```python\r\n \t\r\n```",
+    "",
+    " \t\n ",
+])
+def test_empty_code_continuation_is_typed_provider_failure_without_retry(
+    providers, monkeypatch, capsys, native, budgeted, model_text,
+):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    if not budgeted:
+        monkeypatch.setattr(app, "_request_limits", None)
+
+        def fake_post(payload, timeout=90):
+            providers["openai_posts"].append(copy.deepcopy(payload))
+            return providers["openai"].pop(0)
+
+        monkeypatch.setattr(app, "_post_openai_responses", fake_post)
+    task = "Write Python code combining two bit masks with XOR, then display the result."
+    history = [{"role": "user", "content": task},
+               {"role": "assistant", "content": app.mark_incomplete_reply("```\nmask = 1 ^ 2")}]
+    assert app.classify_request("continue", history) == "code_continuation"
+    providers["openai"] = [reply(model_text)]
+
+    with TestClient(app.api) as client:
+        response = client.post("/api/chat", json={"message": "continue", "history": history})
+
+    assert result(response) == PROVIDER_UNAVAILABLE
+    assert response.headers["cache-control"] == "no-store"
+    assert "reply" not in response.json()
+    assert len(providers["openai_posts"]) == 1
+    assert providers["tavily_posts"] == []
+    out = capsys.readouterr()
+    assert task not in out.out + out.err
+    assert OPENAI_KEY not in out.out + out.err

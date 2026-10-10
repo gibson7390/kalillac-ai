@@ -5371,6 +5371,32 @@ def extract_fenced_code(reply):
     return text.strip()
 
 
+def _code_continuation_has_usable_remainder(reply):
+    """Fence headers and whitespace are not a missing code remainder.
+
+    Inspect bodies regardless of their language label, including unfinished
+    fences. Keep bare remainders supported; do not parse or repair fragments
+    that may begin in the middle of a statement.
+    """
+    text = str(reply).strip()
+    marker = None
+    saw_fence = False
+    for line in text.splitlines():
+        if marker is None:
+            opener = re.fullmatch(r"[ \t]*(`{3,}|~{3,})(.*)", line)
+            if opener:
+                marker = opener.group(1)
+                saw_fence = True
+        elif re.fullmatch(
+            r"[ \t]*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}[ \t]*",
+            line,
+        ):
+            marker = None
+        elif line.strip():
+            return True
+    return bool(text) and not saw_fence
+
+
 def is_html_output(text):
     lowered = str(text).lower()
     return "<!doctype html" in lowered or "<html" in lowered
@@ -8649,11 +8675,18 @@ Rules:
             get_last_assistant_message(history)
         )
 
+        # Reuse the bounded recent-user window; the fragment alone may not
+        # show which requested operations remain to be written.
+        task_context = "\n\n".join(recent_user_messages)
+
         prompt = f"""
 You are Kalillac AI.
 
 The previous assistant response contains code that was cut off before it
 finished. The user is asking for the missing remainder.
+
+RECENT USER TASK CONTEXT:
+{task_context or "(none)"}
 
 PREVIOUS INCOMPLETE CODE OUTPUT:
 {previous_incomplete_code}
@@ -8662,6 +8695,7 @@ USER REQUEST:
 {message}
 
 ABSOLUTE CONTINUATION RULES:
+- Use RECENT USER TASK CONTEXT to identify requested work still missing from the previous output. Do not redo requirements already satisfied by delivered code.
 - Continue from the exact point where PREVIOUS INCOMPLETE CODE OUTPUT stopped.
 - Return ONLY the missing continuation. Do NOT regenerate the code from the beginning.
 - Do NOT repeat lines, sections, tags, declarations, functions, or other content that was already delivered.
@@ -10478,7 +10512,15 @@ Rules:
         )
 
         reply = extract_response_text(response.content)
-        reply = clean_ai_reply(reply)
+        if route == "code_continuation":
+            if not _code_continuation_has_usable_remainder(reply):
+                print("WARN: CODE_CONTINUATION_EMPTY_RESPONSE")
+                _raise_if_request_stopped()
+                raise ModelProviderUnavailable()
+            # Prose cleanup can alter meaningful blank lines or tokens in a
+            # code fragment. Preserve the exact missing remainder unchanged.
+        else:
+            reply = clean_ai_reply(reply)
         html_grounding_context = ""
 
         if (

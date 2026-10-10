@@ -310,3 +310,140 @@ def test_router_prompt_separates_verified_and_example_values():
     ) in prompt
     assert "no verified time-based TTL" in prompt
     assert "# Example value, not a verified Kalillac setting" in prompt
+
+
+# --- explicit code continuation must retain the task, not just its fragment ---
+
+LIVE_CODE_TASKS = [
+    (
+        "Write a short Python example combining two bit masks with XOR, then print the result.",
+        "mask = 1 ^ 2",
+        "print(mask)",
+    ),
+    (
+        "Write a short Python example storing a raw Windows filename string, then print it.",
+        r'path = r"C:\Users\kalil\notes.txt"',
+        "print(path)",
+    ),
+]
+
+
+def _code_task_history(task, fragment, paired=False):
+    answer = app.mark_incomplete_reply("```\n" + fragment)
+    if paired:
+        return [(task, answer)]
+    return [{"role": "user", "content": task}, {"role": "assistant", "content": answer}]
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("paired", [False, True])
+@pytest.mark.parametrize("task,fragment,remainder", LIVE_CODE_TASKS)
+def test_explicit_continuation_task_reaches_actual_provider_prompt(
+    scripted_openai, monkeypatch, native, paired, task, fragment, remainder,
+):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    history = _code_task_history(task, fragment, paired)
+    assert app.classify_request("continue", history) == "code_continuation"
+    scripted_openai["responses"] = [_response("```python\n" + remainder + "\n```")]
+
+    result = app.chat("continue", history, session_id="continuation-task-prompt")
+
+    assert result == "```python\n" + remainder + "\n```"
+    assert len(scripted_openai["payloads"]) == 1
+    payload = scripted_openai["payloads"][0]
+    prompt = json.dumps(payload["input"])
+    assert task in prompt
+    assert fragment in "\n".join(item["content"] for item in payload["input"])
+    assert "Do NOT regenerate the code from the beginning" in prompt
+    assert "Do NOT repeat lines" in prompt
+    assert payload["max_output_tokens"] == app.CODE_CONTINUATION_RESPONSE_TOKENS
+    assert payload["store"] is False
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("task,fragment,remainder", LIVE_CODE_TASKS)
+def test_task_aware_mock_returns_only_nonempty_missing_remainder(
+    scripted_openai, monkeypatch, native, task, fragment, remainder,
+):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    calls = []
+
+    def task_aware_provider(payload, timeout=90):
+        calls.append(payload)
+        context = "\n".join(item["content"] for item in payload["input"])
+        # This oracle models task availability, not real model quality.
+        text = "```python\n" + (remainder if task in context else "") + "\n```"
+        return _response(text)
+
+    monkeypatch.setattr(app, "_post_openai_responses", task_aware_provider)
+    history = _code_task_history(task, fragment)
+    result = app.chat("continue", history, session_id="task-aware-continuation")
+
+    assert result == "```python\n" + remainder + "\n```"
+    assert fragment not in result
+    joined = fragment + "\n" + app.extract_fenced_code(result)
+    tree = ast.parse(joined)
+    assert len(tree.body) == 2
+    assert isinstance(tree.body[1], ast.Expr)
+    assert isinstance(tree.body[1].value, ast.Call)
+    assert tree.body[1].value.args[0].id == tree.body[0].targets[0].id
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_continuation_task_context_uses_existing_recent_user_window(scripted_openai, paired):
+    old_task = "OLD-EXCLUDED-TASK: Write a JavaScript game."
+    task = "Create a Python function that loads JSON and returns the decoded value."
+    refinement = "Use the standard library only."
+    fragment = "```python\nimport json\ndef decode(text):"
+    turns = [(old_task, "Old answer."), (task, "Understood."),
+             (refinement, app.mark_incomplete_reply(fragment)),
+             ("continue", app.mark_incomplete_reply(fragment))]
+    history = turns if paired else [
+        {"role": role, "content": content}
+        for user, assistant in turns
+        for role, content in [("user", user), ("assistant", assistant)]
+    ]
+    scripted_openai["responses"] = [_response("```python\n    return json.loads(text)\n```")]
+
+    app.chat("continue", history, session_id="bounded-code-task")
+
+    prompt = "\n".join(item["content"] for item in scripted_openai["payloads"][0]["input"])
+    assert task in prompt and refinement in prompt
+    assert old_task not in prompt
+    assert len(scripted_openai["payloads"]) == 1
+
+
+def test_exact_remainder_preserves_blank_lines_inside_code(scripted_openai):
+    task = "Write Python code assigning a multiline message and computing its length."
+    fragment = "```python\nmessage ="
+    remainder = '```python\n"""alpha\n\n\nbeta"""\nsize = len(message)\n```'
+    scripted_openai["responses"] = [_response(remainder)]
+
+    result = app.chat("continue", [{"role": "user", "content": task},
+                                 {"role": "assistant", "content": app.mark_incomplete_reply(fragment)}],
+                      session_id="exact-code-remainder")
+
+    assert result == remainder
+    assert len(scripted_openai["payloads"]) == 1
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("remainder", [
+    "```python\nprint(mask)\n```",
+    "```text\nprint(mask)\n```",
+    "````python\nprint(mask)\n````",
+    "~~~python\nprint(mask)\n~~~",
+    "```python\r\nprint(mask)\r\n```",
+    "```python\nprint(mask)",
+    "print(mask)",
+])
+def test_nonempty_continuation_body_survives_unchanged(scripted_openai, monkeypatch, native, remainder):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    history = _code_task_history(*LIVE_CODE_TASKS[0][:2])
+    scripted_openai["responses"] = [_response(remainder)]
+
+    result = app.chat("continue", history, session_id="nonempty-code-body")
+
+    assert result == remainder
+    assert len(scripted_openai["payloads"]) == 1
