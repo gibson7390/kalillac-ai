@@ -9559,6 +9559,186 @@ def _run_v31_native_tool_chat(
 
 
 
+# === CRISIS GUARD ===
+#
+# A small, high-confidence deterministic boundary inside chat(), not a
+# classifier route. It runs before prior-session handling, classify_request(),
+# memory, the calculator, file handling, V31, search and every provider call.
+# Unmistakable suicide, self-harm or overdose language returns one of two
+# fixed local replies as a normal HTTP 200 chat response: CRISIS_SELF_RESPONSE
+# for the user, CRISIS_CONCERN_RESPONSE for clear concern about another real
+# person. No model, search or tool is called, nothing is written to session
+# state, and this crisis application path does not log the message body.
+#
+# Ambiguous distress ("I feel hopeless", "I can't do this anymore",
+# "goodbye") deliberately stays on the normal model path.
+#
+# Quoted words are separated before matching. Quoted first-person crisis
+# words count as the user's own only when the user applies them to
+# themselves, and as concern when a person close to the user said them.
+# Third-person language needs a real-person anchor ("my sister", "worried"),
+# and a fiction, media or academic frame suppresses it unless the user says
+# they are worried.
+#
+# A short follow-up ("yes, tonight", "they have a weapon") triggers the guard
+# only when the immediately preceding exchange in the supplied history was a
+# crisis: the last entry is one of the fixed replies, or a user message in the
+# last two entries matches on its own. No server state is kept.
+
+_CRISIS_RELATION = (r"my (?:friend|sister|brother|mom|mother|dad|father|son|daughter|wife|husband|"
+                    r"partner|girlfriend|boyfriend|roommate|coworker|classmate|kid|child|cousin|student)")
+_CRISIS_PILLS = r"(?:pills|tablets|meds|medication|medicine|painkillers)"
+
+_CRISIS_SELF = re.compile("|".join((
+    r"\b(?:kill|killing|hurt|hurting|harm|harming|cut|cutting) myself\b",
+    r"\b(?:end|ending|take|taking) my (?:own )?life\b",
+    r"\bi (?:really |just |honestly )?(?:want|wanna|wanted|wish i could) (?:to )?die\b(?! laughing| of\b)",
+    r"\bi wish i (?:was|were) dead\b",
+    r"\bi(?:d| would) be better off dead\b",
+    r"\b(?:im|i am|i feel|ive been|i have been) (?:so |really |very )?suicidal\b",
+    r"\b(?:i have|ive|im having|i keep having) suicidal (?:thoughts|feelings|urges)\b",
+    r"\b(?:im|i am|ive been|i have been|i keep) thinking (?:about|of) (?:suicide|killing myself)\b",
+    r"\b(?:im going to|i am going to|i want to|i will|ill|im about to|i plan to) (?:commit suicide|end it all)\b",
+    r"\bi (?:self harm|have been self harming|ve been self harming|keep self harming)\b",
+    r"\bi (?:dont|do not|no longer) want to (?:be alive|live|exist|be here anymore)\b",
+    r"\bi (?:think i |may have |might have |just |already |accidentally )*overdosed\b",
+    r"\bi (?:think i |may have |might have |just |already |accidentally )*(?:took|taken|swallowed|ve taken|have taken) "
+    r"(?:way )?(?:too many|too much of my|a whole bottle of|a bottle of) " + _CRISIS_PILLS,
+    r"\b(?:im going to|i am going to|im gonna|i want to|i will|ill|im about to|i plan to) (?:take|swallow) "
+    r"all (?:of )?(?:my|the|these|those) " + _CRISIS_PILLS +
+    r"\b(?![^.?!]*\b(?:as prescribed|as directed|with (?:food|breakfast|lunch|dinner)|daily|every day))",
+    r"\b" + _CRISIS_PILLS + r"\b[^.?!]{0,60}\b(?:going to|gonna|will) (?:take|swallow) (?:them all|all of them)\b",
+)))
+
+_CRISIS_OTHER = re.compile("|".join((
+    r"\b(?:kill|killing|hurt|hurting|harm|harming|cut|cutting) (?:himself|herself|themselves|themself)\b",
+    r"\b(?:end|ending|take|taking) (?:his|her|their) (?:own )?life\b",
+    r"\b(?:he|she|they|" + _CRISIS_RELATION + r") (?:really |just )?(?:wants|want|wanted) to die\b",
+    r"\b(?:is|are|seems|sounds|has been|have been) suicidal\b",
+    r"\b(?:talking|talks|talked) about (?:suicide|killing (?:himself|herself|themselves))\b",
+    r"\b(?:he|she|they|" + _CRISIS_RELATION + r") (?:may have |might have |just |already )*"
+    r"(?:overdosed|took too many|taken too many|swallowed a (?:whole )?bottle of)\b",
+)))
+_CRISIS_ANCHOR = re.compile(r"\b(?:" + _CRISIS_RELATION + r"|worried|scared|afraid|concerned)\b")
+_CRISIS_WORRY = re.compile(r"\b(?:worried|scared|afraid|concerned)\b")
+_CRISIS_FRAME = re.compile(r"\b(?:novel|story|character|scene|fiction|poem|song|lyrics?|essay|book|movie|"
+                           r"film|article|news|research|history|historical|study)\b")
+# "My friend said I want to die": the reporting verb attributes the words.
+_CRISIS_REPORTING = re.compile(r"\b(?:he|she|they|" + _CRISIS_RELATION + r") (?:said|says|told me|texted(?: me)?|"
+                               r"wrote|messaged(?: me)?|keeps saying|posted)(?: that)?\b[ ,:]*")
+_CRISIS_SELF_APPLIED = re.compile(r"\b(?:how i feel|describes me|thats me|me too|i feel the same|"
+                                  r"i keep (?:thinking|telling myself))\b")
+_CRISIS_QUOTE = re.compile(r"\"[^\"]*\"|(?<![a-z0-9])'(?:[^']|(?<=[a-z])'(?=[a-z]))+'(?![a-z0-9])")
+
+
+def _crisis_clean(text):
+    return re.sub(r"\s+", " ", re.sub(r"[-_]", " ", text.replace("'", ""))).strip()
+
+
+def crisis_kind(message):
+    """"self", "concern" or None for one message on its own."""
+    text = str(message).lower().translate({0x201C: '"', 0x201D: '"', 0x2018: "'", 0x2019: "'"})
+    quoted = " | ".join(_crisis_clean(q) for q in _CRISIS_QUOTE.findall(text))
+    outside = _crisis_clean(_CRISIS_QUOTE.sub(" | ", text))
+
+    reported = _CRISIS_REPORTING.search(outside)
+    if reported and _CRISIS_SELF.match(outside, reported.end()):
+        return "concern"
+    if _CRISIS_SELF.search(outside):
+        return "self"
+    if quoted and _CRISIS_SELF.search(quoted):
+        if _CRISIS_SELF_APPLIED.search(outside):
+            return "self"
+        if _CRISIS_REPORTING.search(outside):
+            return "concern"
+    framed = _CRISIS_FRAME.search(outside) and not _CRISIS_WORRY.search(outside)
+    if _CRISIS_ANCHOR.search(outside) and not framed and _CRISIS_OTHER.search(outside):
+        return "concern"
+    return None
+
+
+_CRISIS_FOLLOWUP = re.compile("|".join((
+    r"^(?:yes |yeah |yep )?(?:tonight|right now|now|today|soon)$",
+    r"^(?:i|he|she|they)(?: already| just)? (?:took|swallowed|have taken|ve taken|has taken) "
+    r"(?:them|it|all of them|(?:the|my|his|her|their) " + _CRISIS_PILLS + r")(?: already)?$",
+    r"^(?:i|he|she|they) (?:have|has|got) (?:a|the|my|his|her|their) (?:gun|knife|weapon|rope|"
+    + _CRISIS_PILLS + r")(?: here| with (?:me|them|him|her))?$",
+    r"^(?:im|i am) with (?:them|him|her)(?: now| right now)?$",
+    r"^what (?:should|do|can) i do(?: now| right now)?$",
+)))
+
+
+def _crisis_last_exchange(history):
+    """The last two (role, content) entries of the supplied history, from
+    {'role', 'content'} dicts or [user, assistant] pairs."""
+    entries = []
+    for item in list(history or ())[-2:]:
+        if isinstance(item, dict):
+            entries.append((str(item.get("role", "")).lower(), str(item.get("content") or "")))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            entries += [(role, str(text)) for role, text in (("user", item[0]), ("assistant", item[1]))
+                        if text is not None]
+    return entries[-2:]
+
+
+def crisis_followup_kind(message, history):
+    text = _crisis_clean(re.sub(r"[^a-z0-9' ]+", " ", str(message).lower().replace("’", "'")))
+    if len(text) > 60 or not _CRISIS_FOLLOWUP.search(text):
+        return None
+    exchange = _crisis_last_exchange(history)
+    context = None
+    if exchange and exchange[-1][0] == "assistant":
+        context = {CRISIS_SELF_RESPONSE: "self", CRISIS_CONCERN_RESPONSE: "concern"}.get(exchange[-1][1].strip())
+    for role, content in exchange:
+        if context is None and role == "user":
+            context = crisis_kind(content)
+    if context is None:
+        return None
+    if re.match(r"(?:he|she|they)\b|(?:im|i am) with\b", text):
+        return "concern"
+    return "self" if re.match(r"i(?: already| just)? (?:took|swallowed|have taken|ve taken)\b", text) else context
+
+
+def crisis_response(message, history=None):
+    """The fixed crisis reply for this message, or None."""
+    kind = crisis_kind(message) or crisis_followup_kind(message, history)
+    return {"self": CRISIS_SELF_RESPONSE, "concern": CRISIS_CONCERN_RESPONSE}.get(kind)
+
+
+CRISIS_SELF_RESPONSE = (
+    "Thank you for telling me. I'm taking what you said seriously.\n\n"
+    "If you're in immediate danger, have just made an attempt, or may have "
+    "taken too much of something, call your local emergency number now (911 "
+    "in the US and Canada) or go to the nearest emergency department.\n\n"
+    "In the US or Canada, you can call or text 988 to reach the Suicide & "
+    "Crisis Lifeline at any time. In other countries, findahelpline.com lists "
+    "free local crisis lines.\n\n"
+    "If you can, move away from anything you could use to hurt yourself, and "
+    "contact someone you trust who can come and stay with you.\n\n"
+    "I can't contact emergency services or check on you, and I'm not a "
+    "replacement for trained help. I'm here to keep talking with you while you "
+    "reach out."
+)
+
+CRISIS_CONCERN_RESPONSE = (
+    "You're right to take this seriously.\n\n"
+    "If they may be in immediate danger, have just made an attempt, or may have "
+    "taken an overdose, call your local emergency number now (911 in the US and "
+    "Canada) or get them to the nearest emergency department.\n\n"
+    "Ask them directly whether they're thinking about suicide. Asking doesn't "
+    "put the idea in their head, and it gives them a chance to talk.\n\n"
+    "If the danger may be immediate, stay with them or arrange for another "
+    "responsible person to stay with them. If you can do it safely, move "
+    "weapons, medications or other means out of their reach. Don't put yourself "
+    "in danger to do this.\n\n"
+    "In the US or Canada, you can call or text 988 for guidance on helping "
+    "them. In other countries, findahelpline.com lists free local crisis "
+    "lines.\n\n"
+    "I can't contact them or check on them, but I can keep talking this through "
+    "with you."
+)
+
+
 def chat(message, history, request=None, session_id=None):
     """Kalillac chat pipeline.
 
@@ -9584,6 +9764,15 @@ def chat(message, history, request=None, session_id=None):
         )
 
     try:
+        # Crisis guard: a deterministic boundary ahead of prior-session
+        # handling, classify_request(), memory, calculator, files, V31,
+        # search and every provider call. Fixed local reply; this crisis
+        # application path does not log the message body.
+        crisis_reply = crisis_response(message, history)
+        if crisis_reply is not None:
+            log("CRISIS GUARD: fixed local response (no model, search, or memory write)")
+            return crisis_reply
+
         if (
             is_previous_conversation_reference(message)
             and not is_memory_retention_question(message)

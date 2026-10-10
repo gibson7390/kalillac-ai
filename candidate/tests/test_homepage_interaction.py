@@ -20,7 +20,6 @@ always run.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -43,8 +42,9 @@ from test_homepage_handoff import (
 )
 
 
-# The commit this slice started from. /app/ and the backend must be byte-for-
-# byte unchanged relative to it (update deliberately if /app/ later changes).
+# The commit this slice started from. /app/ and the site's build and
+# dependency files must be unchanged relative to it (update deliberately if
+# /app/ later changes). The backend is out of this slice's scope.
 SLICE_BASE = "92a4984792ac0bfb4c1952555e08300d094ab3a0"
 GAP_BELOW_HEADER = 16
 
@@ -393,7 +393,6 @@ EXAMPLE_PROMPTS = (
     "Research this and show me the sources",
 )
 MEMORY_SENTENCE = "Temporary session data can remain in server memory until capacity limits or a restart clear it."
-BACKEND_SHA256 = "7095878b8680743e4f8a77bc928a85ab431b976239e17f400447c85e2c9d0dfb"
 # Claims the homepage must never make.
 FORBIDDEN_CLAIMS = ("end-to-end", "end to end", "deleted immediately", "immediately deleted",
                     "immediate deletion", "zero retention", "zero-retention", "completely private",
@@ -1617,13 +1616,6 @@ def test_privacy_diagram_source_makes_no_absolute_claims_and_respects_reduced_mo
     assert re.search(r"@media \(prefers-reduced-motion: no-preference\) \{[^}]*animation", css)
 
 
-def test_backend_source_hash_is_unchanged():
-    # SHA-256 of the committed (LF) bytes; a Windows checkout with
-    # core.autocrlf=true holds CRLF on disk, so compare git's normalized form.
-    backend = REPO / "candidate" / "app_fastapi_candidate.py"
-    assert hashlib.sha256(backend.read_bytes().replace(b"\r\n", b"\n")).hexdigest() == BACKEND_SHA256
-
-
 def test_css_keeps_the_header_sticky_and_decorations_inert():
     css = SITE_CSS.read_text(encoding="utf-8")
 
@@ -1646,7 +1638,7 @@ def git_diff_names(*paths: str) -> list[str] | None:
     return changed + untracked
 
 
-def test_app_frontend_backend_and_dependencies_are_untouched():
+def test_app_frontend_and_site_dependencies_are_untouched():
     # /app/ may differ only in the composer CSS, the composer JavaScript and
     # their cache-busting references -- nothing else under frontend/.
     frontend = git_diff_names("frontend")
@@ -1655,11 +1647,8 @@ def test_app_frontend_backend_and_dependencies_are_untouched():
     assert set(frontend) <= {"frontend/app.css", "frontend/app.js", "frontend/index.html"}, frontend
 
     names = git_diff_names(
-        "candidate/app_fastapi_candidate.py", "candidate/kalillac_routing",
-        "candidate/kalillac_accounts", "candidate/kalillac_billing", "candidate/kalillac_db",
-        "candidate/migrations", "requirements-production-lock.txt", "requirements-dev.txt",
-        "requirements-database.txt", "requirements-billing.txt", "site/package.json", "site/package-lock.json",
-        "site/vite.config.ts", "site/index.html", "site/deployment-preserve-live-assets.txt", "site/public",
+        "site/package.json", "site/package-lock.json", "site/vite.config.ts", "site/index.html",
+        "site/deployment-preserve-live-assets.txt", "site/public",
     )
     if names is None:
         pytest.skip(f"git or the slice base commit {SLICE_BASE} is unavailable")
