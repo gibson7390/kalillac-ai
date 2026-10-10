@@ -7815,14 +7815,6 @@ def is_web_search_request(message, history=None):
     if domains and not is_incidental_domain_reference(text):
         return True
 
-    # Current or precision-sensitive technical implementation facts should
-    # use the existing source-grounded web path instead of unverified model
-    # memory. This must run before the conceptual-prefix exclusion because
-    # questions such as "What is the current Kali Linux release?" begin with
-    # an otherwise conceptual-looking prefix.
-    if is_current_or_precision_sensitive_technical_request(message):
-        return True
-
     # Conceptual questions and private targets are excluded BEFORE the
     # generic signal list below. Previously the list ran first, so
     # "how does Google search work?" matched the bare "google" signal
@@ -7853,68 +7845,10 @@ def is_web_search_request(message, history=None):
         "find sources",
     ]
 
-    if any(signal in text for signal in explicit_search_signals):
-        return True
-
-    # Conceptual questions about search itself are not search requests.
-    if text.startswith(("explain", "how does", "how do", "what does")):
-        return False
-
-    # Current-information signals.
-    # Targeted current-fact patterns.
-    if re.search(r"\b(what time|when) does\b.{0,40}\b(open|close)\b", text):
-        return True
-
-    if re.search(r"\bwho (runs|owns|leads|heads)\b", text):
-        return True
-
-    if re.search(
-        r"\bwho is\b.{0,30}\b(ceo|president|prime minister|chairman|owner|founder)\b",
-        text,
-    ):
-        return True
-
-    if re.search(
-        r"\bis\b.{0,50}\b(released|out yet|available yet|available now)\b", text
-    ):
-        return True
-
-    current_info_signals = [
-        "latest",
-        "right now",
-        "as of today",
-        "today's",
-        "this week",
-        "recent news",
-        "news today",
-        "in the news",
-        "breaking news",
-        "the weather",
-        "weather in",
-        "weather today",
-        "forecast",
-        "stock price",
-        "price of",
-        "prices",
-        "price right now",
-        "score of the",
-        "game tonight",
-        "schedule for",
-        "business hours",
-        "phone number for",
-        "who is the president",
-        "who is the current",
-        "who currently",
-        "still the ceo",
-        "still the president",
-        "what happened today",
-        "what happened recently",
-        "new release",
-        "just released",
-        "released this",
-    ]
-
-    return any(signal in text for signal in current_info_signals)
+    # Whether an ordinary question needs current information is the model's
+    # decision (V31 search_web); words such as "latest", "current" or "price"
+    # no longer force a search.
+    return any(signal in text for signal in explicit_search_signals)
 
 
 def is_emotional_context(message):
@@ -8230,7 +8164,6 @@ Rules:
 - Do not use Jupyter notebook syntax like !pip unless the user says they are in Jupyter.
 - If the user mentions langchain_chroma, explain that the Python import name is langchain_chroma but the pip package is usually installed with:
 pip install langchain-chroma
-- If the user says ModelNotFound with langchain_chroma, explain that langchain_chroma is not an Ollama model; it is a Python package/module.
 - Do not use memory.
 - Do not use document information.
 - Stop when answered.
@@ -10759,16 +10692,18 @@ def run_router_tests():
             "expected": "file_unavailable",
         },
         {"prompt": "search for the latest Python release", "expected": "web_search"},
+        # Current-information words no longer force web_search: these reach
+        # the V31 general route, where the model decides on search_web.
         {
             "prompt": "who is the current president of the United States",
-            "expected": "web_search",
+            "expected": "general",
         },
         {
             "prompt": "what is the weather in Terre Haute today",
-            "expected": "web_search",
+            "expected": "general",
         },
-        {"prompt": "find current iPhone prices", "expected": "web_search"},
-        {"prompt": "what happened in the news today", "expected": "web_search"},
+        {"prompt": "find current iPhone prices", "expected": "general"},
+        {"prompt": "what happened in the news today", "expected": "general"},
         {"prompt": "what is Python", "expected": "general"},
         {"prompt": "write a Python web scraper", "expected": "code"},
         {"prompt": "explain how web search works", "expected": "general"},
@@ -10812,12 +10747,12 @@ def run_router_tests():
         {"prompt": "why", "expected": "followup", "history": talk_history},
         {"prompt": "hello", "expected": "general"},
         {"prompt": "what is a flibbernax", "expected": "general"},
-        {"prompt": "Who is Apple's CEO?", "expected": "web_search"},
-        {"prompt": "What time does Walmart close?", "expected": "web_search"},
-        {"prompt": "Is Python 3.14 released?", "expected": "web_search"},
-        {"prompt": "Who runs Microsoft?", "expected": "web_search"},
-        {"prompt": "Is version 4.0 available yet?", "expected": "web_search"},
-        {"prompt": "When does Walmart close today?", "expected": "web_search"},
+        {"prompt": "Who is Apple's CEO?", "expected": "general"},
+        {"prompt": "What time does Walmart close?", "expected": "general"},
+        {"prompt": "Is Python 3.14 released?", "expected": "general"},
+        {"prompt": "Who runs Microsoft?", "expected": "general"},
+        {"prompt": "Is version 4.0 available yet?", "expected": "general"},
+        {"prompt": "When does Walmart close today?", "expected": "general"},
         {"prompt": "What is current?", "expected": "general"},
         {"prompt": "Explain electrical current.", "expected": "general"},
         {"prompt": "How do I search the web in Python?", "expected": "code"},
