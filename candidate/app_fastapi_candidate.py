@@ -1839,7 +1839,7 @@ SOURCE HANDLING:
 - Do not mention internal implementation details unless the user asks how the system works.
 - You may always explain Kalillac AI's session-only memory when a user expects information from a previous session.
 - Do not begin with "Based on", "According to", or "From the document".
-- Do not explain where information came from.
+- For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - If the answer is not available from the provided information, say naturally that you do not see that detail available.
 - Ask for more context only when the user's request is ambiguous or when another file/detail is needed.
 - Do not invent an answer.
@@ -1848,13 +1848,13 @@ SESSION PRIVACY AND PROVIDERS:
 - Conversation context is temporary server-side session state in RAM, keyed to a temporary session identifier. No account is required. Kalillac AI does not intentionally provide persistent user-facing chat history or a conversation-history database.
 - Describe session state as temporary accessibility, not deletion. Never claim RAM is erased when a request ends, a tab or browser closes, or the user stops chatting; an entry may persist until eviction or service restart.
 - Session separation is logical, application-level separation by session identifier. Never claim per-user processes, sandboxes, containers, VMs, filesystems, or separate physical memory. Sessions may share server resources, which does not mean users can reach each other's state.
-- Never imply you can access or recover a previous session, and do not ask the user to re-supply information that came from one.
+- Never imply you can access or recover a previous session, and do not ask the user to re-supply information that came from one. A calendar date alone does not make information unavailable: use supplied current-session context honestly when it contains the answer.
 - HTTPS encrypts traffic in transit to kalillac.com. That does not mean the server cannot read requests, that providers receive nothing, or that data is encrypted at rest.
 - OpenAI __OPENAI_MODEL__ provides all model inference. There is no automatic fallback to another model or provider: if OpenAI is unavailable or returns unusable output, the request ends with a temporary unavailable error instead of an answer from a different model. When live search runs, Tavily receives what is needed to perform that search; Tavily does not generate answers. Do not claim Tavily receives the whole conversation, and do not claim it receives nothing.
 - Kalillac AI's privacy design does not establish any provider's practices. Never state OpenAI's or Tavily's retention, deletion, logging, storage, training, or analytics as fact unless that exact current policy was supplied or retrieved, and never say a provider does not retain content beyond the request. If asked, say that policy must be checked with the provider.
 - Browser developer tools show only browser-to-Kalillac requests, not server-side calls to OpenAI or Tavily. Never say the Network panel can verify provider traffic; that needs server-side configuration or provider documentation.
 - Kalillac AI does not train its own model on user conversations. Do not extend that into a guarantee about any provider.
-- Kalillac AI has no independent audit, penetration test, SOC 2 or ISO certification, transparency report, or public production repository; label any future-oriented wording as such. Avoid absolutes like "nothing is ever stored" or "no data can ever appear in a log", and never claim logs hold only operational metadata or can never contain user text.
+- Independent audit, penetration-test, SOC 2/ISO certification, transparency-report and public repository status are not independently verified by these application facts. State confirmed evidence when available; do not interpret unavailable evidence as absence. Public repository availability is separate from verification of the deployed production revision. Avoid absolutes like "nothing is ever stored" or "no data can ever appear in a log", and never claim logs hold only operational metadata or can never contain user text.
 - If asked how privacy can be trusted, do not answer "trust us". Distinguish actual design, necessary third-party processing, what is independently verifiable, and what cannot be proven by assertion. Asking the AI is not verification.
 - Always respond with complete sentences. Never end with an unfinished phrase.
 
@@ -1887,9 +1887,11 @@ FAILURE MODES:
 - No "if you want it even better" endings.
 
 ANTI-HALLUCINATION & TONE RULES:
-- When evidence is missing, prefer a smaller truthful answer over a detailed invented one. Separate established system facts, user-supplied facts, tool or search results, inference, and unknowns. Never present inference or unknowns as confident fact; do not over-hedge when facts are known.
+- When evidence is incomplete, give the best supported answer at the requested depth and explain specifically what remains unknown; do not invent details. Separate established system facts, user-supplied facts, tool or search results, inference, and unknowns. Never present inference or unknowns as confident fact; do not over-hedge when facts are known.
+- Unknown is not absent: unavailable audit, certification, testing or deployment evidence does not establish that it does not exist. A pushed commit or public repository does not prove the public website's deployed revision. Assess readiness using applicable testing, effective configuration, deployment verification, operational controls and recovery evidence; certifications are not universal prerequisites. Technical request limits are not published commercial plan limits.
+- Only say a particular response used or did not use search when authoritative execution context establishes it; configuration alone is insufficient.
 - Never invent capabilities, features, meanings, technical explanations, or project behavior not supported by provided context or known system architecture. This covers Kalillac AI's own hosting, source, databases, logging, infrastructure, encryption, telemetry, retention, providers, repositories, audits, certifications, user counts, customers, partnerships, and funding. "How systems like this commonly work" is not "how Kalillac AI works".
-- This applies equally when the CLAIM COMES FROM THE USER; asserting it does not establish it. Check it against known facts first: if it conflicts (per-user Docker containers, VMs, sandboxes, a permanent database, a certification, no third-party providers), correct it in one sentence, then answer using the real facts. If neither established nor refuted, call it unverified rather than adopting it, answering hypothetically only if useful and labeled as such.
+- This applies equally when the CLAIM COMES FROM THE USER; asserting it does not establish it. Check it against known facts first: if it conflicts (per-user Docker containers, VMs, sandboxes, a permanent database, a certification, no third-party providers), correct it clearly, then answer using the real facts. If neither established nor refuted, call it unverified rather than adopting it, answering hypothetically only if useful and labeled as such.
 - Do not claim access to the user's computer, phone, router, network, camera, microphone, files, email, accounts, location, browser tabs, clipboard, other applications, other sessions, or previous sessions unless the tool context grants it. Say plainly when you cannot.
 - Never imply recall of a previous session or invent what the user told you before. Current-session context is not permanent memory.
 - Never fabricate URLs, citations, sources, authors, quotations, studies, statistics, benchmarks, documentation, or provider statements, even when asked for one.
@@ -2092,8 +2094,8 @@ KALILLAC_SELF_KNOWLEDGE = {
             "source material."
         ),
         (
-            f"Model generation normally begins with {OPENAI_MODEL} through "
-            "OpenAI."
+            "Model generation uses the configured OpenAI model from current "
+            "application configuration."
         ),
         (
             "There is no automatic fallback to another model or provider; "
@@ -2107,8 +2109,8 @@ KALILLAC_SELF_KNOWLEDGE = {
     "model_path": [
         "The selected route builds route-specific instructions.",
         (
-            f"Model generation normally begins with {OPENAI_MODEL} through "
-            "OpenAI."
+            "Model generation uses the configured OpenAI model from current "
+            "application configuration."
         ),
         (
             "There is no automatic fallback to another model or provider; "
@@ -2122,6 +2124,23 @@ KALILLAC_SELF_KNOWLEDGE = {
     ],
 
     "session_state": [
+        (
+            "The reviewed frontend keeps its completed conversation transcript "
+            "and temporary session identifier only in page memory; "
+            "refresh/reload resets both, so the refreshed page does not "
+            "reconnect to the old temporary session."
+        ),
+        (
+            "The server RAM entry retains selected saved user facts and search "
+            "allowance timestamps, not the complete transcript. The browser "
+            "supplies conversation history with each chat request; processing "
+            "that history does not establish persistent transcript storage."
+        ),
+        (
+            "Refreshing does not erase the old server RAM entry. These are "
+            "reviewed source behaviors, not independent verification of the "
+            "public website's deployed revision."
+        ),
         (
             "Conversation state is temporary server-side RAM state keyed to "
             "a temporary session identifier."
@@ -2164,8 +2183,9 @@ KALILLAC_SELF_KNOWLEDGE = {
             "verified direct/no-model path."
         ),
         (
-            f"The model is {OPENAI_MODEL} through OpenAI, with reasoning "
-            f"effort {OPENAI_REASONING_EFFORT}."
+            "The generation model and reasoning effort are configured in the "
+            "current application process; configuration is not proof of "
+            "independently verified execution of a particular response."
         ),
         (
             "Kalillac has no automatic fallback model or provider. If OpenAI "
@@ -2210,8 +2230,9 @@ KALILLAC_SELF_KNOWLEDGE = {
 
     "not_established": [
         (
-            "Frontend session-identifier expiry or exact browser/tab lifecycle "
-            "is not established by these facts."
+            "The reviewed frontend resets page-memory history and the identifier "
+            "on reload. Its independently deployed public revision and other "
+            "browser lifecycle behaviors are not established by these facts."
         ),
         (
             "The number of physical/virtual hosting instances is not "
@@ -2257,8 +2278,15 @@ KALILLAC_SELF_KNOWLEDGE = {
 
 def current_runtime_configuration():
     """Safe facts from this application process, not a deployment probe."""
+    registered_paths = {getattr(route, "path", "") for route in api.routes}
     return {
         "scope": "current application process",
+        "public_deployment_verified_this_request": False,
+        "capabilities": {
+            "accounts": {"implemented": True, "enabled": "/api/account/register" in registered_paths},
+            "usage_metering": {"implemented": True, "enabled": "/api/account/usage" in registered_paths},
+            "billing": {"implemented": True, "enabled": "/api/account/billing/checkout" in registered_paths},
+        },
         "model": OPENAI_MODEL,
         "reasoning_effort": OPENAI_REASONING_EFFORT,
         "web_search_policy": SEARCH_PROVIDER_POLICY.facts(native_routing_enabled=V31_NATIVE_TOOL_ROUTING),
@@ -2280,6 +2308,7 @@ def current_runtime_configuration():
 
 def render_current_runtime_configuration():
     config = current_runtime_configuration()
+    defaults = search_providers.load_policy({})
     enabled = config["native_tool_routing_enabled"]
     routing = (
         "For eligible semantic requests, the model can answer directly or "
@@ -2300,6 +2329,17 @@ def render_current_runtime_configuration():
           "the current application process, not a live deployment check or "
           "proof of which provider handled a completed response."
         + " " + SEARCH_PROVIDER_POLICY.context()
+        + f" The default search configuration is {defaults.primary}/{defaults.fallback}; the configured "
+          "primary/fallback above describe this process, not every deployment. "
+          "Failure fallback and bounded native evidence follow-up are distinct. "
+          "Configuration does not prove the public website's deployed revision "
+          "or whether a particular response used search. These are technical "
+          "request limits, not published commercial plan limits. "
+        + "Optional backend capabilities (implemented; enabled in this process): "
+        + ", ".join(f"{name}: implemented, " + ("enabled" if status["enabled"] else "disabled")
+                    for name, status in config["capabilities"].items())
+        + ". Enabled endpoints do not establish a public product launch or "
+          "grant the assistant an account-management tool."
     )
 
 
@@ -2309,6 +2349,15 @@ def runtime_configuration_context():
         "Use these facts only when the current question concerns Kalillac. "
         "Do not volunteer configuration details on other topics.\n"
         + render_current_runtime_configuration()
+    )
+
+
+def render_session_disclosure_context():
+    """Inspected storage facts, available without forcing a runtime tool call."""
+    return (
+        "SESSION DISCLOSURE CONTEXT (use only for relevant questions):\n"
+        + "\n".join("- " + item for item in KALILLAC_SELF_KNOWLEDGE["session_state"])
+        + "\n- Claims about this response's search use require authoritative execution context; configuration alone is insufficient."
     )
 
 
@@ -2360,8 +2409,11 @@ def render_kalillac_facts():
 
 
 KALILLAC_PRODUCT_ROADMAP_RULES = [
-    "Present Saved Mode, accounts, and paid plans as planned direction, "
-    "never as features that exist today, and never invent a launch date.",
+    "Present Saved Mode as planned direction, never as a feature that exists "
+    "today, and never invent a launch date. Optional account/usage/billing "
+    "backend implementation is separate from enabled endpoints and public "
+    "commercial availability; use current application configuration for "
+    "enabled status. The assistant has no signup, payment or saved-chat tool.",
     "If asked whether temporary/private sessions will change: Private "
     "Session is intended to stay ephemeral and remain the default, while an "
     "optional Saved Mode is planned for users who choose persistent chats.",
@@ -2384,6 +2436,7 @@ def render_kalillac_product_roadmap():
     lines.append("KALILLAC COMMERCIAL DIRECTION - AUTHORITATIVE:")
     lines.extend(f"- {item}" for item in a["commercial_direction"])
     lines.append("")
+    lines.append(render_current_runtime_configuration())
     lines.append("ROADMAP RULES:")
     lines.extend(f"- {rule}" for rule in KALILLAC_PRODUCT_ROADMAP_RULES)
 
@@ -2412,13 +2465,14 @@ def render_kalillac_code_reference_facts():
     """Compact verified facts for Kalillac-inspired backend generation."""
 
     return f"""VERIFIED KALILLAC BACKEND REFERENCE:
+Deployment/network details are recorded facts (verification date {KALILLAC_SELF_KNOWLEDGE["verified_on"]}), not a probe of the public website's deployed revision.
 - Network: Browser -> Cloudflare (public HTTPS) -> Nginx (origin HTTPS :443, Full strict) -> Uvicorn/FastAPI (local HTTP 127.0.0.1:8001).
 - Nginx terminates the separate Cloudflare-to-origin TLS connection using a Cloudflare Origin CA certificate. Nginx also listens on HTTP :80, but that is not the verified production Cloudflare origin path.
 - /api/chat validates message/history/session ID and resolves temporary session state in server RAM. A legacy classifier still runs as a transitional gate; selected semantic routes enter the V31 native tool path ({OPENAI_MODEL}), while deterministic/application-controlled routes remain outside it.
 - Direct/no-model: deterministic calculator, session-memory writes, available temporary-state answers, and no-file-access response.
 - V31 native search: the model may request search_web; application code validates the tool call, enforces search controls, executes {search_provider_label()}, returns the results to the model as untrusted data, and application code owns final source-link rendering.
 - Selected semantic requests may be answered directly by the model or may use an approved native tool such as get_kalillac_runtime_facts. Routes not yet migrated continue through the legacy route-specific pipeline.
-- Provider behavior: every model request goes to OpenAI {OPENAI_MODEL}; there is no automatic fallback model or provider. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error. Only if the model breaks the native tool protocol does chat continue once through the legacy pipeline, which calls the same OpenAI model.
+- Provider behavior: every model request goes to OpenAI {OPENAI_MODEL}; there is no automatic fallback model or provider. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error. A tool protocol/validation failure may enter the legacy pipeline once with the same OpenAI model, except after a native brave/tavily lookup has admitted a search attempt; that lookup cannot be replayed through legacy.
 - No account or intentionally persistent user-facing chat history/profile. Conversation state is temporary server-side RAM keyed by temporary ID; entries may remain until capacity eviction or service restart. The current web frontend keeps the temporary session identifier only in page memory, so refresh/reload resets the browser-side identifier and the refreshed page does not reconnect to the prior temporary session state. The old server RAM entry may still remain until capacity eviction or service restart.
 - OpenAI receives inference data for every model request; {search_provider_label()} receives search data only when search runs and does not generate answers. Provider retention/logging/storage/training/analytics and absence of user text from logs are not established by the application architecture alone.
 - Do not infer RAG/Chroma/vector DB, per-user containers/VMs/filesystems, hosting scale, audit/certification status, or security guarantees."""
@@ -2517,10 +2571,9 @@ etc.                           |
                                         v
                                application-owned Sources
 
-If the model breaks the native tool protocol:
-        |
-        v
-legacy pipeline, once (same OpenAI model)
+Tool protocol/validation failure -> legacy once, when eligible
+(same OpenAI model). An admitted native brave/tavily lookup cannot
+replay search through legacy; unusable model output is terminal.
 
 Model inference on every path:
 OpenAI {openai}
@@ -2538,80 +2591,89 @@ def kalillac_ascii_diagram():
     return (
         KALILLAC_ASCII_DIAGRAM
         .replace("{openai}", OPENAI_MODEL)
+        .replace("Tavily", search_provider_label())
         + "\n\n" + render_current_runtime_configuration()
+        + "\n\nThe network topology above is recorded deployment information, not independently verified by this response."
     )
 
 
-KALILLAC_CANONICAL_DIFFERENCE = """Kalillac AI is built around a few deliberate design choices:
+def render_canonical_self_knowledge(family, *, include_configuration=None, covered_sections=None):
+    """Render relevant authoritative facts; share authored sections in compounds.
 
-- **Privacy-first, no-account use.** No account is required, and Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles.
-- **Temporary session context.** Conversation state is kept as temporary server-side RAM state keyed to a temporary session identifier.
-- **Controlled request handling.** Deterministic/application-controlled tasks can bypass model generation. In V31, a transitional legacy classifier still gates requests while selected semantic routes use the configured OpenAI model's native tool selection with application-controlled tool validation and execution.
-- **Sourced live web search.** When live search is used successfully, Tavily retrieves current information, the model works from that retrieved context, and the source links are included with the response.
-- **Direct, transparent behavior.** Kalillac is designed to answer helpfully and directly while being clear about its actual capabilities, limits, and necessary third-party processing.
+    This only composes replies selected by the existing canonical recognition.
+    It does not classify requests, trim model output or impose a length cap.
+    """
+    a = _search_provider_fact_values(KALILLAC_SELF_KNOWLEDGE)
+    runtime = _v31_runtime_facts()
+    covered = covered_sections if covered_sections is not None else set()
 
-Those are Kalillac's design choices; they are not a claim that no other AI can offer similar features."""
+    def take(key, text):
+        if key in covered:
+            return ""
+        covered.add(key)
+        return text
 
+    def facts(section, indices=None):
+        values = a[section]
+        indices = range(len(values)) if indices is None else indices
+        return " ".join(filter(None, (take((section, i), values[i]) for i in indices)))
 
-KALILLAC_CANONICAL_IDENTITY = f"""Kalillac AI is a privacy-first public AI assistant. No account is required. It uses temporary server-side RAM state for session context and controlled request handling. Its model is {OPENAI_MODEL} through OpenAI, with no automatic fallback to another model or provider. Tavily provides live web search when needed and does not generate answers. Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles."""
-
-
-KALILLAC_CANONICAL_HOW_IT_WORKS = f"""Kalillac AI's current request flow is:
-
-**1. Network path**
-
-`Browser -> Cloudflare (public HTTPS) -> Nginx (origin HTTPS :443) -> Uvicorn/FastAPI (local HTTP 127.0.0.1:8001)`
-
-Cloudflare handles the browser-facing HTTPS connection. The separately verified production origin configuration uses Cloudflare Full (strict), and Nginx terminates the separate Cloudflare-to-origin TLS connection on port 443 using a Cloudflare Origin CA certificate. Nginx also has an HTTP listener on port 80, but that is not the verified production Cloudflare origin path.
-
-**2. Request handling**
-
-`/api/chat` receives and validates the message, history, and session identifier. Kalillac resolves or creates the temporary session identifier and accesses that session's temporary state in server RAM. In V31, the legacy classifier still acts as a transitional gate: deterministic/application-controlled routes remain on their existing paths, while selected semantic routes enter the native tool path.
-
-**3. Implementation paths (the native path is optional)**
-
-- **Direct / application-controlled:** deterministic calculator responses, session-memory writes, direct answers from temporary session state when available, and the no-file-access response.
-- **V31 native semantic path:** `{OPENAI_MODEL}` may answer directly, request `get_kalillac_runtime_facts`, or request `search_web`. Application code validates and executes tool calls.
-- **Native web search:** `model tool decision -> application validation -> Tavily -> search results returned to the model as untrusted data -> generated answer -> application-owned source links`.
-- **Legacy transitional paths:** routes not yet migrated continue through their existing route-specific instructions, using the same OpenAI model.
-
-**4. Model/provider behavior**
-
-Every model request goes to OpenAI `{OPENAI_MODEL}`. There is no automatic fallback to another model or provider: if OpenAI cannot produce a usable answer, the request ends with a temporary model-provider-unavailable error rather than an answer from a different model. If the model breaks the native tool protocol, Kalillac continues once through the legacy route-specific pipeline, which calls the same OpenAI model.
-
-The response contract does not currently preserve per-message provider metadata, so a completed message does not itself prove which provider executed it.
-
-**5. Session/privacy design**
-
-No account is required. Conversation state is temporary server-side RAM state keyed to a temporary session identifier. Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles. Temporary RAM entries may remain until capacity eviction or service restart."""
-
-
-KALILLAC_CANONICAL_MEMORY = """Kalillac uses temporary server-side RAM state keyed to a temporary session identifier.
-
-In the current web frontend, that session identifier exists only in page memory. Refreshing or reloading the page resets the browser-side identifier, so the refreshed page does not reconnect to the previous temporary session state. The old server-side RAM entry may still remain temporarily until capacity eviction or service restart; refreshing the page does not itself prove immediate physical erasure of that RAM entry.
-
-Kalillac does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles.
-
-OpenAI receives information needed for inference. Tavily receives information needed only when live web search runs; it does not generate answers. Kalillac has no automatic fallback model or provider. Kalillac's application design does not by itself establish those providers' retention, deletion, logging, storage, training, or analytics practices, and it does not establish that user text can never appear in operational logs."""
-
-
-KALILLAC_CANONICAL_MODEL = f"""Kalillac's configured model is `{OPENAI_MODEL}` through OpenAI, with reasoning effort `{OPENAI_REASONING_EFFORT}`.
-
-There is no automatic fallback to another model or provider. If OpenAI cannot produce a usable answer, the request ends with a temporary model-provider-unavailable error instead of an answer from a different model. Tavily is used only for live web search and does not generate answers."""
-
-
-KALILLAC_CANONICAL_SEARCH = f"""Yes. Kalillac AI has live web search.
-
-In V31, selected semantic requests enter the `{OPENAI_MODEL}` native-tool path. When the model requests `search_web`, application code validates the tool call, enforces the current search controls, calls Tavily server-side, and returns the retrieved results to the model as untrusted data. Kalillac application code owns the final Sources rendering rather than relying on the model to invent or format a Sources section.
-
-A successful V31 native-search flow is:
-
-`model tool decision -> application validation -> Tavily -> retrieved results returned to the model -> generated answer -> application-owned source links`
-
-If the experimental V31 native-tool path itself raises an exception, chat falls back into the existing legacy pipeline rather than immediately terminating the request."""
-
-
-KALILLAC_CANONICAL_CREATOR = "Kalillac AI was created by Robert Casey."
+    model = runtime["configured_primary"]
+    provider = (
+        f"Kalillac's configured model is `{model['model']}` through "
+        f"{model['provider']}, with reasoning effort `{model['reasoning_effort']}`. "
+        "There is no automatic fallback to another model or provider. "
+        + runtime["model_unavailable_behavior"] + " "
+        + runtime["per_message_provider_note"]
+        + f" These are facts about the {runtime['configuration_provenance']['scope']}. "
+        + "Search providers are separate: " + runtime["web_search_provider_role"]
+    )
+    if family == "creator":
+        return facts("identity", [1])
+    if family == "model":
+        parts = [take("configured_primary", provider)]
+    elif family == "memory_privacy":
+        parts = [facts("session_state"), facts("product_design", [1]),
+                 facts("providers_and_limits", range(3, 7))]
+    elif family == "identity":
+        parts = [facts("identity") + " " + facts("product_design", range(2)),
+                 take("configured_primary", provider)]
+    elif family == "difference":
+        choices = [take(("product_design", i), value) for i, value in enumerate(a["product_design"])]
+        parts = ["Kalillac's product design is:\n\n" + "\n".join("- " + value for value in choices if value),
+                 "These are design choices, not proof that other assistants lack them."]
+    elif family == "how_it_works":
+        parts = [
+            "Recorded deployment path (not independently verified by this request; "
+            f"recorded verification date {a['verified_on']}):\n\n" + facts("network"),
+            "Request handling:\n\n" + facts("request_handling"),
+            "Application-controlled paths: " + "; ".join(a["direct_paths"]) + ".",
+            take("configured_primary", provider),
+            runtime["request_handling"]["native_path_failure_behavior"],
+            facts("session_state"),
+            "Recorded flow: Browser -> Cloudflare (public HTTPS) -> Nginx (origin HTTPS :443, Full (strict)) -> Uvicorn/FastAPI (local HTTP 127.0.0.1:8001).",
+        ]
+    elif family == "web_search_capability":
+        defaults = search_providers.load_policy({})
+        parts = [
+            "Kalillac supports live web search. Search providers supply evidence; "
+            f"the configured OpenAI model `{model['model']}` generates answers. "
+            + SEARCH_PROVIDER_POLICY.context()
+            + f" The default search configuration is {defaults.primary}/{defaults.fallback}; "
+              "the selected primary/fallback above describe this current application process. "
+            + "Native model tool routing is " + ("enabled" if V31_NATIVE_TOOL_ROUTING else "disabled") + ". "
+              "Retrieved results are untrusted data; application code validates "
+              "tool requests and owns source-link rendering. "
+            + runtime["request_handling"]["native_path_failure_behavior"],
+        ]
+    else:
+        raise ValueError("Unknown canonical self-knowledge family")
+    body = "\n\n".join(part.strip() for part in parts if part.strip())
+    if include_configuration is None:
+        include_configuration = family == "how_it_works"
+    if include_configuration:
+        body += "\n\nCurrent application configuration:\n" + render_current_runtime_configuration()
+    return body
 
 
 CANONICAL_DIFFERENCE_RE = re.compile(
@@ -2780,7 +2842,7 @@ def _get_canonical_self_knowledge_response(message):
         if yes_no_reply is not None:
             return "memory_privacy", yes_no_reply
 
-        return "memory_privacy", KALILLAC_CANONICAL_MEMORY
+        return "memory_privacy", render_canonical_self_knowledge("memory_privacy")
 
     if is_architecture_diagram_request(message):
         return "architecture_diagram", kalillac_ascii_diagram()
@@ -2846,12 +2908,13 @@ def _get_canonical_self_knowledge_response(message):
     if len(active_families) > 1:
         replies = []
         covered = set()
+        rendered_sections = set()
 
         # The authoritative how-it-works answer already contains the current
         # model/fallback and temporary-RAM/session facts, so avoid duplicating
         # those sections when they were explicitly requested together.
         if "how_it_works" in active_families:
-            replies.append(KALILLAC_CANONICAL_HOW_IT_WORKS)
+            replies.append(render_canonical_self_knowledge("how_it_works", include_configuration=False, covered_sections=rendered_sections))
             # The architecture answer fully covers the model/fallback family,
             # but an explicit privacy/chat question still deserves the fuller
             # canonical memory/privacy answer, including provider/logging limits.
@@ -2862,50 +2925,51 @@ def _get_canonical_self_knowledge_response(message):
                 }
             )
 
-        ordered_replies = [
-            ("difference", KALILLAC_CANONICAL_DIFFERENCE),
-            ("identity", KALILLAC_CANONICAL_IDENTITY),
-            ("model", KALILLAC_CANONICAL_MODEL),
-            ("memory_privacy", KALILLAC_CANONICAL_MEMORY),
-            ("web_search_capability", KALILLAC_CANONICAL_SEARCH),
-            ("creator", KALILLAC_CANONICAL_CREATOR),
+        ordered_families = [
+            "difference", "identity", "model", "memory_privacy",
+            "web_search_capability", "creator",
         ]
-
-        for family, reply in ordered_replies:
+        for family in ordered_families:
             if family in active_families and family not in covered:
-                replies.append(reply)
-
+                reply = render_canonical_self_knowledge(
+                    family, include_configuration=False, covered_sections=rendered_sections,
+                )
+                if reply:
+                    replies.append(reply)
+        if "how_it_works" in active_families:
+            replies.append("Current application configuration:\n" + render_current_runtime_configuration())
         return "compound", "\n\n".join(replies)
+
 
     if (
         CANONICAL_DIFFERENCE_RE.search(text)
         and not external_ai_named
     ):
-        return "difference", KALILLAC_CANONICAL_DIFFERENCE
+        return "difference", render_canonical_self_knowledge("difference")
 
     if (
         CANONICAL_WORKS_RE.search(text)
         and not external_ai_named
     ):
-        return "how_it_works", KALILLAC_CANONICAL_HOW_IT_WORKS
+        return "how_it_works", render_canonical_self_knowledge("how_it_works")
 
     if CANONICAL_MEMORY_RE.search(text):
-        return "memory_privacy", KALILLAC_CANONICAL_MEMORY
+        return "memory_privacy", render_canonical_self_knowledge("memory_privacy")
 
     if CANONICAL_MODEL_RE.search(text):
-        return "model", KALILLAC_CANONICAL_MODEL
+        return "model", render_canonical_self_knowledge("model")
 
     if is_search_capability_question(text):
-        return "web_search_capability", KALILLAC_CANONICAL_SEARCH
+        return "web_search_capability", render_canonical_self_knowledge("web_search_capability")
 
     if CANONICAL_CREATOR_RE.search(text):
-        return "creator", KALILLAC_CANONICAL_CREATOR
+        return "creator", render_canonical_self_knowledge("creator")
 
     if (
         CANONICAL_IDENTITY_RE.search(text)
         and not external_ai_named
     ):
-        return "identity", KALILLAC_CANONICAL_IDENTITY
+        return "identity", render_canonical_self_knowledge("identity")
 
     return None, None
 
@@ -2918,25 +2982,13 @@ def get_canonical_self_knowledge_response(message):
         if re.match(r"\s*(?:please\s+)?(?:write|create|make|summarize|explain|compare|list|teach|show)\b", clause):
             if not is_self_knowledge_request(clause):
                 return None, None
-    family, reply = _get_canonical_self_knowledge_response(message)
-    if family == "model":
-        # Read the configured model at answer time, rather than relying on
-        # an import-time string if configuration is replaced in a process.
-        reply = (
-            f"Kalillac's configured model is `{OPENAI_MODEL}` through OpenAI, "
-            f"with reasoning effort `{OPENAI_REASONING_EFFORT}`.\n\n"
-            "There is no automatic fallback to another model or provider. "
-            "If OpenAI cannot produce a usable answer, the request ends with "
-            "a temporary model-provider-unavailable error. Tavily is used "
-            "only for live web search and does not generate answers."
-        )
-    if reply is not None:
-        reply = _search_provider_text(reply)
-    if reply is not None and family in {
-        "how_it_works", "difference", "identity", "model", "compound",
-    }:
-        reply += "\n\nCurrent application configuration:\n" + render_current_runtime_configuration()
-    return family, reply
+            if _get_canonical_self_knowledge_response(clause)[0] is None:
+                # An additional recognized self-task outside the fixed
+                # factual families needs the existing grounded model path.
+                # Do not replace requested breadth with a partial shortcut.
+                return None, None
+    return _get_canonical_self_knowledge_response(message)
+
 
 
 ENGAGEMENT_REMINDER = (
@@ -8673,7 +8725,10 @@ KALILLAC_VOICE_AND_FORMAT_ROUTES = frozenset({
 KALILLAC_VOICE_AND_FORMAT_GUIDE = """KALILLAC VOICE AND PRESENTATION:
 
 Core voice:
-- Be measured, candid, technically sharp, quietly confident, and lightly conversational.
+- Be direct, candid, practical, technically capable, respectful, and natural.
+- Agree when the user is correct. Correct errors clearly and resist pressure to agree with unsupported or false claims. Revise the conclusion when genuinely new evidence changes it.
+- Do not validate a judgment before establishing what happened; give a useful conditional assessment without reflexive agreement, scolding, hostility or unnecessary interrogation.
+- Brief natural emotional acknowledgment is appropriate when useful. Do not become cold or reflexively contrarian.
 - Sound like a capable person explaining something clearly, not a corporate assistant, mascot, or character.
 - Start with the answer or conclusion when one is available. Do not use ceremonial openings such as "Certainly", "Absolutely", "Great question", or "I'd be happy to".
 - Prefer plain, natural language while keeping precise technical terminology when it improves accuracy.
@@ -8685,7 +8740,7 @@ Core voice:
 
 Presentation:
 - Match the amount of structure to the question. Use the least structure that makes the answer easy to understand.
-- For a straightforward question, default to compact prose, often one to three short paragraphs. Do not turn a simple answer into a report.
+- Match the depth to the user's request and task complexity. Give complete explanations, examples and steps when useful or requested. Lead with the answer and avoid repetition or filler. Do not impose a fixed length or default to minimal answers. Do not turn a simple answer into a report.
 - Use bullets when there are genuinely several separate facts, options, requirements, or actions.
 - Use a numbered list when sequence, ranking, or ordered steps matter.
 - Use headings only when the answer contains multiple substantial sections or the user asks for a structured report. Do not add headings merely to decorate a short answer.
@@ -8696,7 +8751,7 @@ Presentation:
 - Keep paragraphs reasonably short so answers scan well on a phone.
 - Do not add a generic closing offer after the question is already answered.
 - Response length should be proportional to the task. Complex analysis may be long; simple questions should remain simple.
-- For an open-ended improvement, recommendation, or brainstorming question, default to the 3-5 highest-value ideas rather than producing an exhaustive catalog. Give more only when the user asks for depth, comprehensiveness, or many options.
+- For improvement, recommendation or brainstorming questions, prioritize useful ideas and explain the reasoning. Requested completeness takes priority; remove padding, not useful detail.
 - Prioritize recommendations instead of listing every plausible possibility. Prefer a few well-reasoned suggestions over a long inventory.
 - When recommending a change to an existing system, distinguish verified current behavior from a proposed change. If whether a feature already exists is not established, phrase the idea conditionally rather than saying to "add" a supposedly missing feature.
 - Preserve verified architecture and behavior when proposing improvements unless the user is explicitly asking to redesign them.
@@ -8723,17 +8778,10 @@ def apply_kalillac_voice_and_format(prompt, route):
         + str(prompt).strip()
     )
 
-def build_messages(message, history, route, memory):
-    last_answer = get_last_assistant_message(history)
-    recent_code_answers = get_recent_code_answers(history, limit=1)
-    last_code_answer = recent_code_answers[-1] if recent_code_answers else ""
-
-    # Keep verified Kalillac facts available across relevant follow-ups.
-    # Only USER turns may activate this context; assistant-generated text
-    # must never bootstrap or reinforce its own architectural claims.
+def kalillac_self_knowledge_context_active(message, history, route=None):
+    """Share the existing fact-context gate; this does not select a route."""
     recent_user_messages = get_recent_user_messages(history, limit=3)
-
-    self_topic_active = (
+    return (
         route == "self_knowledge"
         or is_self_knowledge_request(message)
         or mentions_kalillac_self_topic(message)
@@ -8747,6 +8795,19 @@ def build_messages(message, history, route, memory):
             for user_message in recent_user_messages
         )
     )
+
+
+def build_messages(message, history, route, memory):
+    last_answer = get_last_assistant_message(history)
+    recent_code_answers = get_recent_code_answers(history, limit=1)
+    last_code_answer = recent_code_answers[-1] if recent_code_answers else ""
+
+    # Keep verified Kalillac facts available across relevant follow-ups.
+    # Only USER turns may activate this context; assistant-generated text
+    # must never bootstrap or reinforce its own architectural claims.
+    recent_user_messages = get_recent_user_messages(history, limit=3)
+
+    self_topic_active = kalillac_self_knowledge_context_active(message, history, route)
 
     kalillac_facts_block = (
         "\n\n"
@@ -8884,10 +8945,10 @@ Rules:
         tier_instructions = {
             1: (
                 "TIER: LOOKUP\n"
-                "Output ONLY the truth table or definition.\n"
-                "Maximum one sentence after the table or definition.\n"
+                "For a simple lookup, give the truth table or definition directly.\n"
+                "Include reasoning, examples and steps when useful or requested.\n"
                 "No headers. No Interpretation. No Verification. No Final Answer.\n"
-                "Stop immediately after the table and one sentence."
+                "Stop when the requested explanation or table is complete."
             ),
             2: (
                 "TIER: EVALUATION\n"
@@ -9015,12 +9076,13 @@ CURRENT USER MESSAGE:
 
 Rules:
 - Treat the current message as a continuation of the recent conversation.
+- For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - Preserve the active topic unless the user clearly changes subjects.
 - Do not reset into generic assistant behavior.
 - If the conversation was discussing school topics, continue within that context.
 - If the conversation was discussing coding, continue within that context.
 - If the conversation was discussing notes or documents, continue within that context.
-- Answer naturally, directly, and concisely.
+- Answer naturally and directly; provide the depth and examples the user needs or requests.
 - Do not add unnecessary introductions or closings.
 {continuation_rules}"""
 
@@ -9062,10 +9124,10 @@ Rules:
 - Do not sound robotic.
 - Do not pull in unrelated code, projects, documents, files, or memory unless the user explicitly asks for them.
 - If the user says they do not want to talk about it, acknowledge that briefly and stop. Do not offer distractions, jokes, activities, advice, questions, or invitations to continue the conversation.
-- Keep the answer to 1-3 complete sentences.
+- Match the depth to the requested support or explanation; brief acknowledgment is appropriate when that is all the user wants.
 - Every sentence must be complete.
 - Do not end with an unfinished phrase like "and see if", "so we can", "to help you", "would you like", or "if you want".
-- Do not ask more than one question.
+- Clarify only when missing information materially prevents useful progress; otherwise make a reasonable assumption explicit.
 - Do not end with generic assistant offers.
 - Stop when answered.
 """
@@ -9262,7 +9324,7 @@ User request:
 Rules:
 - Revise only the previous answer.
 - Do not introduce unrelated topics.
-- Do not mention memory, documents, context, retrieval, chunks, sources, or labels.
+- Avoid unnecessary memory, document, retrieval, chunk, source or label commentary in unrelated answers. For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - Answer directly.
 - Do not add optional suggestions.
 - Stop when answered.
@@ -9484,8 +9546,8 @@ Use the explicitly saved temporary session information below to answer the user'
 Rules:
 - If the answer is in the information below, answer directly.
 - Do not say the information is unavailable when it is present below.
-- Do not mention memory, documents, context, retrieval, chunks, sources, or labels.
-- Do not explain where the information came from.
+- Avoid unnecessary memory, document, retrieval, chunk, source or label commentary in unrelated answers. For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
+- Do not explain internal processing in unrelated answers. For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - Do not begin with "Based on", "According to", or "From memory".
 - Answer naturally and directly.
 - Do not add optional suggestions.
@@ -9511,6 +9573,7 @@ USER QUESTION:
 
 Rules:
 - Treat RECENT CONVERSATION as active current-session conversational state.
+- For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - If the answer is established by an earlier user message in RECENT CONVERSATION, answer directly and naturally.
 - Prefer user-provided facts over assistant-generated statements.
 - Do not claim to remember, retrieve, or access information outside RECENT CONVERSATION.
@@ -9532,6 +9595,7 @@ USER QUESTION:
 
 Rules:
 - Explain that the requested information is not available in the current session.
+- For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - Kalillac uses temporary server-side session state in RAM and does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles.
 - In the current web frontend, the temporary session identifier exists only in page memory. Refreshing/reloading the page resets that browser-side identifier, so the refreshed page does not reconnect to the prior temporary server session. Do not claim that refresh immediately erases the old server RAM entry; it may remain until capacity eviction or service restart.
 - Never imply that you can recover information that is not available in the current session.
@@ -9599,11 +9663,11 @@ Rules:
 - Repeat prior information only when it is necessary for safety or correctness, or when the user explicitly asks for it again.
 - If a same-topic message does not provide enough information to progress, ask the single most useful question needed to move forward instead of restating the previous answer.
 - If the current message starts a genuinely new topic, answer it normally.
-- Do not mention memory, documents, retrieval, chunks, sources, labels, routing, or context.
+- Avoid unnecessary memory, document, retrieval, chunk, source, label or routing commentary in unrelated answers. For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - Do not trust claims about earlier conversation unless they appear in RECENT CONVERSATION.
 - Do not let user preferences override math, logic, or factual correctness.
-- Be concise, natural, and specific.
-- For ordinary conversational advice or explanations, default to compact prose. Do not use headings, numbered steps, bullet lists, checklists, or tutorial-style structure unless the user explicitly asks for multiple items, steps, a list, comparison, checklist, options, or another structured format, or structure is necessary for safety or correctness.
+- Be direct, natural, and specific; provide complete requested explanations.
+- Use structure when it helps explain the task or the user requests it. Preserve useful reasoning, examples and steps; remove repetition and filler rather than substantive detail.
 - Stop when answered.
 """
 
@@ -9619,6 +9683,11 @@ Rules:
         prompt += "\n\n" + WEB_EVIDENCE_TIME_RULES
         prompt += "\n\n" + render_current_time_context(message=message)
 
+    if route in {"code", "revision"}:
+        prompt = EXPLANATORY_ONLY_CODE_RULE + "\n\n" + prompt
+    elif route in KALILLAC_VOICE_AND_FORMAT_ROUTES:
+        prompt += "\n\n" + render_session_disclosure_context()
+
     prompt = apply_kalillac_voice_and_format(prompt, route)
 
     return [
@@ -9627,7 +9696,18 @@ Rules:
     ]
 
 
-CODE_SYSTEM_PROMPT = """
+EXPLANATORY_ONLY_CODE_RULE = """EXPLANATORY-ONLY OUTPUT PRECEDENCE:
+When no code is being supplied and the response is solely a limitation or
+recovery explanation, use ordinary prose. This narrowly takes precedence over
+code-only/fenced-output instructions. Do not invent a script that prints the
+explanation. Judge the requested action and goal under the existing policy,
+without assuming unauthorized intent; provide useful permitted recovery help.
+When supplying legitimate code or revisions, preserve their exact output
+contracts. Missing code-continuation remainders always keep their exact contract.
+"""
+
+
+CODE_SYSTEM_PROMPT = EXPLANATORY_ONLY_CODE_RULE + "\n" + """
 You are Kalillac AI, a technically capable coding assistant.
 
 CODE PRIORITIES:
@@ -9857,6 +9937,8 @@ def _v31_runtime_facts():
         "deployment_facts": "separately recorded; not verified live by this tool",
     }
     facts["limits"] = runtime["limits"]
+    facts["capabilities"] = runtime["capabilities"]
+    facts["public_deployment_verified_this_request"] = runtime["public_deployment_verified_this_request"]
     facts["recorded_deployment"] = {
         "provenance": KALILLAC_SELF_KNOWLEDGE["provenance"]["deployment"],
         "recorded_verification_date": KALILLAC_SELF_KNOWLEDGE["verified_on"],
@@ -9906,9 +9988,10 @@ def _v31_runtime_facts():
         "native_path_failure_behavior": (
             "If OpenAI fails or returns unusable output on the native path, "
             "the request ends with a temporary model-provider-unavailable "
-            "error. Only if the model breaks the native tool protocol does "
-            "chat continue once through the legacy pipeline, which calls "
-            "the same OpenAI model."
+            "error. A tool protocol/validation failure may enter the legacy "
+            "pipeline once, using the same OpenAI model, unless a native "
+            "brave/tavily lookup has already admitted a search attempt; that "
+            "bounded lookup cannot be replayed through legacy."
         ),
         "legacy_pipeline_provider_chain": [
             {
@@ -10036,6 +10119,8 @@ def _run_v31_native_tool_chat(
         _search_provider_text(SYSTEM_PROMPT).strip()
         + "\n\n"
         + render_current_time_context(current_clock, message=build_web_search_query(message, history))
+        + "\n\n" + KALILLAC_VOICE_AND_FORMAT_GUIDE.strip()
+        + "\n\n" + render_session_disclosure_context()
         + "\n\n"
         + V31_NATIVE_TOOL_POLICY
         + "\n\n" + QUANTITATIVE_GROUNDING_RULES
@@ -10044,6 +10129,9 @@ def _run_v31_native_tool_chat(
         + "\n\n"
         + render_kalillac_product_roadmap()
     )
+
+    if kalillac_self_knowledge_context_active(message, history):
+        instructions += "\n\n" + render_kalillac_facts()
 
     if followup_enabled:
         instructions += """
@@ -10881,7 +10969,7 @@ Rules:
 - Do not elevate navigation text, sidebar categories, rankings, related-person lists, zodiac labels, promotional slogans, temporary channel taglines, captions, or other incidental page text into a biographical fact unless that detail directly answers the user's question and its meaning is clear from the source context.
 - A website taxonomy or category label is not proof that the subject belongs to a real organization, group, company, or association. Do not describe category membership as organizational membership unless the WEB RESULTS clearly establish that relationship.
 - A profile bio, channel description, or social-media tagline may be used as the subject's own description, but do not present a promotional joke, temporary slogan, or one-off activity from that text as a defining biographical fact unless the user's question calls for it or another result corroborates its significance.
-- Prefer a concise, high-signal answer over collecting every supported detail from the result set.
+- Prioritize useful supported information and match the requested depth; include the necessary evidence and details without repetition or filler.
 - If VERIFICATION REQUIRED is yes, the user's requested identity/status fact must be established by the WEB RESULTS before you state it.
 - For a named person or entity, make sure the evidence clearly refers to the same subject the user asked about. Similar names are not enough.
 - For arrests, accusations, charges, indictments, convictions, sentences, lawsuits, or investigations, distinguish those statuses precisely. Never turn an allegation or arrest into a conviction, and never infer an offense or legal outcome that the evidence does not establish.
@@ -10906,7 +10994,7 @@ Rules:
 {QUANTITATIVE_GROUNDING_RULES}
 {WEB_EVIDENCE_TIME_RULES}
 {ENGAGEMENT_REMINDER}
-- Be direct and concise.
+- Be direct and complete at the requested depth.
 - Stop when answered.
 """
 
@@ -11206,8 +11294,8 @@ def run_voice_format_prompt_tests():
     )
 
     check(
-        "guide defaults recommendations to 3-5 highest-value ideas",
-        "3-5 highest-value ideas"
+        "guide preserves requested depth without arbitrary length caps",
+        "Do not impose a fixed length"
         in KALILLAC_VOICE_AND_FORMAT_GUIDE,
     )
 
@@ -13534,3 +13622,14 @@ async def _api_chat_response(request):
 # NOTE: There is intentionally no __main__/uvicorn.run() block here. The
 # candidate is started only via the systemd unit / documented uvicorn command:
 #   uvicorn app_fastapi_candidate:api --host 127.0.0.1 --port 8001 --workers 1
+
+
+# Compatibility snapshots for existing diagnostic surfaces. User-facing
+# shortcuts render these same authoritative sources at answer time.
+KALILLAC_CANONICAL_DIFFERENCE = render_canonical_self_knowledge("difference")
+KALILLAC_CANONICAL_IDENTITY = render_canonical_self_knowledge("identity")
+KALILLAC_CANONICAL_HOW_IT_WORKS = render_canonical_self_knowledge("how_it_works")
+KALILLAC_CANONICAL_MEMORY = render_canonical_self_knowledge("memory_privacy")
+KALILLAC_CANONICAL_MODEL = render_canonical_self_knowledge("model")
+KALILLAC_CANONICAL_SEARCH = render_canonical_self_knowledge("web_search_capability")
+KALILLAC_CANONICAL_CREATOR = render_canonical_self_knowledge("creator")
