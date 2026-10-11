@@ -679,9 +679,10 @@ def test_api_failure_wording_is_accurate():
 # usable results when the search-attempt allowance runs out ("partial"). Any
 # later change to the search path must update these deliberately.
 # Deliberately reviewed search-policy slice: Brave primary/bounded fallback
-# and the shared search holder. All fingerprint assertions remain exact.
+# and the shared search holder. Native evidence follow-up extends only
+# run_web_search; all fingerprint assertions remain exact.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "637d341a88e2f641f7ce503be9bea87767af887105b93cd49a2a1de33381c790",
+    "run_web_search": "f463580d4d120fcc9a4152effc0c6afa300bc678a15c093cc59e4b160adfa66b",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
     "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
     "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",

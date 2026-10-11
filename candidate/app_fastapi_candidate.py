@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from contextvars import ContextVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from types import SimpleNamespace
 
@@ -79,6 +80,7 @@ OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 SEARCH_PROVIDER_POLICY = search_providers.load_policy(os.environ)
+_NATIVE_SEARCH_CONTEXT = ContextVar("native_search_context", default=None)
 
 # Diagnostic logging (routes, raw messages, memory counts) is off by
 # default on the public deployment so visitor messages are not logged.
@@ -407,6 +409,23 @@ def _search_provider_fact_values(value):
 
 
 def _post_single_search(provider, arguments):
+    """Record admitted attempts for the bounded native lookup only."""
+    context = _NATIVE_SEARCH_CONTEXT.get()
+    budget = current_budget()
+    before = budget.search_attempts if budget is not None else None
+    if context is not None and provider in context[0].attempts:
+        raise ChatInternalError()
+    try:
+        return _post_single_search_attempt(provider, arguments)
+    finally:
+        # A budget admission stays consumed even if transport then fails.
+        # No credential/missing-key branch calls this helper. With no budget,
+        # entry into the single-attempt adapter is the attempt boundary.
+        if context is not None and (budget is None or budget.search_attempts > before):
+            context[0].attempts.append(provider)
+
+
+def _post_single_search_attempt(provider, arguments):
     """One attempt on either search adapter; no retry or extraction."""
     budget = current_budget()
     if budget is not None:
@@ -947,8 +966,19 @@ def run_web_search(query, include_domains=None):
     could be admitted; the results are exactly those obtained so far.
     Provider errors are never exposed to the user.
     """
-    log(f"SEARCH_PROVIDER selected={SEARCH_PROVIDER_POLICY.primary} fallback={SEARCH_PROVIDER_POLICY.fallback}")
-    if SEARCH_PROVIDER_POLICY.primary == "tavily" and not TAVILY_API_KEY:
+    native_context = _NATIVE_SEARCH_CONTEXT.get()
+    policy = native_context[0].policy if native_context is not None else SEARCH_PROVIDER_POLICY
+    selected_primary = native_context[1] if native_context is not None else policy.primary
+    native_followup = native_context is not None and selected_primary == "tavily"
+    if native_context is not None:
+        budget = current_budget()
+        if budget is not None:
+            budget.ensure_open()
+        if tavily_transport.quarantined():
+            raise SearchTransportUnavailable()
+    fallback = "none" if native_followup else policy.fallback
+    log(f"SEARCH_PROVIDER selected={selected_primary} fallback={fallback} native_followup={str(native_followup).lower()}")
+    if selected_primary == "tavily" and (not TAVILY_API_KEY or (native_followup and not str(TAVILY_API_KEY).strip())):
         log("SEARCH_PROVIDER evidence=none reason=missing_credential")
         return "unavailable", []
 
@@ -1291,9 +1321,12 @@ def run_web_search(query, include_domains=None):
 
             search_domains = primary_domains
 
-        single_attempt_fallback = False
+        single_attempt_fallback = native_followup
         restriction_domains = []
-        if SEARCH_PROVIDER_POLICY.primary == "brave":
+        if native_followup:
+            restriction_domains = search_providers.domains_for_query(requested_domains or search_domains, raw_query)
+            search_domains = restriction_domains
+        if selected_primary == "brave":
             budget = current_budget()
             if budget is not None:
                 budget.ensure_open()
@@ -1326,11 +1359,13 @@ def run_web_search(query, include_domains=None):
                         reason = "provider_or_transport_failure"
                 else:
                     log("SEARCH_PROVIDER evidence=brave fallback_used=false")
+                    if native_context is not None:
+                        native_context[0].evidence_provider = "brave"
                     return "ok", results
             log(f"SEARCH_PROVIDER brave_failed reason={reason}")
             if budget is not None:
                 budget.ensure_open()
-            if SEARCH_PROVIDER_POLICY.fallback != "tavily" or not TAVILY_API_KEY or not str(TAVILY_API_KEY).strip():
+            if policy.fallback != "tavily" or not TAVILY_API_KEY or not str(TAVILY_API_KEY).strip():
                 log("SEARCH_PROVIDER evidence=none")
                 return "unavailable", []
             log("SEARCH_PROVIDER fallback_selected=tavily")
@@ -1669,7 +1704,9 @@ def run_web_search(query, include_domains=None):
 
             return "unavailable", []
 
-        log(f"SEARCH_PROVIDER evidence=tavily fallback_used={str(single_attempt_fallback).lower()}")
+        log(f"SEARCH_PROVIDER evidence=tavily fallback_used={str(single_attempt_fallback and not native_followup).lower()} native_followup={str(native_followup).lower()}")
+        if native_context is not None:
+            native_context[0].evidence_provider = "tavily"
         # Keep downstream prompt size bounded.
         return (
             "partial" if coverage_exhausted is not None else "ok",
@@ -2224,7 +2261,7 @@ def current_runtime_configuration():
         "scope": "current application process",
         "model": OPENAI_MODEL,
         "reasoning_effort": OPENAI_REASONING_EFFORT,
-        "web_search_policy": SEARCH_PROVIDER_POLICY.facts(),
+        "web_search_policy": SEARCH_PROVIDER_POLICY.facts(native_routing_enabled=V31_NATIVE_TOOL_ROUTING),
         "native_tool_routing_enabled": bool(V31_NATIVE_TOOL_ROUTING),
         "native_tool_routes": sorted(V31_NATIVE_TOOL_ROUTES),
         "limits": {
@@ -9793,7 +9830,7 @@ def _v31_runtime_facts():
     )
 
     facts = build_runtime_facts(config)
-    facts["web_search_policy"] = SEARCH_PROVIDER_POLICY.facts()
+    facts["web_search_policy"] = SEARCH_PROVIDER_POLICY.facts(native_routing_enabled=V31_NATIVE_TOOL_ROUTING)
 
     runtime = current_runtime_configuration()
     facts["routing_mode"] = "transitional_v31"
@@ -9868,6 +9905,13 @@ def _v31_runtime_facts():
             "or provider."
         ),
     }
+
+    if SEARCH_PROVIDER_POLICY.native_tavily_followup:
+        facts["request_handling"]["native_path_failure_behavior"] += (
+            " In native brave/tavily mode, a protocol failure after an admitted "
+            "search attempt ends as unusable model output; the bounded lookup "
+            "is never replayed through legacy search."
+        )
 
     return facts
 
@@ -9960,7 +10004,12 @@ def _run_v31_native_tool_chat(
 
     search_results = []
     search_calls = 0
+    search_requests = 0
     search_coverage_limited = False
+    lookup = SimpleNamespace(policy=SEARCH_PROVIDER_POLICY, attempts=[],
+                             evidence_provider=None, session_admitted=False, first_round=None)
+    followup_enabled = lookup.policy.native_tavily_followup
+    model_round = 0
     private_request = is_private_search_target(message)
 
     current_clock = datetime.now(timezone.utc)
@@ -9979,11 +10028,26 @@ def _run_v31_native_tool_chat(
         + render_kalillac_product_roadmap()
     )
 
+    if followup_enabled:
+        instructions += """
+
+NATIVE SEARCH EVIDENCE RECOVERY:
+- Application code selects the provider. The first search uses Brave.
+- When the initial evidence is adequate, answer without another search.
+- If the initial Brave evidence cannot adequately support the requested answer (for example, expired forecasts, older observations, wrong-location evidence or insufficient coverage), you may request one follow-up search_web in a later model round after inspecting those results. Application code uses Tavily directly, only if Tavily has not already been attempted by this lookup's failure fallback.
+- At most one Brave attempt and one Tavily attempt share one bounded lookup. No extraction, retry, third provider search or return to Brave is allowed. Existing request and tool limits still apply; availability of a fallback does not establish accuracy.
+- provider_provenance in each search tool result reports selected/admitted search attempts and the provider supplying that result. It is search evidence provenance, not per-response model-provider metadata. Configuration alone never proves a provider was used.
+- Preserve each evidence record's original source, values, dates, labels and time periods, even when two records share a URL. Do not replace one record's measurements with another's.
+- If Tavily is unavailable or its evidence is also inadequate, keep the answer qualified and provide only useful supported information. Do not invent current conditions or request further provider searches.
+"""
+
     explanation_continuation = is_explanation_continuation_request(message, history)
     if explanation_continuation:
         instructions += "\n\n" + EXPLANATION_CONTINUATION_RULES
 
     def call_model(input_items):
+        nonlocal model_round
+        model_round += 1
         # A remote failure in any native round ends the request as provider
         # unavailable; it is never retried through the legacy pipeline.
         try:
@@ -10015,8 +10079,14 @@ def _run_v31_native_tool_chat(
             )
             raise ChatInternalError() from None
 
+    def provider_trace(selected=None, evidence=None):
+        if not followup_enabled:
+            return {}
+        return {"provider_provenance": {"selected_provider": selected,
+                "attempted_providers": list(lookup.attempts), "evidence_provider": evidence}}
+
     def run_tool(call):
-        nonlocal search_calls, search_coverage_limited
+        nonlocal search_calls, search_requests, search_coverage_limited
 
         if (
             call.name
@@ -10033,11 +10103,10 @@ def _run_v31_native_tool_chat(
                 "reason": "Unknown tool.",
             }
 
-        # Private session, memory or conversation context never goes to
-        # Tavily: checked against the user's request and, because model
-        # output is untrusted, the generated query, before any search
-        # count, session allowance or domain selection. Neither text is
-        # logged.
+        search_requests += 1
+        # Private context wins before provider attempts, session admission or
+        # domain selection. Rejected requests still count toward the bounded
+        # native tool-request cap; neither private text is logged here.
         if private_request or is_private_search_target(call.arguments.get("query", "")):
             log("V31 SEARCH: rejected (private context)")
             return {
@@ -10049,25 +10118,32 @@ def _run_v31_native_tool_chat(
                 ),
             }
 
-        # Preserve the current one-search-per-request behavior during
-        # the V31 migration. This prevents a model loop from multiplying
-        # Tavily usage.
+        if followup_enabled and search_requests > 2:
+            return {"status": "rejected", "reason": "The bounded lookup permits only two search requests; no third search is allowed.",
+                    **provider_trace()}
+
+        selected_provider = lookup.policy.primary
         if search_calls >= 1:
-            return {
-                "status": "rejected",
-                "reason": (
-                    "Only one external search is allowed "
-                    "for this request."
-                ),
-            }
-
-        search_calls += 1
-
-        if not session_search_allowed(state):
-            return {
-                "status": "limited",
-                "results": [],
-            }
+            search_calls += 1
+            if not followup_enabled:
+                return {"status": "rejected", "reason": "Only one external search is allowed for this request."}
+            if "tavily" in lookup.attempts:
+                reason = "Tavily has already been attempted; no further provider search is allowed."
+            elif search_calls > 2 or not lookup.session_admitted:
+                reason = "The bounded lookup is complete or unavailable; no further provider search is allowed."
+            elif model_round <= lookup.first_round:
+                reason = "A Tavily follow-up is available only after inspecting the initial result in a later model round."
+            else:
+                reason = None
+            if reason is not None:
+                return {"status": "rejected", "reason": reason, **provider_trace()}
+            selected_provider = "tavily"
+        else:
+            search_calls = 1
+            if not session_search_allowed(state):
+                return {"status": "limited", "results": [], **provider_trace()}
+            lookup.session_admitted = True
+            lookup.first_round = model_round
 
         query = ground_relative_search_query(
             call.arguments["query"], build_web_search_query(message, history),
@@ -10089,24 +10165,31 @@ def _run_v31_native_tool_chat(
             )
         )
 
-        status, results = run_web_search(
-            query,
-            include_domains=domains,
-        )
+        if followup_enabled:
+            lookup.evidence_provider = None
+            token = _NATIVE_SEARCH_CONTEXT.set((lookup, selected_provider))
+            try:
+                status, results = run_web_search(query, include_domains=domains)
+            finally:
+                _NATIVE_SEARCH_CONTEXT.reset(token)
+        else:
+            status, results = run_web_search(query, include_domains=domains)
 
         if status not in {"ok", "partial"}:
             return {
                 "status": "unavailable",
                 "results": [],
+                **provider_trace(selected_provider),
             }
 
-        search_results[:] = results
+        search_results.extend(results)
 
         if status == "partial":
             search_coverage_limited = True
 
         return {
             "status": "ok",
+            **provider_trace(selected_provider, lookup.evidence_provider),
             "coverage": "limited" if status == "partial" else "complete",
             "search_date": current_date,
             "search_date_timezone": "UTC",
@@ -10142,8 +10225,11 @@ def _run_v31_native_tool_chat(
     except _OPENAI_PATH_STOPS:
         raise
     except (ToolLoopProtocolError, ToolValidationError):
-        # The model broke the tool protocol; chat() may continue once
-        # through the legacy pipeline (the same OpenAI model).
+        # Never replay an admitted bounded lookup through legacy search.
+        # Protocol failure before any provider attempt retains the old path.
+        if followup_enabled and lookup.attempts:
+            _raise_if_request_stopped()
+            raise ModelProviderUnavailable() from None
         raise
     except ToolLoopOutputError as unusable:
         print(
@@ -10184,9 +10270,12 @@ def _run_v31_native_tool_chat(
         if search_coverage_limited:
             reply = with_limited_search_notice(reply)
 
+        displayed_sources = {}
+        for item in search_results:
+            displayed_sources.setdefault(item["url"], item)
         sources = "\n".join(
             f"- [{item['title']}]({item['url']})"
-            for item in search_results
+            for item in displayed_sources.values()
         )
 
         return (

@@ -490,3 +490,381 @@ def test_budgeted_brave_wire_failure_uses_existing_transport(providers, monkeypa
         server.server_close()
         thread.join(2)
         assert not thread.is_alive()
+
+
+# --- one model-requested native evidence follow-up, through both transport seams ---
+
+@pytest.fixture
+def native_lookup(providers, monkeypatch):
+    from kalillac_routing.provider_transport import TransportHolder
+    state = providers
+    state.update(turns=[], session_checks=0)
+    real_session_allowed = app.session_search_allowed
+
+    def model_post(payload):
+        state["model"].append(copy.deepcopy(payload))
+        assert payload["model"] == app.OPENAI_MODEL and payload["store"] is False
+        assert payload["reasoning"]["effort"] == app.OPENAI_REASONING_EFFORT
+        assert payload["max_output_tokens"] == app.MAX_RESPONSE_TOKENS
+        if not state["turns"]:
+            raise UnscriptedRequest("Unexpected model attempt")
+        response = state["turns"].pop(0)
+        return response(payload) if callable(response) else copy.deepcopy(response)
+
+    class ModelTransport:
+        def __init__(self, **kwargs):
+            pass
+        def post_json(self, url, payload, *, headers, timeout, max_bytes, cancelled=None):
+            assert url == app.OPENAI_RESPONSES_URL and 0 < timeout <= app.OPENAI_CALL_TIMEOUT_SECONDS
+            assert max_bytes == LIMITS.openai_max_bytes
+            return model_post(payload)
+        def close(self, timeout):
+            return SimpleNamespace(clean=True)
+
+    def session_allowed(session):
+        state["session_checks"] += 1
+        return real_session_allowed(session)
+
+    monkeypatch.setattr(app, "OPENAI_API_KEY", "offline-model-key")
+    monkeypatch.setattr(app, "_post_openai_responses", model_post)
+    monkeypatch.setattr(app, "_OPENAI_TRANSPORT", TransportHolder(factory=ModelTransport))
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
+    monkeypatch.setattr(app, "session_search_allowed", session_allowed)
+    return state
+
+
+def _lookup_tool(query="weather reported location today", call_id="lookup-1", **extra):
+    return {"output":[{"type":"function_call", "name":"search_web", "call_id":call_id,
+                       "arguments":json.dumps({"query":query, **extra})}]}
+
+
+def _lookup_reply(text="The supported evidence is limited; current conditions remain unverified."):
+    return {"output":[{"type":"message", "content":[{"type":"output_text", "text":text}]}]}
+
+
+def _lookup_outputs(state):
+    return [json.loads(i["output"]) for i in state["model"][-1]["input"]
+            if i.get("type")=="function_call_output"]
+
+
+def _run_lookup(state, budgeted=True, message="Search the web for weather today at the reported location.", budget=None):
+    policy = app.SEARCH_PROVIDER_POLICY
+    budget = budget or RequestBudget(duration_seconds=45, max_model_attempts=6, max_search_attempts=6)
+    with budget_scope(budget) if budgeted else nullcontext():
+        answer = app.chat(message, [], session_id="native-evidence-lookup")
+    assert app.SEARCH_PROVIDER_POLICY is policy
+    assert state["session_checks"] == 1
+    return answer, budget
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+def test_native_adequate_brave_evidence_uses_no_tavily(native_lookup, budgeted):
+    state = native_lookup
+    state["brave"] = [brave_result(content="An applicable observation with a stated time.")]
+    state["turns"] = [_lookup_tool(), _lookup_reply("Supported answer.")]
+    answer, budget = _run_lookup(state, budgeted)
+    assert [c["provider"] for c in state["calls"]] == ["brave"]
+    assert len(state["model"]) == 2 and budget.search_attempts == (1 if budgeted else 0)
+    result = _lookup_outputs(state)[0]
+    assert result["provider_provenance"]["attempted_providers"] == ["brave"]
+    assert result["provider_provenance"]["evidence_provider"] == "brave"
+    assert "adequate" in state["model"][0]["instructions"]
+    assert "one follow-up" in state["model"][0]["instructions"]
+    assert answer == "Supported answer.\n\n**Sources**\n\n- [Reference](" + SOURCE + ")"
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("insufficiency", ["expired-weather", "wrong-location"])
+def test_native_requested_followup_uses_tavily_once(native_lookup, budgeted, insufficiency):
+    state = native_lookup
+    content = ("Observation September 15, 2026. Forecast expires September 17, 2026."
+               if insufficiency=="expired-weather" else "Weather for a different location, not the requested location.")
+    state["brave"] = [brave_result(content=content)]
+    state["tavily"] = [tavily_result(url="https://weather.test/followup", content="Requested location: a separately dated observation.")]
+    def ask_followup(payload):
+        first = next(json.loads(i["output"]) for i in payload["input"] if i.get("type")=="function_call_output")
+        assert first["results"][0]["content"] == content
+        return _lookup_tool("weather reported location latest observation", "lookup-2")
+    state["turns"] = [_lookup_tool(), ask_followup, _lookup_reply()]
+    answer, budget = _run_lookup(state, budgeted)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+    assert budget.search_attempts == (2 if budgeted else 0)
+    assert budget.model_attempts == (3 if budgeted else 0) and len(state["model"]) == 3
+    outputs = _lookup_outputs(state)
+    assert outputs[0]["provider_provenance"]["attempted_providers"] == ["brave"]
+    assert outputs[1]["provider_provenance"] == {"selected_provider":"tavily", "attempted_providers":["brave","tavily"], "evidence_provider":"tavily"}
+    assert outputs[0]["results"][0]["content"] == content
+    assert outputs[1]["results"][0]["content"] == "Requested location: a separately dated observation."
+    assert "expired forecasts" in state["model"][0]["instructions"] and "wrong-location" in state["model"][0]["instructions"]
+    assert SOURCE in answer and "https://weather.test/followup" in answer
+    assert state["calls"][1]["url"] == tavily_transport.SEARCH_URL
+    assert all(c["max_bytes"] == LIMITS.tavily_search_max_bytes for c in state["calls"])
+
+
+@pytest.mark.parametrize("failure", [TransportHTTPError(429), TransportConnectionError(), {"grounding":{"generic":[]}}])
+def test_native_initial_failure_fallback_closes_followup(native_lookup, failure):
+    state = native_lookup; state["brave"] = [failure];state["tavily"] = [tavily_result()]
+    state["turns"] = [_lookup_tool(), _lookup_tool(call_id="lookup-2"), _lookup_reply()]
+    _,budget = _run_lookup(state)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+    assert budget.search_attempts == 2
+    outputs = _lookup_outputs(state)
+    assert outputs[0]["provider_provenance"]["attempted_providers"] == ["brave", "tavily"]
+    assert outputs[0]["provider_provenance"]["evidence_provider"] == "tavily"
+    assert outputs[1]["status"] == "rejected" and "already" in outputs[1]["reason"]
+
+
+def test_native_missing_brave_key_counts_only_actual_tavily_attempt(native_lookup, monkeypatch):
+    state=native_lookup;monkeypatch.setattr(app,"BRAVE_API_KEY",None)
+    state["tavily"]=[tavily_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    _,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["tavily"] and budget.search_attempts==1
+    outputs=_lookup_outputs(state)
+    assert outputs[0]["provider_provenance"]["attempted_providers"]==["tavily"]
+    assert outputs[1]["status"]=="rejected"
+
+
+def test_native_third_search_is_rejected(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_tool(call_id="lookup-3"),_lookup_reply()]
+    _,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily"] and budget.search_attempts==2
+    assert [o["status"] for o in _lookup_outputs(state)]==["ok","ok","rejected"]
+    assert budget.model_attempts==4
+
+
+@pytest.mark.parametrize("primary",["tavily","brave"])
+def test_native_single_provider_policy_still_rejects_second_search(native_lookup,monkeypatch,primary):
+    state=native_lookup;monkeypatch.setattr(app,"SEARCH_PROVIDER_POLICY",sp.SearchProviderPolicy(primary,"none"))
+    state[primary]=[tavily_result() if primary=="tavily" else brave_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    _,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==[primary] and budget.search_attempts==1
+    assert _lookup_outputs(state)[1]["status"]=="rejected"
+
+
+def test_legacy_does_not_follow_up_on_nonempty_stale_brave(native_lookup,monkeypatch):
+    state=native_lookup;monkeypatch.setattr(app,"V31_NATIVE_TOOL_ROUTING",False)
+    state["brave"]=[brave_result(content="Old observation; forecast expired.")]
+    state["turns"]=[_lookup_reply()]
+    _,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave"] and budget.search_attempts==1
+    assert len(state["model"])==1
+
+
+@pytest.mark.parametrize("stop",["cancel","deadline","exhaustion","quarantine"])
+def test_native_followup_respects_request_and_transport_stops(native_lookup,stop):
+    state=native_lookup;clock=[100.0]
+    budget=RequestBudget(duration_seconds=45,max_model_attempts=6,max_search_attempts=1 if stop=="exhaustion" else 6,clock=lambda:clock[0])
+    state["brave"]=[brave_result()]
+    def stopped_followup(payload):
+        if stop=="cancel":budget.cancel()
+        if stop=="deadline":clock[0]=145.0
+        if stop=="quarantine":tavily_transport.search_holder().quarantine()
+        return _lookup_tool(call_id="lookup-2")
+    state["turns"]=[_lookup_tool(),stopped_followup]
+    error={"cancel":RequestCancelled,"deadline":RequestDeadlineExceeded,"exhaustion":CallBudgetExhausted,"quarantine":app.SearchTransportUnavailable}[stop]
+    with pytest.raises(error):_run_lookup(state,budget=budget)
+    assert [c["provider"] for c in state["calls"]]==["brave"] and budget.search_attempts==1
+    assert len(state["model"])==2
+
+
+@pytest.mark.parametrize("result",[{"results":[]},TransportHTTPError(500)])
+def test_native_failed_followup_is_truthful_and_preserves_primary_sources(native_lookup,result):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[result]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    answer,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily"] and budget.search_attempts==2
+    output=_lookup_outputs(state)[1]
+    assert output["status"]=="unavailable" and output["results"]==[]
+    assert output["provider_provenance"]["evidence_provider"] is None
+    assert "current conditions remain unverified" in answer and SOURCE in answer
+
+
+def test_native_followup_preserves_user_domains_and_guards_added_date(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result(url="https://docs.example.com/reference")];state["tavily"]=[tavily_result(url="https://docs.example.com/reference")]
+    message="Search https://docs.example.com for weather today."
+    state["turns"]=[_lookup_tool("weather today site:outside.test"),_lookup_tool("weather October 11, 2026 site:outside.test","lookup-2"),_lookup_reply()]
+    _run_lookup(state,message=message)
+    assert state["calls"][0]["payload"]["goggles"]=="$discard\n$site=docs.example.com"
+    assert state["calls"][1]["payload"]["include_domains"]==["docs.example.com"]
+    assert _lookup_outputs(state)[1]["query"]==message
+    assert "October 11" not in state["calls"][1]["payload"]["query"]
+
+
+def test_native_followup_retains_authoritative_domain_policy(native_lookup):
+    state=native_lookup;url="https://developers.openai.com/api/docs/pricing"
+    state["brave"]=[brave_result(url=url)];state["tavily"]=[tavily_result(url=url)]
+    state["turns"]=[_lookup_tool("current OpenAI API pricing official"),_lookup_tool("current OpenAI API pricing official","lookup-2"),_lookup_reply()]
+    _run_lookup(state,message="Search the web for current OpenAI API pricing.")
+    assert state["calls"][1]["payload"]["include_domains"]==["developers.openai.com","openai.com"]
+
+
+def test_native_private_followup_never_reaches_provider(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool("search my session memory for weather","lookup-2"),_lookup_reply()]
+    _,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave"] and budget.search_attempts==1
+    assert _lookup_outputs(state)[1]["status"]=="rejected"
+
+
+@pytest.mark.parametrize("duplicate",[False,True])
+def test_native_evidence_records_survive_and_display_urls_are_deduplicated(native_lookup,duplicate):
+    state=native_lookup;url=SOURCE if duplicate else "https://weather.test/second"
+    first="Source A: Current 61, Tonight 57; observed September 15."
+    second="Source B: Current 66, Tonight 59; observed October 10."
+    state["brave"]=[brave_result(content=first)];state["tavily"]=[tavily_result(url=url,content=second)]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply("Qualified answer.\n\nSources: [Wrong]")]
+    answer,_=_run_lookup(state)
+    outputs=_lookup_outputs(state)
+    assert outputs[0]["results"][0]["content"]==first and outputs[1]["results"][0]["content"]==second
+    assert answer.count("**Sources**")==1 and answer.count("]("+SOURCE+")")==1
+    assert answer.count("- [Reference]")== (1 if duplicate else 2)
+    assert "Wrong" not in answer
+
+
+def test_native_followup_preserves_each_provider_context_limits(native_lookup):
+    state=native_lookup
+    state["brave"]=[{"grounding":{"generic":[{"url":f"https://weather.test/a{i}","title":f"A{i}","snippets":["A"*9000]} for i in range(8)]},"sources":{}}]
+    state["tavily"]=[{"results":[{"url":f"https://weather.test/b{i}","title":f"B{i}","content":"B"*9000} for i in range(8)]}]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    answer,_=_run_lookup(state)
+    outputs=_lookup_outputs(state)
+    assert [len(o["results"]) for o in outputs]==[app.MAX_SEARCH_RESULTS,app.MAX_SEARCH_RESULTS]
+    assert all(len(r["content"])<=800 for o in outputs for r in o["results"])
+    assert answer.count("- [")==2*app.MAX_SEARCH_RESULTS
+
+
+def test_native_lookup_cannot_bypass_session_allowance(native_lookup,monkeypatch):
+    state=native_lookup
+    def limited(session):state["session_checks"]+=1;return False
+    monkeypatch.setattr(app,"session_search_allowed",limited)
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    _run_lookup(state)
+    assert state["calls"]==[] and [o["status"] for o in _lookup_outputs(state)]==["limited","rejected"]
+
+
+def test_native_model_cannot_override_provider_in_tool_arguments(native_lookup):
+    state=native_lookup;state["turns"]=[_lookup_tool(provider="tavily")]
+    with pytest.raises(app.ToolValidationError):
+        with budget_scope(RequestBudget(duration_seconds=45,max_model_attempts=6,max_search_attempts=6)):
+            app._run_v31_native_tool_chat("Search the web for weather today.",[],{"memory":[],"search_times":[]})
+    assert state["calls"]==[]
+
+
+def test_native_followup_requires_a_later_model_round(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()]
+    batch={"output":_lookup_tool()["output"]+_lookup_tool(call_id="lookup-2")["output"]}
+    state["turns"]=[batch,_lookup_reply()]
+    _run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave"]
+    assert _lookup_outputs(state)[1]["status"]=="rejected"
+
+
+def test_native_lookup_round_limit_does_not_replay_providers_via_legacy(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
+    state["turns"]=[_lookup_tool(call_id=f"lookup-{i}") for i in range(4)]
+    with pytest.raises(app.ModelProviderUnavailable):_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily"]
+    assert len(state["model"])==4
+
+
+def test_native_followup_does_not_expand_model_attempt_allowance(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2")]
+    budget=RequestBudget(duration_seconds=45,max_model_attempts=2,max_search_attempts=6)
+    with pytest.raises(CallBudgetExhausted):_run_lookup(state,budget=budget)
+    assert budget.model_attempts==2 and budget.search_attempts==2
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily"]
+
+
+def test_native_followup_facts_are_scoped_to_native_brave_tavily(native_lookup,monkeypatch):
+    facts=app._v31_runtime_facts()
+    recovery=facts["web_search_policy"]["native_evidence_followup"]
+    assert recovery["available_when_native_routing_enabled"] is True
+    assert recovery["requires_no_prior_tavily_attempt"] is True and recovery["legacy_eligible"] is False
+    assert facts["automatic_model_fallback"] is False and facts["configured_fallback_chain"]==[]
+    for policy in [sp.SearchProviderPolicy(),sp.SearchProviderPolicy("brave","none")]:
+        monkeypatch.setattr(app,"SEARCH_PROVIDER_POLICY",policy)
+        assert app._v31_runtime_facts()["web_search_policy"]["native_evidence_followup"]["available_when_native_routing_enabled"] is False
+
+
+
+def test_native_followup_provenance_scope_resets_before_legacy_search(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    _run_lookup(state)
+    assert app._NATIVE_SEARCH_CONTEXT.get() is None
+    state["brave"]=[brave_result()]
+    assert app.run_web_search("weather today")[0]=="ok"
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily","brave"]
+
+
+def test_native_followup_keeps_explicit_user_dates(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
+    message="Search the web for weather today and October 12, 2026."
+    state["turns"]=[_lookup_tool("weather today October 12, 2026"),_lookup_tool("weather October 12, 2026","lookup-2"),_lookup_reply()]
+    _run_lookup(state,message=message)
+    assert _lookup_outputs(state)[1]["query"]=="weather October 12, 2026"
+    assert "October 12, 2026" in state["calls"][1]["payload"]["query"]
+
+
+def test_native_unconfirmed_followup_cleanup_stops_without_more_model_or_provider_calls(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[TransportCleanupUnconfirmed("deadline")]
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2")]
+    with pytest.raises(app.SearchTransportUnavailable):_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily"]
+    assert len(state["model"])==2 and tavily_transport.quarantined()
+    assert app._NATIVE_SEARCH_CONTEXT.get() is None
+
+
+def test_native_followup_missing_key_is_not_reported_as_tavily_attempt(native_lookup,monkeypatch):
+    state=native_lookup;state["brave"]=[brave_result()];monkeypatch.setattr(app,"TAVILY_API_KEY",None)
+    state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_reply()]
+    _,budget=_run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave"] and budget.search_attempts==1
+    followup=_lookup_outputs(state)[1]
+    assert followup["status"]=="unavailable" and followup["provider_provenance"]=={
+        "selected_provider":"tavily","attempted_providers":["brave"],"evidence_provider":None}
+
+
+def test_native_private_origin_never_starts_a_lookup(native_lookup):
+    state=native_lookup;state["turns"]=[_lookup_tool(),_lookup_reply()]
+    with budget_scope(RequestBudget(duration_seconds=45,max_model_attempts=6,max_search_attempts=6)):
+        app._run_v31_native_tool_chat("Search my memory for weather.",[],{"memory":[],"search_times":[]})
+    assert state["calls"]==[] and state["session_checks"]==0
+    assert _lookup_outputs(state)[0]["status"]=="rejected"
+
+
+def test_native_followup_runtime_facts_include_actual_routing_flag(native_lookup,monkeypatch):
+    assert app._v31_runtime_facts()["web_search_policy"]["native_evidence_followup"]["enabled_in_current_process"] is True
+    monkeypatch.setattr(app,"V31_NATIVE_TOOL_ROUTING",False)
+    assert app._v31_runtime_facts()["web_search_policy"]["native_evidence_followup"]["enabled_in_current_process"] is False
+    assert app.current_runtime_configuration()["web_search_policy"]["native_evidence_followup"]["enabled_in_current_process"] is False
+
+
+
+def test_native_third_search_after_private_rejection_still_cannot_use_tavily(native_lookup):
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
+    state["turns"]=[_lookup_tool(),_lookup_tool("search my session memory for weather","lookup-2"),
+                    _lookup_tool(call_id="lookup-3"),_lookup_reply()]
+    _run_lookup(state)
+    assert [c["provider"] for c in state["calls"]]==["brave"]
+    assert [o["status"] for o in _lookup_outputs(state)]==["ok","rejected","rejected"]
+
+
+
+@pytest.mark.parametrize("budgeted",[False,True])
+def test_native_news_followup_never_extracts_or_retries(native_lookup,budgeted):
+    state=native_lookup;state["brave"]=[brave_result(content="A"*2000)]
+    state["tavily"]=[{"results":[{"title":"Dated article","url":"https://news.test/article",
+                                 "published_date":"2026-09-01","content":"B"*2000}]}]
+    state["turns"]=[_lookup_tool("AI news today"),_lookup_tool("latest AI news developments","lookup-2"),_lookup_reply()]
+    _run_lookup(state,budgeted,message="Search the web for AI news today.")
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily"]
+    assert state["calls"][1]["url"]==tavily_transport.SEARCH_URL
+    outputs=_lookup_outputs(state)
+    assert len(outputs[0]["results"][0]["content"])==1600
+    assert len(outputs[1]["results"][0]["content"])==1600
+    assert outputs[1]["results"][0]["published"]=="2026-09-01"
