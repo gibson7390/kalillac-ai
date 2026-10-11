@@ -678,13 +678,15 @@ def test_api_failure_wording_is_accurate():
 # updated deliberately in the error-contract slice (base cc6a3b43) to keep
 # usable results when the search-attempt allowance runs out ("partial"). Any
 # later change to the search path must update these deliberately.
+# Deliberately reviewed search-policy slice: Brave primary/bounded fallback
+# and the shared search holder. All fingerprint assertions remain exact.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "82fbaeeb24c6db7d7eca63f72976ad935daa4d7ee9c6cc95dab8377c6b56428d",
+    "run_web_search": "637d341a88e2f641f7ce503be9bea87767af887105b93cd49a2a1de33381c790",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
     "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
     "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",
 }
-TAVILY_TRANSPORT_MODULE_SOURCE = "3e448019cf1fd14992ead2ffb3aaba64fb0faff82005108e3749f2f1812e6676"
+TAVILY_TRANSPORT_MODULE_SOURCE = "ac0a2191549120fda5447be4360cc5157ca4b8697521bbaec0d94c255cdee37d"
 
 
 @pytest.mark.parametrize("name", list(TAVILY_PATH_SOURCE))

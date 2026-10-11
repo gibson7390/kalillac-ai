@@ -45,7 +45,7 @@ from kalillac_routing.provider_transport import (
     TransportUnavailable,
     post_json_within_budget,
 )
-from kalillac_routing import tavily_transport
+from kalillac_routing import tavily_transport, search_providers
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -76,6 +76,8 @@ OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
 # temporary unavailable error instead of a silently substituted answer.
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+SEARCH_PROVIDER_POLICY = search_providers.load_policy(os.environ)
 
 # Diagnostic logging (routes, raw messages, memory counts) is off by
 # default on the public deployment so visitor messages are not logged.
@@ -380,6 +382,60 @@ def _close_tavily_transport():
     if report is not None:
         clean = bool(getattr(report, "clean", False))
         print(f"INFO: SEARCH_TRANSPORT_CLOSED clean={clean}")
+
+
+def search_provider_label():
+    return SEARCH_PROVIDER_POLICY.label
+
+
+def _search_provider_text(text):
+    """Adapt authored facts only, never user history or returned evidence."""
+    if SEARCH_PROVIDER_POLICY.primary == "tavily":
+        return text
+    return str(text).replace("Tavily source links", "search-result source links").replace("Tavily", search_provider_label())
+
+
+def _search_provider_fact_values(value):
+    if isinstance(value, str):
+        return _search_provider_text(value)
+    if isinstance(value, list):
+        return [_search_provider_fact_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _search_provider_fact_values(item) for key, item in value.items()}
+    return value
+
+
+def _post_single_search(provider, arguments):
+    """One attempt on either search adapter; no retry or extraction."""
+    budget = current_budget()
+    if budget is not None:
+        budget.ensure_open()
+        if provider == "tavily":
+            response = _post_tavily_for_attempt(budget, "search", arguments)
+        else:
+            budget.admit_search_attempt()
+            timeout, request_selected = budget.select_call_timeout(SEARCH_TIMEOUT_SECONDS)
+            limits = _request_limits
+            if limits is None:
+                raise ChatInternalError()
+            response = post_json_within_budget(
+                tavily_transport.search_holder(), limits.tavily_transport,
+                search_providers.BRAVE_CONTEXT_URL, arguments,
+                headers={"X-Subscription-Token": BRAVE_API_KEY, "Content-Type": "application/json"},
+                budget=budget, timeout=timeout, request_deadline_selected=request_selected,
+                max_bytes=limits.tavily_search_max_bytes,
+            )
+        budget.ensure_open()
+        return response
+    if provider == "brave":
+        return search_providers.post_json_unbudgeted(
+            search_providers.BRAVE_CONTEXT_URL, arguments,
+            {"X-Subscription-Token": BRAVE_API_KEY}, SEARCH_TIMEOUT_SECONDS,
+        )
+    return tavily_transport.validate_response(search_providers.post_json_unbudgeted(
+        tavily_transport.SEARCH_URL, tavily_transport.search_payload(arguments),
+        {"Authorization": "Bearer " + TAVILY_API_KEY}, SEARCH_TIMEOUT_SECONDS,
+    ))
 
 
 def _status_text(error):
@@ -872,7 +928,11 @@ def _looks_like_news_hub_url(url):
 
 
 def run_web_search(query, include_domains=None):
-    """Run a Tavily search and return (status, results).
+    """Run the configured search policy and return (status, results).
+
+    Tavily-only preserves its existing search/retry/extraction behavior.
+    Brave primary returns extracted context or tries Tavily once on an
+    eligible failure; that fallback never retries or extracts articles.
 
     Normal searches use basic depth to conserve credits.
 
@@ -886,7 +946,9 @@ def run_web_search(query, include_domains=None):
     could be admitted; the results are exactly those obtained so far.
     Provider errors are never exposed to the user.
     """
-    if not TAVILY_API_KEY:
+    log(f"SEARCH_PROVIDER selected={SEARCH_PROVIDER_POLICY.primary} fallback={SEARCH_PROVIDER_POLICY.fallback}")
+    if SEARCH_PROVIDER_POLICY.primary == "tavily" and not TAVILY_API_KEY:
+        log("SEARCH_PROVIDER evidence=none reason=missing_credential")
         return "unavailable", []
 
     # The search-attempt exhaustion that ended later work after usable
@@ -1228,6 +1290,54 @@ def run_web_search(query, include_domains=None):
 
             search_domains = primary_domains
 
+        single_attempt_fallback = False
+        restriction_domains = []
+        if SEARCH_PROVIDER_POLICY.primary == "brave":
+            budget = current_budget()
+            if budget is not None:
+                budget.ensure_open()
+            restriction_domains = search_providers.domains_for_query(requested_domains or search_domains, raw_query)
+            payload = search_providers.brave_payload(search_query, restriction_domains, MAX_SEARCH_RESULTS)
+            reason = "missing_credential"
+            if BRAVE_API_KEY and str(BRAVE_API_KEY).strip():
+                try:
+                    response = _post_single_search("brave", payload)
+                    results = search_providers.normalize_brave(
+                        response, restriction_domains, MAX_SEARCH_RESULTS,
+                        1600 if technical_verification_search or news_freshness_search else 800,
+                    )
+                except RequestBudgetError:
+                    raise
+                except TransportUnavailable:
+                    # Never fall back alongside an operation with unconfirmed cleanup.
+                    if tavily_transport.quarantined():
+                        raise SearchTransportUnavailable() from None
+                    reason = "transport_unavailable"
+                except (TypeError, ValueError):
+                    raise ChatInternalError() from None
+                except Exception as error:
+                    code = getattr(error, "status_code", getattr(error, "code", getattr(error, "status", None)))
+                    if isinstance(code, int) and not isinstance(code, bool) and code in {401, 403, 429}:
+                        reason = "auth_permission_quota"
+                    elif isinstance(error, search_providers.SearchResponseInvalid):
+                        reason = error.reason
+                    else:
+                        reason = "provider_or_transport_failure"
+                else:
+                    log("SEARCH_PROVIDER evidence=brave fallback_used=false")
+                    return "ok", results
+            log(f"SEARCH_PROVIDER brave_failed reason={reason}")
+            if budget is not None:
+                budget.ensure_open()
+            if SEARCH_PROVIDER_POLICY.fallback != "tavily" or not TAVILY_API_KEY or not str(TAVILY_API_KEY).strip():
+                log("SEARCH_PROVIDER evidence=none")
+                return "unavailable", []
+            log("SEARCH_PROVIDER fallback_selected=tavily")
+            single_attempt_fallback = True
+            # Carry the same effective allowlist onto the fallback request,
+            # including site: operators removed by query simplification.
+            search_domains = restriction_domains
+
         # Under a request budget every Tavily request goes through Kalillac's
         # own bounded transport; the SDK client is used only without one.
         budget = current_budget()
@@ -1235,7 +1345,7 @@ def run_web_search(query, include_domains=None):
             TavilyClient(
                 api_key=TAVILY_API_KEY
             )
-            if budget is None
+            if budget is None and not single_attempt_fallback
             else None
         )
 
@@ -1275,6 +1385,8 @@ def run_web_search(query, include_domains=None):
             if domains:
                 search_args["include_domains"] = domains[:5]
 
+            if single_attempt_fallback:
+                return _post_single_search("tavily", search_args)
             if budget is None:
                 return client.search(**search_args)
 
@@ -1331,7 +1443,7 @@ def run_web_search(query, include_domains=None):
                 # ordinary searches keep the existing compact 800-char bound.
                 content_limit = (
                     1600
-                    if technical_verification_search
+                    if technical_verification_search or (single_attempt_fallback and news_freshness_search)
                     else 800
                 )
                 content = search_content[:content_limit]
@@ -1347,7 +1459,11 @@ def run_web_search(query, include_domains=None):
                 score = item.get("score")
 
                 if title and url:
-                    if news_freshness_search:
+                    if single_attempt_fallback and (
+                        not search_content or not search_providers.allowed_url(url, restriction_domains)
+                    ):
+                        continue
+                    if news_freshness_search and not single_attempt_fallback:
                         # Strict current-news retrieval uses the search result
                         # only for discovery/metadata. Do not trust its content
                         # chunk because Tavily may return navigation, related
@@ -1487,6 +1603,7 @@ def run_web_search(query, include_domains=None):
             requested_domains
             and results
             and not use_advanced
+            and not single_attempt_fallback
         ):
             primary_hosts = set()
 
@@ -1544,12 +1661,14 @@ def run_web_search(query, include_domains=None):
                             results = retry_results
 
         if not results:
+            log("SEARCH_PROVIDER evidence=none reason=no_evidence")
             if coverage_exhausted is not None:
                 # Exhaustion never turns into "no results found".
                 raise coverage_exhausted
 
             return "unavailable", []
 
+        log(f"SEARCH_PROVIDER evidence=tavily fallback_used={str(single_attempt_fallback).lower()}")
         # Keep downstream prompt size bounded.
         return (
             "partial" if coverage_exhausted is not None else "ok",
@@ -1563,6 +1682,7 @@ def run_web_search(query, include_domains=None):
         raise
 
     except Exception as e:
+        log("SEARCH_PROVIDER evidence=none reason=provider_or_transport_failure")
         print(
             f"SEARCH ERROR: {type(e).__name__}"
         )
@@ -2103,6 +2223,7 @@ def current_runtime_configuration():
         "scope": "current application process",
         "model": OPENAI_MODEL,
         "reasoning_effort": OPENAI_REASONING_EFFORT,
+        "web_search_policy": SEARCH_PROVIDER_POLICY.facts(),
         "native_tool_routing_enabled": bool(V31_NATIVE_TOOL_ROUTING),
         "native_tool_routes": sorted(V31_NATIVE_TOOL_ROUTES),
         "limits": {
@@ -2140,6 +2261,7 @@ def render_current_runtime_configuration():
           "application-enforced limits remain in force. These facts describe "
           "the current application process, not a live deployment check or "
           "proof of which provider handled a completed response."
+        + " " + SEARCH_PROVIDER_POLICY.context()
     )
 
 
@@ -2155,7 +2277,7 @@ def runtime_configuration_context():
 def render_kalillac_facts():
     """Render the current source of truth for model-backed self-description."""
 
-    a = KALILLAC_SELF_KNOWLEDGE
+    a = _search_provider_fact_values(KALILLAC_SELF_KNOWLEDGE)
 
     sections = [
         ("IDENTITY", a["identity"]),
@@ -2256,11 +2378,11 @@ def render_kalillac_code_reference_facts():
 - Nginx terminates the separate Cloudflare-to-origin TLS connection using a Cloudflare Origin CA certificate. Nginx also listens on HTTP :80, but that is not the verified production Cloudflare origin path.
 - /api/chat validates message/history/session ID and resolves temporary session state in server RAM. A legacy classifier still runs as a transitional gate; selected semantic routes enter the V31 native tool path ({OPENAI_MODEL}), while deterministic/application-controlled routes remain outside it.
 - Direct/no-model: deterministic calculator, session-memory writes, available temporary-state answers, and no-file-access response.
-- V31 native search: the model may request search_web; application code validates the tool call, enforces search controls, executes Tavily, returns the results to the model as untrusted data, and application code owns final source-link rendering.
+- V31 native search: the model may request search_web; application code validates the tool call, enforces search controls, executes {search_provider_label()}, returns the results to the model as untrusted data, and application code owns final source-link rendering.
 - Selected semantic requests may be answered directly by the model or may use an approved native tool such as get_kalillac_runtime_facts. Routes not yet migrated continue through the legacy route-specific pipeline.
 - Provider behavior: every model request goes to OpenAI {OPENAI_MODEL}; there is no automatic fallback model or provider. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error. Only if the model breaks the native tool protocol does chat continue once through the legacy pipeline, which calls the same OpenAI model.
 - No account or intentionally persistent user-facing chat history/profile. Conversation state is temporary server-side RAM keyed by temporary ID; entries may remain until capacity eviction or service restart. The current web frontend keeps the temporary session identifier only in page memory, so refresh/reload resets the browser-side identifier and the refreshed page does not reconnect to the prior temporary session state. The old server RAM entry may still remain until capacity eviction or service restart.
-- OpenAI receives inference data for every model request; Tavily receives search data only when search runs and does not generate answers. Provider retention/logging/storage/training/analytics and absence of user text from logs are not established by the application architecture alone.
+- OpenAI receives inference data for every model request; {search_provider_label()} receives search data only when search runs and does not generate answers. Provider retention/logging/storage/training/analytics and absence of user text from logs are not established by the application architecture alone.
 - Do not infer RAG/Chroma/vector DB, per-user containers/VMs/filesystems, hosting scale, audit/certification status, or security guarantees."""
 
 def get_recent_user_messages(history, limit=3):
@@ -2770,6 +2892,8 @@ def get_canonical_self_knowledge_response(message):
             "a temporary model-provider-unavailable error. Tavily is used "
             "only for live web search and does not generate answers."
         )
+    if reply is not None:
+        reply = _search_provider_text(reply)
     if reply is not None and family in {
         "how_it_works", "difference", "identity", "model", "compound",
     }:
@@ -6126,7 +6250,7 @@ REPAIR RULES:
 - Preserve the existing provider invocation and exception-handling structure unless the user's request specifically requires changing it.
 - Do not introduce new databases, services, provider claims, Kalillac architecture claims, or API fields merely to perform the repair.
 - Keep temporary server-side session state bounded with explicit capacity or eviction.
-- When describing current V31 native search, preserve model tool decision -> application validation -> Tavily -> returned search data -> application-owned source rendering.
+- When describing current V31 native search, preserve model tool decision -> application validation -> {search_provider_label()} -> returned search data -> application-owned source rendering.
 - Clearly label any unspecified implementation mechanism with a concise code comment such as: # Example implementation choice: ...
 - Keep the result complete, syntactically valid, and directly runnable.
 """
@@ -8499,7 +8623,7 @@ def build_messages(message, history, route, memory):
             "idea conditionally, such as `consider X if it is not already present`, or say the "
             "current status must be verified first.\n"
           + "- On privacy, never say all conversation data stays only in RAM. OpenAI receives "
-            "information needed for inference, and Tavily receives information needed when "
+            f"information needed for inference, and {search_provider_label()} receives information needed when "
             "live search runs.\n"
           + "- Do not claim user text is retained only for immediate processing, cannot appear "
             "in logs, or is immediately erased after a response. Temporary session entries may "
@@ -8702,17 +8826,17 @@ RULES:
   - Kalillac already exposes GET /api/health as its minimal liveness endpoint. A recommendation for richer readiness, dependency, or provider health monitoring must be described as expanding the existing health capability, not adding Kalillac's first health endpoint.
   - Kalillac's production session identifier is already an opaque, unguessable CSPRNG token generated with secrets.token_urlsafe(32), not derived from IP address, user agent, timestamp, or browser properties. HMAC is not encryption; do not describe an HMAC as encrypting or anonymizing this token.
   - Kalillac has no automatic model fallback: every model request goes to OpenAI {OPENAI_MODEL}. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error; do not describe any other model or provider as a backup.
-  - On privacy, do not say all conversation context or all user data stays only in RAM. OpenAI receives information needed for inference; Tavily receives information needed when live search runs.
+  - On privacy, do not say all conversation context or all user data stays only in RAM. OpenAI receives information needed for inference; {search_provider_label()} receives information needed when live search runs.
   - Do not claim that Kalillac retains user text only for immediate processing, immediately erases it after a response, never places it in logs, or has no database/logging of any kind. Temporary session entries may remain in RAM until capacity eviction or service restart, and absence of user text from operational logs is not established.
   - Do not claim the design is easier to audit, independently auditable, or objectively more secure merely because sessions are RAM-backed, accounts are not required, or persistent user-facing history is absent.
   - For live search, say retrieved source links are included with successful live-search responses. Do not broaden that into `sources are always shown`.
-  - Do not state or imply that OpenAI or Tavily trains on user conversations. Their retention, deletion, logging, storage, training, and analytics practices are not established by Kalillac's application architecture and require separate current verification.
+  - Do not state or imply that OpenAI or {search_provider_label()} trains on user conversations. Their retention, deletion, logging, storage, training, and analytics practices are not established by Kalillac's application architecture and require separate current verification.
 - Answer every explicit part of the user's current Kalillac question. Do not silently omit one requested part because another part is more detailed.
   - If the user asks which AI, LLM, model, or provider Kalillac uses, state the verified current model and that there is no automatic fallback model or provider, from the established facts. Do not imply that the model identity is undisclosed.
 - Answer the user's actual question; do not dump unrelated facts.
 - When describing architecture, preserve the established sequence and do not invent additional named backend services, layers, or components.
 - A behavior implemented in code is not automatically a separate backend service.
-  - For a successful live-search request, preserve this sequence: Tavily search -> retrieved search context -> OpenAI inference -> response cleanup -> append Tavily source links -> final response.
+  - For a successful live-search request, preserve this sequence: {search_provider_label()} search -> retrieved search context -> OpenAI inference -> response cleanup -> append {search_provider_label()} source links -> final response.
 - Do not describe Boolean/symbolic logic as a direct/no-model path.
   - Every model request goes to OpenAI {OPENAI_MODEL}; there is no application-level model fallback chain. If OpenAI fails, the request ends with a temporary unavailable error.
 - If asked what makes Kalillac different or unique, answer at the product level first: privacy-first design, no-account access, temporary RAM-backed session state, controlled routing, deterministic handling where appropriate, sourced live search, direct/helpful response design, and transparency about limits and necessary third-party processing.
@@ -9044,7 +9168,7 @@ REFERENCE RULES:
 - Build a NEW illustrative implementation from only the verified behavior above; never claim it is Kalillac's exact/private source.
 - Never attribute unspecified components, schemas, persistence, lifecycle, logging/provider behavior, deployment, audit, or security properties to Kalillac.
 - Reasonable details needed by the NEW backend are allowed; when relevant, label an unverified choice in a code comment as an example implementation choice.
-- For V31 native search, preserve this order: model tool decision -> application validation -> Tavily -> search results returned to the model as untrusted data -> application-owned source rendering. Do not describe current V31 native search as passing results to any model other than {OPENAI_MODEL}.
+- For V31 native search, preserve this order: model tool decision -> application validation -> {search_provider_label()} -> search results returned to the model as untrusted data -> application-owned source rendering. Do not describe current V31 native search as passing results to any model other than {OPENAI_MODEL}.
 - Never use eval() or exec() for arithmetic, expression parsing, or request handling; use explicit parsing/allowlisted operations.
 - Temporary server-side session state must be bounded with explicit capacity/eviction, never an unbounded global dictionary. Do not call Kalillac's temporary state a cache or claim refresh/tab/browser/session end erases it.
 - Use only response fields needed by the NEW implementation; do not imply Kalillac uses that schema.
@@ -9356,7 +9480,7 @@ Rules:
     prompt = apply_kalillac_voice_and_format(prompt, route)
 
     return [
-        SystemMessage(content=system_prompt),
+        SystemMessage(content=_search_provider_text(system_prompt)),
         HumanMessage(content=prompt),
     ]
 
@@ -9577,10 +9701,11 @@ def _v31_runtime_facts():
         primary_provider="OpenAI",
         primary_model=OPENAI_MODEL,
         reasoning_effort=OPENAI_REASONING_EFFORT,
-        web_search_provider="Tavily",
+        web_search_provider=SEARCH_PROVIDER_POLICY.primary.title(),
     )
 
     facts = build_runtime_facts(config)
+    facts["web_search_policy"] = SEARCH_PROVIDER_POLICY.facts()
 
     runtime = current_runtime_configuration()
     facts["routing_mode"] = "transitional_v31"
@@ -9631,8 +9756,8 @@ def _v31_runtime_facts():
             f"{OPENAI_MODEL} decides whether search_web is needed",
             "application validates the tool request",
             "application enforces search limits",
-            "application calls Tavily",
-            "Tavily results return to the model as untrusted data",
+            _search_provider_text("application calls Tavily"),
+            _search_provider_text("Tavily results return to the model as untrusted data"),
             "the model generates the answer",
             "application owns final source-link rendering",
         ],
@@ -9754,7 +9879,7 @@ def _run_v31_native_tool_chat(
     current_date = current_clock.date().isoformat()
 
     instructions = (
-        SYSTEM_PROMPT.strip()
+        _search_provider_text(SYSTEM_PROMPT).strip()
         + "\n\n"
         + render_current_time_context(current_clock)
         + "\n\n"
@@ -10591,7 +10716,7 @@ Rules:
 
             response = invoke_llm(
                 [
-                    SystemMessage(content=SYSTEM_PROMPT),
+                    SystemMessage(content=_search_provider_text(SYSTEM_PROMPT)),
                     HumanMessage(content=web_prompt),
                 ]
             )
