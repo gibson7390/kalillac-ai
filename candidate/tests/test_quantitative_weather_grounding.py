@@ -764,3 +764,130 @@ def test_timezone_os_error_from_clock_conversion_is_not_swallowed():
             raise OSError("Unrelated clock-conversion failure")
     with pytest.raises(OSError, match="clock-conversion"):
         app._location_dates_for_request(Clock(), "timezone Asia/Tokyo")
+
+
+# --- exact live footer examples and evidence-backed plain citation names ---
+
+LIVE_WEATHER_FOOTER = "Sources: WeatherAPI Terre Haute observation; National Weather Service Terre Haute point forecast."
+LIVE_LIBRARY_FOOTER = "Source: [Vigo County Public Library \u2014 Main Library](https://vigocounty.librarycalendar.com/branch/main-library)"
+LIVE_FOOTER_CASES = [
+    ("weather", LIVE_WEATHER_FOOTER, [
+        {"title":"WeatherAPI Terre Haute observation", "url":"https://weather.test/observation", "published":"", "score":None, "content":"A dated observation."},
+        {"title":"National Weather Service Terre Haute point forecast", "url":"https://weather.test/forecast", "published":"", "score":None, "content":"A separately dated forecast."},
+    ]),
+    ("library", LIVE_LIBRARY_FOOTER, [
+        {"title":"Vigo County Public Library \u2014 Main Library", "url":"https://vigocounty.librarycalendar.com/branch/main-library", "published":"", "score":None, "content":"Public branch information."},
+    ]),
+]
+
+
+@pytest.mark.parametrize("case,footer,sources", LIVE_FOOTER_CASES)
+def test_live_source_footer_examples_direct(case, footer, sources):
+    answer = "Keep the complete answer.\n\n" + footer
+    assert app.strip_model_source_footer(answer, sources=sources) == "Keep the complete answer."
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("case,footer,sources", LIVE_FOOTER_CASES)
+def test_live_source_footer_examples_through_actual_chat(pipeline, monkeypatch, native, case, footer, sources):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    message = "Search the web for weather at the reported location." if case=="weather" else "Search the web for the public library branch page."
+    pipeline["search"] = True
+    pipeline["query"] = "weather at the reported location" if case=="weather" else "public library main branch"
+    pipeline["results"] = copy.deepcopy(sources)
+    body = "Keep the complete answer, including 100 and \\(f(x)=x^2\\). See [the page](" + sources[0]["url"] + ") for details."
+    pipeline["text"] = body + "\n\n" + footer
+    answer = app.chat(message, [], session_id="live-source-footer")
+    assert answer == body + "\n\n" + _expected_source_list(sources)
+    assert len(pipeline["searches"]) == 1 and len(pipeline["payloads"]) == (2 if native else 1)
+    assert pipeline["results"] == sources
+    assert answer.count("**Sources**") == 1 and "\nSource:" not in answer and "\nSources:" not in answer
+    if native:
+        result = next(json.loads(i["output"]) for i in pipeline["payloads"][-1]["input"] if i.get("type")=="function_call_output")
+        assert result["results"] == [{"title":s["title"],"url":s["url"],"published":s["published"],"content":s["content"]} for s in sources]
+
+
+PRESENTATION_PRESERVED_ANSWERS = [
+    "Sources: the observation and forecast represent different time periods.",
+    "Source: [Main Library](https://vigocounty.librarycalendar.com/branch/main-library) explains its services.",
+    "The explanation cites [Main Library](https://vigocounty.librarycalendar.com/branch/main-library) inline.",
+    "Sources: WeatherAPI Terre Haute observation; an unidentified reference.",
+    "Sources: WeatherAPI Terre Haute observation; National Weather Service Terre Haute point forecast. These may be outdated.",
+    "Source: 100",
+    "Source: f(x)=x^2",
+    "Sources: [Reference](https://example.test)\n\n100",
+    "Use `Source: [Main Library](https://vigocounty.librarycalendar.com/branch/main-library)` as a literal example.",
+    "Source: `WeatherAPI Terre Haute observation`",
+    "Use ``Sources: WeatherAPI Terre Haute observation; `literal` `` as an example.",
+    "Literal indented code:\n\n    " + LIVE_WEATHER_FOOTER,
+    "Literal indented code:\n\n\t" + LIVE_LIBRARY_FOOTER,
+    "Literal code:\n\n```markdown\n" + LIVE_WEATHER_FOOTER + "\n```",
+    "Literal code:\n\n~~~markdown\n" + LIVE_LIBRARY_FOOTER + "\n~~~",
+    "Literal unfinished code:\n\n```markdown\n" + LIVE_LIBRARY_FOOTER,
+    "\\[\n" + LIVE_WEATHER_FOOTER,
+    "\\(\n" + LIVE_LIBRARY_FOOTER,
+    "$$\n" + LIVE_WEATHER_FOOTER + "\n$$",
+    "\\[\n" + LIVE_LIBRARY_FOOTER + "\n\\]",
+]
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("body", PRESENTATION_PRESERVED_ANSWERS)
+def test_evidence_aware_footer_preserves_answer_code_and_math(pipeline, monkeypatch, native, body):
+    pipeline["results"] = copy.deepcopy(LIVE_FOOTER_CASES[0][2] + LIVE_FOOTER_CASES[1][2])
+    pipeline["text"] = body
+    assert _weather_chat(pipeline, monkeypatch, native) == body + "\n\n" + _expected_source_list(pipeline["results"])
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("footer", [LIVE_WEATHER_FOOTER, LIVE_LIBRARY_FOOTER, "Sources: [Reference](https://example.test)"])
+def test_answers_without_application_sources_keep_their_citations(pipeline, monkeypatch, native, footer):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    body = "The bibliographic reference is below.\n\n" + footer
+    pipeline["text"] = body
+    assert app.chat("Explain a bibliographic reference.", [], session_id="no-source-list") == body
+    assert pipeline["searches"] == [] and len(pipeline["payloads"]) == 1
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_whole_fenced_plain_source_example_stays_code(pipeline, monkeypatch, native):
+    pipeline["results"] = copy.deepcopy(LIVE_FOOTER_CASES[0][2])
+    body = "```markdown\n" + LIVE_WEATHER_FOOTER + "\n```"
+    pipeline["text"] = body
+    assert _weather_chat(pipeline, monkeypatch, native) == body + "\n\n" + _expected_source_list(pipeline["results"])
+
+
+def test_plain_footer_requires_known_complete_source_titles():
+    answer = "Answer.\n\n" + LIVE_WEATHER_FOOTER
+    assert app.strip_model_source_footer(answer, sources=[{"title":"Other page", "url":"https://other.test"}]) == answer
+    assert app.strip_model_source_footer(answer) == answer
+    for title in ["100", "f(x)=x^2", "[0,2]"]:
+        text = "Source: " + title
+        assert app.strip_model_source_footer(text, sources=[{"title":title, "url":"https://math.test"}]) == text
+
+
+def test_plain_citation_matching_is_general_and_handles_mixed_reference_syntax():
+    sources = [{"title":"Example Observatory measurement ledger", "url":"https://example.test/ledger"}]
+    answer = "Answer.\n\nSources: Example Observatory measurement ledger; [Another](https://example.test/other)."
+    assert app.strip_model_source_footer(answer, sources=sources) == "Answer."
+
+
+
+def test_native_continuation_keeps_fenced_plain_citation_example(pipeline, monkeypatch):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
+    pipeline["search"] = True
+    pipeline["results"] = copy.deepcopy(LIVE_FOOTER_CASES[0][2])
+    body = "```markdown\n" + LIVE_WEATHER_FOOTER + "\n```"
+    pipeline["text"] = body
+    history = [{"role":"user", "content":"Explain weather source references."},
+               {"role":"assistant", "content":app.mark_incomplete_reply("A weather citation list can be written as")}]
+    assert app.is_explanation_continuation_request("continue", history)
+    answer = app.chat("continue", history, session_id="citation-code-continuation")
+    assert answer == body + "\n\n" + _expected_source_list(pipeline["results"])
+    assert len(pipeline["searches"]) == 1 and len(pipeline["payloads"]) == 2
+
+
+def test_source_cleanup_without_replacement_preserves_direct_answer():
+    for footer in [LIVE_WEATHER_FOOTER, LIVE_LIBRARY_FOOTER, "Sources: [Reference](https://example.test)"]:
+        answer = "Answer.\n\n" + footer
+        assert app.strip_model_source_footer(answer, sources=[]) == answer

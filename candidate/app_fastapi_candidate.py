@@ -5381,14 +5381,27 @@ def _map_outside_code_fences(text, transform):
     )
 
 
-def strip_model_source_footer(reply):
-    """Remove only a trailing citation-only Sources footer outside code.
+def strip_model_source_footer(reply, sources=None):
+    """Remove only a trailing citation-only Source/Sources footer.
 
-    Preserve source-like prose, mathematics, and literal source lists in
-    closed or unfinished fences. A heading followed by substantive text is
-    part of the answer, not a removable footer.
+    Plain names must match explicitly supplied retrieved titles in full.
+    Empty sources means no application list will replace model citations.
+    Preserve prose, math and literal lists in code; ambiguous text stays.
     """
     text = str(reply)
+    if sources is not None and not sources:
+        return text
+
+    def plain_reference_key(value):
+        if not isinstance(value, str) or re.search(r"[\\$`{}\[\]<>=+^*/()]", value):
+            return None
+        value = re.sub(r"^[ \t]*(?:[-*\u2022][ \t]+|[0-9]+[.)][ \t]+)", "", value)
+        if sum(char.isalpha() for char in value) < 2:
+            return None
+        return re.sub(r"\s+", " ", value).casefold().strip(" \t,;:.")
+
+    known_titles = {plain_reference_key(item.get("title")) for item in sources or [] if isinstance(item, dict)}
+    known_titles.discard(None)
     lines = text.splitlines(keepends=True)
     protected = []
     marker = None
@@ -5436,8 +5449,8 @@ def strip_model_source_footer(reply):
             protected[index] = in_math or line.startswith(("    ", "\t"))
 
     heading = re.compile(
-        r"^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*Sources:?\*\*:?[ \t]*"
-        r"|Sources(?:[ \t]*:[ \t]*|[ \t]+|$))(.*?)[ \t]*$",
+        r"^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*Sources?:?\*\*:?[ \t]*"
+        r"|Sources(?:[ \t]*:[ \t]*|[ \t]+|$)|Source(?:[ \t]*:[ \t]*|$))(.*?)[ \t]*$",
         re.IGNORECASE,
     )
     citation = re.compile(
@@ -5470,9 +5483,12 @@ def strip_model_source_footer(reply):
             residue, count = citation.subn("", content)
             citation_count += count
             if residue.strip(" \t\r\n-*\u00b7\u2022|,;:.()"):
-                break
+                references = [part.strip() for part in re.split(r"[;|\u00b7\u2022]", residue) if part.strip(" \t,;:.")]
+                if not references or any(plain_reference_key(part) not in known_titles for part in references):
+                    break
+                citation_count += len(references)
         else:
-            if citation_count or not has_content:
+            if citation_count or (not has_content and re.search(r"\bSources\b", line, re.IGNORECASE)):
                 return "".join(lines[:start]).rstrip()
     return text
 
@@ -5571,7 +5587,7 @@ PROSE_FENCE_GUARD_ROUTES = {
 }
 
 
-def unwrap_accidental_prose_fence(reply, route):
+def unwrap_accidental_prose_fence(reply, route, sources=None):
     """Remove only a whole-response fence explicitly labeled as prose.
 
     Legitimate code fences, nested fences, unlabeled fences, and code/revision
@@ -5602,7 +5618,8 @@ def unwrap_accidental_prose_fence(reply, route):
     body = "\n".join(lines[1:-1]).strip()
     # A literal source-list example is copy-paste content. Unwrapping its
     # Markdown fence would expose it to application source-footer cleanup.
-    if strip_model_source_footer(body) != body:
+    if (strip_model_source_footer(body) != body
+            or (sources and strip_model_source_footer(body, sources=sources) != body)):
         return reply
     return body
 
@@ -10252,10 +10269,10 @@ NATIVE SEARCH EVIDENCE RECOVERY:
         )
 
         if explanation_continuation:
-            reply = unwrap_accidental_prose_fence(reply, "followup")
+            reply = unwrap_accidental_prose_fence(reply, "followup", sources=search_results)
 
         # Sources have exactly one owner: Kalillac application code.
-        reply = strip_model_source_footer(reply)
+        reply = strip_model_source_footer(reply, sources=search_results)
 
         if result.incomplete:
             print(
@@ -10908,8 +10925,8 @@ Rules:
 
             reply = extract_response_text(response.content)
             reply = clean_ai_reply(reply)
-            reply = unwrap_accidental_prose_fence(reply, route)
-            reply = strip_model_source_footer(reply)
+            reply = unwrap_accidental_prose_fence(reply, route, sources=results)
+            reply = strip_model_source_footer(reply, sources=results)
 
             if is_incomplete_model_response(response):
                 reply = mark_incomplete_reply(reply)
