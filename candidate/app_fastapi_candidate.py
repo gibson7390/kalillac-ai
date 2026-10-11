@@ -7,6 +7,7 @@ import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -8104,6 +8105,46 @@ def build_web_search_query(message, history=None):
 
 
 
+def _search_calendar_dates(text):
+    """Recognize calendar dates, not version numbers, for query provenance."""
+    months = ("january", "february", "march", "april", "may", "june",
+              "july", "august", "september", "october", "november", "december")
+    names = "|".join(name + "|" + name[:3] + r"\.?" for name in months)
+    patterns = [
+        r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b",
+        r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>\d{4})\b",
+        rf"\b(?P<month>{names})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{{4}}))?\b",
+        rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{names})(?:,?\s+(?P<year>\d{{4}}))?\b",
+    ]
+    dates = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, str(text), re.IGNORECASE):
+            fields = match.groupdict()
+            month = fields["month"].lower().rstrip(".")
+            month = int(month) if month.isdigit() else next(i + 1 for i, name in enumerate(months) if name[:3] == month[:3])
+            year = int(fields["year"]) if fields["year"] else None
+            day = int(fields["day"])
+            try:
+                datetime(year or 2000, month, day)
+            except ValueError:
+                continue
+            dates.add((year, month, day))
+    return dates
+
+
+def ground_relative_search_query(query, user_task):
+    """Replace an invented dated query with the existing user-derived task.
+
+    This operates after the native model selects search; it changes neither
+    routing nor attempts. Explicit user dates retain their supplied wording.
+    """
+    if re.search(r"\b(?:today|tonight|tomorrow|right now|current|currently|latest|this morning|this evening|this week)\b", str(user_task), re.IGNORECASE):
+        if _search_calendar_dates(query) - _search_calendar_dates(user_task):
+            return str(user_task)
+    return query
+
+
+
 def requires_web_verification(message, history=None):
     """True when unverified model memory is not acceptable."""
     return get_web_verification_subject(message, history) is not None
@@ -8483,20 +8524,66 @@ def classify_request(message, history):
     return "general"
 
 
-def render_current_time_context(now=None):
+def _location_dates_for_request(now, message="", results=None):
+    """Convert only explicit IANA zones; never infer a zone from a city or clock.
+
+    Structured source zones are attributed to that source's location, not
+    silently promoted to the requested location. Prose/fetch dates are ignored.
+    """
+    candidates = []
+    user_zones = re.findall(r"(?<![\w/])[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)+", str(message))
+    user_zones += re.findall(r"\b(?:timezone|time zone|tz_id)\s*[:=]?\s*(UTC)\b", str(message))
+    for zone in dict.fromkeys(user_zones):
+        candidates.append((zone, {"basis": "explicit user timezone"}))
+        if len(candidates) >= MAX_SEARCH_RESULTS:
+            break
+    for item in (results or [])[:MAX_SEARCH_RESULTS]:
+        try:
+            data = json.loads(item.get("content", ""))
+        except (ValueError, TypeError):
+            continue
+        location = data.get("location") if isinstance(data, dict) else None
+        if not isinstance(location, dict):
+            continue
+        zone = location.get("tz_id") or location.get("timezone")
+        if isinstance(zone, str):
+            candidates.append((zone, {"basis": "structured source location",
+                "source_url": item.get("url"), "location": str(location.get("name", ""))[:160]}))
+    dates = []
+    for zone, provenance in candidates:
+        try:
+            location_zone = ZoneInfo(zone)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            continue
+        try:
+            local = now.astimezone(location_zone)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+        dates.append({"timezone": zone, "local_date": local.date().isoformat(),
+                      "local_time": local.isoformat(), **provenance})
+    return dates
+
+
+def render_current_time_context(now=None, message="", results=None):
     """One explicit clock reference for native and legacy model prompts."""
     if now is None:
         now = datetime.now(timezone.utc)
     if now.utcoffset() is None:
         raise ValueError("current clock must be timezone-aware")
     now = now.astimezone(timezone.utc)
+    location_dates = _location_dates_for_request(now, message, results)
+    location_context = ("APPLICATION-CALCULATED LOCATION DATES:\n" + json.dumps(location_dates, ensure_ascii=False)
+                        if location_dates else "TARGET LOCATION DATE: unknown (no usable explicit IANA timezone).")
     return f'''CURRENT REQUEST TIME (UTC):
 {now.isoformat()}
 Timezone: UTC
 - This is the current request clock, distinct from observation/update, forecast, publication, and retrieval timestamps. The search_date field, when present, is the retrieval calendar date in UTC.
 - For location-specific "today", convert this clock using the reliable location timezone supplied by the user or evidence. Do not use the UTC or server calendar date as that location's date.
 - If the location timezone is unknown or unverified, do not assume the user or location shares the server timezone; use explicit forecast dates rather than inventing a local "today".
-- Do not substitute a report's localtime or an old report clock for this current clock. A report may supply a reliable timezone for conversion while its recorded localtime and observation/update timestamps are older.'''
+- Do not substitute a report's localtime or an old report clock for this current clock. A report may supply a reliable timezone for conversion while its recorded localtime and observation/update timestamps are older.
+{location_context}
+- Use application-calculated local dates only for their stated user timezone or source location. A source's timezone does not prove that it describes the requested location. An explicit user timezone defines the requested local clock; another source location does not override it.
+- If no applicable location date is calculated, do not introduce a local calendar date or weekday for today. Report explicit source dates and freshness limits instead. These current local clocks do not refresh any observation or forecast.'''
 
 
 QUANTITATIVE_GROUNDING_RULES = r"""QUANTITATIVE GROUNDING:
@@ -8511,6 +8598,7 @@ WEB_EVIDENCE_TIME_RULES = """WEATHER AND EVIDENCE TIMES:
 - For weather measurements, identify the applicable observation/update time when supplied, including the supplied date and timezone. Distinguish observation/update time, forecast update time, page publication time, and retrieval/search time; one does not establish another.
 - In WeatherAPI evidence, current.last_updated is the reading's update time; location.localtime is the location's clock time, not the observation update time. Do not substitute it for last_updated or invent a timezone when none is supplied.
 - Do not combine differently timed observations as though they describe one current measurement. Keep each temperature, condition, wind direction, and wind speed attached to its own source and observation time. Prefer the most recent applicable observation supported by the evidence, and label older observations as such when useful.
+- Keep each value attached to its source label and time period: current, tonight, tomorrow, observation, and forecast are distinct. Preserve those associations even when values differ; do not transfer a current reading into a tonight/tomorrow forecast or a forecast into an observation. If a period or date is ambiguous, quote its supplied label and state the limitation rather than relabeling it.
 - A forecast update does not refresh an older observation. A long-range or monthly outlook is not a current observation. Page publication or retrieval today does not establish that the measurement was taken today.
 - When freshness is unavailable, state that limitation naturally while providing useful supported information; do not assert an unverified reading is current or refuse to report supported data solely because its observation time is missing.
 - After a successful search, never write a source footer or Sources section, including inline Sources: links. Kalillac appends the application-owned source list from the returned search URLs."""
@@ -9475,7 +9563,7 @@ Rules:
     if route not in {"code", "revision", "code_continuation", "calculator"}:
         prompt += "\n\n" + QUANTITATIVE_GROUNDING_RULES
         prompt += "\n\n" + WEB_EVIDENCE_TIME_RULES
-        prompt += "\n\n" + render_current_time_context()
+        prompt += "\n\n" + render_current_time_context(message=message)
 
     prompt = apply_kalillac_voice_and_format(prompt, route)
 
@@ -9881,7 +9969,7 @@ def _run_v31_native_tool_chat(
     instructions = (
         _search_provider_text(SYSTEM_PROMPT).strip()
         + "\n\n"
-        + render_current_time_context(current_clock)
+        + render_current_time_context(current_clock, message=build_web_search_query(message, history))
         + "\n\n"
         + V31_NATIVE_TOOL_POLICY
         + "\n\n" + QUANTITATIVE_GROUNDING_RULES
@@ -9981,7 +10069,9 @@ def _run_v31_native_tool_chat(
                 "results": [],
             }
 
-        query = call.arguments["query"]
+        query = ground_relative_search_query(
+            call.arguments["query"], build_web_search_query(message, history),
+        )
 
         # A user-specified public domain always takes precedence.
         # Otherwise, apply the narrow first-party source policy after
@@ -10019,6 +10109,11 @@ def _run_v31_native_tool_chat(
             "status": "ok",
             "coverage": "limited" if status == "partial" else "complete",
             "search_date": current_date,
+            "search_date_timezone": "UTC",
+            "request_time_utc": current_clock.isoformat(),
+            "location_time_context": render_current_time_context(
+                current_clock, message=build_web_search_query(message, history), results=results,
+            ),
             "query": query,
             "results": [
                 {
@@ -10573,6 +10668,7 @@ def chat(message, history, request=None, session_id=None):
                 history,
             )
 
+            current_clock = datetime.now(timezone.utc)
             search_query = build_web_search_query(
                 message,
                 history,
@@ -10649,7 +10745,7 @@ You are Kalillac AI.
 The user asked a question that required a live web search. The search
 results below were genuinely retrieved just now.
 
-{render_current_time_context()}
+{render_current_time_context(current_clock, message=search_query, results=results)}
 
 VERIFICATION REQUIRED:
 {"yes" if verification_required else "no"}

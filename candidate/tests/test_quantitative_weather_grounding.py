@@ -47,7 +47,7 @@ def pipeline(monkeypatch):
         outputs = [item for item in payload["input"] if item.get("type") == "function_call_output"]
         if payload.get("tools") and state["search"] and not outputs:
             return {"output": [{"type": "function_call", "name": "search_web", "call_id": "weather-1",
-                                "arguments": json.dumps({"query": SEARCH_QUERY})}]}
+                                "arguments": json.dumps({"query": state.get("query", SEARCH_QUERY)})}]}
         return _response(state["text"])
 
     def fake_search(query, include_domains=None):
@@ -63,13 +63,15 @@ def pipeline(monkeypatch):
     monkeypatch.setattr(app, "run_web_search", fake_search)
     monkeypatch.setattr(app.urllib.request, "urlopen", refuse)
     monkeypatch.setattr(app, "SESSION_STATE", type(app.SESSION_STATE)())
+    state["model_response"] = fake_post
     return state
 
 
 def _provider_text(state):
     payload = state["payloads"][-1]
     return payload.get("instructions", "") + "\n" + "\n".join(
-        item.get("content", "") for item in payload["input"] if isinstance(item.get("content", ""), str)
+        item.get("content", item.get("output", "")) for item in payload["input"]
+        if isinstance(item.get("content", item.get("output", "")), str)
     )
 
 
@@ -471,3 +473,294 @@ def test_complete_calculus_fixture_and_existing_guidance_reach_provider(
     evidence_path = tmp_path / "actual-provider-payloads.json"
     evidence_path.write_text(json.dumps(pipeline["payloads"], indent=2), encoding="utf-8")
     print("CALCULUS_PAYLOAD_PATH=" + str(evidence_path))
+
+
+# --- deterministic local dates, native query dates and weather value ownership ---
+
+LIVE_BOUNDARY_CLOCK = RealDatetime(2026, 10, 11, 2, 28, 1, 83347, tzinfo=ClockTimezone.utc)
+_REAL_WEATHER_SEARCH = app.run_web_search
+
+
+@pytest.fixture
+def live_boundary_clock(monkeypatch):
+    class FixedDatetime(RealDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            return LIVE_BOUNDARY_CLOCK.astimezone(tz) if tz else LIVE_BOUNDARY_CLOCK.replace(tzinfo=None)
+    monkeypatch.setattr(app, "datetime", FixedDatetime)
+    return LIVE_BOUNDARY_CLOCK
+
+
+@pytest.mark.parametrize("clock,zone", [
+    (LIVE_BOUNDARY_CLOCK, "America/Indiana/Indianapolis"),
+    (LIVE_BOUNDARY_CLOCK, "America/Los_Angeles"),
+    (LIVE_BOUNDARY_CLOCK, "Asia/Tokyo"),
+    (RealDatetime(2027, 1, 1, 0, 10, tzinfo=ClockTimezone.utc), "America/New_York"),
+])
+def test_application_computes_explicit_iana_location_date(clock, zone):
+    context = app.render_current_time_context(clock, message="Use timezone " + zone)
+    local = clock.astimezone(ZoneInfo(zone))
+    assert clock.isoformat() in context and "Timezone: UTC" in context
+    assert '"timezone": "' + zone + '"' in context
+    assert '"local_date": "' + local.date().isoformat() + '"' in context
+    assert local.isoformat() in context
+    assert "APPLICATION-CALCULATED LOCATION DATES" in context
+
+
+@pytest.mark.parametrize("message,content", [
+    ("Weather today", "Timezone America/Indiana/Indianapolis; Current: 61 degrees"),
+    ("Weather today, timezone Not/AZone", '{}'),
+    ("Weather today, timezone EDT", '{"location":{"localtime":"2026-10-10 22:28"}}'),
+    ("Weather today", '{"location":{"tz_id":"Not/AZone"}}'),
+])
+def test_unavailable_timezone_does_not_create_a_local_date(message, content):
+    context = app.render_current_time_context(LIVE_BOUNDARY_CLOCK, message=message,
+        results=[{"url":"https://weather.test/report", "content":content}])
+    assert "TARGET LOCATION DATE: unknown" in context
+    assert '"local_date"' not in context
+    assert "Do not use the UTC or server calendar date" in context
+
+
+@pytest.mark.parametrize("original,model_query,expected", [
+    ("weather today", "weather October 11, 2026", "weather today"),
+    ("weather right now", "weather 2026-10-11", "weather right now"),
+    ("current weather", "weather 11 October 2026", "current weather"),
+    ("weather tonight", "weather Oct. 11 2026", "weather tonight"),
+    ("weather tomorrow", "weather 10/11/2026", "weather tomorrow"),
+    ("weather today and October 10, 2026", "weather October 11, 2026", "weather today and October 10, 2026"),
+    ("weather today and October 10, 2026", "weather 2026-10-10", "weather 2026-10-10"),
+    ("weather on October 11, 2026", "weather October 11, 2026", "weather October 11, 2026"),
+    ("weather today", "weather today", "weather today"),
+    ("current Python 3.11 release", "Python 3.11 current release site:docs.python.org", "Python 3.11 current release site:docs.python.org"),
+])
+def test_native_relative_query_guard_preserves_user_dates_and_other_query_text(original, model_query, expected):
+    assert app.ground_relative_search_query(model_query, original) == expected
+
+
+def _use_scripted_weather_transport(state, monkeypatch, provider):
+    from types import SimpleNamespace
+    from kalillac_routing import search_providers, tavily_transport
+    from kalillac_routing.provider_transport import TransportHolder
+    from kalillac_routing.request_limits import RequestLimits, TransportLimits
+    settings = TransportLimits(3, 1, 3, 0.02, 0.5, 1.0, 2.0)
+    limits = RequestLimits(45.0, 2.0, 6, 6, settings, 2097152, settings, 262144, 524288)
+    state["wire_searches"] = []
+
+    class ScriptTransport:
+        def __init__(self, **kwargs):
+            pass
+        def post_json(self, url, payload, *, headers, timeout, max_bytes, cancelled=None):
+            assert 0 < timeout <= 45 and max_bytes > 0
+            if url == app.OPENAI_RESPONSES_URL:
+                return state["model_response"](payload)
+            assert url == (search_providers.BRAVE_CONTEXT_URL if provider == "brave" else tavily_transport.SEARCH_URL)
+            state["wire_searches"].append(copy.deepcopy(payload))
+            if provider == "tavily":
+                return {"results": copy.deepcopy(state["results"])}
+            return {"grounding": {"generic": [
+                {"url":r["url"], "title":r["title"], "snippets":[r["content"]]} for r in state["results"]]}, "sources":{}}
+        def close(self, timeout):
+            return SimpleNamespace(clean=True)
+
+    monkeypatch.setattr(app, "run_web_search", _REAL_WEATHER_SEARCH)
+    monkeypatch.setattr(app, "_request_limits", limits)
+    monkeypatch.setattr(app, "_OPENAI_TRANSPORT", TransportHolder(factory=ScriptTransport))
+    monkeypatch.setattr(tavily_transport, "_SLOT", tavily_transport.TavilyTransportSlot(factory=ScriptTransport))
+    monkeypatch.setattr(app, "SEARCH_PROVIDER_POLICY", search_providers.SearchProviderPolicy(provider, "none"))
+    monkeypatch.setattr(app, "BRAVE_API_KEY", "offline-brave-placeholder")
+    monkeypatch.setattr(app, "TAVILY_API_KEY", "offline-tavily-placeholder")
+
+
+def _wire_weather_chat(state, monkeypatch, native, provider, message):
+    from kalillac_routing.request_budget import RequestBudget, budget_scope
+    _use_scripted_weather_transport(state, monkeypatch, provider)
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    state["search"] = True
+    assert app.classify_request(message, []) == "web_search"
+    budget = RequestBudget(duration_seconds=45, max_model_attempts=6, max_search_attempts=6)
+    with budget_scope(budget):
+        answer = app.chat(message, [], session_id="weather-date-wire")
+    assert budget.search_attempts == 1
+    assert budget.model_attempts == (2 if native else 1)
+    assert len(state["wire_searches"]) == 1
+    assert len(state["payloads"]) == (2 if native else 1)
+    assert all(p["store"] is False and p["model"] == app.OPENAI_MODEL
+               and p["reasoning"]["effort"] == app.OPENAI_REASONING_EFFORT for p in state["payloads"])
+    return answer
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("provider", ["brave", "tavily"])
+@pytest.mark.parametrize("zone", ["America/Indiana/Indianapolis", "Asia/Tokyo", None, "Not/AZone"])
+def test_local_date_metadata_through_actual_chat_and_scripted_transport(
+    pipeline, monkeypatch, live_boundary_clock, native, provider, zone,
+):
+    message = "Search the web for weather today at the reported location."
+    pipeline["query"] = "weather reported location October 11, 2026"
+    report = {"location":{"tz_id":zone,"localtime":"2026-10-01 02:00"},
+              "current":{"last_updated":"2026-10-01 01:45","temp_f":61},
+              "forecast":{"date":"2026-10-11"}}
+    pipeline["results"] = [{"title":"Weather report", "url":"https://weather.test/current", "content":json.dumps(report)}]
+    pipeline["text"] = "The report is older; its dated forecast does not establish current conditions."
+    answer = _wire_weather_chat(pipeline, monkeypatch, native, provider, message)
+    prompt = _provider_text(pipeline)
+    assert LIVE_BOUNDARY_CLOCK.isoformat() in prompt
+    if not native:
+        assert pipeline["results"][0]["content"] in prompt
+    if zone in {"America/Indiana/Indianapolis", "Asia/Tokyo"}:
+        local = LIVE_BOUNDARY_CLOCK.astimezone(ZoneInfo(zone))
+        assert local.isoformat() in prompt
+        assert local.date().isoformat() in prompt
+    else:
+        assert "TARGET LOCATION DATE: unknown" in prompt
+    if native:
+        output = next(json.loads(i["output"]) for i in pipeline["payloads"][-1]["input"] if i.get("type")=="function_call_output")
+        assert output["request_time_utc"] == LIVE_BOUNDARY_CLOCK.isoformat()
+        assert output["search_date_timezone"] == "UTC"
+        assert output["search_date"] == "2026-10-11"
+        assert output["query"] == message
+        assert json.loads(output["results"][0]["content"]) == report
+        assert "October 11" not in pipeline["wire_searches"][0].get("q", pipeline["wire_searches"][0].get("query"))
+    assert answer == pipeline["text"] + "\n\n" + _expected_source_list(pipeline["results"])
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_explicit_user_date_reaches_provider_without_reinterpretation(pipeline, monkeypatch, live_boundary_clock, native):
+    message = "Search the web for weather today and the forecast for October 12, 2026, timezone Asia/Tokyo."
+    pipeline["query"] = "weather today forecast October 12, 2026 Asia/Tokyo"
+    pipeline["results"] = [{"title":"Forecast", "url":"https://weather.test/forecast", "content":"Forecast dated October 12, 2026; observation time unavailable."}]
+    answer = _wire_weather_chat(pipeline, monkeypatch, native, "brave", message)
+    wire = pipeline["wire_searches"][0]["q"]
+    assert "October 12" in wire and "2026" in wire
+    assert LIVE_BOUNDARY_CLOCK.astimezone(ZoneInfo("Asia/Tokyo")).isoformat() in _provider_text(pipeline)
+    assert answer.startswith("Supported answer.")
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("provider", ["brave", "tavily"])
+def test_weather_labels_values_and_freshness_guidance_reach_actual_prompt(pipeline, monkeypatch, live_boundary_clock, native, provider):
+    content = "Current: 61\u00b0\nTonight: 57\u00b0\nTomorrow: 78\u00b0\nObservation and forecast update dates not supplied."
+    pipeline["results"] = [{"title":"Local forecast", "url":"https://weather.test/periods", "content":content}]
+    pipeline["text"] = "The excerpt labels current as 61\u00b0, tonight as 57\u00b0, and tomorrow as 78\u00b0. Applicable update dates were not supplied, so their freshness is unverified."
+    answer = _wire_weather_chat(pipeline, monkeypatch, native, provider, "Search the web for weather today.")
+    prompt = _provider_text(pipeline)
+    assert "Keep each value attached to its source label and time period" in prompt
+    assert "current, tonight, tomorrow, observation, and forecast" in prompt
+    assert "do not transfer" in prompt and "useful supported information" in prompt
+    if native:
+        output = next(json.loads(i["output"]) for i in pipeline["payloads"][-1]["input"] if i.get("type")=="function_call_output")
+        assert output["results"][0]["content"] == content
+    else:
+        assert content in prompt
+    # This scripted output is a formatting control, not proof of model adherence.
+    assert answer == pipeline["text"] + "\n\n" + _expected_source_list(pipeline["results"])
+
+
+
+def test_source_location_dates_are_attributed_and_do_not_override_user_timezone():
+    results = [
+        {"url":"https://weather.test/west", "content":json.dumps({"location":{"name":"West", "timezone":"America/Los_Angeles"}})},
+        {"url":"https://weather.test/east", "content":json.dumps({"location":{"name":"East", "tz_id":"Asia/Tokyo"}})},
+    ]
+    dates = app._location_dates_for_request(LIVE_BOUNDARY_CLOCK, "Weather today, timezone Europe/London", results)
+    assert dates[0]["basis"] == "explicit user timezone" and dates[0]["timezone"] == "Europe/London"
+    assert dates[0]["local_date"] == "2026-10-11"
+    assert dates[1]["source_url"] == results[0]["url"] and dates[1]["local_date"] == "2026-10-10"
+    assert dates[2]["source_url"] == results[1]["url"] and dates[2]["local_date"] == "2026-10-11"
+    context = app.render_current_time_context(LIVE_BOUNDARY_CLOCK, message="timezone Europe/London", results=results)
+    assert "another source location does not override it" in context
+
+
+def test_assistant_invented_date_cannot_authorize_a_native_query_date():
+    history = [{"role":"user", "content":"Search the web for weather today."},
+               {"role":"assistant", "content":"Sunday, October 11, 2026."}]
+    task = app.build_web_search_query("weather today", history)
+    assert "October 11" not in task
+    assert app.ground_relative_search_query("weather October 11, 2026", task) == task
+
+
+# --- timezone-data loader errors are unavailable information, not chat failures ---
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("provider", ["brave", "tavily"])
+@pytest.mark.parametrize("loader_error", [None, IsADirectoryError, PermissionError, OSError],
+                         ids=["actual-directory-key", "simulated-directory", "simulated-permission", "simulated-os-error"])
+def test_malformed_structured_timezone_loader_remains_unknown_in_chat(
+    pipeline, monkeypatch, live_boundary_clock, native, provider, loader_error,
+):
+    real_zoneinfo = app.ZoneInfo
+    if loader_error:
+        def load_zone(key):
+            if key == "Europe":
+                raise loader_error("Simulated timezone-data load failure")
+            return real_zoneinfo(key)
+        monkeypatch.setattr(app, "ZoneInfo", load_zone)
+    report = {"location":{"name":"Reported location", "tz_id":"Europe"},
+              "current":{"last_updated":"2026-10-10 22:15", "temp_f":61}}
+    pipeline["results"] = [{"title":"Weather report", "url":"https://weather.test/malformed-zone",
+                            "content":json.dumps(report)}]
+    pipeline["text"] = "The report provides a dated reading; the location timezone is unavailable."
+    answer = _wire_weather_chat(pipeline, monkeypatch, native, provider, "Search the web for weather today.")
+    prompt = _provider_text(pipeline)
+    assert "TARGET LOCATION DATE: unknown" in prompt
+    assert '"local_date"' not in prompt
+    assert LIVE_BOUNDARY_CLOCK.isoformat() in prompt
+    if native:
+        output = next(json.loads(i["output"]) for i in pipeline["payloads"][-1]["input"]
+                      if i.get("type")=="function_call_output")
+        assert "TARGET LOCATION DATE: unknown" in output["location_time_context"]
+        assert output["request_time_utc"] == LIVE_BOUNDARY_CLOCK.isoformat()
+        assert output["search_date_timezone"] == "UTC"
+        assert json.loads(output["results"][0]["content"]) == report
+    else:
+        assert pipeline["results"][0]["content"] in prompt
+    assert answer == pipeline["text"] + "\n\n" + _expected_source_list(pipeline["results"])
+
+
+def test_timezone_loader_error_keeps_valid_conversion_and_source_attribution(monkeypatch):
+    real_zoneinfo = app.ZoneInfo
+    def load_zone(key):
+        if key == "Europe":
+            raise IsADirectoryError("Simulated directory key")
+        return real_zoneinfo(key)
+    monkeypatch.setattr(app, "ZoneInfo", load_zone)
+    results = [
+        {"url":"https://weather.test/invalid", "content":json.dumps({"location":{"tz_id":"Europe"}})},
+        {"url":"https://weather.test/valid", "content":json.dumps({"location":{"name":"Valid location", "tz_id":"Asia/Tokyo"}})},
+    ]
+    dates = app._location_dates_for_request(LIVE_BOUNDARY_CLOCK, "timezone America/New_York", results)
+    assert len(dates) == 2
+    assert dates[0]["timezone"] == "America/New_York" and dates[0]["basis"] == "explicit user timezone"
+    assert dates[0]["local_time"] == LIVE_BOUNDARY_CLOCK.astimezone(ZoneInfo("America/New_York")).isoformat()
+    assert dates[1]["timezone"] == "Asia/Tokyo" and dates[1]["source_url"] == results[1]["url"]
+    assert dates[1]["location"] == "Valid location" and dates[1]["basis"] == "structured source location"
+    assert dates[1]["local_time"] == LIVE_BOUNDARY_CLOCK.astimezone(ZoneInfo("Asia/Tokyo")).isoformat()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("Unexpected loader defect"), TypeError("Unexpected type")])
+def test_timezone_loader_unexpected_application_errors_are_not_swallowed(monkeypatch, error):
+    def load_zone(key):
+        raise error
+    monkeypatch.setattr(app, "ZoneInfo", load_zone)
+    with pytest.raises(type(error)):
+        app._location_dates_for_request(LIVE_BOUNDARY_CLOCK, "timezone Asia/Tokyo")
+
+
+def test_timezone_os_error_outside_conversion_is_not_swallowed():
+    class BadLocalTime:
+        def date(self):
+            raise OSError("Unrelated result-formatting failure")
+    class Clock:
+        def astimezone(self, zone):
+            return BadLocalTime()
+    with pytest.raises(OSError, match="result-formatting"):
+        app._location_dates_for_request(Clock(), "timezone Asia/Tokyo")
+
+
+
+def test_timezone_os_error_from_clock_conversion_is_not_swallowed():
+    class Clock:
+        def astimezone(self, zone):
+            raise OSError("Unrelated clock-conversion failure")
+    with pytest.raises(OSError, match="clock-conversion"):
+        app._location_dates_for_request(Clock(), "timezone Asia/Tokyo")
