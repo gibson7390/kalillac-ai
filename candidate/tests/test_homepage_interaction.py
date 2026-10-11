@@ -387,10 +387,10 @@ def expected_card_top(run) -> float:
 
 
 EXAMPLE_PROMPTS = (
-    "Help me reason through a difficult decision",
-    "Rewrite this without losing my voice",
-    "Explain why this code fails",
-    "Research this and show me the sources",
+    "Explain how encryption works",
+    "Draft a professional email",
+    "Build a simple Python password generator",
+    "Find this week’s biggest technology stories",
 )
 MEMORY_SENTENCE = "Temporary session data can remain in server memory until capacity limits or a restart clear it."
 # Claims the homepage must never make.
