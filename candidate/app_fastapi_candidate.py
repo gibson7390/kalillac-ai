@@ -6,7 +6,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -8359,6 +8359,22 @@ def classify_request(message, history):
     return "general"
 
 
+def render_current_time_context(now=None):
+    """One explicit clock reference for native and legacy model prompts."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.utcoffset() is None:
+        raise ValueError("current clock must be timezone-aware")
+    now = now.astimezone(timezone.utc)
+    return f'''CURRENT REQUEST TIME (UTC):
+{now.isoformat()}
+Timezone: UTC
+- This is the current request clock, distinct from observation/update, forecast, publication, and retrieval timestamps. The search_date field, when present, is the retrieval calendar date in UTC.
+- For location-specific "today", convert this clock using the reliable location timezone supplied by the user or evidence. Do not use the UTC or server calendar date as that location's date.
+- If the location timezone is unknown or unverified, do not assume the user or location shares the server timezone; use explicit forecast dates rather than inventing a local "today".
+- Do not substitute a report's localtime or an old report clock for this current clock. A report may supply a reliable timezone for conversion while its recorded localtime and observation/update timestamps are older.'''
+
+
 QUANTITATIVE_GROUNDING_RULES = r"""QUANTITATIVE GROUNDING:
 - Preserve the quantities, variable definitions, units, and scaling explicitly supplied by the user or problem statement. Do not invent units, scale factors, or conversions; a prior assistant guess does not establish them.
 - If units or scaling were not supplied, the physical units remain unspecified. Give the mathematical result without turning it into an unsupported real-world quantity.
@@ -9335,6 +9351,7 @@ Rules:
     if route not in {"code", "revision", "code_continuation", "calculator"}:
         prompt += "\n\n" + QUANTITATIVE_GROUNDING_RULES
         prompt += "\n\n" + WEB_EVIDENCE_TIME_RULES
+        prompt += "\n\n" + render_current_time_context()
 
     prompt = apply_kalillac_voice_and_format(prompt, route)
 
@@ -9733,14 +9750,13 @@ def _run_v31_native_tool_chat(
     search_coverage_limited = False
     private_request = is_private_search_target(message)
 
-    current_date = (
-        datetime.now().date().isoformat()
-    )
+    current_clock = datetime.now(timezone.utc)
+    current_date = current_clock.date().isoformat()
 
     instructions = (
         SYSTEM_PROMPT.strip()
-        + "\n\nCURRENT SERVER DATE: "
-        + current_date
+        + "\n\n"
+        + render_current_time_context(current_clock)
         + "\n\n"
         + V31_NATIVE_TOOL_POLICY
         + "\n\n" + QUANTITATIVE_GROUNDING_RULES
@@ -10508,8 +10524,7 @@ You are Kalillac AI.
 The user asked a question that required a live web search. The search
 results below were genuinely retrieved just now.
 
-SEARCH DATE:
-{datetime.now().date().isoformat()}
+{render_current_time_context()}
 
 VERIFICATION REQUIRED:
 {"yes" if verification_required else "no"}

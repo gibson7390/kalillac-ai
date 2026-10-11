@@ -329,3 +329,145 @@ def test_inline_ticks_cannot_cross_math_paragraph_or_fenced_block_pipeline(pipel
     result = _weather_chat(pipeline, monkeypatch, native)
 
     assert result == answer + "\n\n" + _expected_source_list(pipeline["results"])
+
+
+# --- timezone-aware request clock and complete committed calculus context ---
+
+from datetime import datetime as RealDatetime, timezone as ClockTimezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+FIXED_UTC_CLOCK = RealDatetime(2026, 10, 11, 0, 22, tzinfo=ClockTimezone.utc)
+
+
+@pytest.fixture
+def utc_server_clock(monkeypatch):
+    class FixedDatetime(RealDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return FIXED_UTC_CLOCK.replace(tzinfo=None)
+            return FIXED_UTC_CLOCK.astimezone(tz)
+
+    monkeypatch.setattr(app, "datetime", FixedDatetime)
+    return FIXED_UTC_CLOCK
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("zone_name,place", [
+    ("America/Indiana/Indianapolis", "Terre Haute, Indiana"),
+    ("Asia/Tokyo", "Tokyo, Japan"),
+    (None, "an unspecified location"),
+    ("Not/AZone", "a location with an unverified timezone"),
+])
+@pytest.mark.parametrize("old_report_clock", [False, True], ids=["recent-report", "old-report"])
+def test_current_clock_location_date_boundary_in_actual_payload(
+    pipeline, monkeypatch, utc_server_clock, native, zone_name, place, old_report_clock,
+):
+    monkeypatch.setitem(globals(), "WEATHER_QUERY", f"Search the web for weather right now in {place}.")
+    monkeypatch.setitem(globals(), "SEARCH_QUERY", "weather " + place)
+    known_zone = zone_name in {"America/Indiana/Indianapolis", "Asia/Tokyo"}
+    local_now = utc_server_clock.astimezone(ZoneInfo(zone_name)) if known_zone else None
+    if local_now:
+        assert local_now.date().isoformat() == ("2026-10-10" if place.startswith("Terre Haute") else "2026-10-11")
+    # An old report's clock cannot override the independent request clock.
+    localtime = "2026-10-01 02:00" if old_report_clock else (
+        local_now.strftime("%Y-%m-%d %H:%M") if local_now else "2026-10-10 20:22")
+    update = "2026-10-01 01:45" if old_report_clock else (
+        local_now.replace(minute=15).strftime("%Y-%m-%d %H:%M") if local_now else "2026-10-10 20:15")
+    evidence = {"location": {"name": place, "tz_id": zone_name, "localtime": localtime},
+                "current": {"last_updated": update, "temp_f": 66.7, "condition": "overcast",
+                            "wind_dir": "SE", "wind_mph": 7.2},
+                "forecast": {"forecastday": [{"date": "2026-10-11", "day": "Cloudy"}]}}
+    pipeline["results"] = [{"title": "Weather report", "url": "https://weather.test/report",
+                            "published": "2026-10-11", "content": json.dumps(evidence)}]
+    relation = ("tomorrow" if local_now.date().isoformat() == "2026-10-10" else "today") if local_now else "a dated forecast; the location timezone is unverified"
+    pipeline["text"] = f"The report lists 66.7 F, overcast, SE wind 7.2 mph, updated {update}. The October 11 forecast is {relation}."
+
+    result = _weather_chat(pipeline, monkeypatch, native)
+
+    prompt = _provider_text(pipeline)
+    assert "CURRENT REQUEST TIME (UTC):" in prompt
+    assert utc_server_clock.isoformat() in prompt and "Timezone: UTC" in prompt
+    assert "CURRENT SERVER DATE:" not in prompt and "\nSEARCH DATE:\n" not in prompt
+    assert 'location-specific "today"' in prompt and "reliable location timezone" in prompt
+    assert "timezone is unknown" in prompt and "do not assume" in prompt
+    assert "Do not substitute a report's localtime" in prompt
+    assert "observation/update" in prompt and "forecast" in prompt
+    assert result == pipeline["text"] + "\n\n" + _expected_source_list(pipeline["results"])
+    if native:
+        outputs = [json.loads(item["output"]) for item in pipeline["payloads"][-1]["input"]
+                   if item.get("type") == "function_call_output"]
+        assert outputs[0]["search_date"] == utc_server_clock.date().isoformat()
+        assert outputs[0]["results"] == pipeline["results"]
+    else:
+        assert pipeline["results"][0]["content"] in prompt
+
+
+@pytest.mark.parametrize("clock", [
+    FIXED_UTC_CLOCK,
+    FIXED_UTC_CLOCK.astimezone(ClockTimezone(RealDatetime(2026, 1, 1, 5, 30) - RealDatetime(2026, 1, 1))),
+    FIXED_UTC_CLOCK.astimezone(ZoneInfo("Asia/Tokyo")),
+])
+def test_shared_current_clock_is_explicit_and_normalized_to_utc(clock):
+    context = app.render_current_time_context(clock)
+    assert FIXED_UTC_CLOCK.isoformat() in context
+    assert "Timezone: UTC" in context
+    assert 'location-specific "today"' in context
+
+
+def test_current_clock_rejects_naive_injected_time():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        app.render_current_time_context(FIXED_UTC_CLOCK.replace(tzinfo=None))
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+def test_supplied_report_uses_independent_current_clock(pipeline, monkeypatch, utc_server_clock, native):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    message = "Summarize this supplied report: timezone Asia/Tokyo, localtime 2026-10-01 02:00, observation updated 01:45, forecast dated October 11."
+    pipeline["text"] = "The report clock and observation are older. The forecast is dated October 11."
+
+    answer = app.chat(message, [], session_id="supplied-report-clock")
+
+    prompt = _provider_text(pipeline)
+    assert FIXED_UTC_CLOCK.isoformat() in prompt and "Timezone: UTC" in prompt
+    assert "Do not substitute a report's localtime" in prompt
+    assert message in prompt and answer == pipeline["text"]
+    assert len(pipeline["payloads"]) == 1 and pipeline["searches"] == []
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+@pytest.mark.parametrize("defined_scale", [False, True], ids=["unspecified-x", "explicit-hypothetical-scale"])
+def test_complete_calculus_fixture_and_existing_guidance_reach_provider(
+    pipeline, monkeypatch, tmp_path, native, defined_scale,
+):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    fixture = (Path(__file__).parent / "fixtures" / "calculus_cutoff.md").read_text(encoding="utf-8").rstrip()
+    profit_section = fixture.split("## 15. Finding when profit is greatest", 1)[1].split("---", 1)[0]
+    assert "profit is:" in profit_section and "P(x)=-2x^2+40x-100" in profit_section
+    assert "products" not in profit_section and "hundreds" not in profit_section
+    request = "I need you to teach me calculus in a way that anybody can understand"
+    if defined_scale:
+        request += ". In the hypothetical profit example, define x in hundreds of products."
+        pipeline["text"] = "Under the explicitly supplied hypothetical scale, x=10 represents 1,000 products, and P(10)=100."
+    else:
+        pipeline["text"] = r"Mathematically, \(x=10\) maximizes profit with \(P(10)=100\). The physical meaning of x and its scale are unspecified."
+    history = [{"role": "user", "content": request},
+               {"role": "assistant", "content": app.mark_incomplete_reply(fixture)}]
+    assert app.is_explanation_continuation_request("continue", history)
+    assert app.classify_request("continue", history) == "followup"
+
+    reply = app.chat("continue", history, session_id="complete-calculus-context")
+
+    prompt = _provider_text(pipeline)
+    assert request in prompt and fixture in prompt
+    assert app.QUANTITATIVE_GROUNDING_RULES in prompt
+    assert "variable definitions" in prompt
+    assert "physical interpretation that needs additional assumptions" in prompt
+    assert "Clearly introduced hypothetical examples are allowed" in prompt
+    assert app.EXPLANATION_CONTINUATION_RULES in prompt
+    assert reply == pipeline["text"]
+    assert len(pipeline["payloads"]) == 1 and pipeline["searches"] == []
+    evidence_path = tmp_path / "actual-provider-payloads.json"
+    evidence_path.write_text(json.dumps(pipeline["payloads"], indent=2), encoding="utf-8")
+    print("CALCULUS_PAYLOAD_PATH=" + str(evidence_path))
