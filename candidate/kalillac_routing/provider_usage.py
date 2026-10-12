@@ -238,6 +238,8 @@ def admitted():
 
 def dispatched():
     """The HTTP client operation started, not proof of bytes/billing."""
+    from . import provider_controls
+    provider_controls.dispatch()
     _update(dispatched=True)
 
 
@@ -270,9 +272,9 @@ def _failure(error):
         return "cancelled"
     if name in {"RequestDeadlineExceeded", "TransportDeadlineExceeded"}:
         return "deadline"
-    if name == "CallBudgetExhausted":
+    if name in {"CallBudgetExhausted", "CeilingBusy"}:
         return "allowance"
-    if name in {"TransportUnavailable", "ProviderTransportUnavailable", "SearchTransportUnavailable", "OpenAIConfigurationUnavailable"}:
+    if name in {"TransportUnavailable", "ProviderTransportUnavailable", "SearchTransportUnavailable", "OpenAIConfigurationUnavailable", "CeilingUnavailable"}:
         return "local_unavailable"
     return "provider_or_unknown"
 

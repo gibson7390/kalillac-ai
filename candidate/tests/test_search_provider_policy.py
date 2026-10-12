@@ -468,9 +468,13 @@ def test_budgeted_brave_wire_failure_uses_existing_transport(providers, monkeypa
     monkeypatch.setattr(tavily_transport, "_SLOT", slot)
     monkeypatch.setattr(app, "_request_limits", replace(LIMITS, tavily_search_max_bytes=128))
     monkeypatch.setattr(app, "SEARCH_PROVIDER_POLICY", sp.SearchProviderPolicy("brave", "none"))
-    budget = RequestBudget(duration_seconds=0.8 if failure == "deadline" else 10,
-                           max_model_attempts=6, max_search_attempts=6)
     try:
+        if failure == "deadline":
+            # Isolate the wire deadline from variable cold SSL initialization.
+            # Cold-start deadlines are checked separately in test_bounded_transport.
+            slot.holder().get_or_create(app._request_limits.tavily_transport).start(2.0)
+        budget = RequestBudget(duration_seconds=0.8 if failure == "deadline" else 10,
+                               max_model_attempts=6, max_search_attempts=6)
         with budget_scope(budget):
             if failure == "deadline":
                 with pytest.raises(RequestDeadlineExceeded):

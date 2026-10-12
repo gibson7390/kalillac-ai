@@ -41,6 +41,8 @@ def test_only_approved_account_tables_exist():
         "kalillac.account_sessions",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
+        "kalillac.account_usage_slots",
+        "kalillac.provider_usage_pools",
         "kalillac.account_billing",
         "kalillac.stripe_webhook_events",
     }

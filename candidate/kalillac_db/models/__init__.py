@@ -10,6 +10,8 @@ from .account_billing import AccountBilling
 from .account_entitlement import AccountEntitlement
 from .account_session import AccountSession
 from .account_usage_daily import AccountUsageDaily
+from .account_usage_slot import AccountUsageSlot
+from .provider_usage_pool import ProviderUsagePool
 from .base import Base
 from .stripe_webhook_event import StripeWebhookEvent
 from .user import User
@@ -19,6 +21,8 @@ __all__ = [
     "AccountEntitlement",
     "AccountSession",
     "AccountUsageDaily",
+    "AccountUsageSlot",
+    "ProviderUsagePool",
     "Base",
     "StripeWebhookEvent",
     "User",

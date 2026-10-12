@@ -35,10 +35,11 @@ def build_usage_increment(
     *,
     request_chars: int,
     response_chars: int,
+    successful_chats: int = 1,
 ):
     """The atomic upsert statement for one successful chat."""
 
-    if request_chars < 0 or response_chars < 0:
+    if request_chars < 0 or response_chars < 0 or successful_chats < 0:
         raise ValueError("Usage counts cannot be negative.")
 
     try:
@@ -53,7 +54,7 @@ def build_usage_increment(
     statement = insert(table).values(
         user_id=user_id,
         usage_date=usage_date,
-        successful_chats=1,
+        successful_chats=successful_chats,
         request_chars=request_chars,
         response_chars=response_chars,
     )
@@ -80,6 +81,7 @@ def increment_daily_usage(
     *,
     request_chars: int,
     response_chars: int,
+    successful_chats: int = 1,
 ) -> None:
     session.execute(
         build_usage_increment(
@@ -88,6 +90,7 @@ def increment_daily_usage(
             usage_date,
             request_chars=request_chars,
             response_chars=response_chars,
+            successful_chats=successful_chats,
         )
     )
 

@@ -52,7 +52,9 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0004_account_billing"]
+    assert script.get_heads() == ["0006_provider_usage_pools"]
+    assert script.get_revision("0006_provider_usage_pools").down_revision == "0005_account_usage_slots"
+    assert script.get_revision("0005_account_usage_slots").down_revision == "0004_account_billing"
     assert script.get_revision("0004_account_billing").down_revision == (
         "0003_account_usage_daily"
     )
@@ -102,6 +104,8 @@ ACCOUNT_TABLES = (
     "account_usage_daily",
     "account_billing",
     "stripe_webhook_events",
+    "account_usage_slots",
+    "provider_usage_pools",
 )
 
 

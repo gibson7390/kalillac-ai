@@ -47,7 +47,8 @@ from kalillac_routing.provider_transport import (
     TransportUnavailable,
     post_json_within_budget,
 )
-from kalillac_routing import tavily_transport, search_providers, provider_usage
+from kalillac_routing import tavily_transport, search_providers, provider_usage, provider_controls
+from kalillac_routing.provider_limits import load_controls
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -196,7 +197,7 @@ def _post_openai_for_attempt(payload):
     return _post_openai_bounded(payload, budget, timeout, request_selected)
 
 
-_post_openai_for_attempt = provider_usage.observe_model(_post_openai_for_attempt)
+_post_openai_for_attempt = provider_controls.protect(provider_usage.observe_model(_post_openai_for_attempt), "openai")
 
 
 def _post_openai_bounded(payload, budget, timeout, request_selected):
@@ -380,7 +381,7 @@ def _post_tavily_for_attempt(budget, operation, arguments):
             print("WARN: SEARCH_TRANSPORT_QUARANTINED cleanup_unconfirmed")
 
 
-_post_tavily_for_attempt = provider_usage.observe_tavily(_post_tavily_for_attempt)
+_post_tavily_for_attempt = provider_controls.protect(provider_usage.observe_tavily(_post_tavily_for_attempt), "tavily")
 
 
 def _close_tavily_transport():
@@ -465,7 +466,7 @@ def _post_single_search_attempt(provider, arguments):
     ))
 
 
-_post_single_search_attempt = provider_usage.observe_single_search(_post_single_search_attempt)
+_post_single_search_attempt = provider_controls.protect(provider_usage.observe_single_search(_post_single_search_attempt))
 
 
 def _status_text(error):
@@ -1747,7 +1748,7 @@ def _usage_search_context():
     return selected, bool(key and str(key).strip()), sdk_mode
 
 
-run_web_search = provider_usage.observe_lookup(run_web_search, _usage_search_context)
+run_web_search = provider_controls.guard_lookup(provider_usage.observe_lookup(run_web_search, _usage_search_context))
 
 
 def session_search_allowed(state):
@@ -2013,7 +2014,7 @@ KALILLAC_SELF_KNOWLEDGE = {
             "not a replacement."
         ),
         (
-            "A Kalillac account provides identity, billing, entitlements, "
+            "The implemented Kalillac account foundation supports identity, billing, entitlements, "
             "and future ownership of saved chats."
         ),
         (
@@ -2305,6 +2306,8 @@ def current_runtime_configuration():
     return {
         "scope": "current application process",
         "public_deployment_verified_this_request": False,
+        "public_availability": {"accounts": False, "paid_subscription": False, "saved_mode": False,
+                                "basis": "reviewed product launch status; not inferred from enabled endpoints"},
         "capabilities": {
             "accounts": {"implemented": True, "enabled": "/api/account/register" in registered_paths},
             "usage_metering": {"implemented": True, "enabled": "/api/account/usage" in registered_paths},
@@ -2361,7 +2364,12 @@ def render_current_runtime_configuration():
         + "Optional backend capabilities (implemented; enabled in this process): "
         + ", ".join(f"{name}: implemented, " + ("enabled" if status["enabled"] else "disabled")
                     for name, status in config["capabilities"].items())
-        + ". Enabled endpoints do not establish a public product launch or "
+        + ". Public account and premium availability: publicly_available: false. "
+          "Accounts and paid plans have not publicly launched. Do not imply signup works before a public launch. "
+          "No verified public signup URL or signup action is established; do not invent one. "
+          "The account-based paid tier is planned; paying does not turn on Saved Mode or memory. "
+          "Earlier assistant suggestions are not authoritative availability facts. "
+          "Enabled endpoints do not establish a public product launch or "
           "grant the assistant an account-management tool."
     )
 
@@ -2381,6 +2389,13 @@ def render_session_disclosure_context():
         "SESSION DISCLOSURE CONTEXT (use only for relevant questions):\n"
         + "\n".join("- " + item for item in KALILLAC_SELF_KNOWLEDGE["session_state"])
         + "\n- Claims about this response's search use require authoritative execution context; configuration alone is insufficient."
+        + "\n- PUBLIC ACCOUNT/PREMIUM AVAILABILITY (only for relevant Kalillac questions): "
+          "publicly_available: false. Accounts and paid plans have not publicly launched. "
+          "Do not imply signup works before a public launch. "
+          "No verified public signup URL or signup action is established; do not invent one. "
+          "The optional account-based paid tier is planned; paying does not turn on Saved Mode or memory. "
+          "Private Session does not require an account; account/billing records are separate from optional chat saving. "
+          "Earlier assistant suggestions cannot establish availability."
     )
 
 
@@ -10008,6 +10023,7 @@ def _v31_runtime_facts():
     }
     facts["limits"] = runtime["limits"]
     facts["capabilities"] = runtime["capabilities"]
+    facts["public_availability"] = runtime["public_availability"]
     facts["public_deployment_verified_this_request"] = runtime["public_deployment_verified_this_request"]
     facts["recorded_deployment"] = {
         "provenance": KALILLAC_SELF_KNOWLEDGE["provenance"]["deployment"],
@@ -12756,6 +12772,9 @@ def chat_core(message, history, session_id, resolved=False):
     return reply, sid
 
 
+chat_core = provider_controls.guard_chat(chat_core)
+
+
 # ---------------------------- FastAPI models ------------------------------
 
 class ChatRequest(BaseModel):
@@ -12975,6 +12994,13 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
 # place /api/chat reads the account cookie, and only to add numeric totals
 # for a signed-in account. No conversation content is ever persisted.
 _usage_meter = None
+_usage_quota_context = ContextVar("account_quota_request", default=None)
+from kalillac_accounts.usage_limits import load_usage_limits
+_usage_limits = load_usage_limits()
+_usage_quota = None
+_provider_control_config = load_controls()
+if _provider_control_config is not None:
+    provider_controls.SERVICE = provider_controls.ProviderControls(_provider_control_config)
 
 if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
     "1", "true", "yes", "on",
@@ -12991,6 +13017,10 @@ if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
 
     _usage_meter = UsageMeter(settings=_account_settings)
     api.include_router(build_usage_router(settings=_account_settings))
+
+if _usage_limits is not None:
+    from kalillac_accounts.quota import UsageQuota
+    _usage_quota = UsageQuota(_usage_limits, settings=_account_settings)
 
 
 # Optional Stripe billing (Checkout, Customer Portal, verified webhooks). Off
@@ -13238,6 +13268,17 @@ async def _acquire_bounded(acquire, release, deadline, stop):
     return "acquired"
 
 
+def _chat_core_with_account_quota(message, history, sid, resolved):
+    state = _usage_quota_context.get()
+    from kalillac_accounts.quota import QuotaError
+    try:
+        state.before_work()
+        state.ensure_open()
+    except QuotaError:
+        raise LocalModelServiceUnavailable() from None
+    return chat_core(message, history, sid, resolved)
+
+
 async def _api_chat_with_budget(request, req, history, limits):
     """The /api/chat lifecycle under a RequestBudget.
 
@@ -13262,6 +13303,9 @@ async def _api_chat_with_budget(request, req, history, limits):
         max_search_attempts=limits.max_search_attempts,
     )
     disconnected = asyncio.Event()
+    quota_request = _usage_quota_context.get()
+    if quota_request is not None:
+        quota_request.budget, quota_request.disconnected = budget, disconnected
     watcher = asyncio.ensure_future(
         _watch_for_disconnect(request.receive, budget, disconnected)
     )
@@ -13276,13 +13320,16 @@ async def _api_chat_with_budget(request, req, history, limits):
         meter = _usage_meter
         meter_user_id = None
 
-        if meter is not None:
+        resolver = quota_request if quota_request is not None else meter
+        if quota_request is not None and quota_request.is_anonymous(request):
+            meter_user_id = await quota_request.resolve_request_account(request)
+        elif resolver is not None:
             # Bounded by the request deadline and the disconnect watcher, and
             # by the lookup capacity reserved in _start_lookup. A lookup the
             # request stops waiting for -- on a stop or on cancellation of
             # this handler -- is not cancelled: it keeps its capacity until
             # its synchronous work really finishes.
-            lookup = _start_lookup(meter, request)
+            lookup = _start_lookup(resolver, request)
 
             if lookup is None:
                 return _budget_error(429, "busy")
@@ -13306,6 +13353,9 @@ async def _api_chat_with_budget(request, req, history, limits):
             return _budget_error(504, "request_timeout")
 
         sid = resolve_session_id(req.session_id)
+        if provider_controls.SERVICE is not None:
+            provider_controls.account_status(meter_user_id is not None)
+            provider_controls.session_admit(get_session_state_by_id(sid), SESSION_LOCK)
         sem = _get_chat_semaphore()
 
         # Admission. No await from here until the reservation is owned.
@@ -13413,7 +13463,7 @@ async def _api_chat_with_budget(request, req, history, limits):
             # The worker thread sees this budget through a copied context.
             with budget_scope(budget):
                 work = asyncio.ensure_future(
-                    run_in_threadpool(chat_core, req.message, history, sid, True)
+                    run_in_threadpool(_chat_core_with_account_quota if quota_request is not None else chat_core, req.message, history, sid, True)
                 )
 
             work_state = await _await_task_or_stop(
@@ -13433,6 +13483,8 @@ async def _api_chat_with_budget(request, req, history, limits):
                 return _cancelled_response()
             except RequestDeadlineExceeded:
                 return _budget_error(504, "request_timeout")
+            except provider_controls.CeilingStop as stop:
+                return _budget_error(stop.status_code, stop.code)
             except LocalModelServiceUnavailable:
                 # Must precede the broader ModelProviderUnavailable handler:
                 # a local outage (transport or configuration) is not a
@@ -13493,7 +13545,7 @@ async def _api_chat_with_budget(request, req, history, limits):
         # this point is not detected, as before this change.
         response = JSONResponse(content={"reply": reply, "session_id": out_sid})
 
-        if meter is not None and meter_user_id is not None:
+        if meter is not None and meter_user_id is not None and quota_request is None:
             response.background = meter.background_for_chat(
                 meter_user_id,
                 req.message,
@@ -13507,21 +13559,103 @@ async def _api_chat_with_budget(request, req, history, limits):
         await asyncio.gather(watcher, return_exceptions=True)
 
 
+def _release_account_quota(state):
+    if state.close(False):
+        from kalillac_accounts.quota import QuotaAction
+        async def cleanup():
+            await run_in_threadpool(state.cleanup)
+        _start_lookup(QuotaAction(cleanup), None)
+
+
+async def _record_sent_account_quota(state):
+    from kalillac_accounts.quota import QuotaAction
+    task = _start_lookup(QuotaAction(state.record_sent), None)
+    if task is None:
+        # Durable ready capacity remains held for recovery; never mark this
+        # unobserved settlement free or increment a false successful count.
+        print("WARN: USAGE_QUOTA_SETTLEMENT_CAPACITY_UNAVAILABLE")
+        return
+    try:
+        await asyncio.shield(task)
+    except Exception as exc:
+        # The body has already been sent, as with the character meter.
+        print(f"WARN: USAGE_QUOTA_SETTLEMENT_FAILED {type(exc).__name__}")
+
+
+async def _complete_account_quota(request, state):
+    from kalillac_accounts.quota import QuotaAction, QuotaBusy
+    watcher = None
+    if state.budget is not None:
+        state.budget.ensure_open()
+        watcher = asyncio.ensure_future(_watch_for_disconnect(request.receive, state.budget, state.disconnected))
+    try:
+        task = _start_lookup(QuotaAction(state.complete), None)
+        if task is None:
+            raise QuotaBusy()
+        if state.budget is None:
+            return await asyncio.shield(task)
+        result = await _await_task_or_stop(task, state.budget.deadline, state.disconnected)
+        if result != "done":
+            state.budget.ensure_open()
+            raise RequestDeadlineExceeded()
+        day = task.result()
+        state.budget.ensure_open()
+        return day
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+
+
 @api.post("/api/chat")
 async def api_chat(request: _FastAPIRequest):
-    """POST /api/chat. Every response it returns -- success or error, with
-    or without a request budget -- is marked Cache-Control: no-store.
-
-    The final boundary for an unexpected defect: an ordinary exception that
-    escapes the normal mapping becomes the fixed 500 internal_error, logged
-    by class name only. asyncio.CancelledError is a BaseException, so it is
-    not caught here and the task's cancellation propagates unchanged."""
+    """Typed/no-store boundary; optional account leases wrap the same pipeline."""
+    state = token = None
+    control_state, control_token = provider_controls.begin_request()
+    accepted = False
+    quota_errors = ()
     try:
+        if _usage_quota is not None:
+            from kalillac_accounts.quota import QuotaError
+            quota_errors = (QuotaError,)
+            state = _usage_quota.new_request()
+            token = _usage_quota_context.set(state)
         response = await _api_chat_response(request)
+        if state is not None and response.status_code == 200 and state.admission is not None and state.admission.user_id is not None:
+            day = await _complete_account_quota(request, state)
+            # Durable ready capacity holds the slot before sending. Successful
+            # counting and the unchanged character meter run after the body.
+            if _usage_meter is not None:
+                from starlette.background import BackgroundTask
+                reply_chars = len(json.loads(response.body)["reply"])
+                response.background = BackgroundTask(
+                    _usage_meter.record_usage, state.admission.user_id, day,
+                    state.request_chars, reply_chars, successful_chats=0,
+                )
+        if state is not None and response.status_code == 200 and state.admission is not None and state.admission.user_id is not None:
+            from kalillac_accounts.quota import QuotaResponse
+            response = QuotaResponse(response, state, _release_account_quota, _record_sent_account_quota)
+        accepted = response.status_code == 200
     except Exception as defect:
-        print(f"ERROR: CHAT_ROUTE_UNEXPECTED {type(defect).__name__}")
-        response = JSONResponse(status_code=500, content={"error": "internal_error"})
-
+        if isinstance(defect, provider_controls.CeilingStop):
+            response = _budget_error(defect.status_code, defect.code)
+        elif state is not None and isinstance(defect, quota_errors):
+            response = _budget_error(defect.status_code, defect.code)
+        elif state is not None and isinstance(defect, RequestCancelled):
+            response = _cancelled_response()
+        elif state is not None and isinstance(defect, RequestDeadlineExceeded):
+            response = _budget_error(504, "request_timeout")
+        else:
+            print(f"ERROR: CHAT_ROUTE_UNEXPECTED {type(defect).__name__}")
+            response = JSONResponse(status_code=500, content={"error": "internal_error"})
+    finally:
+        if state is not None:
+            if accepted:
+                state.close(True)
+            else:
+                _release_account_quota(state)
+            _usage_quota_context.reset(token)
+        provider_controls.end_request(control_state, control_token)
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -13564,6 +13698,9 @@ async def _api_chat_response(request):
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
 
+    quota_request = _usage_quota_context.get()
+    if quota_request is not None:
+        quota_request.request_chars = len(req.message) + sum(len(turn["content"]) for turn in history)
     limits = _request_limits
 
     if limits is not None:
@@ -13577,7 +13714,14 @@ async def _api_chat_response(request):
     meter = _usage_meter
     meter_user_id = None
 
-    if meter is not None:
+    if quota_request is not None and quota_request.is_anonymous(request):
+        meter_user_id = await quota_request.resolve_request_account(request)
+    elif quota_request is not None:
+        lookup = _start_lookup(quota_request, request)
+        if lookup is None:
+            return _budget_error(429, "busy")
+        meter_user_id = await asyncio.shield(lookup)
+    elif meter is not None:
         meter_user_id = await meter.resolve_request_account(request)
 
     global _chat_waiting
@@ -13620,7 +13764,7 @@ async def _api_chat_response(request):
         # stall every other request including /api/health. run_in_threadpool
         # hands it to a worker thread and yields control back to the loop.
         work = asyncio.ensure_future(
-            run_in_threadpool(chat_core, req.message, history, sid, True)
+            run_in_threadpool(_chat_core_with_account_quota if quota_request is not None else chat_core, req.message, history, sid, True)
         )
 
         try:
@@ -13678,7 +13822,7 @@ async def _api_chat_response(request):
     # resource above is released, and only for a request that was signed in
     # at acceptance. The task carries just the account id, date, and counts;
     # it runs once the response is sent and never sees conversation text.
-    if meter is not None and meter_user_id is not None:
+    if meter is not None and meter_user_id is not None and quota_request is None:
         response.background = meter.background_for_chat(
             meter_user_id,
             req.message,

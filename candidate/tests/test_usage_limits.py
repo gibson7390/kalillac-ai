@@ -304,17 +304,16 @@ def test_disabled_mode_never_reads_limit_settings(monkeypatch):
     assert PAID_DAILY_LIMIT not in read
 
 
-def test_application_does_not_use_this_module_yet():
-    # Configuration only in this phase: /api/chat and startup are unchanged.
-    with open(
-        os.path.join(CANDIDATE_DIR, "app_fastapi_candidate.py"),
-        encoding="utf-8",
-    ) as handle:
-        source = handle.read()
-
-    assert "usage_limits" not in source
-    assert ENFORCEMENT_FLAG not in source
-
+def test_application_loads_validated_default_off_configuration():
+    # This phase now wires the existing loader. Keep the guard: no quota
+    # implementation is constructed while the loader returns None.
+    import ast
+    with open(os.path.join(CANDIDATE_DIR, "app_fastapi_candidate.py"), encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    assert any(isinstance(node, ast.ImportFrom) and node.module == "kalillac_accounts.usage_limits" for node in tree.body)
+    guarded = [node for node in tree.body if isinstance(node, ast.If) and ast.unparse(node.test) == "_usage_limits is not None"]
+    assert len(guarded) == 1
+    assert any(isinstance(node, ast.ImportFrom) and node.module == "kalillac_accounts.quota" for node in guarded[0].body)
 
 def _run_app_with(env_overrides):
     env = {

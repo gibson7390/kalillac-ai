@@ -189,6 +189,8 @@ def post_json_unbudgeted(url, payload, headers, timeout, max_bytes=SEARCH_MAX_BY
     """
     request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json", "Accept": "application/json", **headers}, method="POST")
+    from . import provider_controls
+    provider_controls.dispatch()
     with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
         if response.headers.get("Content-Encoding", "identity").lower() not in {"", "identity"}:
             raise SearchResponseInvalid()

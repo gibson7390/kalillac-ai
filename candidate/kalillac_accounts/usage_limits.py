@@ -1,7 +1,7 @@
 """Daily chat-limit configuration for signed-in accounts.
 
-Configuration only: nothing here enforces a limit, and nothing imports this
-module yet. The quota service will load it at startup.
+The chat application loads this at startup. The optional quota service
+reserves account capacity before work; this module only validates settings.
 
 KALILLAC_USAGE_ENFORCEMENT_ENABLED is off by default. While it is off the
 limit settings are never read, so leftover or malformed values cannot change

@@ -312,6 +312,8 @@ def test_account_schema_holds_identity_only():
         "kalillac.account_sessions",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
+        "kalillac.account_usage_slots",
+        "kalillac.provider_usage_pools",
         *billing_tables,
     }
 
@@ -386,11 +388,15 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "account_sessions",
         "account_entitlements",
         "account_usage_daily",
+        "account_usage_slots",
+        "provider_usage_pools",
         "account_billing",
         "stripe_webhook_events",
     }
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
+    from kalillac_db.models import AccountUsageSlot
+    assert _count(db, AccountUsageSlot) == 0
 
     # No temporary chat session was created or touched.
     assert app.SESSION_STATE == chat_state_before

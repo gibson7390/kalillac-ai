@@ -425,3 +425,32 @@ def test_comprehensive_self_task_is_not_replaced_by_a_single_family_shortcut(pip
     assert "COMMERCIAL DIRECTION" in text and "PRODUCT DESIGN" in text
     assert "Optional backend capabilities" in text
     assert len(pipeline["payloads"]) == 1
+
+
+
+def test_account_premium_sequence_uses_authoritative_unlaunched_availability(pipeline):
+    history = []
+    for message in ["I want premium features and privacy without an account", "I can choose an account?", "How do I create one?"]:
+        pipeline["text"] = "Accounts and paid signup are not publicly available yet. Private Session remains available; payment would not save chats."
+        assert chat(pipeline, message, history) == pipeline["text"]
+        delivered = prompt(pipeline)
+        assert "publicly_available: false" in delivered
+        assert "Do not imply signup works before a public launch" in delivered
+        assert "No verified public signup URL or signup action" in delivered
+        assert "paying does not turn on Saved Mode" in delivered
+        history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": pipeline["text"]}])
+    assert len(pipeline["payloads"]) == 3
+
+
+
+def test_enabled_account_endpoints_do_not_establish_public_launch(pipeline, monkeypatch):
+    from fastapi import FastAPI
+    api = FastAPI()
+    for path in ["/api/account/register", "/api/account/usage", "/api/account/billing/checkout"]:
+        api.add_api_route(path, lambda: {})
+    monkeypatch.setattr(app, "api", api)
+    facts = app._v31_runtime_facts()
+    assert all(value["implemented"] and value["enabled"] for value in facts["capabilities"].values())
+    assert facts["public_availability"]["accounts"] is False
+    assert facts["public_availability"]["paid_subscription"] is False
+    assert "publicly_available: false" in app.render_current_runtime_configuration()

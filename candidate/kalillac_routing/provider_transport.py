@@ -187,6 +187,10 @@ def _outcome(
     if deadline_type and request_deadline_selected:
         return RequestDeadlineExceeded()
 
+    from .provider_controls import CeilingStop
+    if isinstance(error, CeilingStop):
+        return error
+
     # 4: remote failures, including a deadline the shorter per-call cap set
     # whose cleanup was confirmed.
     if isinstance(error, _REMOTE_FAILURES) or isinstance(error, TransportDeadlineExceeded):
