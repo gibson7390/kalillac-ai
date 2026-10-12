@@ -211,6 +211,9 @@ def post_json_within_budget(
     """POST payload as JSON once, within the request budget; return the
     decoded JSON response. See the module docstring for failure mapping."""
 
+    from . import provider_usage
+
+    provider_usage.admitted()
     transport = holder.get_or_create(settings)
 
     try:

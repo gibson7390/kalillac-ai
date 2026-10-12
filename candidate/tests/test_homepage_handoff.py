@@ -518,11 +518,11 @@ def test_privacy_wording_boundaries():
         "Refreshing or closing the page removes the browser’s access to that session.",
         "That does not promise immediate deletion of the server-memory entry.",
         "OpenAI may process requests sent for model inference.",
-        "When web search is used, relevant query text may be sent to Tavily.",
+        "When web search is used, relevant query text may be sent to Brave or Tavily, depending on which provider is used.",
         "Cloudflare provides edge delivery and security for",
         "Cloudflare can process request content while proxying it, including chat requests",
         "Cloudflare Workers AI and Groq are not part of the current active model-provider path.",
-        "Do not submit information you cannot allow OpenAI, Tavily, or Cloudflare to process.",
+        "Do not submit information you cannot allow OpenAI, Brave, Tavily, or Cloudflare to process.",
         "No account or paid subscription is currently offered.",
     ):
         assert required in text, required

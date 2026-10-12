@@ -47,7 +47,7 @@ from kalillac_routing.provider_transport import (
     TransportUnavailable,
     post_json_within_budget,
 )
-from kalillac_routing import tavily_transport, search_providers
+from kalillac_routing import tavily_transport, search_providers, provider_usage
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -189,10 +189,14 @@ def _post_openai_for_attempt(payload):
         return _post_openai_responses(payload)
 
     budget.admit_model_attempt()
+    provider_usage.admitted()
     timeout, request_selected = budget.select_call_timeout(
         OPENAI_CALL_TIMEOUT_SECONDS
     )
     return _post_openai_bounded(payload, budget, timeout, request_selected)
+
+
+_post_openai_for_attempt = provider_usage.observe_model(_post_openai_for_attempt)
 
 
 def _post_openai_bounded(payload, budget, timeout, request_selected):
@@ -376,6 +380,9 @@ def _post_tavily_for_attempt(budget, operation, arguments):
             print("WARN: SEARCH_TRANSPORT_QUARANTINED cleanup_unconfirmed")
 
 
+_post_tavily_for_attempt = provider_usage.observe_tavily(_post_tavily_for_attempt)
+
+
 def _close_tavily_transport():
     """Shutdown hook: close Tavily's bounded transport only if one exists,
     bounded by its configured close timeout. Never creates one; safe to
@@ -456,6 +463,9 @@ def _post_single_search_attempt(provider, arguments):
         tavily_transport.SEARCH_URL, tavily_transport.search_payload(arguments),
         {"Authorization": "Bearer " + TAVILY_API_KEY}, SEARCH_TIMEOUT_SECONDS,
     ))
+
+
+_post_single_search_attempt = provider_usage.observe_single_search(_post_single_search_attempt)
 
 
 def _status_text(error):
@@ -657,6 +667,7 @@ def _post_openai_responses(payload, timeout=90):
         method="POST",
     )
 
+    provider_usage.dispatched()
     with urllib.request.urlopen(
         request,
         timeout=timeout,
@@ -1725,6 +1736,18 @@ def run_web_search(query, include_domains=None):
             f"SEARCH ERROR: {type(e).__name__}"
         )
         return "unavailable", []
+
+
+def _usage_search_context():
+    context = _NATIVE_SEARCH_CONTEXT.get()
+    policy = context[0].policy if context is not None else SEARCH_PROVIDER_POLICY
+    selected = context[1] if context is not None else policy.primary
+    key = BRAVE_API_KEY if selected == "brave" else TAVILY_API_KEY
+    sdk_mode = current_budget() is None and selected == "tavily" and context is None
+    return selected, bool(key and str(key).strip()), sdk_mode
+
+
+run_web_search = provider_usage.observe_lookup(run_web_search, _usage_search_context)
 
 
 def session_search_allowed(state):
@@ -4849,17 +4872,50 @@ def calculate_expression(message):
         return None
 
 
-def is_file_reference_request(message):
+def _supplied_file_content_is_available(content):
+    """Distinguish supplied text/code from a filename, path or empty fence."""
+    def has_content(text, minimum_words):
+        text = str(text).strip()
+        if re.fullmatch(r"(?:[A-Za-z]:[\\/]|/|~[\\/]|\.{1,2}[\\/])[^\r\n]*", text):
+            return False
+        if re.fullmatch(r"[\w .-]+\.[A-Za-z0-9]{1,12}", text):
+            return False
+        return len(text.split()) >= minimum_words
+
+    blocks = CODE_FENCE_BLOCK_RE.findall(str(content))
+    if blocks:
+        return any(has_content(block.partition("\n")[2].strip("` \t\r\n"), 1)
+                   for block in blocks)
+    return has_content(content, 3)
+
+
+def is_file_reference_request(message, history=None, *, resolve_supplied=True):
     text = normalize_for_router(message)
 
     # Supplied text is usable conversation content, not inaccessible file
     # access. A path/filename after a colon is not document content.
-    supplied = re.search(
+    supplied_pattern = (
         r"\b(?:my notes|my document|the document|the file|study notes|class notes|the pdf)"
-        r"\s*:\s*(\S[\s\S]*)", str(message), re.IGNORECASE,
+        r"\s*:\s*(\S[\s\S]*)"
     )
-    if supplied and len(supplied.group(1).split()) >= 3:
+    supplied = re.search(supplied_pattern, str(message), re.IGNORECASE)
+    if resolve_supplied and supplied and _supplied_file_content_is_available(supplied.group(1)):
         return False
+
+    # Resolve an unnamed file against USER-supplied content already available
+    # in both model paths' existing recent-history window. A named/local file,
+    # an upload claim, or older content must not borrow an unrelated excerpt.
+    if resolve_supplied and history and re.search(
+        r"\b(?:the|this|that)\s+(?:file|document|notes?|pdf)\s*[.!?]*$", text,
+    ):
+        for recent in reversed(get_recent_user_messages(history[-4:], limit=2)):
+            supplied = re.search(supplied_pattern, recent, re.IGNORECASE)
+            if supplied and _supplied_file_content_is_available(supplied.group(1)):
+                return False
+            if CODE_FENCE_BLOCK_RE.search(recent) and _supplied_file_content_is_available(recent):
+                return False
+            if re.search(r"\b(?:notes?|documents?|files?|pdfs?|uploaded)\b", recent, re.IGNORECASE):
+                break
 
     # FUTURE / PLANNING intent is NOT a file reference
     planning_phrases = [
@@ -4920,7 +4976,8 @@ def is_file_reference_request(message):
         "i dont remember what my notes say",
     ]
 
-    if any(signal in text for signal in file_reference_signals):
+    if any(re.search(r"\b" + re.escape(signal) + r"\b", text)
+           for signal in file_reference_signals):
         return True
 
     # The loose fallback below fires on the bare word "file", which caught
@@ -4990,9 +5047,7 @@ def is_file_reference_request(message):
     if any(signal in text for signal in technical_file_context):
         return False
 
-    return (
-        "notes" in text or "document" in text or "file" in text or "pdf" in text
-    ) and len(text.split()) <= 15
+    return bool(re.search(r"\b(?:notes?|documents?|files?|pdfs?)\b", text)) and len(text.split()) <= 15
 
 
 
@@ -7437,7 +7492,7 @@ EMAIL_PATTERN = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.IGNORECA
 
 DOMAIN_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s<>\"']+"
-    r"|(?<![@\w.])[a-z0-9][a-z0-9-]*\.(?:com|org|net|gov|edu)\b",
+    r"|(?<![@\w.-])(?:[a-z0-9][a-z0-9-]*\.)+(?:com|org|net|gov|edu)\b",
     re.IGNORECASE,
 )
 
@@ -7498,6 +7553,16 @@ def is_private_search_target(raw_text):
         or is_memory_recall_request(raw_text)
         or is_previous_conversation_reference(raw_text)
         or is_explicit_previous_session_reference(raw_text)
+        # A private file reference stays private when its contents are supplied.
+        # Bare public topics such as release notes are not private file intent.
+        or bool(
+            re.search(
+                r"\b(?:(?:my|our|the|this|that)\s+(?:notes?|documents?|files?|pdfs?)"
+                r"|(?:class|study)\s+notes|uploaded)\b",
+                normalize_for_router(raw_text),
+            )
+            and is_file_reference_request(raw_text, resolve_supplied=False)
+        )
     )
 
 # Conceptual questions about search are not search requests.
@@ -8425,7 +8490,7 @@ def is_web_search_request(message, history=None):
     # Private/internal targets win before ANY search condition. A domain in
     # the message must never send a memory or conversation lookup to Tavily:
     # "search my memory for groq.com" is not a web search.
-    if is_private_context_request(text):
+    if is_private_search_target(message):
         return False
 
     # A capability question with no target belongs to self_knowledge.
@@ -8548,7 +8613,7 @@ def classify_request(message, history):
     # === FILE / DOCUMENT REFERENCE DETECTION ===
     # The public build has no document access; these get a deterministic
     # explanation instead of a model call.
-    has_file_reference = is_file_reference_request(message)
+    has_file_reference = is_file_reference_request(message, history)
 
     # === PERSONAL DETECTION ===
     has_personal = is_personal_conversation(message) or is_personal_followup(
@@ -9087,21 +9152,26 @@ Rules:
 {continuation_rules}"""
 
     elif route == "unclear":
+        recent_context = get_recent_conversation_context(history, limit=4)
         prompt = f"""
 You are Kalillac AI.
 
-The user's message is vague or unclear.
+The user's message may be vague in isolation.
+
+RECENT CONVERSATION:
+{recent_context}
 
 User message:
 {message}
 
-Respond with ONLY one short clarification question.
-Do not answer the question.
-Do not guess what the user meant.
-Do not explain anything.
-Do not use memory or documents.
-Ask exactly what the user wants to do.
-Stop after the question.
+If RECENT CONVERSATION establishes the requested action and supplies the
+needed text or code, carry out that task using the supplied content.
+Do not ask the user to repeat an already established action.
+Otherwise respond with ONLY one short clarification question about what
+is still unclear. Do not guess an action or unavailable contents.
+Use only content supplied in this conversation; do not claim file access
+or use saved memory or inaccessible documents.
+Stop after completing the task or asking the question.
 """
 
     elif route == "personal":

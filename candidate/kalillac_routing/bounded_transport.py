@@ -1112,6 +1112,9 @@ class BoundedTransport:
 
     @staticmethod
     async def _exchange(client: httpx.AsyncClient, call: _Call) -> Any:
+        from . import provider_usage
+
+        provider_usage.dispatched()
         async with client.stream(
             "POST",
             call.url,
@@ -1157,4 +1160,6 @@ class BoundedTransport:
                 if len(body) > call.max_bytes:
                     raise ResponseTooLarge()
 
-        return _parse_json(bytes(body))
+        result = _parse_json(bytes(body))
+        provider_usage.returned(result)
+        return result

@@ -793,12 +793,12 @@ def test_privacy_diagram_has_four_stages_and_an_accessible_name(structure):
     assert [s[0] for s in stages] == ["1", "2", "3", "4"]
     expected = [("YOU ASK", "No account or profile required."),
                 ("TEMPORARY SESSION", "Kalillac keeps the current conversation context in server memory."),
-                ("ANSWER OR SEARCH", "OpenAI produces the answer."),
+                ("ANSWER OR SEARCH", "OpenAI generates model answers."),
                 ("YOU MOVE ON", "Refreshing or leaving ends this browser\u2019s access to the conversation.")]
     for (_, text), (title, body) in zip(stages, expected):
         assert text.startswith(title + " ") and body in text, text
-    assert "Tavily searches when current web information is needed." in " ".join(stages[2][1].split())
-    # The conditional Tavily branch is dashed and teal; the normal path is solid.
+    assert "Brave primary search. Tavily if eligible." in " ".join(stages[2][1].split())
+    # The conditional search-provider branch is dashed and teal; the normal path is solid.
     assert svg["searchPaths"], svg
     for dash, stroke in svg["searchPaths"]:
         assert dash not in ("none", "") and stroke == "rgb(53, 201, 167)", (dash, stroke)
@@ -813,7 +813,7 @@ def test_privacy_diagram_has_a_semantic_summary_and_the_memory_sentence_beneath(
     assert structure["flowHeading"] == ["Your conversation has boundaries.", "PRIVATE BY STRUCTURE"]
     summary = structure["summary"]
     assert len(summary) == 4
-    assert "OpenAI" in summary[2] and "Tavily" in summary[2] and "when" in summary[2]
+    assert "OpenAI" in summary[2] and "Brave" in summary[2] and "Tavily" in summary[2] and "When search is needed" in summary[2]
     note = structure["note"]
     assert note["visible"] and note["text"].startswith(MEMORY_SENTENCE)
     assert note["rect"]["top"] >= structure["svg"]["rect"]["bottom"]     # directly underneath
@@ -890,7 +890,7 @@ def test_explanation_has_exactly_two_blocks_with_the_required_meaning(structure)
     for phrase in ("doesn\u2019t require an account", "permanent chat history", "temporary session",
                    "Refreshing or leaving the page ends", MEMORY_SENTENCE):
         assert phrase.replace("\u2019", "'") in session.replace("\u2019", "'"), phrase
-    assert "OpenAI produces the answer." in providers and "Tavily searches when" in providers
+    assert "OpenAI generates model answers." in providers and "Brave is the primary search provider" in providers and "Tavily may supply one bounded fallback" in providers
     assert structure["privacyLink"] == "/privacy"
 
 
