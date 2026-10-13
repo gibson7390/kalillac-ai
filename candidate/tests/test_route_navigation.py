@@ -4,10 +4,10 @@ In-app links (wouter <Link>) change the route without reloading the page.
 Before the fix the new page kept the previous page's vertical scroll
 position, so the Privacy page, for example, opened scrolled to its middle or
 end. Every explicit page link must now open the new page at its top, without
-smooth scrolling. The header's Product and Privacy items are page links
-(/ and /privacy, desktop nav and phone menu alike) and also open at the top;
-"How it works" stays a section link to /#how-it-works. A bookmarked
-/#product URL still reaches the homepage section that carries that id.
+smooth scrolling. Privacy remains an in-app page link to /privacy. Product
+and How it works are native section anchors to /#product and /#how-it-works
+on desktop and in the phone menu. A bookmarked /#product URL reaches the
+homepage tools section.
 
 Browser tests drive the BUILT site over loopback only (the same harness as
 test_homepage_handoff.py) with real, trusted clicks at an exact 1440 x 900
@@ -94,9 +94,9 @@ SCENARIOS = [
     ("doc-home-link-from-privacy", "/privacy", "link", ('[data-testid="link-doc-home"]',) * 2, "/", "top"),
     ("header-logo-on-home", "/", 2400, ('[data-testid="link-home-brand"]',) * 2, "/", "top"),
     ("product-from-scrolled-privacy", "/privacy", 2400,
-     ('[data-testid="link-product-nav"]', '[data-testid="link-mobile-product"]'), "/", "top"),
+     ('[data-testid="link-product-nav"]', '[data-testid="link-mobile-product"]'), "/#product", "section"),
     ("product-from-scrolled-home", "/", 2400,
-     ('[data-testid="link-product-nav"]', '[data-testid="link-mobile-product"]'), "/", "top"),
+     ('[data-testid="link-product-nav"]', '[data-testid="link-mobile-product"]'), "/#product", "section"),
     ("header-privacy-from-scrolled-home", "/", "bottom",
      ('[data-testid="link-privacy-nav"]', '[data-testid="link-mobile-privacy"]'), "/privacy", "top"),
     ("header-privacy-from-scrolled-terms", "/terms", "bottom",
@@ -206,6 +206,21 @@ def navigation(request, tmp_path_factory):
               return { path: location.pathname, hash: location.hash, scrollY: Math.round(window.scrollY),
                        sectionTop: s ? Math.round(s.getBoundingClientRect().top) : null,
                        heading: s ? s.querySelector('h2').textContent.trim() : null };""")
+            if viewport == "mobile":
+                page.eval("document.querySelector('[data-testid=\"button-mobile-menu\"]').focus({preventScroll:true}); return true;")
+                for kind in ("keyDown", "keyUp"):
+                    event = {"type":kind,"key":"Enter","code":"Enter","windowsVirtualKeyCode":13}
+                    if kind == "keyDown": event["text"] = "\r"
+                    devtools.call("Input.dispatchKeyEvent", event, session)
+                page.wait_for("document.getElementById('mobile-site-menu')")
+                for kind in ("keyDown", "keyUp"):
+                    devtools.call("Input.dispatchKeyEvent", {"type":kind,"key":"Tab","code":"Tab","windowsVirtualKeyCode":9}, session)
+                first_link = page.eval("return document.activeElement.getAttribute('data-testid');")
+                for kind in ("keyDown", "keyUp"):
+                    devtools.call("Input.dispatchKeyEvent", {"type":kind,"key":"Escape","code":"Escape","windowsVirtualKeyCode":27}, session)
+                page.wait_for("!document.getElementById('mobile-site-menu')")
+                results["keyboardMenu"] = page.eval("return {closed:!document.getElementById('mobile-site-menu'), focus:document.activeElement.getAttribute('data-testid'), expanded:document.activeElement.getAttribute('aria-expanded')};")
+                results["keyboardMenu"]["firstLink"] = first_link
             results["apiRequests"] = [p for p in site.http.paths if "/api/" in p]
 
     shutil.rmtree(profile, ignore_errors=True)
@@ -247,10 +262,10 @@ def test_privacy_entry_points_cover_header_footer_and_homepage_link(navigation):
         assert navigation[name]["title"] == "Privacy", name
 
 
-def test_product_opens_the_homepage_at_its_top_on_desktop_and_phone(navigation):
+def test_product_opens_the_tools_section_on_desktop_and_phone(navigation):
     for name in ("product-from-scrolled-privacy", "product-from-scrolled-home"):
         run = navigation[name]
-        assert run["path"] == "/" and run["hash"] == "" and run["scrollY"] == 0, run
+        assert run["path"] == "/" and run["hash"] == "#product" and run["scrollY"] > 0, run
         assert run["usedMenu"] is (navigation["viewport"] == "mobile")       # phones use the menu
         assert run["menuOpen"] is False
 
@@ -261,10 +276,10 @@ def test_header_privacy_uses_the_menu_on_phones_and_closes_it(navigation):
         assert run["usedMenu"] is (navigation["viewport"] == "mobile") and run["menuOpen"] is False, run
 
 
-def test_legacy_product_bookmark_reaches_the_memory_section(navigation):
+def test_product_bookmark_reaches_the_tools_section(navigation):
     legacy = navigation["legacyProduct"]
     assert legacy["path"] == "/" and legacy["hash"] == "#product"
-    assert legacy["heading"] == "Temporary memory you can test yourself."
+    assert legacy["heading"] == "Powerful tools for real work."
     assert legacy["scrollY"] > 0 and abs(legacy["sectionTop"] - SECTION_SCROLL_MARGIN) <= 2, legacy
 
 
@@ -303,9 +318,17 @@ def test_scroll_reset_is_centralized_in_the_router():
     # No scattered resets: the only window.scrollTo calls are the workspace CTA and this handler.
     assert app.count("window.scrollTo(") == 3, app.count("window.scrollTo(")
     assert "popstate" not in app and "scrollRestoration" not in app
-    # Product and Privacy are in-app page links, so this handler governs them.
+    # The logo and Privacy are in-app page links governed by this handler;
+    # Product and How it works use native section anchors.
     header = app[app.index("function SiteHeader()"):app.index("function SiteFooter()")]
-    assert header.count('<Link href="/" ') == 3                 # logo, Product, mobile Product
+    assert header.count('<Link href="/" ') == 1                 # header logo only
     assert header.count('<Link href="/privacy" ') == 2          # Privacy, mobile Privacy
-    assert 'href="/#product"' not in header and 'href="/#privacy"' not in header
-    assert header.count('href="/#how-it-works"') == 2           # the one header section link
+    assert header.count('href="/#product"') == 2 and 'href="/#privacy"' not in header
+    assert header.count('href="/#how-it-works"') == 2           # How it works section anchors
+
+
+def test_mobile_menu_keyboard_escape_returns_focus(navigation):
+    if navigation["viewport"] != "mobile":
+        return  # The desktop menu toggle is intentionally absent.
+    assert navigation["keyboardMenu"] == {"closed": True, "focus": "button-mobile-menu", "expanded": "false", "firstLink": "link-mobile-product"}
+    assert navigation["apiRequests"] == []

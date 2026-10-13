@@ -886,3 +886,24 @@ body {
     padding-bottom: 8px;
   }
 }
+
+/* Functional task cards: same .hint/data-prompt handler, no new chat protocol. */
+.empty-hints { gap: 12px; }
+.hint { display: flex; align-items: flex-start; gap: 11px; min-width: 0; min-height: 112px; padding: 16px 13px; border-color: #dce8fb; border-radius: 12px; background: white; color: #101d39; box-shadow: 0 3px 10px #236acf05; }
+.hint-icon { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: #eff6ff; color: #0069ff; }.hint-icon svg { width: 27px; height: 27px; }.hint-learning .hint-icon { color: #008b89; background: #eafbf7; }
+.hint-copy { flex: 1; min-width: 0; }.hint-title { display: block; color: #101d39; font-size: 15px; font-weight: 750; line-height: 1.25; }.hint-description { display: block; color: #586780; font-size: 13px; line-height: 1.45; margin-top: 6px; }.hint-arrow { flex: none; width: 15px; height: 15px; color: #0069ff; margin-top: 2px; }
+.hint:hover,.hint:focus-visible { background: #f2f7ff; border-color: #0069ff; }.hint:focus-visible { outline: 3px solid #0056d8; outline-offset: 3px; }.hint.hint-guide-active { border-color: #a4c6fa; background: #f8fbff; box-shadow: none; }
+.is-embedded { --blue: #0069ff; --blue-deep: #0053cf; --blue-soft: #eaf3ff; --paper: #fff; --rail: 20px; }
+.is-embedded .thread { padding-top: 20px; }.is-embedded .empty { padding: 0 0 4px; width: 100%; }.is-embedded .empty-title { font-size: 24px; font-weight: 800; color: #0b1737; }.is-embedded .empty-line { font-size: 14px; max-width: 44ch; }.is-embedded .empty-hints { margin-top: 24px; }.is-embedded .composer { border-top: 1px solid #e3edfa; padding-top: 12px; padding-bottom: 14px; }.is-embedded .composer-shell { border-color: #dae6fa; box-shadow: 0 2px 8px #236acf08; }
+@media (max-width: 560px) { .empty-hints { grid-template-columns: repeat(2,minmax(0,1fr)); }.hint { padding: 12px; gap: 8px; min-height: 128px; }.hint-icon { width: 27px; height: 27px; }.hint-icon svg { width: 24px; height: 24px; }.hint-arrow { width: 12px; height: 12px; }.hint-title { font-size: 14px; }.hint-description { font-size: 13px; }.is-embedded { --rail: 16px; }.is-embedded .empty-title { font-size: 23px; } }
+@media (max-width: 400px) { .empty-hints { grid-template-columns: 1fr; gap: 10px; }.hint { min-height: 88px; padding: 13px; align-items: center; }.hint-icon { width: 34px; height: 34px; }.hint-copy { padding-right: 3px; }.hint-title { font-size: 15px; }.hint-description { font-size: 13px; margin-top: 4px; }.hint-arrow { width: 16px; height: 16px; }.is-embedded .empty-hints { margin-top: 20px; } }
+@media (max-height: 560px) and (min-width: 401px) { .is-embedded .empty-title { font-size: 22px; }.is-embedded .empty-hints { margin-top: 16px; }.is-embedded .hint { min-height: 96px; padding: 11px; }.is-embedded .thread { padding-top: 14px; } }
+
+/* Keep the existing interactive composer affordances above the embedded theme. */
+.is-embedded .composer-shell:hover { border-color: #86b8fa; }
+.is-embedded .composer-shell:focus-within { border-color: #0069ff; box-shadow: 0 0 0 3px #0069ff1f; }
+
+/* A capped phone workspace may need to scroll its task area. Auto margins
+   center a fitting intro without clipping the beginning of an overflowing one. */
+.is-embedded .conversation.is-empty .thread { justify-content: flex-start; }
+.is-embedded .empty { flex-shrink: 0; margin-block: auto; }

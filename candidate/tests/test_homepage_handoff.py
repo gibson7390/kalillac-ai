@@ -55,12 +55,10 @@ SITE_CSS = SITE_SRC / "index.css"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 VIEWPORTS = {"desktop": (1440, 900), "mobile": (390, 844)}
-# The compact card's fixed height (site/src/index.css), by viewport.
-# The homepage chat workspace's one stable height (site/src/index.css). At
-# 1180px and wider it sits beside the headline and fills the first screen:
-# clamp(560px, 100svh - 128px, 760px), i.e. 760px at 1440 x 900. Phones use
-# clamp(520px, 72svh, 680px), i.e. 608px at 390 x 844.
-WORKSPACE_HEIGHT = {"desktop": 760, "mobile": round(0.72 * 844)}
+# The workspace stays the same size throughout a conversation. These reference
+# viewports retain the approved layout; shorter phones cap it to the available
+# viewport so the CTA can show the complete composer below the sticky header.
+WORKSPACE_HEIGHT = {"desktop": 460, "mobile": 660}
 
 
 # --- loopback servers --------------------------------------------------------------------------
@@ -264,10 +262,18 @@ def browser_page(browser: Path, profile: Path, size: tuple[int, int], mobile: bo
     try:
         port_file = profile / "DevToolsActivePort"
         deadline = time.monotonic() + 30
-        while not (port_file.is_file() and len(port_file.read_text().split()) >= 2):
+        while True:
             assert time.monotonic() < deadline, "the browser did not open its DevTools port"
+            # Edge can create the file before releasing its Windows write lock.
+            # Only this bounded startup read may wait; no test/assertion timeout grows.
+            try:
+                fields = port_file.read_text(encoding="utf-8").split()
+            except (FileNotFoundError, PermissionError):
+                fields = []
+            if len(fields) >= 2:
+                port, path = fields[:2]
+                break
             time.sleep(0.1)
-        port, path = port_file.read_text().split()[:2]
 
         devtools = DevTools(f"ws://127.0.0.1:{port}{path}")
         target = devtools.call("Target.createTarget", {"url": "about:blank"})["targetId"]
@@ -467,21 +473,21 @@ def test_homepage_copy_and_navigation():
     assert not re.search(r"<h[1-6][^>]*>\s*PRIVATE BY DESIGN", app)
     assert HERO_COPY in text
     assert ">Start a private session <ArrowRight" in home
-    assert ('<span className="trust-item"><span className="live-dot" /> Temporary sessions</span>' in home
-            and '<span className="trust-item">No account required</span>' in home
-            and ">Clear provider disclosure<" in home)
+    assert ('<span className="trust-item"><Clock size={16} aria-hidden="true"/> Temporary sessions</span>' in home
+            and '<span className="trust-item"><CircleSlash size={16} aria-hidden="true"/> No account required</span>' in home
+            and "Clear provider disclosure</Link>" in home)
     # Restrained navigation: no second filled button in the header.
     header = app[app.index("function SiteHeader()"):app.index("function SiteFooter()")]
-    # Product opens the homepage and Privacy the full Privacy page (in-app links);
-    # How it works is the one header section link.
-    for item in ('<Link href="/" className="nav-link" data-testid="link-product-nav">Product</Link>',
+    # Product and How it works are native homepage section anchors; Privacy
+    # opens its full page through an in-app link.
+    for item in ('<a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>',
                  '<Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>',
                  '<a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>',
-                 '<Link href="/" onClick={close} data-testid="link-mobile-product">Product</Link>',
+                 '<a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>',
                  '<Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>',
                  '<a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>'):
         assert item in header, item
-    assert 'href="/#product"' not in header and 'href="/#privacy"' not in header
+    assert header.count('href="/#product"') == 2 and 'href="/#privacy"' not in header
     assert "Try Kalillac" not in app and "nav-cta" not in app
     assert app.count('className="primary-link') == 1
     for unfinished in ("Pricing", "Sign in", "Sign up", "Create account", "Log in"):

@@ -31,6 +31,8 @@ import pytest
 
 from test_homepage_handoff import (
     APP_TSX,
+    APP_JS,
+    INDEX_HTML,
     REPO,
     SITE,
     SITE_CSS,
@@ -121,7 +123,8 @@ def run_scenario(page: Page, reduced: bool) -> dict:
         titleShown: shown('.empty-title'), lineShown: shown('.empty-line'), hintsShown: shown('.empty-hints'),
         titleText: d.querySelector('.empty-title').textContent.trim(),
         lineText: d.querySelector('.empty-line').textContent.trim().replace(/\\s+/g, ' '),
-        hints: [...d.querySelectorAll('.hint')].map(h => [h.textContent.trim(), h.getAttribute('data-prompt')]),
+        hints: [...d.querySelectorAll('.hint')].map(h => [h.getAttribute('aria-label'), h.getAttribute('data-prompt')]),
+        hintTitles: [...d.querySelectorAll('.hint-title')].map(h => h.textContent.trim()),
         composer: ix.childRect(d.getElementById('composer-shell')),
         messages: d.querySelectorAll('#thread .msg').length,
         input: ix.childRect(ix.input()), send: ix.childRect(d.getElementById('send-btn')),
@@ -141,7 +144,7 @@ def run_scenario(page: Page, reduced: bool) -> dict:
     # ---- pointer, caret, decorative layers -------------------------------------------
     r["styles"] = page.eval("""
       const ix = window.__ix, d = ix.doc(), cs = el => getComputedStyle(el);
-      const decorative = ['.orbital-wrap', '.orbital-glow', '.hero-signal-line', '.phone-stage'];
+      const decorative = ['.orbital-wrap', '.hero-signal-line', '.phone-stage'];
       return {
         inputCursor: cs(ix.input()).cursor, caretColor: cs(ix.input()).caretColor, inputColor: cs(ix.input()).color,
         shellBackground: cs(d.getElementById('composer-shell')).backgroundColor,
@@ -196,7 +199,7 @@ def run_scenario(page: Page, reduced: bool) -> dict:
         page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
         time.sleep(0.2)
         r["hintClicks"].append(page.eval("""const ix = window.__ix, d = ix.doc();
-          return { value: ix.input().value, messages: d.querySelectorAll('#thread .msg').length,
+          return { ...ix.focusState(), value: ix.input().value, messages: d.querySelectorAll('#thread .msg').length,
                    requests: (ix.frame().contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length,
                    emptyPresent: !!d.getElementById('empty') && d.getElementById('empty').isConnected,
                    sendDisabled: d.getElementById('send-btn').disabled, path: location.pathname,
@@ -386,12 +389,8 @@ def expected_card_top(run) -> float:
     return run["startFromBottom"]["header"]["bottom"] + GAP_BELOW_HEADER
 
 
-EXAMPLE_PROMPTS = (
-    "Explain how encryption works",
-    "Draft a professional email",
-    "Build a simple Python password generator",
-    "Find this week’s biggest technology stories",
-)
+EXAMPLE_PROMPTS = ('Find this week’s biggest technology stories', 'Draft a professional email', 'Build a simple Python password generator', 'Explain how encryption works')
+TASK_LABELS = ('Research the current web', 'Write and revise', 'Code and debug', 'Learn anything')
 MEMORY_SENTENCE = "Temporary session data can remain in server memory until capacity limits or a restart clear it."
 # Claims the homepage must never make.
 FORBIDDEN_CLAIMS = ("end-to-end", "end to end", "deleted immediately", "immediately deleted",
@@ -456,12 +455,12 @@ def test_initial_workspace_is_full_height_without_a_transcript_scrollbar(interac
     assert landing["messages"] == 0
     # One stable full workspace from the first render: no compact state.
     assert abs(landing["card"]["height"] - WORKSPACE_HEIGHT[interaction["viewport"]]) <= 1, landing["card"]
-    assert landing["card"]["height"] >= (560 if interaction["viewport"] == "desktop" else 520)
+    assert landing["card"]["height"] >= (460 if interaction["viewport"] == "desktop" else 660)
     # The intentional starting state sits in the workspace...
     assert landing["titleShown"] and landing["lineShown"] and landing["hintsShown"]
     assert landing["titleText"] == "What are you working on?"
     assert landing["lineText"] == "Bring a difficult question, a rough draft, broken code, or something current."
-    assert landing["hints"] == [[p, p] for p in EXAMPLE_PROMPTS]
+    assert landing["hints"] == [list(pair) for pair in zip(TASK_LABELS, EXAMPLE_PROMPTS)]
     # ...without overflowing it, so no empty-history scrollbar can appear.
     scroll_height, client_height = landing["convScroll"]
     assert scroll_height <= client_height, landing["convScroll"]
@@ -480,7 +479,7 @@ def test_eyebrow_is_editorial_text_with_a_short_blue_rule(interaction):
     assert eyebrow["radius"] == "0px" and eyebrow["padding"] == "0px" and eyebrow["borderTopWidth"] == "0px"
     # One short blue rule beside the text.
     assert eyebrow["ruleContent"] == '""' and eyebrow["ruleHeight"] == "2px"
-    assert eyebrow["ruleWidth"] in ("28px", "22px") and eyebrow["ruleColor"] == "rgb(50, 102, 216)"
+    assert eyebrow["ruleWidth"] in ("28px", "22px") and eyebrow["ruleColor"] == "rgb(0, 105, 255)"
     assert float(eyebrow["fontSize"].rstrip("px")) >= 10 and float(eyebrow["letterSpacing"].rstrip("px")) > 0
     # Aligned with the headline's left edge.
     assert abs(eyebrow["rect"]["left"] - interaction["landing"]["headline"]["left"]) <= 1
@@ -489,8 +488,10 @@ def test_eyebrow_is_editorial_text_with_a_short_blue_rule(interaction):
 def test_example_prompts_fill_the_composer_and_never_send(interaction):
     clicks = interaction["hintClicks"]
 
+    assert interaction["landing"]["hintTitles"] == list(TASK_LABELS)
     assert [c["value"] for c in clicks] == list(EXAMPLE_PROMPTS)
     for click in clicks:
+        assert click["parentActive"] and click["childActive"], click
         assert click["messages"] == 0 and click["requests"] == 0, click
         assert click["emptyPresent"] is True and click["sendDisabled"] is False, click
         assert click["path"] == "/" and click["historyLength"] == clicks[0]["historyLength"], click
@@ -653,7 +654,7 @@ const svgs = qa('.flow-svg').filter(visible);
 const svg = svgs[0];
 const alpha = c => { const m = c.match(/rgba?\(([^)]+)\)/); if (!m) return 0; const p = m[1].split(',');
   return p.length > 3 ? parseFloat(p[3]) : 1; };
-const order = ['section-hero', 'section-flow', 'section-demos', 'section-explain', 'section-mobile-app']
+const order = ['section-hero', 'section-tools', 'section-promise', 'section-flow', 'section-demos', 'section-explain', 'section-mobile-app']
   .map(id => q(`[data-testid="${id}"]`));
 return {
   innerWidth, innerHeight, dpr: devicePixelRatio,
@@ -668,7 +669,7 @@ return {
   slotHeight: Math.round(slot.height),
   sectionsInOrder: order.every((el, i) => el && (i === 0 ||
     (order[i - 1].compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))),
-  footerLast: !!q('.site-footer') && !!(order[4].compareDocumentPosition(q('.site-footer')) & Node.DOCUMENT_POSITION_FOLLOWING),
+  footerLast: !!q('.site-footer') && !!(order[6].compareDocumentPosition(q('.site-footer')) & Node.DOCUMENT_POSITION_FOLLOWING),
   sectionTops: order.map(el => Math.round(rect(el).top)),
   visibleSvgs: svgs.map(s => s.getAttribute('data-testid')),
   svg: svg ? {
@@ -689,13 +690,16 @@ return {
   note: (() => { const n = q('[data-testid="flow-memory-note"]'); return { text: n.textContent.replace(/\s+/g, ' ').trim(),
     rect: rect(n), visible: visible(n), fontSize: parseFloat(getComputedStyle(n).fontSize) }; })(),
   flowHeading: [q('#how-it-works h2').textContent.trim(), q('#how-it-works .eyebrow').textContent.trim()],
-  demosHeading: q('#product h2').textContent.trim(),
+  demosHeading: q('#temporary-memory h2').textContent.trim(),
+  flowHTML: {tag: q('[data-testid="flow-summary"]').tagName, labelledby: q('[data-testid="flow-summary"]').getAttribute('aria-labelledby'), stages: qa('.flow-stage').map(e => [e.dataset.stage, e.querySelector('h3').textContent, e.querySelector('p').textContent]), rect: rect(q('.flow-stages')), columns: getComputedStyle(q('.flow-stages')).gridTemplateColumns.split(' ').length, svgText: qa('.flow-panel svg text').length, minTextSize: Math.min(...qa('.flow-stage p').map(e => parseFloat(getComputedStyle(e).fontSize)))},
+  tools: qa('.tool-card h3').map(e => e.textContent),
+  promise: { heading: q('#promise-heading').textContent, text: q('.promise-panel').textContent, count: qa('.promise-item').length },
   memory: (() => { const s = q('[data-testid="section-demos"]'), phases = [...s.querySelectorAll('.memory-phase')];
     return { id: s.id, tag: s.tagName, labelledby: s.getAttribute('aria-labelledby'), headingId: s.querySelector('h2').id,
       eyebrow: s.querySelector('.eyebrow').innerText.trim(), intro: s.querySelector('.demos-intro p').textContent.trim(),
       phasesListTag: phases.length ? phases[0].parentElement.tagName : null,
       phases: phases.map(ph => { const h = ph.querySelector('h3'), list = ph.querySelector('.memory-transcript');
-        return { tag: ph.tagName, label: h.innerText.trim(), labelTag: h.tagName, labelId: h.id, listTag: list.tagName,
+        return { tag: ph.tagName, label: h.textContent.replace(/\s+/g, ' ').trim(), labelTag: h.tagName, labelId: h.id, listTag: list.tagName,
                  listLabelledby: list.getAttribute('aria-labelledby'), rect: rect(ph),
                  turns: [...list.children].map(m => [m.tagName, m.className, m.querySelector('.memory-speaker').textContent.trim(),
                                                      m.querySelector('p').textContent.trim()]) }; }),
@@ -721,6 +725,8 @@ STRUCTURE_VIEWPORTS = {
     "1440x900": ((1440, 900), False, False, None),
     "1440x900-reduced-motion": ((1440, 900), False, True, None),
     "1024x768": ((1024, 768), False, False, None),
+    "1024x1366": ((1024, 1366), False, False, None),
+    "320x844": ((320, 844), True, False, None),
     "390x844": ((390, 844), True, False, None),
     "360x800": ((360, 800), True, False, None),
     # A 1440 x 900 browser window at the browser's own 200% page zoom (no emulation).
@@ -755,7 +761,7 @@ def test_structure_has_one_h1_and_one_filled_call_to_action(structure):
     assert structure["heroEyebrow"] == ["SPAN", "PRIVATE BY DESIGN"]
     assert [t.replace("\u00a0", " ") for t in structure["filled"]] == ["Start a private session"], structure["filled"]
     if not structure["mobile"] and structure["innerWidth"] >= 1024:
-        assert structure["navLinks"] == [["Product", "/"], ["Privacy", "/privacy"],
+        assert structure["navLinks"] == [["Product", "/#product"], ["Privacy", "/privacy"],
                                          ["How it works", "/#how-it-works"]]
 
 
@@ -779,55 +785,43 @@ def test_structure_desktop_first_screen_shows_the_complete_composer(structure):
     if structure["innerWidth"] < 1440:
         pytest.skip("the side-by-side first screen applies at 1440 x 900 and wider")
     assert structure["composerBottomInViewport"] <= structure["innerHeight"], structure
-    assert structure["slotHeight"] >= 560                           # not shrunk to fit
+    assert structure["slotHeight"] == 460                           # approved desktop workspace height
 
 
 def test_privacy_diagram_has_four_stages_and_an_accessible_name(structure):
-    svg = structure["svg"]
-    wide = structure["innerWidth"] >= 1180
-
-    assert structure["visibleSvgs"] == ["flow-svg-wide" if wide else "flow-svg-narrow"]
-    assert svg["role"] == "img" and svg["labelledby"] == svg["titleId"] and svg["describedby"] == svg["descId"]
-    assert svg["title"] == "How a Kalillac conversation moves" and "four stages" in svg["desc"]
-    stages = svg["stages"]
-    assert [s[0] for s in stages] == ["1", "2", "3", "4"]
-    expected = [("YOU ASK", "No account or profile required."),
-                ("TEMPORARY SESSION", "Kalillac keeps the current conversation context in server memory."),
-                ("ANSWER OR SEARCH", "OpenAI generates model answers."),
-                ("YOU MOVE ON", "Refreshing or leaving ends this browser\u2019s access to the conversation.")]
-    for (_, text), (title, body) in zip(stages, expected):
-        assert text.startswith(title + " ") and body in text, text
-    assert "Brave primary search. Tavily if eligible." in " ".join(stages[2][1].split())
-    # The conditional search-provider branch is dashed and teal; the normal path is solid.
-    assert svg["searchPaths"], svg
-    for dash, stroke in svg["searchPaths"]:
-        assert dash not in ("none", "") and stroke == "rgb(53, 201, 167)", (dash, stroke)
-    assert svg["answerPaths"] and set(svg["answerPaths"]) == {"none"}, svg["answerPaths"]
-    assert "Answers return to you" in svg["text"]                   # the return path to the visitor
-    assert not svg["overflowsPanel"]
-    # Readable at every width, including 200% zoom (text height in CSS pixels).
-    assert svg["minTextHeight"] >= 11, svg["minTextHeight"]
+    flow = structure["flowHTML"]
+    assert flow["tag"] == "OL" and flow["labelledby"] == "flow-heading"
+    assert flow["svgText"] == 0
+    stages = flow["stages"]
+    assert [stage[0] for stage in stages] == ["1", "2", "3", "4"]
+    assert [stage[1] for stage in stages] == ["1. You ask", "2. Temporary session", "3. Answer or search", "4. You move on"]
+    assert "No account or profile is required" in stages[0][2]
+    assert "temporary server memory" in stages[1][2]
+    assert all(p in stages[2][2] for p in ("OpenAI", "Brave", "Tavily", "eligible"))
+    assert "not immediate deletion" in stages[3][2]
+    assert flow["columns"] == (4 if structure["innerWidth"] > 1100 else 2 if structure["innerWidth"] > 720 else 1)
+    assert flow["rect"]["left"] >= 0 and flow["rect"]["right"] <= structure["innerWidth"]
+    assert flow["minTextSize"] >= 13
 
 
 def test_privacy_diagram_has_a_semantic_summary_and_the_memory_sentence_beneath(structure):
-    assert structure["flowHeading"] == ["Your conversation has boundaries.", "PRIVATE BY STRUCTURE"]
+    assert structure["flowHeading"] == ["Your conversation has boundaries.", "HOW IT WORKS"]
     summary = structure["summary"]
-    assert len(summary) == 4
-    assert "OpenAI" in summary[2] and "Brave" in summary[2] and "Tavily" in summary[2] and "When search is needed" in summary[2]
+    assert len(summary) == 4 and all(p in summary[2] for p in ("OpenAI", "Brave", "Tavily", "eligible"))
     note = structure["note"]
     assert note["visible"] and note["text"].startswith(MEMORY_SENTENCE)
-    assert note["rect"]["top"] >= structure["svg"]["rect"]["bottom"]     # directly underneath
+    assert note["rect"]["top"] >= structure["flowHTML"]["rect"]["bottom"]
     assert note["fontSize"] >= 14
 
 
 MEMORY_TRANSCRIPT = {
-    "1 · DURING THE SAME SESSION": [
+    "1 DURING THE SAME SESSION": [
         ("you", "Remember for me that my business name is Kalillac AI."),
         ("kalillac", "I’ll remember that your business name is Kalillac AI for this conversation."),
         ("you", "What is my business name?"),
         ("kalillac", "Your business name is Kalillac AI."),
     ],
-    "2 · AFTER REFRESHING": [
+    "2 AFTER REFRESHING": [
         ("you", "Do you remember me telling you what my business name was?"),
         ("kalillac", "No. I don’t see your business name in the current session, so I can’t recover it."),
     ],
@@ -845,8 +839,8 @@ REMOVED_DEMONSTRATION_TEXT = (
 def test_memory_demonstration_replaces_the_four_handcrafted_cards(structure):
     memory = structure["memory"]
 
-    # The legacy #product target still reaches this section.
-    assert memory["id"] == "product" and memory["tag"] == "SECTION"
+    # The memory section has its own bookmark; #product now reaches the tools.
+    assert memory["id"] == "temporary-memory" and memory["tag"] == "SECTION"
     assert memory["labelledby"] == memory["headingId"] == "memory-heading"
     assert memory["eyebrow"] == "SEE IT IN ACTION"
     assert structure["demosHeading"] == "Temporary memory you can test yourself."
@@ -875,7 +869,7 @@ def test_memory_demonstration_replaces_the_four_handcrafted_cards(structure):
         assert removed.lower() not in page, removed
     # Chronology: side by side on wide screens, phase 1 above phase 2 when stacked.
     first, second = (p["rect"] for p in memory["phases"])
-    if structure["innerWidth"] > 1000:
+    if structure["innerWidth"] > 720:
         assert second["left"] >= first["right"] and abs(second["top"] - first["top"]) <= 1
     else:
         assert second["top"] >= first["bottom"]
@@ -897,7 +891,7 @@ def test_explanation_has_exactly_two_blocks_with_the_required_meaning(structure)
 def test_mobile_app_section_follows_the_explanation(structure):
     assert "Kalillac AI app in development." in structure["mobileApp"]
     assert "No release date announced" in structure["mobileApp"]
-    assert structure["sectionTops"][4] > structure["sectionTops"][3]
+    assert structure["sectionTops"][6] > structure["sectionTops"][5]
 
 
 def test_page_makes_no_absolute_privacy_claims(structure):
@@ -1018,13 +1012,13 @@ def real_zoom(tmp_path_factory):
                        docScrollWidth: document.documentElement.scrollWidth };""")
 
             # The diagram at 200%.
-            r["diagram"] = page.eval("""const svg = [...document.querySelectorAll('.flow-svg')]
-                .filter(s => getComputedStyle(s).display !== 'none')[0];
-              const panel = document.querySelector('.flow-panel').getBoundingClientRect(), b = svg.getBoundingClientRect();
+            r["diagram"] = page.eval("""const flow = document.querySelector('.flow-stages');
+              const panel = document.querySelector('.flow-panel').getBoundingClientRect(), b = flow.getBoundingClientRect();
               const note = document.querySelector('[data-testid="flow-memory-note"]'), n = note.getBoundingClientRect();
-              return { testid: svg.getAttribute('data-testid'), left: b.left, right: b.right,
+              return { testid: 'flow-html-stages', left: b.left, right: b.right,
+                       columns: getComputedStyle(flow).gridTemplateColumns.split(' ').length,
                        panel: [panel.left, panel.right], innerWidth,
-                       texts: [...svg.querySelectorAll('text')].map(x => { const t = x.getBoundingClientRect();
+                       texts: [...flow.querySelectorAll('h3, p')].map(x => { const t = x.getBoundingClientRect();
                          return [x.textContent, t.left, t.right, t.height]; }),
                        note: note.textContent.trim(), noteRight: n.right };""")
 
@@ -1078,7 +1072,7 @@ def test_real_zoom_composer_sends_and_stays_usable(real_zoom):
 
 def test_real_zoom_privacy_diagram_stays_readable(real_zoom):
     d = real_zoom["diagram"]
-    assert d["testid"] == "flow-svg-narrow"                       # the vertical layout
+    assert d["testid"] == "flow-html-stages" and d["columns"] == 1                       # the vertical layout
     assert d["panel"][0] - 1 <= d["left"] and d["right"] <= d["panel"][1] + 1 <= d["innerWidth"] + 2
     for text, left, right, height in d["texts"]:
         assert d["panel"][0] - 1 <= left and right <= d["panel"][1] + 1, text
@@ -1393,7 +1387,7 @@ def app_conversation(request, tmp_path_factory):
 
 
 def min_height(viewport: str) -> int:
-    return 560 if viewport == "desktop" else 520
+    return 460 if viewport == "desktop" else 660
 
 
 def assert_usable_workspace(snap):
@@ -1537,18 +1531,17 @@ def test_direct_app_is_a_full_height_conversation(app_conversation):
 
 def test_workspace_css_is_one_stable_size():
     css = SITE_CSS.read_text(encoding="utf-8")
-
-    assert "height: 640px; height: clamp(560px, 70vh, 720px); scroll-margin-top: 96px; }" in css
-    # Beside the headline (1180px and wider) it fills the first screen below the header.
-    assert ("  .embedded-chat-slot { height: 760px; height: clamp(560px, calc(100vh - 128px), 760px); "
-            "height: clamp(560px, calc(100svh - 128px), 760px); }") in css
-    assert ("  .embedded-chat-slot { height: 600px; height: clamp(520px, 72vh, 680px); "
-            "height: clamp(520px, 72svh, 680px); }") in css
-    # Short viewports (200% zoom, landscape phones): it fits below the sticky header.
-    assert ("@media (max-height: 560px) {\n  .embedded-chat-slot { height: 320px; "
-            "height: max(280px, calc(100vh - 96px)); height: max(280px, calc(100svh - 96px)); }") in css
-    # No other height for the workspace, and no state that could resize it.
-    assert len(re.findall(r"\.embedded-chat-slot[^{]*\{[^}]*\bheight:", css)) == 4
+    assert ".embedded-chat-slot { position: relative; z-index: 2; width: 100%; height: 460px;" in css
+    for boundary, height in ((1100, 440), (899, 500)):
+        block = css[css.index(f"@media (max-width: {boundary}px)"):]
+        block = block[:block.find("@media", 1)]
+        assert f".embedded-chat-slot {{ height: {height}px; }}" in block
+    # Both fallback and small-viewport units cap short phones; behavior is
+    # covered by trusted CTA/card clicks below, rather than this source check.
+    assert "min(660px,max(280px,calc(100vh - 96px)))" in css
+    assert "min(660px,max(280px,calc(100svh - 96px)))" in css
+    assert "@media (max-height: 560px)" in css and "max(280px,calc(100svh - 96px))" in css
+    assert len(re.findall(r"\.embedded-chat-slot[^{]*\{[^}]*\bheight:", css)) == 5
     for gone in ("is-expanded", "is-active", "chat-expanded", "chat-expand"):
         assert gone not in css, gone
 
@@ -1589,15 +1582,22 @@ def test_conversation_stays_on_the_homepage_in_source():
 
 
 def test_example_prompts_only_fill_the_composer_in_source():
-    chat = (REPO / "frontend" / "app.js").read_text(encoding="utf-8")
-    html = (REPO / "frontend" / "index.html").read_text(encoding="utf-8")
-
-    for prompt in EXAMPLE_PROMPTS:
-        assert f'data-prompt="{prompt}">{prompt}</button>' in html
+    from html.parser import HTMLParser
+    class Starters(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.cards = []
+        def handle_starttag(self, tag, attributes):
+            a = dict(attributes)
+            if tag == "button" and "hint" in a.get("class", "").split():
+                self.cards.append((a["aria-label"], a["data-prompt"], a["type"]))
+    parser = Starters(); parser.feed(INDEX_HTML.read_text(encoding="utf-8"))
+    assert parser.cards == [(label, prompt, "button") for label, prompt in zip(TASK_LABELS, EXAMPLE_PROMPTS)]
+    chat = APP_JS.read_text(encoding="utf-8")
     handler = chat[chat.index('var hints = document.querySelectorAll(".hint");'):]
     handler = handler[handler.index('addEventListener("click"'):]
-    handler = handler[: handler.index("});") + 3]
+    handler = handler[:handler.index("});") + 3]
     assert 'input.value = this.getAttribute("data-prompt") || "";' in handler
+    assert "input.focus();" in handler
     assert "send(" not in handler and ".submit" not in handler and "requestSubmit" not in handler
 
 
@@ -1656,3 +1656,85 @@ def test_app_frontend_and_site_dependencies_are_untouched():
 
     package = json.loads((SITE / "package.json").read_text(encoding="utf-8"))
     assert set(package["dependencies"]) == {"lucide-react", "react", "react-dom", "wouter"}
+
+
+def test_tools_and_privacy_promise_match_pre_subscription_scope(structure):
+    assert structure["tools"] == list(TASK_LABELS)
+    promise = structure["promise"]
+    assert promise["heading"] == "Your conversation stays temporary."
+    assert promise["count"] == 4
+    assert "Current conversation context is also held temporarily" in promise["text"]
+    assert "does not immediately delete" in promise["text"]
+    assert "not a promise of complete anonymity or no third-party processing" in promise["text"]
+    for label in ("Pricing", "Sign in", "Create account", "Upgrade", "Checkout", "Buy Me a Coffee"):
+        assert label not in structure["pageText"]
+
+
+
+@pytest.mark.parametrize("size", [(375, 667), (360, 640)], ids=["375x667", "360x640"])
+@pytest.mark.parametrize("reduced", [False, True], ids=["motion", "reduced-motion"])
+def test_short_portrait_cta_shows_focused_composer_and_reachable_cards(size, reduced, tmp_path_factory):
+    """Trusted CTA/card clicks on the previously uncovered portrait heights."""
+    browser = require_browser_and_build()
+    label = f"{size[0]}x{size[1]}" + ("-reduced-motion" if reduced else "")
+    profile = tmp_path_factory.mktemp("edge-short-portrait-" + label)
+    site = Site()
+    with site.http:
+        with browser_page(browser, profile, size, True, reduced_motion=reduced) as (dt, session):
+            page = Page(dt, session)
+            dt.call("Page.navigate", {"url": site.http.origin + "/"}, session)
+            # Navigation can return before React creates the iframe. Poll the
+            # current document without installing helpers in the outgoing one.
+            deadline = time.monotonic() + 10
+            while not page.eval("""const frame = document.querySelector('[data-testid="embedded-chat"] iframe');
+                return !!frame?.contentDocument?.getElementById('composer-input');"""):
+                assert time.monotonic() < deadline, "the real chat composer did not load"
+                time.sleep(0.05)
+            page.eval(HELPERS.replace("\ntrue\n", "") + "return true;")
+            time.sleep(0.3)
+            state_js = """const ix = window.__ix, d = ix.doc();
+              return { ...ix.focusState(), innerWidth, innerHeight, scrollY,
+                composer: ix.childRect(d.getElementById('composer-shell')),
+                form: ix.childRect(d.getElementById('composer')),
+                input: ix.childRect(ix.input()), send: ix.childRect(d.getElementById('send-btn')),
+                frame: ix.rect(ix.frame()), header: ix.rect(ix.header()),
+                conversation: ix.childRect(d.getElementById('conversation')),
+                title: ix.childRect(d.querySelector('.empty-title')),
+                docScrollWidth: document.documentElement.scrollWidth,
+                childScrollWidth: d.documentElement.scrollWidth, childInnerWidth: ix.frame().contentWindow.innerWidth,
+                value: ix.input().value, messages: d.querySelectorAll('#thread .msg').length,
+                requests: (ix.frame().contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length };"""
+            cta = page.eval("return window.__ix.rect(document.querySelector('[data-testid=\"button-start-session\"]'));")
+            page.click(cta["left"] + cta["width"] / 2, cta["top"] + cta["height"] / 2)
+            samples = page.eval("return await window.__ix.sample(1800, 40);")
+            after = page.eval(state_js)
+            assert [after["innerWidth"], after["innerHeight"]] == list(size)
+            assert after["parentActive"] and after["childActive"], after
+            for key in ("composer", "form", "input", "send"):
+                box = after[key]
+                assert after["header"]["bottom"] <= box["top"] < box["bottom"] <= after["innerHeight"], (key, after)
+                assert 0 <= box["left"] < box["right"] <= after["innerWidth"], (key, after)
+            assert after["docScrollWidth"] <= after["innerWidth"]
+            assert after["childScrollWidth"] <= after["childInnerWidth"]
+            assert after["title"]["top"] >= after["conversation"]["top"], after
+            assert after["requests"] == after["messages"] == 0
+            assert samples[-6:] == [samples[-1]] * 6
+            if reduced:
+                assert samples[0] == samples[-1], samples
+            # Every card remains reachable within the independent chat scroller.
+            for index, (title, prompt) in enumerate(zip(TASK_LABELS, EXAMPLE_PROMPTS)):
+                box = page.eval(f"""const ix = window.__ix, card = ix.doc().querySelectorAll('.hint')[{index}];
+                  card.scrollIntoView({{block: 'nearest', behavior: 'instant'}});
+                  await ix.wait(100); return ix.childRect(card);""")
+                assert after["conversation"]["top"] <= box["top"] and box["bottom"] <= after["conversation"]["bottom"], box
+                assert box["width"] >= 44 and box["height"] >= 44
+                page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
+                card_state = page.eval(state_js)
+                visible_title = page.eval(f"return window.__ix.doc().querySelectorAll('.hint-title')[{index}].textContent.trim();")
+                assert visible_title == title and card_state["value"] == prompt
+                assert card_state["parentActive"] and card_state["childActive"], card_state
+                assert card_state["requests"] == card_state["messages"] == 0
+                assert card_state["frame"] == after["frame"]  # no workspace resize or parent jump
+                assert card_state["docScrollWidth"] <= card_state["innerWidth"]
+                assert card_state["childScrollWidth"] <= card_state["childInnerWidth"]
+            assert not any("/api/" in path for path in site.http.paths)

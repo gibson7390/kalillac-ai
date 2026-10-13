@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, Code2, FileText, Menu, Search, Sparkles, X } from 'lucide-react';
+import { ArrowRight, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
 import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
@@ -16,9 +16,22 @@ const IS_FRAMED = (() => {
   try { return window.self !== window.top; } catch { return true; }
 })();
 
+
 function SiteHeader() {
   const [open, setOpen] = useState(false);
+  const toggle = useRef<HTMLButtonElement>(null);
   const close = () => setOpen(false);
+  useEffect(() => {
+    if (!open) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      close();
+      toggle.current?.focus({ preventScroll: true });
+    };
+    document.addEventListener('keydown', escape);
+    return () => document.removeEventListener('keydown', escape);
+  }, [open]);
   return (
     <header className="site-header">
       <div className="container-wide site-header-inner">
@@ -26,17 +39,17 @@ function SiteHeader() {
           <img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" />
         </Link>
         <nav className="site-nav" aria-label="Site navigation">
-          <Link href="/" className="nav-link" data-testid="link-product-nav">Product</Link>
+          <a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>
           <Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>
           <a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>
-          <button type="button" className="mobile-nav-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-site-menu" aria-label={open ? 'Close navigation menu' : 'Open navigation menu'} data-testid="button-mobile-menu">
-            {open ? <X size={19} /> : <Menu size={19} />}
+          <button ref={toggle} type="button" className="mobile-nav-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-site-menu" aria-label={open ? 'Close navigation menu' : 'Open navigation menu'} data-testid="button-mobile-menu">
+            {open ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
           </button>
         </nav>
       </div>
       {open && (
         <nav id="mobile-site-menu" className="mobile-site-menu" aria-label="Mobile navigation">
-          <Link href="/" onClick={close} data-testid="link-mobile-product">Product</Link>
+          <a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>
           <Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>
           <a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>
         </nav>
@@ -49,33 +62,22 @@ function SiteFooter() {
   return (
     <footer className="site-footer">
       <div className="container-wide footer-inner">
-        <div><Link href="/" className="brand" data-testid="link-footer-home"><img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" /></Link><p>AI for the questions and work in front of you.</p></div>
-        <div className="footer-links"><Link href="/privacy" data-testid="link-footer-privacy">Privacy</Link><Link href="/terms" data-testid="link-footer-terms">Terms</Link><a href="https://www.linkedin.com/in/kalillacai" target="_blank" rel="noopener noreferrer" data-testid="link-footer-linkedin">LinkedIn</a></div>
+        <div className="footer-brand"><Link href="/" className="brand" data-testid="link-footer-home"><img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" /></Link><p>A more private, helpful internet.</p></div>
+        <nav className="footer-links" aria-label="Footer navigation">
+          <a href="/#product" data-testid="link-footer-product">Product</a>
+          <Link href="/privacy" data-testid="link-footer-privacy">Privacy</Link>
+          <a href="/#how-it-works" data-testid="link-footer-how">How it works</a>
+          <Link href="/terms" data-testid="link-footer-terms">Terms</Link>
+          <a href="https://www.linkedin.com/in/kalillacai" target="_blank" rel="noopener noreferrer" data-testid="link-footer-linkedin">LinkedIn</a>
+        </nav>
       </div>
-      <div className="container-wide footer-bottom"><span>© 2026 Kalillac AI · Adults 18+</span><span>Kalillac AI can make mistakes. Verify important information.</span></div>
+      <div className="container-wide footer-bottom"><span>&copy; 2026 Kalillac AI &middot; Adults 18+</span><span>Kalillac AI can make mistakes. Verify important information.</span></div>
     </footer>
   );
 }
 
 function OrbitalAssistant() {
-  return (
-    <div className="orbital-wrap" aria-hidden="true">
-      <div className="orbital-glow" />
-      <div className="orbital">
-        <span className="orbit-line" />
-        <span className="orbit-line two" />
-        <span className="orbit-line three" />
-        <span className="orbit-line four" />
-        <span className="orbit-track orbit-track-one" />
-        <span className="orbit-track orbit-track-two" />
-        <span className="orbit-dot blue" />
-        <span className="orbit-dot mint" />
-        <span className="orbit-dot white" />
-        <span className="orbit-dot tiny" />
-        <span className="orbital-center" />
-      </div>
-    </div>
-  );
+  return <div className="orbital-wrap" aria-hidden="true"><span className="orbit-dot blue"/><span className="orbit-dot mint"/></div>;
 }
 
 // Space kept between the sticky site header and the chat workspace when the
@@ -148,247 +150,64 @@ function EmbeddedChat({ workspace }: { workspace: ReturnType<typeof useChatWorks
   );
 }
 
-/* ---------------- Privacy and provider-flow diagram ----------------
-   One inline SVG per layout: a horizontal drawing for wide screens and a
-   vertical one for narrow screens (CSS shows exactly one, so assistive
-   technology meets exactly one). Both have the same four primary stages.
-   The text inside each SVG is part of the image; its accessible title and
-   description point to the semantic list that follows it. */
 
-function FlowMarkers({ suffix }: { suffix: string }) {
-  return (
-    <defs>
-      <marker id={`flow-arrow-${suffix}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M0 0 L10 5 L0 10 z" fill="#5b93ff" />
-      </marker>
-      <marker id={`flow-arrow-teal-${suffix}`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M0 0 L10 5 L0 10 z" fill="#35c9a7" />
-      </marker>
-    </defs>
-  );
+/* Meaningful flow content is HTML; arrows are decorative. */
+function FlowMarkers() { return <ArrowRight className="flow-arrow" size={22} aria-hidden="true"/>; }
+
+const tools: { title: string; description: string; kind: string; icon: LucideIcon }[] = [
+  { title: 'Research the current web', description: 'Find current information with sources. Brave is primary; Tavily may provide a bounded fallback or follow-up when eligible.', kind: 'research', icon: Search },
+  { title: 'Write and revise', description: 'Draft, edit, and improve your writing. Get clearer, stronger versions and useful feedback.', kind: 'writing', icon: PenLine },
+  { title: 'Code and debug', description: 'Build, debug, and explain code in plain language across multiple languages.', kind: 'code', icon: Code2 },
+  { title: 'Learn anything', description: 'Get clear, step-by-step explanations on complex topics, from everyday questions to advanced concepts.', kind: 'learning', icon: Lightbulb },
+];
+
+function ToolIllustration({ kind, icon: Icon }: { kind: string; icon: LucideIcon }) {
+  return <div className={`tool-art art-${kind}`} aria-hidden="true">
+    <span className="art-orbit"/><span className="art-dot dot-one"/><span className="art-dot dot-two"/>
+    <span className="art-layer"/>
+    <span className="art-paper"><i/><i/><i/></span>
+    <span className="art-symbol"><Icon size={kind === 'learning' ? 54 : 42} strokeWidth={1.8}/></span>
+  </div>;
 }
 
-function BrowserIcon({ x, y }: { x: number; y: number }) {
-  return (
-    <g className="flow-icon" transform={`translate(${x} ${y})`}>
-      <circle r="36" className="flow-node" />
-      <rect x="-19" y="-14" width="38" height="28" rx="5" className="flow-glyph" />
-      <line x1="-19" y1="-6" x2="19" y2="-6" className="flow-glyph" />
-      <circle cx="-13" cy="-10" r="1.6" className="flow-glyph-fill" />
-      <circle cx="-8" cy="-10" r="1.6" className="flow-glyph-fill" />
-      <line x1="-11" y1="3" x2="9" y2="3" className="flow-glyph-soft" />
-      <line x1="-11" y1="8" x2="3" y2="8" className="flow-glyph-soft" />
-    </g>
-  );
+function PowerfulTools() {
+  return <section className="tools-section" id="product" aria-labelledby="tools-heading" data-testid="section-tools">
+    <div className="container-wide">
+      <div className="section-intro"><div><span className="eyebrow">GET MORE DONE</span><h2 id="tools-heading">Powerful tools for real work.</h2></div><p>A private, flexible workspace for research, writing, coding, and learning—with real-time information when you need it.</p></div>
+      <div className="tools-grid">{tools.map(tool => <article className="tool-card" key={tool.kind}><ToolIllustration kind={tool.kind} icon={tool.icon}/><h3>{tool.title}</h3><p>{tool.description}</p></article>)}</div>
+    </div>
+  </section>;
 }
 
-function MemoryIcon({ x, y }: { x: number; y: number }) {
-  return (
-    <g className="flow-icon" transform={`translate(${x} ${y})`}>
-      <circle r="36" className="flow-node" />
-      <rect x="-16" y="-15" width="32" height="8" rx="3" className="flow-glyph" />
-      <rect x="-16" y="-4" width="32" height="8" rx="3" className="flow-glyph" />
-      <rect x="-16" y="7" width="32" height="8" rx="3" className="flow-glyph flow-glyph-temporary" />
-      <circle cx="21" cy="-17" r="6" className="flow-glyph-teal" />
-    </g>
-  );
-}
-
-function ModelIcon({ x, y }: { x: number; y: number }) {
-  return (
-    <g className="flow-icon" transform={`translate(${x} ${y})`}>
-      <circle r="36" className="flow-node" />
-      <path d="M0 -17 L15 -8.5 L15 8.5 L0 17 L-15 8.5 L-15 -8.5 Z" className="flow-glyph" />
-      <circle r="4.5" className="flow-glyph-fill" />
-      <line x1="0" y1="-4.5" x2="0" y2="-17" className="flow-glyph-soft" />
-      <line x1="3.9" y1="2.3" x2="15" y2="8.5" className="flow-glyph-soft" />
-      <line x1="-3.9" y1="2.3" x2="-15" y2="8.5" className="flow-glyph-soft" />
-    </g>
-  );
-}
-
-function SearchIcon({ x, y }: { x: number; y: number }) {
-  return (
-    <g className="flow-icon" transform={`translate(${x} ${y})`}>
-      <circle r="24" className="flow-node flow-node-teal" />
-      <circle r="11" className="flow-glyph-teal-line" />
-      <ellipse rx="5" ry="11" className="flow-glyph-teal-line" />
-      <line x1="-11" y1="0" x2="11" y2="0" className="flow-glyph-teal-line" />
-    </g>
-  );
-}
-
-function ExitIcon({ x, y }: { x: number; y: number }) {
-  return (
-    <g className="flow-icon" transform={`translate(${x} ${y})`}>
-      <circle r="36" className="flow-node flow-node-quiet" />
-      <path d="M-4 -16 H-16 V16 H-4" className="flow-glyph" />
-      <line x1="-6" y1="0" x2="16" y2="0" className="flow-glyph" />
-      <path d="M9 -7 L16 0 L9 7" className="flow-glyph" />
-    </g>
-  );
-}
-
-function ReturnIcon({ x, y }: { x: number; y: number }) {
-  return (
-    <g className="flow-icon" transform={`translate(${x} ${y})`}>
-      <circle r="18" className="flow-node" />
-      <path d="M8 -6 H-4 A6 6 0 0 0 -4 6 H6" className="flow-glyph" />
-      <path d="M-8 -10 L-12 -6 L-8 -2" className="flow-glyph" transform="translate(16 0) scale(-1 1)" />
-    </g>
-  );
-}
-
-function FlowDiagramWide() {
-  return (
-    <svg className="flow-svg flow-svg-wide" viewBox="0 0 1120 420" role="img" aria-labelledby="flow-title-wide" aria-describedby="flow-desc-wide" data-testid="flow-svg-wide">
-      <title id="flow-title-wide">How a Kalillac conversation moves</title>
-      <desc id="flow-desc-wide">A diagram with four stages: you ask, temporary session, answer or search, and you move on. OpenAI generates model answers; Brave is primary search, with one eligible Tavily fallback or later native evidence follow-up. The conditional policy and provider processing are described in the list that follows.</desc>
-      <FlowMarkers suffix="wide" />
-
-      {/* Answer path: you -> temporary session -> answer. */}
-      <line x1="188" y1="130" x2="390" y2="130" className="flow-path" markerEnd="url(#flow-arrow-wide)" />
-      <line x1="468" y1="130" x2="670" y2="130" className="flow-path" markerEnd="url(#flow-arrow-wide)" />
-      {/* The result returns through Kalillac to you. */}
-      <path d="M710 92 C710 48 600 36 430 36 C260 36 150 48 150 90" className="flow-path flow-path-return" markerEnd="url(#flow-arrow-wide)" />
-      <text x="430" y="26" textAnchor="middle" className="flow-label">Answers return to you through Kalillac</text>
-      {/* Web search: a separate, conditional branch. */}
-      <path d="M744 146 C800 158 834 196 834 250 L834 296" className="flow-path-search" markerStart="url(#flow-arrow-teal-wide)" markerEnd="url(#flow-arrow-teal-wide)" />
-      {/* Later, the visitor moves on. */}
-      <line x1="748" y1="130" x2="950" y2="130" className="flow-path-later" />
-      <text x="850" y="118" textAnchor="middle" className="flow-label flow-label-quiet">Later</text>
-
-      <g className="flow-stage" data-stage="1">
-        <BrowserIcon x={150} y={130} />
-        <text x="150" y="198" textAnchor="middle" className="flow-stage-title">YOU ASK</text>
-        <text x="150" y="226" textAnchor="middle" className="flow-stage-body">No account or</text>
-        <text x="150" y="248" textAnchor="middle" className="flow-stage-body">profile required.</text>
-      </g>
-      <g className="flow-stage" data-stage="2">
-        <MemoryIcon x={430} y={130} />
-        <text x="430" y="198" textAnchor="middle" className="flow-stage-title">TEMPORARY SESSION</text>
-        <text x="430" y="226" textAnchor="middle" className="flow-stage-body">Kalillac keeps the current</text>
-        <text x="430" y="248" textAnchor="middle" className="flow-stage-body">conversation context</text>
-        <text x="430" y="270" textAnchor="middle" className="flow-stage-body">in server memory.</text>
-      </g>
-      <g className="flow-stage" data-stage="3">
-        <ModelIcon x={710} y={130} />
-        <text x="710" y="198" textAnchor="middle" className="flow-stage-title">ANSWER OR SEARCH</text>
-        <text x="710" y="226" textAnchor="middle" className="flow-stage-body">OpenAI generates</text>
-        <text x="710" y="248" textAnchor="middle" className="flow-stage-body">model answers.</text>
-        <SearchIcon x={834} y={326} />
-        <text x="872" y="320" className="flow-stage-body flow-search-text">Brave primary search.</text>
-        <text x="872" y="342" className="flow-stage-body flow-search-text">Tavily if eligible.</text>
-      </g>
-      <g className="flow-stage" data-stage="4">
-        <ExitIcon x={990} y={130} />
-        <text x="990" y="198" textAnchor="middle" className="flow-stage-title">YOU MOVE ON</text>
-        <text x="990" y="226" textAnchor="middle" className="flow-stage-body">Refreshing or leaving ends</text>
-        <text x="990" y="248" textAnchor="middle" className="flow-stage-body">this browser’s access to</text>
-        <text x="990" y="270" textAnchor="middle" className="flow-stage-body">the conversation.</text>
-      </g>
-
-      <g className="flow-legend" transform="translate(40 392)">
-        <line x1="0" y1="0" x2="34" y2="0" className="flow-path" />
-        <text x="44" y="5" className="flow-legend-text">Answer path</text>
-        <line x1="170" y1="0" x2="204" y2="0" className="flow-path-search" />
-        <text x="214" y="5" className="flow-legend-text">Web search, only when needed</text>
-      </g>
-    </svg>
-  );
-}
-
-function FlowDiagramNarrow() {
-  return (
-    <svg className="flow-svg flow-svg-narrow" viewBox="0 0 360 920" role="img" aria-labelledby="flow-title-narrow" aria-describedby="flow-desc-narrow" data-testid="flow-svg-narrow">
-      <title id="flow-title-narrow">How a Kalillac conversation moves</title>
-      <desc id="flow-desc-narrow">A diagram with four stages: you ask, temporary session, answer or search, and you move on. OpenAI generates model answers; Brave is primary search, with one eligible Tavily fallback or later native evidence follow-up. The conditional policy and provider processing are described in the list that follows.</desc>
-      <FlowMarkers suffix="narrow" />
-
-      <line x1="48" y1="98" x2="48" y2="176" className="flow-path" markerEnd="url(#flow-arrow-narrow)" />
-      <line x1="48" y1="258" x2="48" y2="366" className="flow-path" markerEnd="url(#flow-arrow-narrow)" />
-      <path d="M70 434 C96 462 108 486 108 520" className="flow-path-search" markerStart="url(#flow-arrow-teal-narrow)" markerEnd="url(#flow-arrow-teal-narrow)" />
-      <line x1="48" y1="448" x2="48" y2="620" className="flow-path flow-path-return" markerEnd="url(#flow-arrow-narrow)" />
-      <line x1="48" y1="676" x2="48" y2="738" className="flow-path-later" />
-
-      <g className="flow-stage" data-stage="1">
-        <BrowserIcon x={48} y={60} />
-        <text x="100" y="50" className="flow-stage-title">YOU ASK</text>
-        <text x="100" y="74" className="flow-stage-body">No account or profile</text>
-        <text x="100" y="94" className="flow-stage-body">required.</text>
-      </g>
-      <g className="flow-stage" data-stage="2">
-        <MemoryIcon x={48} y={220} />
-        <text x="100" y="206" className="flow-stage-title">TEMPORARY SESSION</text>
-        <text x="100" y="230" className="flow-stage-body">Kalillac keeps the current</text>
-        <text x="100" y="250" className="flow-stage-body">conversation context in</text>
-        <text x="100" y="270" className="flow-stage-body">server memory.</text>
-      </g>
-      <g className="flow-stage" data-stage="3">
-        <ModelIcon x={48} y={410} />
-        <text x="100" y="398" className="flow-stage-title">ANSWER OR SEARCH</text>
-        <text x="100" y="422" className="flow-stage-body">OpenAI generates model answers.</text>
-        <SearchIcon x={128} y={548} />
-        <text x="164" y="534" className="flow-stage-body flow-search-text">Brave primary search.</text>
-        <text x="164" y="554" className="flow-stage-body flow-search-text">Tavily if eligible.</text>
-        <text x="164" y="574" className="flow-stage-body flow-search-text">Only when needed.</text>
-      </g>
-      <ReturnIcon x={48} y={648} />
-      <text x="80" y="644" className="flow-label">Answers return to you</text>
-      <text x="80" y="664" className="flow-label">through Kalillac.</text>
-      <g className="flow-stage" data-stage="4">
-        <ExitIcon x={48} y={776} />
-        <text x="100" y="764" className="flow-stage-title">YOU MOVE ON</text>
-        <text x="100" y="788" className="flow-stage-body">Refreshing or leaving ends</text>
-        <text x="100" y="808" className="flow-stage-body">this browser’s access to</text>
-        <text x="100" y="828" className="flow-stage-body">the conversation.</text>
-      </g>
-
-      <g className="flow-legend" transform="translate(20 876)">
-        <line x1="0" y1="0" x2="30" y2="0" className="flow-path" />
-        <text x="40" y="5" className="flow-legend-text">Answer path</text>
-        <line x1="0" y1="26" x2="30" y2="26" className="flow-path-search" />
-        <text x="40" y="31" className="flow-legend-text">Web search, only when needed</text>
-      </g>
-    </svg>
-  );
+function PrivacyPromise() {
+  const promises = [
+    { title: 'No account required', icon: UserRound, text: 'Start a session without an account. The current product does not offer permanent account chat history.' },
+    { title: 'Temporary sessions', icon: Clock, text: 'Your active conversation uses temporary server memory for context, including the facts you ask Kalillac to remember.' },
+    { title: 'Clear provider disclosure', icon: ShieldCheck, text: 'OpenAI generates model answers. Relevant query text goes to the search provider used when search is needed.' },
+    { title: 'Session inaccessible after refresh', icon: CircleSlash, text: "Refreshing or leaving ends this browser's access. It does not immediately delete the server-memory entry." },
+  ];
+  return <section className="promise-section" aria-labelledby="promise-heading" data-testid="section-promise"><div className="container-wide promise-panel">
+    <span className="eyebrow">OUR PRIVACY PROMISE</span><h2 id="promise-heading">Your conversation stays temporary.</h2>
+    <p className="promise-qualification">This refers to facts you ask Kalillac to remember. Current conversation context is also held temporarily; this is not a promise of complete anonymity or no third-party processing.</p>
+    <div className="promise-grid">{promises.map(({ title, icon: Icon, text }) => <div className="promise-item" key={title}><span className="promise-icon" aria-hidden="true"><Icon size={25}/></span><div><h3>{title}</h3><p>{text}</p></div></div>)}</div>
+  </div></section>;
 }
 
 function PrivacyFlow() {
-  return (
-    <section className="flow-section" id="how-it-works" aria-labelledby="flow-heading" data-testid="section-flow">
-      <div className="container-wide">
-        <div className="flow-panel">
-          <div className="flow-intro">
-            <span className="eyebrow eyebrow-on-dark">PRIVATE BY STRUCTURE</span>
-            <h2 id="flow-heading">Your conversation has boundaries.</h2>
-            <p>No account. No permanent chat history. Clear provider roles.</p>
-          </div>
-          <figure className="flow-figure">
-            <FlowDiagramWide />
-            <FlowDiagramNarrow />
-            <figcaption className="sr-only">
-              <ol data-testid="flow-summary">
-                <li>You ask. No account or profile is required, and Kalillac does not provide permanent chat history.</li>
-                <li>Temporary session. Kalillac keeps the current conversation context in server memory for the active temporary session.</li>
-                <li>Answer or search. OpenAI generates model answers. When search is needed, relevant query text goes to the search provider used: Brave is primary. Tavily may supply one bounded fallback after an eligible Brave failure or, in native routing, one later model-requested evidence follow-up after insufficient Brave results, if Tavily has not already been attempted. A usable Brave response does not automatically trigger Tavily fallback. Search fallback is not model fallback; there is no automatic alternate generation model. Retrieved evidence can be supplied to OpenAI for the answer. The answer returns to you through Kalillac.</li>
-                <li>You move on. Refreshing or leaving ends this browser’s access to the conversation. That is not immediate deletion from the server.</li>
-              </ol>
-            </figcaption>
-          </figure>
-          <p className="flow-note" data-testid="flow-memory-note">
-            <strong>Temporary session data can remain in server memory until capacity limits or a restart clear it.</strong>{' '}
-            Ending this browser’s access is not the same as deleting it from the server.
-          </p>
-        </div>
-      </div>
-    </section>
-  );
+  const stages = [
+    { title: '1. You ask', icon: UserRound, text: 'Bring a question, idea, or problem. No account or profile is required.' },
+    { title: '2. Temporary session', icon: FileText, text: 'Kalillac keeps current conversation context in temporary server memory. There is no permanent account chat history.' },
+    { title: '3. Answer or search', icon: Sparkles, text: 'OpenAI generates model answers. Brave is primary search; Tavily may provide one bounded fallback or native evidence follow-up when eligible.' },
+    { title: '4. You move on', icon: CircleSlash, text: "Refreshing or leaving ends this browser's access to the conversation. That is not immediate deletion from the server." },
+  ];
+  return <section className="flow-section" id="how-it-works" aria-labelledby="flow-heading" data-testid="section-flow"><div className="container-wide flow-panel">
+    <div className="section-intro flow-intro"><div><span className="eyebrow eyebrow-on-dark">HOW IT WORKS</span><h2 id="flow-heading">Your conversation has boundaries.</h2></div><p>Kalillac uses AI from OpenAI and can search the current web when needed. Your conversation stays in a temporary session and isn't saved to an account.</p></div>
+    <ol className="flow-stages" aria-labelledby="flow-heading" data-testid="flow-summary">{stages.map(({ title, icon: Icon, text }, index) => <li className="flow-stage" data-stage={index + 1} key={title}><span className="flow-stage-icon" aria-hidden="true"><Icon size={27}/></span><div><h3>{title}</h3><p>{text}</p></div>{index < 3 && <FlowMarkers/>}</li>)}</ol>
+    <div className="provider-rail"><span className="provider-badge"><Search size={21} aria-hidden="true"/><span><strong>Brave</strong><small>Primary search provider</small></span></span><ArrowRight size={20} aria-hidden="true"/><span className="provider-badge"><Sparkles size={21} aria-hidden="true"/><span><strong>Tavily</strong><small>Fallback or follow-up when eligible</small></span></span></div>
+    <p className="flow-policy">Search is used only when needed. A usable Brave response does not automatically trigger Tavily fallback. Tavily may supply one bounded fallback after an eligible Brave failure or, in native routing, one later model-requested evidence follow-up after insufficient Brave results, if Tavily has not already been attempted. Search fallback is not model fallback; there is no automatic alternate generation model. Retrieved evidence can be supplied to OpenAI for the answer.</p>
+    <p className="flow-note" data-testid="flow-memory-note"><strong>Temporary session data can remain in server memory until capacity limits or a restart clear it.</strong>{' '}Ending this browser's access is not the same as deleting it from the server.</p>
+  </div></section>;
 }
-
-/* ---------------- See Kalillac at work ----------------
-   Four illustrative product fragments (not live output and not
-   testimonials), each composed differently. */
 
 type TranscriptTurn = { speaker: 'you' | 'kalillac'; text: string };
 
@@ -406,43 +225,21 @@ const MEMORY_AFTER_REFRESH: TranscriptTurn[] = [
   { speaker: 'kalillac', text: 'No. I don’t see your business name in the current session, so I can’t recover it.' },
 ];
 
+
 function Transcript({ turns, labelledBy }: { turns: TranscriptTurn[]; labelledBy: string }) {
-  return (
-    <ol className="memory-transcript" aria-labelledby={labelledBy}>
-      {turns.map((turn, index) => (
-        <li key={index} className={`memory-msg memory-msg-${turn.speaker}`}>
-          <span className="memory-speaker">{turn.speaker === 'you' ? 'You' : 'Kalillac'}<span className="sr-only">:</span></span>
-          <p>{turn.text}</p>
-        </li>
-      ))}
-    </ol>
-  );
+  return <ol className="memory-transcript" aria-labelledby={labelledBy}>{turns.map((turn, index) => <li key={index} className={`memory-msg memory-msg-${turn.speaker}`}>
+    {turn.speaker === 'kalillac' && <span className="memory-avatar" aria-hidden="true"><MessageSquare size={20}/></span>}
+    <div className="memory-bubble"><span className="memory-speaker">{turn.speaker === 'you' ? 'You' : 'Kalillac'}<span className="sr-only">:</span></span><p>{turn.text}</p></div>
+  </li>)}</ol>;
 }
 
 function MemoryDemonstration() {
-  return (
-    <section className="demos-section" id="product" aria-labelledby="memory-heading" data-testid="section-demos">
-      <div className="container-wide">
-        <div className="demos-intro">
-          <span className="eyebrow">SEE IT IN ACTION</span>
-          <h2 id="memory-heading">Temporary memory you can test yourself.</h2>
-          <p>Kalillac can remember information during your active conversation. Refreshing starts a new browser session that cannot reopen the previous conversation.</p>
-        </div>
-        <ol className="memory-phases">
-          <li className="memory-phase memory-phase-during" data-testid="memory-phase-during">
-            <h3 className="memory-phase-label" id="memory-phase-during-label">1 · DURING THE SAME SESSION</h3>
-            <Transcript turns={MEMORY_SAME_SESSION} labelledBy="memory-phase-during-label" />
-          </li>
-          <li className="memory-phase memory-phase-after" data-testid="memory-phase-after">
-            <h3 className="memory-phase-label" id="memory-phase-after-label">2 · AFTER REFRESHING</h3>
-            <Transcript turns={MEMORY_AFTER_REFRESH} labelledBy="memory-phase-after-label" />
-          </li>
-        </ol>
-        <p className="memory-explain" data-testid="memory-explain">Refreshing ends that browser’s access to the previous temporary conversation. The old session data may remain temporarily in server memory until capacity limits or a restart clear it, but the refreshed browser cannot retrieve it.</p>
-        <p className="memory-disclosure" data-testid="memory-disclosure">Real Kalillac session example. The final response was excerpted, and formatting was condensed for display.</p>
-      </div>
-    </section>
-  );
+  return <section className="demos-section" id="temporary-memory" aria-labelledby="memory-heading" data-testid="section-demos"><div className="container-wide">
+    <div className="section-intro demos-intro"><div><span className="eyebrow">SEE IT IN ACTION</span><h2 id="memory-heading">Temporary memory you can test yourself.</h2></div><p>Kalillac can remember information during your active conversation. Refreshing starts a new browser session that cannot reopen the previous conversation.</p></div>
+    <ol className="memory-phases"><li className="memory-phase memory-phase-during" data-testid="memory-phase-during"><h3 className="memory-phase-label" id="memory-phase-during-label"><span aria-hidden="true">1</span> DURING THE SAME SESSION</h3><Transcript turns={MEMORY_SAME_SESSION} labelledBy="memory-phase-during-label"/></li><li className="memory-phase memory-phase-after" data-testid="memory-phase-after"><h3 className="memory-phase-label" id="memory-phase-after-label"><span aria-hidden="true">2</span> AFTER REFRESHING</h3><Transcript turns={MEMORY_AFTER_REFRESH} labelledBy="memory-phase-after-label"/></li></ol>
+    <p className="memory-explain" data-testid="memory-explain">Refreshing ends that browser’s access to the previous temporary conversation. The old session data may remain temporarily in server memory until capacity limits or a restart clear it, but the refreshed browser cannot retrieve it.</p>
+    <p className="memory-disclosure" data-testid="memory-disclosure">Real Kalillac session example. The final response was excerpted, and formatting was condensed for display.</p>
+  </div></section>;
 }
 
 function SessionExplanation() {
@@ -452,12 +249,12 @@ function SessionExplanation() {
         <h2 id="explain-heading" className="sr-only">Your session and providers in plain language</h2>
         <div className="explain-grid">
           <div className="explain-block" data-testid="explain-session">
-            <h3>Your temporary session</h3>
-            <p>Kalillac doesn’t require an account and doesn’t offer permanent chat history. Your conversation lasts for the active temporary session. Refreshing or leaving the page ends your browser’s access to it. Temporary session data can remain in server memory until capacity limits or a restart clear it.</p>
+            <span className="explain-icon" aria-hidden="true"><Clock size={24}/></span><div><h3>Your temporary session</h3>
+            <p>Kalillac doesn’t require an account and doesn’t offer permanent chat history. Your conversation lasts for the active temporary session. Refreshing or leaving the page ends your browser’s access to it. Temporary session data can remain in server memory until capacity limits or a restart clear it.</p></div>
           </div>
           <div className="explain-block" data-testid="explain-providers">
-            <h3>Who processes what</h3>
-            <p>OpenAI generates model answers. Brave is the primary search provider when search is needed. Tavily may supply one bounded fallback after an eligible Brave failure or, in native routing, one later model-requested evidence follow-up after insufficient Brave results, if Tavily has not already been attempted. A usable Brave response does not automatically trigger Tavily fallback. Search fallback is not model fallback; there is no automatic alternate generation model. Relevant query text goes to whichever search provider is used; retrieved evidence can be supplied to OpenAI for the answer. OpenAI, Brave and Tavily process what they receive under their own policies.</p>
+            <span className="explain-icon" aria-hidden="true"><ShieldCheck size={24}/></span><div><h3>Who processes what</h3>
+            <p>OpenAI generates model answers. Brave is the primary search provider when search is needed. Tavily may supply one bounded fallback after an eligible Brave failure or, in native routing, one later model-requested evidence follow-up after insufficient Brave results, if Tavily has not already been attempted. A usable Brave response does not automatically trigger Tavily fallback. Search fallback is not model fallback; there is no automatic alternate generation model. Relevant query text goes to whichever search provider is used; retrieved evidence can be supplied to OpenAI for the answer. OpenAI, Brave and Tavily process what they receive under their own policies.</p></div>
           </div>
         </div>
         <Link href="/privacy" className="text-link explain-link" data-testid="link-full-privacy">Read the full Privacy page <ArrowRight size={16} aria-hidden="true" /></Link>
@@ -466,68 +263,33 @@ function SessionExplanation() {
   );
 }
 
+
 function MobileAppSection() {
-  return (
-    <section className="mobile-app-section" aria-labelledby="mobile-app-title" data-testid="section-mobile-app">
-      <div className="container-wide mobile-app-panel">
-        <div className="app-copy">
-          <span className="section-label">ON THE GO <span className="label-rule"/></span>
-          <h2 id="mobile-app-title">Kalillac AI app<br/><span>in development.</span></h2>
-          <p>We’re building a dedicated Kalillac mobile experience for questions, writing, coding, and ideas wherever you are.</p>
-          <div className="development-badge"><span className="badge-mark"><Sparkles size={17}/></span><span><strong>Mobile app in progress</strong><small>Coming soon · No release date announced</small></span></div>
-        </div>
-        <div className="phone-stage" aria-label="Illustration of the Kalillac mobile app in development">
-          <div className="phone-halo"/><div className="phone-halo second"/>
-          <div className="phone">
-            <div className="phone-island"/><div className="phone-content"><div className="phone-head"><strong>Kalillac <span>AI</span></strong><span className="phone-head-mark">✦</span></div><small>Your workspace, wherever you are.</small><div className="phone-input">Ask Kalillac anything… <span>↑</span></div><div className="phone-card"><Search size={15}/><div><strong>Research</strong><small>Explore what matters</small></div><ArrowRight size={13}/></div><div className="phone-card"><Code2 size={15}/><div><strong>Code</strong><small>Work through a problem</small></div><ArrowRight size={13}/></div><div className="phone-card"><FileText size={15}/><div><strong>Writing</strong><small>Find your next sentence</small></div><ArrowRight size={13}/></div></div>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
+  return <section className="mobile-app-section" aria-labelledby="mobile-app-title" data-testid="section-mobile-app"><div className="container-wide mobile-app-panel">
+    <div className="app-copy"><span className="eyebrow">COMING SOON</span><h2 id="mobile-app-title">Kalillac AI app in development.</h2><p>Take Kalillac with you. A native mobile app is in progress, bringing the same private, flexible experience to your phone.</p></div>
+    <div className="development-badge"><span aria-hidden="true"><Smartphone size={30}/></span><div><strong>Mobile app in progress</strong><p>No release date announced.</p></div></div>
+    <div className="phone-stage" aria-hidden="true"><span className="phone-halo"/><div className="phone"><span className="phone-island"/><div className="phone-content"><img src={brandLogoUrl} alt="" className="phone-logo"/><p>Private by design.<br/>On the go.</p><span className="phone-home"/></div></div></div>
+  </div></section>;
 }
 
 function HomePage() {
   const workspace = useChatWorkspace();
   const { focusChat } = workspace;
-
-  // Section links (/#product, /#privacy, /#how-it-works, /#chat) arriving
-  // from another page.
   useEffect(() => {
     const id = window.location.hash.slice(1);
     if (!id) return;
     if (id === 'chat') { focusChat(); return; }
     document.getElementById(id)?.scrollIntoView();
   }, [focusChat]);
-
-  return (
-    <div className="site-shell">
-      <SiteHeader />
-      <main>
-        <section className="hero" aria-labelledby="hero-title" data-testid="section-hero">
-          <div className="hero-signal-line" aria-hidden="true" />
-          <div className="container-wide hero-stage">
-            <div className="hero-copy">
-              <span className="eyebrow">PRIVATE BY DESIGN</span>
-              <h1 id="hero-title"><span className="h1-phrase">Think clearly.</span>{' '}<span className="h1-phrase">Write well.</span>{' '}<span className="h1-phrase">Build and debug.</span>{' '}<span className="h1-phrase h1-accent">Search the current web.</span></h1>
-              <p className="hero-description">Work through difficult questions, draft and revise writing, explain and repair code, or research current information with sources—without creating an account or building a permanent chat history.</p>
-              <button type="button" className="primary-link hero-action" onClick={focusChat} data-testid="button-start-session">Start a private session <ArrowRight size={16} aria-hidden="true" /></button>
-              <p className="hero-under-note"><span className="trust-item"><span className="live-dot" /> Temporary sessions</span> <span className="note-divider" aria-hidden="true">·</span> <span className="trust-item">No account required</span> <span className="note-divider" aria-hidden="true">·</span> <Link href="/privacy" className="note-link trust-item">Clear provider disclosure</Link></p>
-            </div>
-            <div className="hero-workspace">
-              <OrbitalAssistant />
-              <EmbeddedChat workspace={workspace} />
-            </div>
-          </div>
-        </section>
-        <PrivacyFlow />
-        <MemoryDemonstration />
-        <SessionExplanation />
-        <MobileAppSection />
-      </main>
-      <SiteFooter />
-    </div>
-  );
+  return <div className="site-shell"><SiteHeader/><main>
+    <section className="hero" aria-labelledby="hero-title" data-testid="section-hero"><div className="hero-signal-line" aria-hidden="true"/><div className="container-wide hero-stage">
+      <div className="hero-copy"><span className="eyebrow">PRIVATE BY DESIGN</span><h1 id="hero-title"><span className="h1-phrase">Think clearly.</span>{' '}<span className="h1-phrase">Write well.</span>{' '}<span className="h1-phrase">Build and debug.</span>{' '}<span className="h1-phrase h1-accent"><span>Search the</span>{' '}<span>current web.</span></span></h1><p className="hero-description">Work through difficult questions, draft and revise writing, explain and repair code, or research current information with sources—without creating an account or building a permanent chat history.</p>
+        <button type="button" className="primary-link hero-action" onClick={focusChat} data-testid="button-start-session">Start a private session <ArrowRight size={18} aria-hidden="true"/></button>
+        <p className="hero-under-note"><span className="trust-item"><Clock size={16} aria-hidden="true"/> Temporary sessions</span><span className="trust-item"><CircleSlash size={16} aria-hidden="true"/> No account required</span><Link href="/privacy" className="note-link trust-item"><ShieldCheck size={16} aria-hidden="true"/> Clear provider disclosure</Link></p>
+      </div><div className="hero-workspace"><OrbitalAssistant/><EmbeddedChat workspace={workspace}/></div>
+    </div></section>
+    <PowerfulTools/><PrivacyPromise/><PrivacyFlow/><MemoryDemonstration/><SessionExplanation/><MobileAppSection/>
+  </main><SiteFooter/></div>;
 }
 
 type DocSectionProps = { id: string; title: string; children: ReactNode };
