@@ -7024,6 +7024,220 @@ def is_revision_followup(message):
     return any(phrase in text for phrase in revision_phrases)
 
 
+# Natural instructions to change code the assistant just delivered: "raise a
+# ValueError when name is missing", "can you add type hints?", "make it
+# async". An imperative verb is not enough ("add milk to my list"): the
+# instruction must refer to the delivered code, or name an operation that only
+# makes sense on code, and must not point at the user's own or a new target
+# ("use JSON for my notes app", "use pathlib in a new project").
+CODE_MODIFICATION_RE = re.compile(
+    r"^(?:(?:now|also|then|and|next|please|ok|okay)[,\s]+)*"
+    r"(?:(?:can|could|would|will) you\s+(?:please\s+)?)?"
+    # "explain it and then add tests": the change follows an explanation.
+    r"(?:(?:explain|describe|review)\b[^.?!]{0,60}?\b(?:and then|then|and)\s+)?"
+    r"(?:add|raise|throw|handle|return|use|remove|delete|drop|rename|catch"
+    r"|reject|validate|replace|change|convert|refactor|switch|support|accept"
+    r"|allow|include|wrap|log|improve|make|update|modify|sort|optimize"
+    r"|simplify|document|comment)\b"
+)
+CODE_REFERENCE_RE = re.compile(
+    r"\bit\b|\binstead\b"
+    r"|\b(?:this|that|these|those)\b(?=\s*(?:[.?!,;:]|$|(?:to|into|in|so|with"
+    r"|for|async|asynchronous|faster|safer|shorter|cleaner)\b))"
+    r"|\b(?:the|this|that)\s+(?:code|function|method|script|class|program"
+    r"|snippet|implementation|return type|signature|loop|print statement"
+    r"|parameters?|arguments?|variable|imports?|output)\b"
+    r"|\b(?:revised|updated|modified|changed|fixed)\s+code\b"
+)
+CODE_SPECIFIC_OPERATION_RE = re.compile(
+    r"\b(?:\w+(?:error|exception)"
+    r"|(?:decoding|parsing|json|key|value|type|index|attribute|runtime"
+    r"|timeout|validation|import)\s+(?:errors?|exceptions?)"
+    r"|(?:error|exception) handling|type hints?|type annotations?"
+    r"|(?:unit )?tests?|docstrings?|comments?|dataclass(?:es)?"
+    r"|input validation|validation|async|asynchronous"
+    r"|return type|return value|print statements?|parameters?|arguments?"
+    r"|invalid json|none|null|empty (?:values?|lists?|strings?|inputs?)"
+    r"|missing (?:keys?|fields?|values?)|logging"
+    r"|try(?:[/-]except)? blocks?|try[/-]except"
+    # A missing-value condition: "when the name is missing".
+    r"|is (?:missing|empty|none|null|absent|invalid))\b"
+)
+OTHER_TARGET_RE = re.compile(
+    r"\b(?:my|our)\b(?!\s+(?:code|function|script|method|class|program)\b)"
+    r"|\b(?:a|another|a different)\s+(?:new\s+)?(?:project|app|application"
+    r"|program|website|repo|repository)\b"
+)
+# Definite objects decide the target. Each phrase stops at a preposition or
+# conjunction, so "the output prettier for the report" yields "output
+# prettier" and "report".
+# - A phrase naming a code construct or identifier ("the main loop", "the
+#   parser", "the payload", "the get_name function") points at the code.
+# - A phrase naming nothing code-related ("the blog post", "the meeting
+#   notes") points elsewhere and overrides the delivered-code context.
+# Generic words ("the name", "the list", "the end") neither point at the code
+# nor away from it.
+_DEFINITE_PHRASE_WORD = (
+    r"(?:(?!(?:to|for|in|on|of|with|and|or|is|are|was|when|if|then|instead"
+    r"|so|into|from|by|as|at|where|which|that|than|the|a|an)\b)[\w-]+)"
+)
+DEFINITE_PHRASE_RE = re.compile(
+    r"\bthe\s+(" + _DEFINITE_PHRASE_WORD
+    + r"(?:\s+" + _DEFINITE_PHRASE_WORD + r"){0,2})"
+)
+_CODE_CONSTRUCT_WORDS = (
+    r"code|function|method|script|program|snippet|implementation|signature"
+    r"|loop|statement|parameter|argument|variable|import|module|parser"
+    r"|handler|helper|payload|exception|docstring|bug|decorator|endpoint"
+    r"|query|regex|constructor|callback|iterator|generator"
+)
+CODE_CONSTRUCT_WORD_RE = re.compile(
+    r"\b(?:" + _CODE_CONSTRUCT_WORDS + r")s?\b|\b\w+_\w+\b"
+)
+CODE_TARGET_WORD_RE = re.compile(
+    r"\b(?:" + _CODE_CONSTRUCT_WORDS
+    + r"|class|return|type|output|input|key|field|value|error|list|string"
+    r"|dict|dictionary|result|name|json|logic|call|test|comment|case|file"
+    r"|line|block|body|request|response|top|bottom|beginning|start|end)s?\b"
+    r"|\b\w+_\w+\b"
+)
+
+
+def names_non_code_target(text):
+    """Whether a definite object in the message names something other than code."""
+    return any(
+        not CODE_TARGET_WORD_RE.search(phrase)
+        for phrase in DEFINITE_PHRASE_RE.findall(text)
+    )
+
+
+def names_code_construct(text):
+    """Whether a definite object in the message names a part of the code."""
+    return any(
+        CODE_CONSTRUCT_WORD_RE.search(phrase)
+        for phrase in DEFINITE_PHRASE_RE.findall(text)
+    )
+
+
+REVISED_CODE_ONLY_RE = re.compile(
+    r"(?:(?:please|ok|okay|now)\s+)?(?:(?:can|could|would) you\s+)?"
+    r"(?:give|send|show)(?:\s+(?:me|us))?\s+(?:only\s+|just\s+)?the\s+"
+    r"(?:revised|updated|modified|changed|fixed|new)\s+code(?:\s+only)?"
+    r"(?:\s+please)?\s*[.!?]*"
+)
+# A request whose object is revised programming code. "Version" alone is not
+# enough: "the updated version of Python" or "of the schedule" is not code.
+REVISION_TARGET_RE = re.compile(
+    r"\b(?:revised|updated|modified|changed|fixed)\s+code\b"
+    r"|\b(?:revised|updated|modified|changed|fixed)\s+version\s+of\s+"
+    r"(?:the|this|that|my)\s+(?:code|function|script|program)\b"
+    r"|\b(?:revise|update|modify)\s+(?:the|this|that|my)\s+code\b"
+)
+
+
+def is_code_modification_followup(message, history):
+    """A request to change the code in the immediately preceding answer."""
+    if not previous_answer_looks_like_code(get_last_assistant_message(history)):
+        return False
+
+    # Code supplied in this message is the code to revise, not the previous one.
+    if previous_answer_looks_like_code(message):
+        return False
+
+    text = normalize_for_router(message)
+
+    if REVISED_CODE_ONLY_RE.fullmatch(text):
+        return True
+
+    return bool(
+        CODE_MODIFICATION_RE.search(text)
+        and not OTHER_TARGET_RE.search(text)
+        and not names_non_code_target(text)
+        and (
+            CODE_REFERENCE_RE.search(text)
+            or CODE_SPECIFIC_OPERATION_RE.search(text)
+            or names_code_construct(text)
+        )
+    )
+
+
+def supplies_code_to_revise(message):
+    """The current message asks for revised code and carries that code."""
+    return bool(
+        previous_answer_looks_like_code(message)
+        and REVISION_TARGET_RE.search(normalize_for_router(message))
+    )
+
+
+def requests_unavailable_code_revision(message, history):
+    """Revised-code wording with no delivered or supplied code to revise."""
+    if previous_answer_looks_like_code(get_last_assistant_message(history)):
+        return False
+
+    if previous_answer_looks_like_code(message):
+        return False
+
+    return bool(REVISION_TARGET_RE.search(normalize_for_router(message)))
+
+
+UNAVAILABLE_CODE_REVISION_RULE = """\
+NO CODE TO REVISE:
+- The user asked for a revised version of code, but no code was delivered
+  immediately before this message.
+- Ask one short question requesting that code or the missing context.
+- Do not write, guess, or invent the code to be revised."""
+
+# Unambiguous requests for code with no surrounding prose.
+CODE_ONLY_REQUEST_RE = re.compile(
+    r"\b(?:only|just)\s+(?:the\s+)?(?:(?:revised|updated|modified|changed"
+    r"|fixed|new|complete|full)\s+)?code\b"
+    r"|\bcode only\b|\bnothing (?:else )?but the code\b"
+    r"|\bno (?:explanations?|prose|commentary)\b"
+    r"|\bwithout (?:any\s+)?(?:explanations?|commentary)\b"
+)
+EXPLANATION_REQUEST_RE = re.compile(r"\b(?:explain|describe|walk me through)\b")
+
+
+def requests_code_only_output(message):
+    return bool(CODE_ONLY_REQUEST_RE.search(normalize_for_router(message)))
+
+
+def requests_explanation_with_code_change(message):
+    """An explanation plus a code change, without code-only wording."""
+    text = normalize_for_router(message)
+    return bool(
+        EXPLANATION_REQUEST_RE.search(text)
+        and not CODE_ONLY_REQUEST_RE.search(text)
+    )
+
+
+SUPPLIED_CODE_EDIT_RULE = """\
+SUPPLIED CODE TO EDIT:
+- The code in the user's message is the source to modify. It is already
+  present; do not ask the user to paste it.
+- Apply the requested change to that code. Do not replace it with an
+  unrelated implementation.
+- Preserve the behavior, names, and structure the request does not affect."""
+
+SUPPLIED_CODE_OUTPUT_RULE = """\
+OUTPUT:
+- Return the complete revised code in one fenced code block with the
+  correct language.
+- A brief note on what changed may follow outside the fence. Do not turn
+  prose into code comments."""
+
+EXPLAIN_AND_EDIT_OUTPUT_RULE = """\
+OUTPUT FOR AN EXPLANATION AND A CHANGE:
+The user asked for an explanation and a change to the code.
+- First explain concisely, in ordinary prose, what the user asked to have
+  explained.
+- Then return the complete revised code in exactly one fenced code block
+  with the correct language.
+- Keep the explanation outside the fence. Do not turn it into code comments.
+- Preserve the original code type unless the user explicitly asks to change it.
+- Do not add follow-up questions."""
+
+
 # Code evidence is syntax, not vocabulary: prose such as "A function is a
 # rule" or a fenced equation is not code.
 CODE_SYNTAX_LINE_RE = re.compile(
@@ -8781,6 +8995,14 @@ def classify_request(message, history):
     ):
         matches.append("revision")
 
+    # A modification of the code just delivered must reach the revision
+    # prompt, which carries that code; the code, debug or logic routes would
+    # otherwise answer without it and ask the user to paste it again.
+    code_modification = is_code_modification_followup(message, history)
+
+    if code_modification and "revision" not in matches:
+        matches.append("revision")
+
     if is_code_generation_intent(message):
         if is_vague_code_request(message):
             matches.append("unclear")
@@ -8801,6 +9023,33 @@ def classify_request(message, history):
 
     if len(matches) > 1:
         log(f"[COLLISION] Multiple routes matched: {matches}")
+
+    if not any(
+        route in matches
+        for route in (
+            "memory_save",
+            "self_knowledge",
+            "file_unavailable",
+            "memory",
+            "code_continuation",
+            "code_history",
+        )
+    ):
+        if code_modification:
+            log(f"[ROUTE] Selected: revision (code modification) | candidates={matches}")
+            return "revision"
+
+        # Code pasted into this message reaches the code route verbatim with
+        # its exact output contract.
+        if supplies_code_to_revise(message):
+            log(f"[ROUTE] Selected: code (supplied code to revise) | candidates={matches}")
+            return "code"
+
+        # "Give me only the revised code" with nothing to revise must ask for
+        # the code instead of reaching a route that writes new code.
+        if requests_unavailable_code_revision(message, history):
+            log(f"[ROUTE] Selected: unclear (no code to revise) | candidates={matches}")
+            return "unclear"
 
     priority_order = [
         "debug",
@@ -9345,6 +9594,9 @@ or use saved memory or inaccessible documents.
 Stop after completing the task or asking the question.
 """
 
+        if requests_unavailable_code_revision(message, history):
+            prompt += "\n" + UNAVAILABLE_CODE_REVISION_RULE + "\n"
+
     elif route == "personal":
         recent_context = get_recent_conversation_context(history, limit=4)
 
@@ -9472,7 +9724,11 @@ USER QUESTION:
 
             resend_rule = ""
 
-            if is_send_code_followup(message) and not is_revision_followup(message):
+            if (
+                is_send_code_followup(message)
+                and not is_revision_followup(message)
+                and not is_code_modification_followup(message, history)
+            ):
                 resend_rule = """
 RESEND REQUEST:
 The user asked to receive the previous code again. Reproduce the previous
@@ -9480,18 +9736,7 @@ code exactly as written, with no changes, improvements, or regeneration.
 This takes precedence over the revision behavior below.
 """
 
-            prompt = f"""
-You are Kalillac AI.
-
-The user wants you to improve, continue, or regenerate previous code.
-
-Previous code:
-{code_to_revise}
-
-User request:
-{message}
-{resend_rule}
-ABSOLUTE OUTPUT RULE:
+            revision_output_rules = """ABSOLUTE OUTPUT RULE:
 Return exactly one fenced code block and nothing else.
 This contract governs supplied code; a limitation, recovery, or capability
 explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above.
@@ -9507,7 +9752,28 @@ Hard rules:
 - Do not add headings.
 - Do not add comments unless the user asks for comments.
 - Do not add follow-up questions.
-- Stop after the code.
+- Stop after the code."""
+
+            # "Explain it and then add tests" asks for prose and code; the
+            # code-only contract would drop the explanation.
+            if (
+                is_code_modification_followup(message, history)
+                and requests_explanation_with_code_change(message)
+            ):
+                revision_output_rules = EXPLAIN_AND_EDIT_OUTPUT_RULE
+
+            prompt = f"""
+You are Kalillac AI.
+
+The user wants you to improve, continue, or regenerate previous code.
+
+Previous code:
+{code_to_revise}
+
+User request:
+{message}
+{resend_rule}
+{revision_output_rules}
 
 Revision behavior:
 - If the previous code is HTML, CSS, JavaScript, SVG, or UI-related code, make a visibly superior version.
@@ -9753,6 +10019,29 @@ UI QUALITY FLOOR:
         if ui_code_rules and requests_minimal_code_scope(message):
             ui_code_rules = MINIMAL_UI_CODE_RULES
 
+        code_output_rules = """ABSOLUTE OUTPUT RULE:
+Return exactly one fenced code block and nothing else.
+This contract governs supplied code; a limitation, recovery, or capability
+explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above.
+Do not write any sentence before the code.
+Do not write any sentence after the code.
+Do not explain what you built."""
+
+        # Code pasted into the message is the source to edit, not a
+        # specification for new code. The one-block contract applies only
+        # when the user asked for code alone.
+        if supplies_code_to_revise(message):
+            if requests_code_only_output(message):
+                supplied_output_rules = code_output_rules
+            elif requests_explanation_with_code_change(message):
+                supplied_output_rules = EXPLAIN_AND_EDIT_OUTPUT_RULE
+            else:
+                supplied_output_rules = SUPPLIED_CODE_OUTPUT_RULE
+
+            code_output_rules = (
+                SUPPLIED_CODE_EDIT_RULE + "\n\n" + supplied_output_rules
+            )
+
         prompt = f"""
 You are Kalillac AI.
 
@@ -9768,13 +10057,7 @@ Recent conversation context:
 
 {kalillac_code_reference}
 
-ABSOLUTE OUTPUT RULE:
-Return exactly one fenced code block and nothing else.
-This contract governs supplied code; a limitation, recovery, or capability
-explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above.
-Do not write any sentence before the code.
-Do not write any sentence after the code.
-Do not explain what you built.
+{code_output_rules}
 
 {ui_code_rules}
 
@@ -10398,6 +10681,9 @@ def _run_v31_native_tool_chat(
 
     if kalillac_self_knowledge_context_active(message, history):
         instructions += "\n\n" + render_kalillac_facts()
+
+    if requests_unavailable_code_revision(message, history):
+        instructions += "\n\n" + UNAVAILABLE_CODE_REVISION_RULE
 
     if followup_enabled:
         instructions += """
