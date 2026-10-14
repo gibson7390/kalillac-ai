@@ -15,7 +15,7 @@ from .request_budget import current_budget
 MAX_REQUESTS = 64
 MAX_ATTEMPTS = 32
 MAX_TOKENS = 2_000_000
-MODEL_IDS = frozenset({"gpt-5.6-luna"})
+MODEL_IDS = frozenset({"gpt-5.6-luna", "gpt-6-luna"})
 TIERS = frozenset({"auto", "default", "standard", "flex", "priority", "fast", "scale"})
 STATUSES = frozenset({"completed", "incomplete", "failed", "cancelled", "queued", "in_progress"})
 _REQUEST = ContextVar("evaluation_request_usage", default=None)

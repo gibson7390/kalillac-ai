@@ -89,7 +89,7 @@ def test_pasted_notes_are_used_instead_of_a_file_access_dead_end(models, monkeyp
 def test_a_file_that_was_not_pasted_still_gets_the_capability_boundary(models, monkeypatch):
     monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
     reply = app.chat("Summarize my notes", [], session_id="missing-notes")
-    assert "doesn't have access" in reply
+    assert "doesn't support file uploads or attachments" in reply
     assert not models["native"] and not models["legacy"]
 
 

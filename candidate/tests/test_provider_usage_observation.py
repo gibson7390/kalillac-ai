@@ -528,3 +528,24 @@ def test_tavily_returned_credits_and_depth_are_numeric_only(providers):
     attempts = data["requests"][0]["attempts"]
     assert len(attempts) == 1 and attempts[0]["credits"] == 2 and attempts[0]["depth"] == "advanced"
     assert "docs.example.test" not in json.dumps(data)
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
+def test_pipeline_observes_gpt6_luna_without_changing_payload(model, monkeypatch, native):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
+    monkeypatch.setattr(app, "OPENAI_MODEL", "gpt-6-luna")
+    model["responses"] = [response(model="gpt-6-luna")]
+    value, data = capture(lambda: app.chat(
+        "Explain public key encryption simply.", [], session_id="current-model-usage"))
+    assert value == "A supported explanation."
+    assert len(model["payloads"]) == 1 and len(data["requests"]) == 1
+    payload = model["payloads"][0]
+    assert payload["model"] == "gpt-6-luna"
+    assert payload["reasoning"] == {"effort": "low"}
+    assert payload["store"] is False
+    record = data["requests"][0]["attempts"][0]
+    assert record["configured_model"] == record["returned_model"] == "gpt-6-luna"
+    assert record["input_tokens"] == 100 and record["output_tokens"] == 40
+    assert record["cached_tokens"] == 10 and record["reasoning_tokens"] == 5
+    assert record["admitted"] is True and record["dispatched"] is True
+    assert record["usage_status"] == "complete"

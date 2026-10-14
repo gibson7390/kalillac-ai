@@ -147,7 +147,9 @@ def run_v31(message, queries, session_id):
 
 def assert_rejected_privately(result):
     assert result["status"] == "rejected"
-    assert "private session, memory or conversation context" in result["reason"]
+    reason = result["reason"].lower()
+    assert "do not search" in reason
+    assert "external search provider" in reason
 
 
 # --- private requests -----------------------------------------------------------------------------

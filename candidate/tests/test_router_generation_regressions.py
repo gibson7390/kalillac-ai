@@ -145,9 +145,9 @@ def test_fidelity_rejects_contradicting_model_facts(code, expected):
 @pytest.mark.parametrize(
     "code",
     [
-        'import os\nMODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")\n',
-        'CHAIN = [("openai", "gpt-5.6-luna")]\n',
-        'PRIMARY = "gpt-5.6-luna"\n',
+        f'import os\nMODEL = os.getenv("OPENAI_MODEL", "{app.OPENAI_MODEL}")\n',
+        f'CHAIN = [("openai", "{app.OPENAI_MODEL}")]\n',
+        f'PRIMARY = "{app.OPENAI_MODEL}"\n',
         "def call_model(messages):\n    return provider.complete(messages)\n",
     ],
 )

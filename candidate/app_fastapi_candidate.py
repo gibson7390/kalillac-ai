@@ -71,7 +71,7 @@ SESSION_SEARCH_LIMIT = 5  # searches allowed per rolling window
 SESSION_SEARCH_WINDOW = 600  # rolling window in seconds (10 minutes)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-luna")
 OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
 
 # OpenAI is Kalillac's only model provider. There is no automatic fallback to
@@ -576,7 +576,9 @@ def _invoke_openai(messages, max_tokens=None):
     """Invoke the configured OpenAI model through the Responses API."""
     _require_openai_configuration()
 
-    input_items = _responses_input_items(messages)
+    input_items = _responses_input_items(
+        [SystemMessage(content=CURRENT_INTERFACE_CAPABILITIES), *messages]
+    )
 
     payload = {
         "model": OPENAI_MODEL,
@@ -1773,6 +1775,36 @@ def session_search_allowed(state):
         return True
 
 
+CURRENT_INTERFACE_CAPABILITIES = """CURRENT PUBLIC CHAT CAPABILITIES:
+- The current public Kalillac chat does not support file uploads or attachments.
+- Never claim or imply that the user can upload or attach a file to the current Kalillac chat. This restriction does not prevent explaining uploads or attachments in other services or writing code that implements upload or attachment functionality.
+- Kalillac cannot access files on the user's device or personal documents that were not supplied.
+- It can work with text or code pasted into the current conversation.
+- If content is missing, ask the user to paste the relevant content and state what they want done.
+- When the user asks to search their private, confidential, internal, or unpublished material, do not request external search. State briefly that the material was not sent to an external search provider and offer to help with it inside the current conversation. This does not prohibit public research about privacy, private companies, public reports about leaked documents, or similarly public subjects.
+- For a brief question about your previous reply, use the recent conversation to explain or correct that reply rather than repeat the same instruction.
+- Because this interface has no file input, never claim or imply that a file was received, opened, read, or available.
+- Treat programming paths, API routes, deployment uploads, and phrases such as "attached a debugger" according to their actual technical meaning; they are not claims that this chat received a file.
+- If the user signals confusion about the previous reply, explain your interpretation once in simpler, genuinely different words instead of defending or repeating the reply.
+- If the user remains confused after that explanation, stop repeating capabilities or instructions and reset with one neutral, plain-language question about what help they want.
+
+RESPONSE QUALITY:
+- Lead with the requested answer, result, or most useful next action. Avoid defensive preambles and unnecessary disclaimers.
+- Match depth to the task: keep simple answers concise, but make teaching, troubleshooting, analysis, and planning answers substantive enough to solve the problem.
+- For broad teaching requests without a requested length, normally give a complete 500-900 word answer that prioritizes the core mental model and most useful details. Offer to go deeper instead of trying to exhaust the topic.
+- Complete the initial answer within the available output limit. Do not repeat sections or depend on an automatic continuation to finish the answer.
+- When teaching, begin accessibly, then deepen the explanation and include a practical example when it materially helps.
+- For genuine side-by-side comparisons or multi-factor decisions, normally use a clear Markdown table when it improves understanding. Include the key decision criteria and enough detail to support a decision, then give a direct recommendation. Do not use tables decoratively or for simple answers.
+- Use numbered steps for procedures. Use at most one compact plain-text flow diagram unless the user explicitly asks for more, and only when sequence or relationships are materially easier to understand visually.
+- Ask one focused clarification only when missing information materially changes the answer; otherwise make reasonable stated assumptions and help immediately.
+- When required content is missing but the requested operation is already clear, ask only for the missing content; do not make the user repeat the task.
+- For current factual requests that specify required facts or sources, do not present the task as complete unless the retrieved evidence supports every required field. Use an available bounded evidence follow-up when needed; otherwise identify exactly what remains unverified and do not turn incomplete evidence into a definitive claim.
+- Use relevant conversation history. Do not restart, contradict, or needlessly repeat an answer the user just received.
+- Follow exact length, format, audience, and output-only instructions.
+- State conclusions decisively when the evidence is sufficient. Do not weaken accurate answers with unnecessary hedging. When evidence is incomplete, identify the exact uncertainty and the verification still needed.
+- Clearly separate facts, inferences, assumptions, and unknowns; never invent certainty."""
+
+
 SYSTEM_PROMPT = """
 You are Kalillac AI, a privacy-first public AI assistant.
 
@@ -1874,9 +1906,9 @@ SESSION PRIVACY AND PROVIDERS:
 - Session separation is logical, application-level separation by session identifier. Never claim per-user processes, sandboxes, containers, VMs, filesystems, or separate physical memory. Sessions may share server resources, which does not mean users can reach each other's state.
 - Never imply you can access or recover a previous session, and do not ask the user to re-supply information that came from one. A calendar date alone does not make information unavailable: use supplied current-session context honestly when it contains the answer.
 - HTTPS encrypts traffic in transit to kalillac.com. That does not mean the server cannot read requests, that providers receive nothing, or that data is encrypted at rest.
-- OpenAI __OPENAI_MODEL__ provides all model inference. There is no automatic fallback to another model or provider: if OpenAI is unavailable or returns unusable output, the request ends with a temporary unavailable error instead of an answer from a different model. When live search runs, Tavily receives what is needed to perform that search; Tavily does not generate answers. Do not claim Tavily receives the whole conversation, and do not claim it receives nothing.
-- Kalillac AI's privacy design does not establish any provider's practices. Never state OpenAI's or Tavily's retention, deletion, logging, storage, training, or analytics as fact unless that exact current policy was supplied or retrieved, and never say a provider does not retain content beyond the request. If asked, say that policy must be checked with the provider.
-- Browser developer tools show only browser-to-Kalillac requests, not server-side calls to OpenAI or Tavily. Never say the Network panel can verify provider traffic; that needs server-side configuration or provider documentation.
+- OpenAI provides all model inference. There is no automatic fallback to another model or provider: if OpenAI is unavailable or returns unusable output, the request ends with a temporary unavailable error instead of an answer from a different model. When live search runs, the search provider used receives the query text needed to perform that search. Retrieved evidence can be supplied to OpenAI for the answer. Search providers do not generate Kalillac’s answer. Do not claim that a search provider receives the entire conversation, and do not claim that it receives nothing.
+- Kalillac AI's privacy design does not establish any provider's practices. Never state OpenAI's or any search provider's retention, deletion, logging, storage, training, or analytics as fact unless that exact current policy was supplied or retrieved, and never say a provider does not retain content beyond the request. If asked, say that policy must be checked with the provider.
+- Browser developer tools show only browser-to-Kalillac requests, not server-side calls to OpenAI or search providers. Never say the Network panel can verify provider traffic; that needs server-side configuration or provider documentation.
 - Kalillac AI does not train its own model on user conversations. Do not extend that into a guarantee about any provider.
 - Independent audit, penetration-test, SOC 2/ISO certification, transparency-report and public repository status are not independently verified by these application facts. State confirmed evidence when available; do not interpret unavailable evidence as absence. Public repository availability is separate from verification of the deployed production revision. Avoid absolutes like "nothing is ever stored" or "no data can ever appear in a log", and never claim logs hold only operational metadata or can never contain user text.
 - If asked how privacy can be trusted, do not answer "trust us". Distinguish actual design, necessary third-party processing, what is independently verifiable, and what cannot be proven by assertion. Asking the AI is not verification.
@@ -1928,8 +1960,8 @@ ANTI-HALLUCINATION & TONE RULES:
 - Keep emotional support brief, natural, and conversational.
 """
 
-# The configured model is filled in from OPENAI_MODEL, never hard-coded.
-SYSTEM_PROMPT = SYSTEM_PROMPT.replace("__OPENAI_MODEL__", OPENAI_MODEL)
+# Precise model identity comes from the current runtime-configuration facts.
+# The shared identity prompt names the provider without freezing a model id.
 
 
 # Shared engagement-policy reminder injected into the free-form generation
@@ -4904,6 +4936,48 @@ def _supplied_file_content_is_available(content):
     return has_content(content, 3)
 
 
+def has_private_path_reference(message):
+    """Conservative raw path/device signal for external-search privacy."""
+    raw = str(message)
+    # Exclude URLs only from this local scan; never rewrite the user's input.
+    scan = re.sub(r"https?://[^\s<>\"']+", "", raw, flags=re.IGNORECASE)
+    return bool(
+        re.search(
+            r"(?<![\w])(?:[a-z]:[\\/]|\\\\[^\\/\r\n]+[\\/])"
+            r"|(?<![\w:/\\])(?:/{2}[^/\r\n]+/|/(?!/)(?=\S))",
+            scan, re.IGNORECASE,
+        )
+        or re.search(
+            r"\b(?:on|from)\s+(?:my|our)\s+(?:device|computer|laptop|phone|desktop)\b",
+            raw, re.IGNORECASE,
+        )
+    )
+
+
+def file_attachment_claim_scope(message):
+    """Recognize a file object claim; distinguish an explicit other destination."""
+    raw = str(message)
+    objects = r"(?:files?|documents?|pdfs?|images?|screenshots?|spreadsheets?|attachments?|photos?|pictures?)"
+    claim = re.search(
+        r"^\s*(?:please\s+)?(?:i|we)\s+(?:(?:have|just|already)\s+)*(?:uploaded|attached)\s+"
+        r"(?:(?:a|an|the|my|our|this|that|some)\s+)?" + objects + r"\b"
+        r"|^\s*(?:please\s+)?(?:(?:read|open|use|search|summarize|review|analyze|inspect)\s+)?"
+        r"(?:my|our|the|this|that)\s+(?:uploaded|attached)\s+" + objects + r"\b",
+        raw, re.IGNORECASE,
+    )
+    if not claim:
+        return None
+    destination = re.match(
+        r"\s+(?:to|into|on|in)\s+([^;.!?\r\n]+)", raw[claim.end():], re.IGNORECASE,
+    )
+    if destination and not re.search(
+        r"\b(?:here|this\s+(?:chat|conversation|message)|current\s+(?:chat|conversation)|kalillac)\b",
+        destination.group(1), re.IGNORECASE,
+    ):
+        return "other"
+    return "current"
+
+
 def is_file_reference_request(message, history=None, *, resolve_supplied=True):
     text = normalize_for_router(message)
 
@@ -4956,10 +5030,27 @@ def is_file_reference_request(message, history=None, *, resolve_supplied=True):
     if any(phrase in text for phrase in planning_phrases):
         return False
 
+    # A past-tense claim must identify a file object, not a debugger/listener.
+    # An explicit other destination is not a claim about this chat's interface.
+    claim_scope = file_attachment_claim_scope(message)
+    if claim_scope:
+        return claim_scope == "current" or not resolve_supplied
+
+    # A path is not supplied contents and must not make a coding/configuration
+    # question unavailable. Search privacy checks raw paths independently.
+    if resolve_supplied and has_private_path_reference(message):
+        return False
+
+    # Search privacy is broader than the unavailable-file response boundary.
+    # Generic references stay private even when their contents were supplied.
+    if not resolve_supplied and re.search(
+        r"\b(?:the|this|that)\s+(?:files?|documents?|pdfs?|notes?)\b", text,
+    ):
+        return True
+
     file_reference_signals = [
         "my notes",
         "my note",
-        "notes on",
         "in my notes",
         "what's in my notes",
         "whats in my notes",
@@ -4971,16 +5062,10 @@ def is_file_reference_request(message, history=None, *, resolve_supplied=True):
         "what are my notes",
         "my document",
         "my documents",
-        "the document",
-        "the documents",
         "my file",
         "my files",
-        "the file",
-        "the files",
         "class notes",
         "study notes",
-        "the pdf",
-        "uploaded",
         "what do my notes say about",
         "can't remember what my notes say",
         "can not remember what my notes say",
@@ -5062,7 +5147,11 @@ def is_file_reference_request(message, history=None, *, resolve_supplied=True):
     if any(signal in text for signal in technical_file_context):
         return False
 
-    return bool(re.search(r"\b(?:notes?|documents?|files?|pdfs?)\b", text)) and len(text.split()) <= 15
+    return (
+        not resolve_supplied
+        and bool(re.search(r"\b(?:notes?|documents?|files?|pdfs?)\b", text))
+        and len(text.split()) <= 15
+    )
 
 
 
@@ -5294,75 +5383,12 @@ def is_send_code_followup(message):
     return any(signal in text for signal in followup_code_signals)
 
 
-def is_targeted_clarification_needed(message):
-    text = normalize_for_router(message)
-
-    vague_file_phrases = [
-        "do the thing with the file",
-        "do that thing with the file",
-        "do it with the file",
-        "do that with the file",
-        "use the file",
-        "fix the file",
-        "handle the file",
-        "what's that thing you do with the file",
-        "what is that thing you do with the file",
-        "what do you do with the file",
-        "that thing with the file",
-        "thing you do with the file",
-        "file thing",
-        "do that cool file thing",
-        "that cool file thing",
-        "cool file thing",
-        "use that and build something",
-    ]
-
-    if any(phrase in text for phrase in vague_file_phrases):
-        return True
-
-    vague_creation_phrases = [
-        "can you create something using that",
-        "create something using that",
-        "make something using that",
-        "build something using that",
-        "use that to create something",
-        "use this to create something",
-        "can you make something with that",
-        "can you build something with that",
-        "can you create something with that",
-        "create something with that",
-        "make something with that",
-        "build something with that",
-    ]
-
-    if any(phrase in text for phrase in vague_creation_phrases):
-        return True
-
-    vague_short_phrases = [
-        "fix it",
-        "do it",
-        "make it work",
-        "use that",
-        "use this",
-        "do that",
-        "do this",
-        "make that",
-        "make this",
-        "build that",
-        "build this",
-        "create that",
-        "create this",
-        "the other one",
-    ]
-
-    if text in vague_short_phrases:
-        return True
-
-        return False
-
-
 def is_general_followup(message):
     text = normalize_for_router(message)
+
+    # Short questions can refer to the previous answer without a pronoun.
+    if re.fullmatch(r"(?:what|how|why)\s*[?!.]*", text):
+        return True
 
     followup_phrases = [
         "explain that",
@@ -6729,7 +6755,7 @@ def is_vague_code_request(message):
         "code something for me",
     ]
 
-    return any(phrase in text for phrase in vague_code_phrases)
+    return text.rstrip(" .!?") in vague_code_phrases
 
 
 def is_code_request(message):
@@ -7558,13 +7584,51 @@ def is_private_context_request(text):
     return any(re.search(pattern, text) for pattern in PRIVATE_CONTEXT_PATTERNS)
 
 
+def is_explicit_private_material_search(raw_text):
+    """Recognize a request to submit the user's explicitly private material
+    to an external search provider.
+
+    This is intentionally narrower than matching privacy-related words alone.
+    Public research about privacy, internal-combustion engines, private
+    companies, or publicly reported leaked documents remains searchable.
+    """
+    text = normalize_for_router(raw_text)
+
+    search_requested = bool(
+        re.search(
+            r"\b(?:search|search the web|search the internet|look up|"
+            r"find online|check online|browse for)\b",
+            text,
+        )
+    )
+
+    if not search_requested:
+        return False
+
+    user_material = bool(
+        re.search(
+            r"\b(?:my|our|this|that|these|those)\s+"
+            r"(?:exact\s+)?"
+            r"(?:(?:private|confidential|internal|unpublished|"
+            r"nonpublic|non public)\s+){1,3}"
+            r"(?:notes?|drafts?|memos?|documents?|files?|messages?|"
+            r"emails?|plans?|records?|reports?|data|information)\b",
+            text,
+        )
+    )
+
+    return user_material
+
+
 def is_private_search_target(raw_text):
     """True when the raw text (a user message or a model-generated search
     query) points at the user's own session, memory, earlier messages or
     prior conversation. Composes the existing deterministic checks; such a
     target must never be sent to external search."""
     return (
-        is_private_context_request(normalize_for_router(raw_text))
+        has_private_path_reference(raw_text)
+        or is_explicit_private_material_search(raw_text)
+        or is_private_context_request(normalize_for_router(raw_text))
         or is_memory_recall_request(raw_text)
         or is_previous_conversation_reference(raw_text)
         or is_explicit_previous_session_reference(raw_text)
@@ -7573,7 +7637,7 @@ def is_private_search_target(raw_text):
         or bool(
             re.search(
                 r"\b(?:(?:my|our|the|this|that)\s+(?:notes?|documents?|files?|pdfs?)"
-                r"|(?:class|study)\s+notes|uploaded)\b",
+                r"|(?:class|study)\s+notes|uploaded|attached)\b",
                 normalize_for_router(raw_text),
             )
             and is_file_reference_request(raw_text, resolve_supplied=False)
@@ -8671,9 +8735,7 @@ def classify_request(message, history):
     ):
         matches.append("followup")
 
-    if is_targeted_clarification_needed(message) or (
-        is_unclear_input(message) and len(str(message).strip()) <= 12
-    ):
+    if is_unclear_input(message) and len(str(message).strip()) <= 12:
         matches.append("unclear")
 
     if not matches:
@@ -8978,7 +9040,7 @@ Rules:
 - If the user mentions langchain_chroma, explain that the Python import name is langchain_chroma but the pip package is usually installed with:
 pip install langchain-chroma
 - Do not use memory.
-- Do not use document information.
+- Do not use inaccessible document information.
 - Stop when answered.
 """
 
@@ -9282,7 +9344,7 @@ Rules:
 - Compare differences clearly and concisely when the user asks about changes, improvements, or versions.
 - Do not introduce unrelated examples.
 - Do not use memory.
-- Do not use document information.
+- Do not use inaccessible document information.
 - If there is not enough previous code to compare, say: "I don't have enough previous code to compare."
 - Be direct and technical.
 - Stop when answered.
@@ -9295,7 +9357,7 @@ Answer the user's question directly using general reasoning.
 
 Rules:
 - Do not use memory.
-- Do not use document information.
+- Do not use inaccessible document information.
 - Answer naturally and directly.
 - Stop when answered.
 
@@ -9986,7 +10048,7 @@ def _invoke_openai_native_tools(input_items, instructions):
 
     payload = {
         "model": OPENAI_MODEL,
-        "instructions": instructions,
+        "instructions": CURRENT_INTERFACE_CAPABILITIES + "\n\n" + instructions,
         "input": input_items,
         "store": False,
         "reasoning": {
@@ -10303,9 +10365,11 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             return {
                 "status": "rejected",
                 "reason": (
-                    "External search is unavailable for private session, "
-                    "memory or conversation context. Answer from the "
-                    "conversation provided."
+                    "Do not search. The request targets private session, "
+                    "memory, conversation, confidential, internal, or "
+                    "unpublished user material. Nothing was sent to an "
+                    "external search provider. Explain this boundary briefly "
+                    "and offer help using only the current conversation."
                 ),
             }
 
@@ -10917,9 +10981,9 @@ def chat(message, history, request=None, session_id=None):
             log("MODEL CALLED: no")
             log("===== END ROUTE LOG =====\n")
             return (
-                "Kalillac AI doesn't have access to "
-                "personal documents, notes, or files. If you paste the "
-                "relevant text into the chat, I can work with it directly."
+                "This chat doesn't support file uploads or attachments, so I can't "
+                "receive or open that file. Paste the relevant text here. If you "
+                "already stated the task, you don't need to repeat it."
             )
 
         if route == "web_search":
@@ -11667,7 +11731,7 @@ def run_router_tests():
             "expected": "code",
         },
         {"prompt": "explain boolean variables in Python", "expected": "logic"},
-        {"prompt": "use the file", "expected": "file_unavailable"},
+        {"prompt": "use the file", "expected": "general"},
         {
             "prompt": "summarize my document",
             "expected": "file_unavailable",
@@ -12155,7 +12219,10 @@ def run_deterministic_tests():
     reply = chat("summarize my document", [], a)
     check(
         "file_unavailable deterministic",
-        "doesn't have access to personal documents" in reply,
+        "paste" in reply.lower()
+        and "doesn't support file uploads or attachments" in reply.lower()
+        and "upload the" not in reply.lower()
+        and "attach the" not in reply.lower(),
         reply,
     )
 

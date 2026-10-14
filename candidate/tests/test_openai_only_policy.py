@@ -196,6 +196,7 @@ def test_openai_success_is_unchanged(openai):
     assert payload["reasoning"] == {"effort": "low"}
     assert payload["max_output_tokens"] == 123
     assert payload["input"] == [
+        {"role": "system", "content": app.CURRENT_INTERFACE_CAPABILITIES},
         {"role": "system", "content": "system"},
         {"role": "user", "content": "hello"},
     ]
@@ -899,9 +900,12 @@ def test_disclosure_uses_the_configured_model_not_a_hard_coded_one():
         assert "luna" not in lowered, name
         assert "gpt-5.6" not in lowered, name
 
-    # Surfaces that state the model name the configured value.
+    # Generic identity names the provider; precise model facts come from runtime.
+    assert "OpenAI provides all model inference." in surfaces["system_prompt"]
+    assert "__OPENAI_MODEL__" not in surfaces["system_prompt"]
+    # Surfaces that state a model must name the configured value.
     for name in (
-        "system_prompt", "facts", "code_reference", "diagram", "identity",
+        "facts", "code_reference", "diagram", "identity",
         "how_it_works", "model", "search", "runtime_facts",
         "self_knowledge_prompt", "python_repair_prompt",
     ):
