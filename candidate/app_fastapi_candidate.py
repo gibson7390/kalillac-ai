@@ -3753,6 +3753,33 @@ def mentions_kalillac_first_turn_self_topic(message):
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+# "Reveal your code" and "show me your source code" ask about Kalillac's own
+# implementation. Bare "your code" or "your implementation" can instead mean
+# code delivered earlier in this conversation, so those count only when no
+# recent code answer exists.
+KALILLAC_OWN_SOURCE_RE = re.compile(
+    r"\b(?:your|kalillac(?: ai)?(?:'s)?)\s+(?:own\s+)?"
+    r"(?:source code|source files|codebase|code base"
+    r"|(?P<ambiguous>code|implementation))\b"
+)
+
+
+def is_kalillac_own_code_request(message, history=None):
+    """Questions about Kalillac's own source; requests to write code are excluded."""
+    if is_code_generation_intent(message) or is_kalillac_code_reference_request(message):
+        return False
+
+    match = KALILLAC_OWN_SOURCE_RE.search(normalize_for_router(message))
+
+    if not match:
+        return False
+
+    return not (
+        match.group("ambiguous")
+        and get_recent_code_answers(history or [], limit=1)
+    )
+
+
 def is_self_knowledge_request(message):
     text = normalize_for_router(message)
 
@@ -3934,9 +3961,13 @@ def is_code_generation_intent(message):
 
         return True
 
-    # Noun-first phrasings: "python function to catch X", "code that does Y"
+    # Noun-first phrasings: "python function to catch X", "code that does Y".
+    # "to" introduces a task only when it is not followed by a pronoun object:
+    # "reveal your code to me" or "send the code to us" asks to see or move
+    # code, not to write new code.
     if programming_context and re.search(
-        r"\b(code|function|script|program|snippet|example)\b\s+(that|to|which)\b",
+        r"\b(code|function|script|program|snippet|example)\b\s+"
+        r"(that|which|to(?!\s+(?:me|us|you|him|her|them)\b))\b",
         text,
     ):
         return True
@@ -5382,7 +5413,18 @@ def is_send_code_followup(message):
         "code for it",
     ]
 
-    return any(signal in text for signal in followup_code_signals)
+    if any(signal in text for signal in followup_code_signals):
+        return True
+
+    # "send the Python code to me again", "show me that code again": a
+    # language or qualifier may sit between the article and "code".
+    return bool(
+        re.search(
+            r"\b(?:send|resend|show|give|paste|share)\b(?:\s+(?:me|us))?"
+            r"\s+(?:the|that|this)\s+(?:[\w+#.-]+\s+){0,2}?code\b",
+            text,
+        )
+    )
 
 
 def is_general_followup(message):
@@ -6876,7 +6918,19 @@ def code_request_needs_recent_context(message):
         "code it",
     ]
 
-    return any(phrase in text for phrase in context_phrases)
+    if any(phrase in text for phrase in context_phrases):
+        return True
+
+    # A bare "give me only the code" carries no task of its own; it refers to
+    # the request or code already established in this conversation.
+    return bool(
+        re.fullmatch(
+            r"(?:(?:please|ok|okay|now)\s+)?(?:(?:can|could|would) you\s+)?"
+            r"(?:give|send|show)(?:\s+(?:me|us))?\s+(?:only|just)\s+the\s+code"
+            r"(?:\s+only)?(?:\s+please)?\s*[.!?]*",
+            text,
+        )
+    )
 
 
 def is_revision_followup(message):
@@ -8676,7 +8730,9 @@ def classify_request(message, history):
     if is_calculator_request(message):
         matches.append("calculator")
 
-    if is_self_knowledge_request(message):
+    if is_self_knowledge_request(message) or is_kalillac_own_code_request(
+        message, history
+    ):
         matches.append("self_knowledge")
 
     if is_memory_recall_request(message):
@@ -8922,12 +8978,47 @@ def apply_kalillac_voice_and_format(prompt, route):
         + str(prompt).strip()
     )
 
+def recent_kalillac_own_code_request(history, limit=3):
+    """Whether one of the recent user turns asked about Kalillac's own code.
+
+    Each turn is judged against the history that preceded it, so a bare
+    "your code" asked after delivered code stays a reference to that code,
+    and code delivered later cannot reinterpret an earlier question.
+    """
+    if not history:
+        return False
+
+    user_turns = []
+    start = max(len(history) - (limit * 2 + 2), 0)
+
+    for index in range(start, len(history)):
+        turn = history[index]
+
+        if isinstance(turn, dict):
+            if str(turn.get("role", "")).strip().lower() != "user":
+                continue
+            content = normalize_history_content(turn.get("content", ""))
+        elif isinstance(turn, (list, tuple)) and len(turn) >= 1 and turn[0]:
+            content = normalize_history_content(turn[0])
+        else:
+            continue
+
+        if content:
+            user_turns.append((str(content), index))
+
+    return any(
+        is_kalillac_own_code_request(content, history[:index])
+        for content, index in user_turns[-limit:]
+    )
+
+
 def kalillac_self_knowledge_context_active(message, history, route=None):
     """Share the existing fact-context gate; this does not select a route."""
     recent_user_messages = get_recent_user_messages(history, limit=3)
     return (
         route == "self_knowledge"
         or is_self_knowledge_request(message)
+        or is_kalillac_own_code_request(message, history)
         or mentions_kalillac_self_topic(message)
         or (
             not recent_user_messages
@@ -8938,6 +9029,7 @@ def kalillac_self_knowledge_context_active(message, history, route=None):
             or mentions_kalillac_self_topic(user_message)
             for user_message in recent_user_messages
         )
+        or recent_kalillac_own_code_request(history, limit=3)
     )
 
 
@@ -9378,6 +9470,16 @@ USER QUESTION:
                 else last_code_answer
             )
 
+            resend_rule = ""
+
+            if is_send_code_followup(message) and not is_revision_followup(message):
+                resend_rule = """
+RESEND REQUEST:
+The user asked to receive the previous code again. Reproduce the previous
+code exactly as written, with no changes, improvements, or regeneration.
+This takes precedence over the revision behavior below.
+"""
+
             prompt = f"""
 You are Kalillac AI.
 
@@ -9388,9 +9490,11 @@ Previous code:
 
 User request:
 {message}
-
+{resend_rule}
 ABSOLUTE OUTPUT RULE:
 Return exactly one fenced code block and nothing else.
+This contract governs supplied code; a limitation, recovery, or capability
+explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above.
 Do not write any sentence before the code.
 Do not write any sentence after the code.
 Do not explain what you changed.
@@ -9666,6 +9770,8 @@ Recent conversation context:
 
 ABSOLUTE OUTPUT RULE:
 Return exactly one fenced code block and nothing else.
+This contract governs supplied code; a limitation, recovery, or capability
+explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above.
 Do not write any sentence before the code.
 Do not write any sentence after the code.
 Do not explain what you built.
@@ -9851,8 +9957,14 @@ recovery explanation, use ordinary prose. This narrowly takes precedence over
 code-only/fenced-output instructions. Do not invent a script that prints the
 explanation. Judge the requested action and goal under the existing policy,
 without assuming unauthorized intent; provide useful permitted recovery help.
+When a limitation, recovery, or capability explanation is followed by optional
+illustrative code, write the explanation as ordinary prose outside the fence
+and put only the actual code inside the fenced block. Never turn conversational
+prose into source-code comments to satisfy a one-fence contract. Comments that
+genuinely explain the code itself remain allowed.
 When supplying legitimate code or revisions, preserve their exact output
-contracts. Missing code-continuation remainders always keep their exact contract.
+contracts. Explicit code-only requests keep their exact contract. Missing
+code-continuation remainders always keep their exact contract.
 """
 
 
