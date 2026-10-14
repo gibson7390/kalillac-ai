@@ -482,11 +482,19 @@ def test_closed_or_expired_dispatch_lease_cannot_send_after_local_refund(pipelin
     assert counts(pipeline) == (0, 0) and pipeline.calls == []
 
 
-def test_private_search_target_never_reaches_provider_or_aggregate(pipeline):
+def test_private_search_target_never_reaches_a_search_provider(pipeline):
+    # OpenAI is the configured answer model and may receive the request; the
+    # private material must never reach Brave or Tavily.
+    explanation = ("I didn't send your private notes to an external search provider. "
+                   "Paste the relevant text here and I can work with it.")
+    pipeline.responses = [{"text": explanation}]
     with TestClient(app.api) as client:
         response = client.post("/api/chat", json={"message": "Search my private notes for " + SENTINEL})
     assert response.status_code == 200
-    assert pipeline.calls == [] and counts(pipeline) == (0, 0)
+    assert response.json()["reply"] == explanation
+    assert pipeline.calls == ["openai"]
+    assert counts(pipeline) == (1, 1)
+    assert counts(pipeline, "brave") == (0, 0) and counts(pipeline, "tavily") == (0, 0)
 
 
 def test_postgresql_pool_lock_and_conflict_insert_are_rendered_not_executed():

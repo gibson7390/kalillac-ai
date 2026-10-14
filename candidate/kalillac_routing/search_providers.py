@@ -53,16 +53,21 @@ class SearchProviderPolicy:
                     "available_when_native_routing_enabled": self.native_tavily_followup,
                     "enabled_in_current_process": bool(native_routing_enabled and self.native_tavily_followup),
                     "provider": "Tavily" if self.native_tavily_followup else None,
-                    "max_attempts": 1 if self.native_tavily_followup else 0,
-                    "requires_no_prior_tavily_attempt": True,
+                    "max_attempts": 2 if self.native_tavily_followup else 0,
+                    "stages": (["discovery/recovery", "targeted verification"]
+                               if self.native_tavily_followup else []),
+                    "max_brave_attempts": 1 if self.native_tavily_followup else 0,
+                    "max_provider_searches": 3 if self.native_tavily_followup else 0,
+                    "verification_requires_prior_usable_tavily_evidence": self.native_tavily_followup,
+                    "each_search_requires_a_later_model_round": self.native_tavily_followup,
                     "legacy_eligible": False,
-                    "trigger": "model requests a subsequent search after inspecting insufficient primary evidence",
+                    "trigger": "model requests a subsequent search after inspecting insufficient evidence",
                     "tool_result_provider_provenance": self.native_tavily_followup,
                 },
                 "per_response_evidence_provider_available": False}
 
     def context(self):
-        recovery = (" In native brave/tavily operation only, the model may request one Tavily follow-up after inspecting insufficient Brave evidence, provided Tavily has not already been attempted. The two providers share one session lookup; each may be attempted at most once. Legacy search retains failure-only fallback. A native lookup that admitted a provider attempt cannot replay providers through legacy after a tool-protocol failure."
+        recovery = (" In native brave/tavily operation only, the native evidence follow-up may admit at most two Tavily attempts in one session lookup: one discovery/recovery search after the model inspects insufficient Brave evidence (or the automatic failure fallback), then one targeted-verification search of a specific discovered candidate. Verification requires prior usable Tavily evidence, and each search requires a later model round. Brave runs at most once and never again; no fourth search, extraction or retry is allowed. Legacy search retains failure-only fallback. A native lookup that admitted a provider attempt cannot replay providers through legacy after a tool-protocol failure."
                     if self.native_tavily_followup else "")
         return (f"Configured search primary: {self.primary.title()}; fallback: "
                 + ("none." if self.fallback == "none" else "Tavily, at most one search attempt after an eligible Brave failure; no extraction or retry.")

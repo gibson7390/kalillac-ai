@@ -250,7 +250,15 @@ def test_generic_search_disclosures_and_precise_runtime_policy(monkeypatch, nati
     assert policy["fallback_for_quality_or_age"] is False
     followup = policy["native_evidence_followup"]
     assert followup["enabled_in_current_process"] is (native and primary == "brave" and fallback == "tavily")
-    assert followup["max_attempts"] == (1 if primary == "brave" and fallback == "tavily" else 0)
+    native_recovery = primary == "brave" and fallback == "tavily"
+    assert followup["max_attempts"] == (2 if native_recovery else 0)
+    assert followup["max_provider_searches"] == (3 if native_recovery else 0)
+    assert followup["verification_requires_prior_usable_tavily_evidence"] is native_recovery
+    assert followup["each_search_requires_a_later_model_round"] is native_recovery
+    assert "requires_no_prior_tavily_attempt" not in followup
+    if native_recovery:
+        assert "at most two Tavily attempts" in delivered and "targeted-verification" in delivered
+        assert "no fourth search" in delivered and "requires_no_prior_tavily_attempt" not in delivered
     assert facts["configured_primary"]["model"] == "gpt-6-luna"
     assert facts["configured_fallback_chain"] == []
     assert facts["automatic_model_fallback"] is False

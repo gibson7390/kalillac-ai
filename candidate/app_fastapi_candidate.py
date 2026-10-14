@@ -421,7 +421,9 @@ def _post_single_search(provider, arguments):
     context = _NATIVE_SEARCH_CONTEXT.get()
     budget = current_budget()
     before = budget.search_attempts if budget is not None else None
-    if context is not None and provider in context[0].attempts:
+    # Exact native lookup bounds: one Brave attempt, at most two Tavily
+    # attempts (discovery/recovery, then targeted verification).
+    if context is not None and context[0].attempts.count(provider) >= (2 if provider == "tavily" else 1):
         raise ChatInternalError()
     try:
         return _post_single_search_attempt(provider, arguments)
@@ -1798,7 +1800,7 @@ RESPONSE QUALITY:
 - Use numbered steps for procedures. Use at most one compact plain-text flow diagram unless the user explicitly asks for more, and only when sequence or relationships are materially easier to understand visually.
 - Ask one focused clarification only when missing information materially changes the answer; otherwise make reasonable stated assumptions and help immediately.
 - When required content is missing but the requested operation is already clear, ask only for the missing content; do not make the user repeat the task.
-- For current factual requests that specify required facts or sources, do not present the task as complete unless the retrieved evidence supports every required field. Use an available bounded evidence follow-up when needed; otherwise identify exactly what remains unverified and do not turn incomplete evidence into a definitive claim.
+- For current factual requests that specify required facts or sources, do not present the task as complete unless retrieved evidence supports every required field. If required fields remain unsupported after primary evidence and a bounded evidence follow-up is available, request that follow-up before answering. Do not stop with an uncertainty statement while that permitted follow-up remains unused. If no follow-up is available or it also fails, identify exactly what remains unverified and do not turn incomplete evidence into a definitive claim.
 - Use relevant conversation history. Do not restart, contradict, or needlessly repeat an answer the user just received.
 - Follow exact length, format, audience, and output-only instructions.
 - State conclusions decisively when the evidence is sufficient. Do not weaken accurate answers with unnecessary hedging. When evidence is incomplete, identify the exact uncertainty and the verification still needed.
@@ -10254,8 +10256,12 @@ def _run_v31_native_tool_chat(
     search_calls = 0
     search_requests = 0
     search_coverage_limited = False
-    lookup = SimpleNamespace(policy=SEARCH_PROVIDER_POLICY, attempts=[],
-                             evidence_provider=None, session_admitted=False, first_round=None)
+    # attempts: ordered admitted provider attempts. last_round: model round of
+    # the most recent provider search. tavily_evidence: a Tavily attempt
+    # returned usable evidence. closed: no further provider search.
+    lookup = SimpleNamespace(policy=SEARCH_PROVIDER_POLICY, attempts=[], evidence_provider=None,
+                             session_admitted=False, last_round=None, tavily_evidence=False,
+                             closed=False, queries=[])
     followup_enabled = lookup.policy.native_tavily_followup
     model_round = 0
     private_request = is_private_search_target(message)
@@ -10285,13 +10291,15 @@ def _run_v31_native_tool_chat(
         instructions += """
 
 NATIVE SEARCH EVIDENCE RECOVERY:
-- Application code selects the provider. The first search uses Brave.
+- Application code selects the provider. Brave runs first.
 - When the initial evidence is adequate, answer without another search.
-- If the initial Brave evidence cannot adequately support the requested answer (for example, expired forecasts, older observations, wrong-location evidence or insufficient coverage), you may request one follow-up search_web in a later model round after inspecting those results. Application code uses Tavily directly, only if Tavily has not already been attempted by this lookup's failure fallback.
-- At most one Brave attempt and one Tavily attempt share one bounded lookup. No extraction, retry, third provider search or return to Brave is allowed. Existing request and tool limits still apply; availability of a fallback does not establish accuracy.
-- provider_provenance in each search tool result reports selected/admitted search attempts and the provider supplying that result. It is search evidence provenance, not per-response model-provider metadata. Configuration alone never proves a provider was used.
+- If the Brave evidence cannot support every required fact, source requirement, time-sensitive claim, comparison or superlative (for example, expired forecasts, older observations, wrong-location evidence or insufficient coverage), request one follow-up search_web in a later model round after inspecting those results. Application code runs it as one Tavily recovery/discovery search.
+- A page about one plausible candidate does not establish that it is the latest, newest, current, highest, lowest, first or most recent.
+- If the Tavily discovery evidence identifies a specific candidate but still lacks an exact required fact or official source, request one narrower search_web in another later model round. Application code runs it as one Tavily targeted-verification search. Focus that query on the discovered candidate and the missing evidence; do not repeat or broaden an earlier query.
+- After that verification attempt, no additional provider search is permitted. One bounded lookup admits at most one Brave attempt and two Tavily attempts, with no extraction, retry or return to Brave. Existing request and tool limits still apply; availability of a search does not establish accuracy.
+- provider_provenance in each search tool result reports the admitted search attempts in order and the provider supplying that result. It is search evidence provenance, not per-response model-provider metadata. Configuration alone never proves a provider was used.
 - Preserve each evidence record's original source, values, dates, labels and time periods, even when two records share a URL. Do not replace one record's measurements with another's.
-- If Tavily is unavailable or its evidence is also inadequate, keep the answer qualified and provide only useful supported information. Do not invent current conditions or request further provider searches.
+- If Tavily is unavailable or verification remains insufficient, identify exactly what remains unsupported and provide only useful supported information. Do not invent certainty or request further provider searches.
 """
 
     explanation_continuation = is_explanation_continuation_request(message, history)
@@ -10359,9 +10367,12 @@ NATIVE SEARCH EVIDENCE RECOVERY:
         search_requests += 1
         # Private context wins before provider attempts, session admission or
         # domain selection. Rejected requests still count toward the bounded
-        # native tool-request cap; neither private text is logged here.
+        # native tool-request cap; neither private text is logged here. A
+        # private rejection closes the lookup: a later public-looking query
+        # cannot reopen it.
         if private_request or is_private_search_target(call.arguments.get("query", "")):
             log("V31 SEARCH: rejected (private context)")
+            lookup.closed = followup_enabled
             return {
                 "status": "rejected",
                 "reason": (
@@ -10373,21 +10384,30 @@ NATIVE SEARCH EVIDENCE RECOVERY:
                 ),
             }
 
-        if followup_enabled and search_requests > 2:
-            return {"status": "rejected", "reason": "The bounded lookup permits only two search requests; no third search is allowed.",
+        if followup_enabled and search_requests > 3:
+            return {"status": "rejected", "reason": "The bounded lookup permits only three search requests; no fourth search is allowed.",
                     **provider_trace()}
+
+        query = ground_relative_search_query(
+            call.arguments["query"], build_web_search_query(message, history),
+        )
 
         selected_provider = lookup.policy.primary
         if search_calls >= 1:
             search_calls += 1
             if not followup_enabled:
                 return {"status": "rejected", "reason": "Only one external search is allowed for this request."}
-            if "tavily" in lookup.attempts:
-                reason = "Tavily has already been attempted; no further provider search is allowed."
-            elif search_calls > 2 or not lookup.session_admitted:
-                reason = "The bounded lookup is complete or unavailable; no further provider search is allowed."
-            elif model_round <= lookup.first_round:
-                reason = "A Tavily follow-up is available only after inspecting the initial result in a later model round."
+            tavily_attempts = lookup.attempts.count("tavily")
+            if lookup.closed or not lookup.session_admitted:
+                reason = "The bounded lookup is closed or unavailable; no further provider search is allowed."
+            elif model_round <= lookup.last_round:
+                reason = "Another search is available only after inspecting the previous result in a later model round."
+            elif tavily_attempts >= 2:
+                reason = "The bounded lookup is complete; no further provider search is allowed."
+            elif tavily_attempts == 1 and not lookup.tavily_evidence:
+                reason = "Targeted verification requires usable evidence from the earlier Tavily search; no further provider search is allowed."
+            elif tavily_attempts == 1 and query.casefold().split() in [q.casefold().split() for q in lookup.queries]:
+                reason = "Targeted verification must be a narrower query about a specific candidate, not a repeat of an earlier search."
             else:
                 reason = None
             if reason is not None:
@@ -10395,14 +10415,14 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             selected_provider = "tavily"
         else:
             search_calls = 1
+            if lookup.closed:
+                return {"status": "rejected", "reason": "The bounded lookup is closed; no provider search is allowed.",
+                        **provider_trace()}
             if not session_search_allowed(state):
                 return {"status": "limited", "results": [], **provider_trace()}
             lookup.session_admitted = True
-            lookup.first_round = model_round
-
-        query = ground_relative_search_query(
-            call.arguments["query"], build_web_search_query(message, history),
-        )
+        lookup.last_round = model_round
+        lookup.queries.append(query)
 
         # A user-specified public domain always takes precedence.
         # Otherwise, apply the narrow first-party source policy after
@@ -10422,11 +10442,20 @@ NATIVE SEARCH EVIDENCE RECOVERY:
 
         if followup_enabled:
             lookup.evidence_provider = None
+            tavily_before = lookup.attempts.count("tavily")
             token = _NATIVE_SEARCH_CONTEXT.set((lookup, selected_provider))
             try:
                 status, results = run_web_search(query, include_domains=domains)
             finally:
                 _NATIVE_SEARCH_CONTEXT.reset(token)
+            # Only usable Tavily evidence opens targeted verification. A
+            # Tavily search that failed or returned nothing closes the lookup.
+            tavily_usable = (status in {"ok", "partial"} and bool(results)
+                             and lookup.evidence_provider == "tavily")
+            if tavily_usable:
+                lookup.tavily_evidence = True
+            elif selected_provider == "tavily" or lookup.attempts.count("tavily") > tavily_before:
+                lookup.closed = True
         else:
             status, results = run_web_search(query, include_domains=domains)
 
@@ -10473,7 +10502,10 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             ),
             call_model=call_model,
             execute_tool=execute_tool,
-            max_tool_rounds=3,
+            # Brave, Tavily discovery and Tavily verification use three
+            # rounds; the fourth keeps one spare round in which an extra
+            # search request is rejected rather than ending the request.
+            max_tool_rounds=4 if followup_enabled else 3,
             max_tool_calls=4,
             max_continuations=1,
         )

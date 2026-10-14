@@ -606,16 +606,21 @@ def test_native_requested_followup_uses_tavily_once(native_lookup, budgeted, ins
 
 
 @pytest.mark.parametrize("failure", [TransportHTTPError(429), TransportConnectionError(), {"grounding":{"generic":[]}}])
-def test_native_initial_failure_fallback_closes_followup(native_lookup, failure):
-    state = native_lookup; state["brave"] = [failure];state["tavily"] = [tavily_result()]
-    state["turns"] = [_lookup_tool(), _lookup_tool(call_id="lookup-2"), _lookup_reply()]
+def test_native_initial_failure_fallback_is_the_discovery_stage(native_lookup, failure):
+    # The automatic failure fallback is the lookup's Tavily discovery attempt:
+    # a repeated query is refused, and only one narrower verification remains.
+    state = native_lookup; state["brave"] = [failure]
+    state["tavily"] = [tavily_result(), tavily_result(url="https://docs.example.test/verified")]
+    state["turns"] = [_lookup_tool(), _lookup_tool(call_id="lookup-2"),
+                      _lookup_tool("reported location official observation", "lookup-3"), _lookup_reply()]
     _,budget = _run_lookup(state)
-    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
-    assert budget.search_attempts == 2
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily", "tavily"]
+    assert budget.search_attempts == 3
     outputs = _lookup_outputs(state)
     assert outputs[0]["provider_provenance"]["attempted_providers"] == ["brave", "tavily"]
     assert outputs[0]["provider_provenance"]["evidence_provider"] == "tavily"
-    assert outputs[1]["status"] == "rejected" and "already" in outputs[1]["reason"]
+    assert outputs[1]["status"] == "rejected" and "repeat" in outputs[1]["reason"]
+    assert outputs[2]["provider_provenance"]["attempted_providers"] == ["brave", "tavily", "tavily"]
 
 
 def test_native_missing_brave_key_counts_only_actual_tavily_attempt(native_lookup, monkeypatch):
@@ -629,12 +634,13 @@ def test_native_missing_brave_key_counts_only_actual_tavily_attempt(native_looku
     assert outputs[1]["status"]=="rejected"
 
 
-def test_native_third_search_is_rejected(native_lookup):
+def test_native_repeated_query_is_not_targeted_verification(native_lookup):
     state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
     state["turns"]=[_lookup_tool(),_lookup_tool(call_id="lookup-2"),_lookup_tool(call_id="lookup-3"),_lookup_reply()]
     _,budget=_run_lookup(state)
     assert [c["provider"] for c in state["calls"]]==["brave","tavily"] and budget.search_attempts==2
     assert [o["status"] for o in _lookup_outputs(state)]==["ok","ok","rejected"]
+    assert "repeat" in _lookup_outputs(state)[2]["reason"]
     assert budget.model_attempts==4
 
 
@@ -767,11 +773,13 @@ def test_native_followup_requires_a_later_model_round(native_lookup):
 
 
 def test_native_lookup_round_limit_does_not_replay_providers_via_legacy(native_lookup):
-    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result()]
-    state["turns"]=[_lookup_tool(call_id=f"lookup-{i}") for i in range(4)]
+    # Rounds 1-3 search, round 4 is refused as a tool result, and a fifth tool
+    # round exhausts the loop: the lookup is never replayed through legacy.
+    state=native_lookup;state["brave"]=[brave_result()];state["tavily"]=[tavily_result(),tavily_result()]
+    state["turns"]=[_lookup_tool(f"weather reported location query {i}",f"lookup-{i}") for i in range(5)]
     with pytest.raises(app.ModelProviderUnavailable):_run_lookup(state)
-    assert [c["provider"] for c in state["calls"]]==["brave","tavily"]
-    assert len(state["model"])==4
+    assert [c["provider"] for c in state["calls"]]==["brave","tavily","tavily"]
+    assert len(state["model"])==5
 
 
 def test_native_followup_does_not_expand_model_attempt_allowance(native_lookup):
@@ -787,11 +795,21 @@ def test_native_followup_facts_are_scoped_to_native_brave_tavily(native_lookup,m
     facts=app._v31_runtime_facts()
     recovery=facts["web_search_policy"]["native_evidence_followup"]
     assert recovery["available_when_native_routing_enabled"] is True
-    assert recovery["requires_no_prior_tavily_attempt"] is True and recovery["legacy_eligible"] is False
+    assert recovery["max_attempts"]==2 and recovery["max_brave_attempts"]==1 and recovery["max_provider_searches"]==3
+    assert recovery["stages"]==["discovery/recovery","targeted verification"]
+    assert recovery["verification_requires_prior_usable_tavily_evidence"] is True
+    assert recovery["each_search_requires_a_later_model_round"] is True
+    assert "requires_no_prior_tavily_attempt" not in recovery and recovery["legacy_eligible"] is False
+    assert facts["web_search_policy"]["fallback_max_attempts"]==1
+    assert facts["web_search_policy"]["fallback_for_quality_or_age"] is False
     assert facts["automatic_model_fallback"] is False and facts["configured_fallback_chain"]==[]
     for policy in [sp.SearchProviderPolicy(),sp.SearchProviderPolicy("brave","none")]:
         monkeypatch.setattr(app,"SEARCH_PROVIDER_POLICY",policy)
-        assert app._v31_runtime_facts()["web_search_policy"]["native_evidence_followup"]["available_when_native_routing_enabled"] is False
+        native_recovery = policy.primary=="brave" and policy.fallback=="tavily"
+        followup = app._v31_runtime_facts()["web_search_policy"]["native_evidence_followup"]
+        assert followup["available_when_native_routing_enabled"] is False
+        assert followup["verification_requires_prior_usable_tavily_evidence"] is native_recovery
+        assert followup["each_search_requires_a_later_model_round"] is native_recovery
 
 
 
@@ -872,3 +890,245 @@ def test_native_news_followup_never_extracts_or_retries(native_lookup,budgeted):
     assert len(outputs[0]["results"][0]["content"])==1600
     assert len(outputs[1]["results"][0]["content"])==1600
     assert outputs[1]["results"][0]["published"]=="2026-09-01"
+
+
+# --- native targeted verification: Brave, Tavily discovery, Tavily verification ---
+
+FIRMWARE = "Search the web for the latest Example Widget firmware release and its official release date."
+DISCOVERY = "Example Widget firmware 4.2 appears to be the newest release."
+VERIFIED = "Example Widget firmware 4.2 was released on October 7, 2026."
+DISCOVERY_URL = "https://news.example.test/widget"
+OFFICIAL_URL = "https://vendor.example.test/firmware/4.2"
+
+
+def _verification_flow(state, discovery=None, verification=None, extra_turns=()):
+    state["brave"] = [brave_result(content="A forum post lists several firmware versions without dates.")]
+    state["tavily"] = [discovery if discovery is not None else tavily_result(url=DISCOVERY_URL, content=DISCOVERY),
+                       verification if verification is not None else tavily_result(url=OFFICIAL_URL, content=VERIFIED)]
+    state["turns"] = [_lookup_tool("newest Example Widget firmware release"),
+                      _lookup_tool("Example Widget firmware latest version", "lookup-2"),
+                      _lookup_tool("Example Widget firmware 4.2 official release date", "lookup-3"),
+                      *extra_turns, _lookup_reply("Supported answer.")]
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+def test_native_targeted_verification_completes_the_bounded_lookup(native_lookup, budgeted):
+    state = native_lookup
+    _verification_flow(state)
+    answer, budget = _run_lookup(state, budgeted, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily", "tavily"]
+    assert len(state["model"]) == 4                         # round 1 Brave, 2 discovery, 3 verification, 4 answer
+    assert budget.search_attempts == (3 if budgeted else 0) and budget.model_attempts == (4 if budgeted else 0)
+    outputs = _lookup_outputs(state)
+    assert [o["provider_provenance"] for o in outputs] == [
+        {"selected_provider": "brave", "attempted_providers": ["brave"], "evidence_provider": "brave"},
+        {"selected_provider": "tavily", "attempted_providers": ["brave", "tavily"], "evidence_provider": "tavily"},
+        {"selected_provider": "tavily", "attempted_providers": ["brave", "tavily", "tavily"], "evidence_provider": "tavily"}]
+    # All three evidence records reach the model, each with its own content.
+    assert [o["results"][0]["content"] for o in outputs] == [
+        "A forum post lists several firmware versions without dates.", DISCOVERY, VERIFIED]
+    assert all(c["url"] == tavily_transport.SEARCH_URL for c in state["calls"][1:])
+    instructions = state["model"][0]["instructions"]
+    assert "targeted-verification" in instructions and "no additional provider search" in instructions
+    assert "does not establish that it is the latest" in instructions
+    assert "Do not stop with an uncertainty statement while that permitted follow-up remains unused." in instructions
+    assert SOURCE in answer and DISCOVERY_URL in answer and OFFICIAL_URL in answer
+    assert app.MAX_SEARCH_RESULTS == 4
+
+
+def test_native_fourth_search_is_rejected_without_a_provider_call(native_lookup):
+    state = native_lookup
+    _verification_flow(state, extra_turns=[_lookup_tool("Example Widget firmware changelog", "lookup-4")])
+    answer, budget = _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily", "tavily"]
+    assert [o["status"] for o in _lookup_outputs(state)] == ["ok", "ok", "ok", "rejected"]
+    assert budget.search_attempts == 3 and budget.model_attempts == 5
+    assert answer.startswith("Supported answer.")
+
+
+def test_native_duplicate_brave_and_third_tavily_attempts_cannot_reach_a_provider(native_lookup):
+    for attempts, provider in ((["brave"], "brave"), (["brave", "tavily", "tavily"], "tavily")):
+        lookup = SimpleNamespace(policy=app.SEARCH_PROVIDER_POLICY, attempts=list(attempts), evidence_provider=None)
+        token = app._NATIVE_SEARCH_CONTEXT.set((lookup, provider))
+        try:
+            with pytest.raises(app.ChatInternalError):
+                app._post_single_search(provider, {"query": "anything"})
+        finally:
+            app._NATIVE_SEARCH_CONTEXT.reset(token)
+        assert lookup.attempts == attempts
+    assert native_lookup["calls"] == []
+
+
+def test_native_verification_requires_a_later_round_than_discovery(native_lookup):
+    # A verification request batched with discovery is refused, and, like any
+    # rejected request, it still counts toward the three-request cap.
+    state = native_lookup
+    _verification_flow(state)
+    batch = {"output": _lookup_tool("Example Widget firmware latest version", "lookup-2")["output"]
+             + _lookup_tool("Example Widget firmware 4.2 official release date", "lookup-2b")["output"]}
+    state["turns"][1:3] = [batch, _lookup_tool("Example Widget firmware 4.2 official release notes", "lookup-3")]
+    _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+    outputs = _lookup_outputs(state)
+    assert [o["status"] for o in outputs] == ["ok", "ok", "rejected", "rejected"]
+    assert "later model round" in outputs[2]["reason"] and "fourth" in outputs[3]["reason"]
+
+
+def test_native_batched_search_calls_cannot_bypass_the_round_boundary(native_lookup):
+    state = native_lookup; state["brave"] = [brave_result()]
+    state["tavily"] = [tavily_result(), tavily_result()]
+    batch = {"output": [item for i in range(3)
+                        for item in _lookup_tool(f"weather reported location view {i}", f"batch-{i}")["output"]]}
+    state["turns"] = [batch, _lookup_reply()]
+    _run_lookup(state)
+    assert [c["provider"] for c in state["calls"]] == ["brave"]
+    assert [o["status"] for o in _lookup_outputs(state)] == ["ok", "rejected", "rejected"]
+
+
+@pytest.mark.parametrize("discovery", [TransportHTTPError(500), {"results": []}, {"results": "bad"}, {},
+                                       TransportConnectionError()],
+                         ids=["unavailable", "empty", "malformed-type", "malformed-missing", "connection"])
+def test_native_verification_requires_usable_discovery_evidence(native_lookup, discovery):
+    state = native_lookup
+    _verification_flow(state, discovery=discovery)
+    _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+    outputs = _lookup_outputs(state)
+    assert outputs[1]["status"] == "unavailable" and outputs[2]["status"] == "rejected"
+    assert outputs[2]["provider_provenance"]["attempted_providers"] == ["brave", "tavily"]
+
+
+def test_native_verification_is_not_attempted_after_a_discovery_timeout(native_lookup):
+    state = native_lookup
+    _verification_flow(state, discovery=TransportDeadlineExceeded())
+    try:
+        _run_lookup(state, message=FIRMWARE)
+    except (app.SearchTransportUnavailable, RequestDeadlineExceeded, CallBudgetExhausted):
+        pass                                            # a request-level stop ends the lookup outright
+    else:
+        assert [o["status"] for o in _lookup_outputs(state)][1:] == ["unavailable", "rejected"]
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+
+
+@pytest.mark.parametrize("stop", ["cancel", "deadline", "exhaustion", "quarantine"])
+def test_native_verification_respects_request_and_transport_stops(native_lookup, stop):
+    state = native_lookup; clock = [100.0]
+    budget = RequestBudget(duration_seconds=45, max_model_attempts=6,
+                           max_search_attempts=2 if stop == "exhaustion" else 6, clock=lambda: clock[0])
+    _verification_flow(state)
+
+    def stopped_verification(payload):
+        if stop == "cancel": budget.cancel()
+        if stop == "deadline": clock[0] = 145.0
+        if stop == "quarantine": tavily_transport.search_holder().quarantine()
+        return _lookup_tool("Example Widget firmware 4.2 official release date", "lookup-3")
+
+    state["turns"][2] = stopped_verification
+    error = {"cancel": RequestCancelled, "deadline": RequestDeadlineExceeded, "exhaustion": CallBudgetExhausted,
+             "quarantine": app.SearchTransportUnavailable}[stop]
+    with pytest.raises(error):
+        _run_lookup(state, budget=budget, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"] and budget.search_attempts == 2
+    assert len(state["model"]) == 3
+
+
+def test_native_missing_tavily_credential_at_discovery_closes_the_lookup(native_lookup, monkeypatch):
+    state = native_lookup; monkeypatch.setattr(app, "TAVILY_API_KEY", None)
+    _verification_flow(state)
+    _, budget = _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave"] and budget.search_attempts == 1
+    outputs = _lookup_outputs(state)
+    assert [o["status"] for o in outputs] == ["ok", "unavailable", "rejected"]
+    assert outputs[2]["provider_provenance"]["attempted_providers"] == ["brave"]
+
+
+def test_native_private_followup_closes_the_lookup_after_discovery(native_lookup):
+    state = native_lookup
+    _verification_flow(state)
+    state["turns"][2:2] = [_lookup_tool("search my session memory for the firmware version", "lookup-private")]
+    _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+    assert [o["status"] for o in _lookup_outputs(state)] == ["ok", "ok", "rejected", "rejected"]
+
+
+@pytest.mark.parametrize("primary", ["tavily", "brave"])
+def test_native_single_provider_policy_never_gains_verification(native_lookup, monkeypatch, primary):
+    state = native_lookup; monkeypatch.setattr(app, "SEARCH_PROVIDER_POLICY", sp.SearchProviderPolicy(primary, "none"))
+    _verification_flow(state)
+    state[primary] = [tavily_result() if primary == "tavily" else brave_result()]
+    _, budget = _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == [primary] and budget.search_attempts == 1
+    assert [o["status"] for o in _lookup_outputs(state)] == ["ok", "rejected", "rejected"]
+    assert "provider_provenance" not in _lookup_outputs(state)[0]
+
+
+def test_native_verification_preserves_user_domain_restrictions(native_lookup):
+    state = native_lookup; url = "https://docs.example.com/firmware"
+    state["brave"] = [brave_result(url=url)]
+    state["tavily"] = [tavily_result(url=url, content=DISCOVERY), tavily_result(url=url, content=VERIFIED)]
+    state["turns"] = [_lookup_tool("firmware site:outside.test"), _lookup_tool("firmware newest site:outside.test", "lookup-2"),
+                      _lookup_tool("firmware 4.2 release date site:outside.test", "lookup-3"), _lookup_reply()]
+    _run_lookup(state, message="Search https://docs.example.com for the newest firmware release.")
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily", "tavily"]
+    assert state["calls"][0]["payload"]["goggles"] == "$discard\n$site=docs.example.com"
+    assert [c["payload"]["include_domains"] for c in state["calls"][1:]] == [["docs.example.com"]] * 2
+
+
+def test_native_verification_preserves_authoritative_domain_policy(native_lookup):
+    state = native_lookup; url = "https://developers.openai.com/api/docs/pricing"
+    state["brave"] = [brave_result(url=url)]
+    state["tavily"] = [tavily_result(url=url), tavily_result(url=url)]
+    state["turns"] = [_lookup_tool("current OpenAI API pricing official"),
+                      _lookup_tool("OpenAI API pricing official page", "lookup-2"),
+                      _lookup_tool("OpenAI API gpt pricing per million tokens official", "lookup-3"), _lookup_reply()]
+    _run_lookup(state, message="Search the web for current OpenAI API pricing.")
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily", "tavily"]
+    assert [c["payload"]["include_domains"] for c in state["calls"][1:]] == [["developers.openai.com", "openai.com"]] * 2
+
+
+@pytest.mark.parametrize("dated_stage", [1, 2])
+def test_native_verification_preserves_date_grounding(native_lookup, dated_stage):
+    state = native_lookup
+    _verification_flow(state)
+    dated = "Example Widget firmware release October 11, 2026"
+    state["turns"][dated_stage] = _lookup_tool(dated, f"lookup-{dated_stage + 1}")
+    _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily", "tavily"]
+    assert all("October 11" not in c["payload"]["query"] for c in state["calls"][1:])
+    assert _lookup_outputs(state)[dated_stage]["query"] == FIRMWARE
+
+
+def test_native_verification_keeps_records_distinct_and_display_urls_deduplicated(native_lookup):
+    state = native_lookup
+    _verification_flow(state, discovery=tavily_result(url=OFFICIAL_URL, content=DISCOVERY),
+                       verification=tavily_result(url=OFFICIAL_URL, content=VERIFIED))
+    state["turns"][-1] = _lookup_reply("Supported answer.\n\nSources: [Wrong]")
+    answer, _ = _run_lookup(state, message=FIRMWARE)
+    outputs = _lookup_outputs(state)
+    assert [o["results"][0]["content"] for o in outputs[1:]] == [DISCOVERY, VERIFIED]
+    assert answer.count("**Sources**") == 1 and answer.count("](" + OFFICIAL_URL + ")") == 1
+    assert "Wrong" not in answer
+
+
+def test_native_verification_keeps_source_and_content_limits(native_lookup):
+    state = native_lookup
+    state["brave"] = [brave_result()]
+    many = {"results": [{"url": f"https://vendor.example.test/{i}", "title": f"T{i}", "content": "C" * 9000} for i in range(8)]}
+    state["tavily"] = [copy.deepcopy(many), copy.deepcopy(many)]
+    state["turns"] = [_lookup_tool("newest Example Widget firmware release"),
+                      _lookup_tool("Example Widget firmware latest version", "lookup-2"),
+                      _lookup_tool("Example Widget firmware 4.2 official release date", "lookup-3"), _lookup_reply()]
+    _run_lookup(state, message=FIRMWARE)
+    outputs = _lookup_outputs(state)
+    assert [len(o["results"]) for o in outputs[1:]] == [app.MAX_SEARCH_RESULTS] * 2
+    assert all(len(r["content"]) <= 1600 for o in outputs[1:] for r in o["results"])
+
+
+def test_native_protocol_failure_after_admitted_search_is_not_replayed(native_lookup):
+    state = native_lookup
+    _verification_flow(state)
+    state["turns"][2] = {"output": [{"type": "function_call", "name": "search_web", "arguments": "{}"}]}
+    with pytest.raises(app.ModelProviderUnavailable):
+        _run_lookup(state, message=FIRMWARE)
+    assert [c["provider"] for c in state["calls"]] == ["brave", "tavily"]
+    assert len(state["model"]) == 3                          # no legacy model call follows
