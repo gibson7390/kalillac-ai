@@ -1782,7 +1782,8 @@ CURRENT_INTERFACE_CAPABILITIES = """CURRENT PUBLIC CHAT CAPABILITIES:
 - Never claim or imply that the user can upload or attach a file to the current Kalillac chat. This restriction does not prevent explaining uploads or attachments in other services or writing code that implements upload or attachment functionality.
 - Kalillac cannot access files on the user's device or personal documents that were not supplied.
 - It can work with text or code pasted into the current conversation.
-- If content is missing, ask the user to paste the relevant content and state what they want done.
+- If content is missing, ask the user to paste the relevant content. When the task is already clear, do not ask them to restate it.
+- Kalillac cannot create, attach, or export files or give download links; never claim that one was created.
 - When the user asks to search their private, confidential, internal, or unpublished material, do not request external search. State briefly that the material was not sent to an external search provider and offer to help with it inside the current conversation. This does not prohibit public research about privacy, private companies, public reports about leaked documents, or similarly public subjects.
 - For a brief question about your previous reply, use the recent conversation to explain or correct that reply rather than repeat the same instruction.
 - Because this interface has no file input, never claim or imply that a file was received, opened, read, or available.
@@ -2532,6 +2533,115 @@ KALILLAC_PRODUCT_TOPIC_RE = re.compile(
 def mentions_kalillac_product_topic(message):
     return bool(
         KALILLAC_PRODUCT_TOPIC_RE.search(normalize_for_router(message))
+    )
+
+
+# The one authoritative statement of Kalillac's document capabilities. It is
+# added only to requests about documents, files, or Kalillac's plans, so the
+# many unrelated requests do not carry it.
+DOCUMENT_CAPABILITY_CONTEXT = """KALILLAC DOCUMENT CAPABILITIES - AUTHORITATIVE:
+- Current: Kalillac drafts, structures, and formats document content in this chat, such as letters, reports, résumés, proposals, meeting notes, and spreadsheet-style tables.
+- Not current: it cannot create, attach, send, or export a file (PDF, Word/DOCX, spreadsheet/XLSX), cannot give a download link, and cannot receive uploaded files. Never claim or imply that a file, attachment, export, download, link, upload, or saved path exists or was created, or that an uploaded file was read.
+- Planned, not launched: downloadable PDF, DOCX, and XLSX creation; secure document uploads with summarization, analysis, and editing; multi-document workflows. No launch date, price, tier, limit, or storage term is established, and an account or subscription will not by itself save conversations or documents.
+
+HOW TO RESPOND:
+- Asked whether you can produce documents or files: say plainly that you can write the content here and cannot yet create a downloadable file. A sample is optional.
+- Asked for a file, attachment, export, or download, or to choose a document yourself: state the limitation in one sentence, then deliver the complete document in the chat with the structure its type calls for, not a placeholder or a description of what you could write. Ask only for details that materially change the document.
+- Writing requests that do not ask for a file need no file remark.
+- Mention planned capabilities only when the user asks about files, documents, or plans."""
+
+DOCUMENT_TOPIC_RE = re.compile(
+    r"\b(?:pdfs?|docx|xlsx|csv files?"
+    r"|(?:word|excel) (?:documents?|docs?|files?|format|exports?|sheets?"
+    r"|workbooks?)|spreadsheets?"
+    r"|download(?:able|s|ing)?|attach(?:ed|ment|ments|ing)?"
+    r"|upload(?:ed|s|ing)?|export(?:s|ed|ing)?)\b"
+    r"|\b(?:produce|make|create|generate|write|send|give|support|handle)\b"
+    r"[^.?!\n]{0,30}\b(?:documents?|files?)\b"
+    r"|\b(?:documents?|files?)\b[^.?!\n]{0,40}"
+    r"\b(?:planned|roadmap|upcoming|supported|support)\b"
+)
+# Plans for Kalillac itself also cover its planned document capabilities.
+KALILLAC_PLANS_RE = re.compile(
+    r"\b(?:roadmap|planned|planning|upcoming|coming soon"
+    r"|future (?:features|plans|capabilities))\b"
+)
+# "How do I generate a PDF in Python?" is a programming question, not a
+# request for Kalillac to produce a file.
+PROGRAMMING_TOPIC_RE = re.compile(
+    r"\b(?:python|javascript|typescript|html|css|django|flask|fastapi|react"
+    r"|node(?:\.js)?|java|php|ruby|golang|rust|library|libraries|package"
+    r"|code|script|function|api|sdk|endpoint|app|application|users?|server"
+    r"|backend|frontend|specification|spec)\b"
+)
+# "The spreadsheet I uploaded to Google Drive" concerns a file somewhere
+# else, not this chat's capabilities.
+OTHER_DESTINATION_FILE_RE = re.compile(
+    r"\b(?:upload(?:ed)?|attach(?:ed)?)\s+(?:[\w-]+\s+){0,3}?(?:to|into|on|in)\s+"
+    r"(?!(?:here|this (?:chat|conversation|message)|the chat|kalillac)\b)"
+)
+
+
+# A capability question addressed to Kalillac itself ("can your app export
+# PDFs?") is about this product even though it mentions an app.
+KALILLAC_CAPABILITY_QUESTION_RE = re.compile(
+    r"\b(?:can|could|will|would|does|do|is)\s+(?:you|kalillac(?: ai)?"
+    r"|(?:your|this|kalillac(?: ai)?(?:'s)?)\s+(?:app|application|chat|assistant"
+    r"|service|site|website|bot))\b"
+)
+# Software the user owns or builds stays a programming question.
+USER_SOFTWARE_RE = re.compile(
+    r"\b(?:my|our)\s+(?:[\w-]+\s+)?(?:app|application|site|website|backend"
+    r"|frontend|server|code|project|program|service|users?|customers?)\b"
+)
+# A follow-up that continues a document request: "send me one", "make it
+# downloadable", "can you attach it?", "what will it cost?".
+DOCUMENT_FOLLOW_UP_RE = re.compile(
+    r"\b(?:send|give|make|put|export|attach|save|convert|turn|email)\b"
+    r"(?:\s+(?:me|us))?\s+(?:it|that|this|one|them)\b"
+    r"|\b(?:launch|launches|released?|available|availability|cost|costs|price"
+    r"|pricing|plans?|tiers?|subscription|private|privacy|stored|storage)\b"
+)
+
+
+def _asks_about_documents(message):
+    text = normalize_for_router(message)
+
+    if (
+        is_code_generation_intent(message)
+        or USER_SOFTWARE_RE.search(text)
+        or OTHER_DESTINATION_FILE_RE.search(text)
+    ):
+        return False
+
+    if KALILLAC_CAPABILITY_QUESTION_RE.search(text) and DOCUMENT_TOPIC_RE.search(text):
+        return True
+
+    if PROGRAMMING_TOPIC_RE.search(text):
+        return False
+
+    return bool(
+        DOCUMENT_TOPIC_RE.search(text)
+        or (KALILLAC_PLANS_RE.search(text) and SK_SELF_REF.search(text))
+    )
+
+
+def document_capability_context_active(message, history=None):
+    """Whether this request needs the authoritative document capabilities.
+
+    A follow-up such as "send me one" or "what will it cost?" inherits a
+    document topic from the previous user turns; an acknowledgment or a new
+    topic does not.
+    """
+    if _asks_about_documents(message):
+        return True
+
+    if not DOCUMENT_FOLLOW_UP_RE.search(normalize_for_router(message)):
+        return False
+
+    return any(
+        _asks_about_documents(user_message)
+        for user_message in get_recent_user_messages(history, limit=2)
     )
 
 
@@ -4301,6 +4411,15 @@ def is_memory_save_request(message):
     if any(re.search(pattern, text) for pattern in negative_patterns):
         return False
 
+    # "Save this as a PDF" asks for a file, not a memory write.
+    if re.search(
+        r"^(?:please\s+)?(?:save|store)\s+(?:this|it|that)\s+(?:as|to|in|into)\s+"
+        r"(?:an?\s+)?(?:pdfs?|docx|word|excel|xlsx|csv|files?|documents?"
+        r"|spreadsheets?|downloads?)\b",
+        text,
+    ):
+        return False
+
     # High-confidence explicit write intent.
     explicit_write_patterns = [
         r"^(?:please\s+)?remember\s+that\b",
@@ -5000,6 +5119,14 @@ def file_attachment_claim_scope(message):
         r"(?:my|our|the|this|that)\s+(?:uploaded|attached)\s+" + objects + r"\b",
         raw, re.IGNORECASE,
     )
+    # Noun-first: "compare the two documents I attached". It counts only as a
+    # claim about this chat; with another destination it is not a claim here.
+    noun_first = None if claim else re.search(
+        r"\b(?:my|our|the|this|that|these|those)\s+(?:[\w-]+\s+){0,2}?" + objects
+        + r"\s+(?:that\s+)?(?:i|we)\s+(?:(?:have|just|already)\s+)*(?:uploaded|attached)\b",
+        raw, re.IGNORECASE,
+    )
+    claim = claim or noun_first
     if not claim:
         return None
     destination = re.match(
@@ -5009,7 +5136,7 @@ def file_attachment_claim_scope(message):
         r"\b(?:here|this\s+(?:chat|conversation|message)|current\s+(?:chat|conversation)|kalillac)\b",
         destination.group(1), re.IGNORECASE,
     ):
-        return "other"
+        return None if noun_first else "other"
     return "current"
 
 
@@ -10227,6 +10354,12 @@ Rules:
     elif route in KALILLAC_VOICE_AND_FORMAT_ROUTES:
         prompt += "\n\n" + render_session_disclosure_context()
 
+    if (
+        route not in {"code", "revision", "code_continuation", "calculator"}
+        and document_capability_context_active(message, history)
+    ):
+        prompt += "\n\n" + DOCUMENT_CAPABILITY_CONTEXT
+
     prompt = apply_kalillac_voice_and_format(prompt, route)
 
     return [
@@ -10682,6 +10815,9 @@ def _run_v31_native_tool_chat(
 
     if kalillac_self_knowledge_context_active(message, history):
         instructions += "\n\n" + render_kalillac_facts()
+
+    if document_capability_context_active(message, history):
+        instructions += "\n\n" + DOCUMENT_CAPABILITY_CONTEXT
 
     if requests_unavailable_code_revision(message, history):
         instructions += "\n\n" + UNAVAILABLE_CODE_REVISION_RULE
@@ -11413,8 +11549,8 @@ def chat(message, history, request=None, session_id=None):
             log("===== END ROUTE LOG =====\n")
             return (
                 "This chat doesn't support file uploads or attachments, so I can't "
-                "receive or open that file. Paste the relevant text here. If you "
-                "already stated the task, you don't need to repeat it."
+                "receive or open files here. Paste the relevant text instead. If "
+                "you already said what you want done, you don't need to repeat it."
             )
 
         if route == "web_search":
@@ -11579,6 +11715,8 @@ Rules:
 - Stop when answered.
 """
 
+            if document_capability_context_active(message, history):
+                web_prompt += "\n" + DOCUMENT_CAPABILITY_CONTEXT + "\n"
 
             web_prompt = apply_kalillac_voice_and_format(
                 web_prompt,
