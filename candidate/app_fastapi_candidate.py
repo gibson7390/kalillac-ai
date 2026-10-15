@@ -1082,6 +1082,30 @@ def run_web_search(query, include_domains=None):
         def make_concise_query(value):
             q = str(value)
 
+            # A site: operator is a domain or path restriction, and -site: an
+            # exclusion. Keep each one whole, sign included, through the
+            # cleanup below. Only a positive bare-domain operator already sent
+            # separately as a requested domain is removed, and then the whole
+            # operator goes, never leaving a fragment.
+            site_operators = []
+
+            def protect_site_operator(match):
+                sign, target = match.group(1), match.group(2).rstrip("?.!,;:")
+                host = target.split("/", 1)[0].lower().removeprefix("www.")
+                if not sign and "/" not in target and host in {
+                    domain.removeprefix("www.") for domain in requested_domains
+                }:
+                    return " "
+                site_operators.append(sign + "site:" + target)
+                return f" \x00{len(site_operators) - 1}\x00 "
+
+            q = re.sub(
+                r"(?<![\w-])(-?)site:(\S+)",
+                protect_site_operator,
+                q,
+                flags=re.IGNORECASE,
+            )
+
             # Remove full URLs.
             q = re.sub(
                 r"https?://[^\s]+",
@@ -1150,8 +1174,10 @@ def run_web_search(query, include_domains=None):
                 flags=re.IGNORECASE,
             )
 
+            # Strip sentence punctuation at token edges only, so versions,
+            # dotted names and paths ("3.15.0rc1", "Node.js", ".NET") survive.
             q = re.sub(
-                r"[?.!,;:]+",
+                r"[?.!,;:]+(?=\s|$)|(?<!\S)[?!,;:]+",
                 " ",
                 q,
             )
@@ -1298,6 +1324,12 @@ def run_web_search(query, include_domains=None):
                 and "download" not in q.lower()
             ):
                 q += " download"
+
+            q = re.sub(
+                r"\x00(\d+)\x00",
+                lambda match: site_operators[int(match.group(1))],
+                q,
+            )
 
             # Explicit commands may legitimately have a one-word target
             # ("google Python"). For non-command advanced searches, preserve
@@ -8082,8 +8114,16 @@ def get_search_domain_filters(raw_message):
 
     domains = []
 
-    for raw_domain in extract_domains(raw_message):
-        candidate = str(raw_domain).strip().rstrip(".,;:!?)]}")
+    # Same matches as extract_domains(), taken one occurrence at a time: a
+    # domain inside a -site: exclusion is not a positive restriction, while
+    # a separate positive mention of the same host still is.
+    text = EMAIL_PATTERN.sub(" ", str(raw_message))
+
+    for match in DOMAIN_PATTERN.finditer(text):
+        if re.search(r"(?<![\w-])-site:$", text[:match.start()], re.IGNORECASE):
+            continue
+
+        candidate = str(match.group(0)).strip().rstrip(".,;:!?)]}")
 
         if not candidate:
             continue

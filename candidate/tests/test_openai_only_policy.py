@@ -681,9 +681,12 @@ def test_api_failure_wording_is_accurate():
 # later change to the search path must update these deliberately.
 # Deliberately reviewed search-policy slice: Brave primary/bounded fallback
 # and the shared search holder. Native evidence follow-up extends only
-# run_web_search; all fingerprint assertions remain exact.
+# run_web_search; all fingerprint assertions remain exact. The query-cleanup
+# slice changed only run_web_search's make_concise_query (identifiers and
+# site:/-site: operators are preserved whole); provider calls and restrictions
+# are unchanged.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "f463580d4d120fcc9a4152effc0c6afa300bc678a15c093cc59e4b160adfa66b",
+    "run_web_search": "ae99879f7331ae86beaa7ce475813cabdabeb16ade0c9fa14bacbbe255d67468",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
     "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
     "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",
