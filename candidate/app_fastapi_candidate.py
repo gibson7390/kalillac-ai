@@ -53,7 +53,10 @@ from kalillac_routing.provider_limits import load_controls
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
 MAX_INPUT_CHARS = 4000
-MAX_RESPONSE_TOKENS = 1600
+# Ceiling for normal model responses, legacy and V31 native. It is an upper
+# bound, not a target length, and it covers reasoning tokens as well as the
+# visible answer, so a reasoning model needs headroom beyond the answer.
+MAX_RESPONSE_TOKENS = 3200
 SELF_KNOWLEDGE_RESPONSE_TOKENS = 2000
 # Code/revision generation and code repair only; every other route keeps
 # MAX_RESPONSE_TOKENS. The cap also covers reasoning tokens, and a

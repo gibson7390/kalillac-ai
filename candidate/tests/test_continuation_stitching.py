@@ -295,7 +295,7 @@ def test_tool_loop_stitches_fenced_restart():
 
 
 def test_code_budget_is_code_specific_and_bounded():
-    assert app.MAX_RESPONSE_TOKENS == 1600
+    assert app.MAX_RESPONSE_TOKENS == 3200
     assert app.CODE_RESPONSE_TOKENS == 6000
 
 

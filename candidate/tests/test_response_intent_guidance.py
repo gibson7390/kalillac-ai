@@ -90,7 +90,7 @@ def test_general_requests_receive_the_intent_guidance_once(pipeline, message):
     for rule in KEPT:
         assert rule in sent, rule
     assert "ABSOLUTE OUTPUT RULE" not in sent
-    assert pipeline["payloads"][-1]["max_output_tokens"] == app.MAX_RESPONSE_TOKENS == 1600
+    assert pipeline["payloads"][-1]["max_output_tokens"] == app.MAX_RESPONSE_TOKENS == 3200
     assert len(pipeline["payloads"]) == 1
 
 
@@ -189,4 +189,4 @@ def test_the_product_question_keeps_the_authoritative_facts(pipeline):
 
 def test_output_budgets_are_unchanged():
     assert (app.MAX_RESPONSE_TOKENS, app.SELF_KNOWLEDGE_RESPONSE_TOKENS,
-            app.CODE_RESPONSE_TOKENS, app.CODE_CONTINUATION_RESPONSE_TOKENS) == (1600, 2000, 6000, 2400)
+            app.CODE_RESPONSE_TOKENS, app.CODE_CONTINUATION_RESPONSE_TOKENS) == (3200, 2000, 6000, 2400)
