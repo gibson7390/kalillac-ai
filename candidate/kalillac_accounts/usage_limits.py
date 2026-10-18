@@ -114,3 +114,66 @@ def load_usage_limits() -> UsageLimits | None:
         )
 
     return UsageLimits(free_daily_chats=free, paid_daily_chats=paid)
+
+
+# --- anonymous daily allowance -----------------------------------------------------------
+#
+# A per-browser fairness limit for visitors who are not signed in.
+# KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED is off by default, and while it is
+# off nothing else is read. When it is on:
+#
+# - KALILLAC_DB_ENABLED and KALILLAC_REQUEST_BUDGET_ENABLED must be on (the
+#   allowance runs only on the bounded request-budget path);
+# - accounts are not required, but if KALILLAC_ACCOUNTS_ENABLED is on then
+#   KALILLAC_USAGE_ENFORCEMENT_ENABLED must be on too, so every signed-in
+#   request is held to an account quota;
+# - KALILLAC_ANONYMOUS_DAILY_LIMIT must be set explicitly to exactly the
+#   approved allowance; every other value is refused.
+#
+# Errors name the setting, never the value supplied for it.
+
+ANONYMOUS_FLAG = "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED"
+ANONYMOUS_DAILY_LIMIT = "KALILLAC_ANONYMOUS_DAILY_LIMIT"
+ANONYMOUS_PREREQUISITE_FLAG = "KALILLAC_DB_ENABLED"
+ANONYMOUS_BUDGET_FLAG = "KALILLAC_REQUEST_BUDGET_ENABLED"
+ANONYMOUS_ACCOUNTS_FLAG = "KALILLAC_ACCOUNTS_ENABLED"
+APPROVED_ANONYMOUS_DAILY_LIMIT = 10
+
+
+def anonymous_allowance_enabled() -> bool:
+    return _flag_enabled(ANONYMOUS_FLAG)
+
+
+def load_anonymous_daily_limit() -> int | None:
+    """Return None while the anonymous allowance is off; otherwise the
+    approved daily limit. Raises UsageLimitConfigError naming the missing
+    prerequisite or the invalid setting."""
+
+    if not anonymous_allowance_enabled():
+        return None
+
+    for prerequisite in (ANONYMOUS_PREREQUISITE_FLAG, ANONYMOUS_BUDGET_FLAG):
+        if not _flag_enabled(prerequisite):
+            raise UsageLimitConfigError(
+                f"{ANONYMOUS_FLAG} requires {prerequisite}."
+            )
+
+    if _flag_enabled(ANONYMOUS_ACCOUNTS_FLAG) and not usage_enforcement_enabled():
+        raise UsageLimitConfigError(
+            f"{ANONYMOUS_FLAG} with {ANONYMOUS_ACCOUNTS_FLAG} requires {ENFORCEMENT_FLAG}."
+        )
+
+    value = os.getenv(ANONYMOUS_DAILY_LIMIT, "").strip()
+
+    if not value:
+        raise UsageLimitConfigError(
+            f"{ANONYMOUS_FLAG} is enabled but {ANONYMOUS_DAILY_LIMIT} is not set."
+        )
+
+    # Exactly the approved allowance; the message never echoes the value.
+    if value != str(APPROVED_ANONYMOUS_DAILY_LIMIT):
+        raise UsageLimitConfigError(
+            f"{ANONYMOUS_DAILY_LIMIT} must be exactly {APPROVED_ANONYMOUS_DAILY_LIMIT}."
+        )
+
+    return APPROVED_ANONYMOUS_DAILY_LIMIT

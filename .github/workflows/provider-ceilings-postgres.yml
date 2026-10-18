@@ -1,4 +1,5 @@
-# Focused verification of the persistent provider ceilings on real PostgreSQL.
+# Focused verification of the persistent provider ceilings and the anonymous
+# daily allowance on real PostgreSQL.
 #
 # Runs only when started by hand. The runner and the PostgreSQL service
 # container are disposable: GitHub destroys both when the job ends. Every
@@ -81,6 +82,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 24, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 29, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused PostgreSQL verification did not run completely")
           PY

@@ -42,6 +42,12 @@
             };
             window.addEventListener("message", onMessage);
             frame.setAttribute("allow", "clipboard-write");
+            // A phone-sized viewport for the scenario that measures layout.
+            if (/_360x640$/.test(name)) {
+              frame.style.border = "0";
+              frame.style.width = "360px";
+              frame.style.height = "640px";
+            }
             frame.src = "/app/?scenario=" + encodeURIComponent(name);
             document.body.appendChild(frame);
             var waited = 0;
@@ -148,6 +154,24 @@
 
   function text(el) { return el ? el.textContent : null; }
 
+  // The daily-limit dialog's state; the cancel event's default is recorded
+  // by cancelDialog below.
+  var lastCancelPrevented = null;
+
+  function dialogState() {
+    var dialog = $("limit-dialog");
+    if (!dialog) return null;
+    var modal = false;
+    try { modal = dialog.open && dialog.matches(":modal"); } catch (e) { modal = null; }
+    return {
+      open: dialog.open,
+      modal: modal,
+      text: dialog.textContent.replace(/\s+/g, " ").trim(),
+      focusIsOk: document.activeElement === $("limit-dialog-ok"),
+      cancelPrevented: lastCancelPrevented
+    };
+  }
+
   function snapshot(label) {
     var input = $("composer-input");
     var button = $("send-btn");
@@ -186,7 +210,8 @@
       emptyShown: !!(empty && empty.isConnected),
       conversationEmpty: $("conversation").classList.contains("is-empty"),
       focusIsComposer: document.activeElement === input,
-      requestCount: requests.length
+      requestCount: requests.length,
+      limitDialog: dialogState()
     };
   }
 
@@ -236,6 +261,36 @@
       };
     },
     snap: function (label) { steps.push(snapshot(label)); },
+    // The daily-limit dialog's three close paths, a click inside its panel,
+    // the showModal() fallback and a layout measurement.
+    clickDialogOk: function () { $("limit-dialog-ok").click(); return wait(30); },
+    cancelDialog: function () {
+      var event = new Event("cancel", { cancelable: true });
+      $("limit-dialog").dispatchEvent(event);
+      lastCancelPrevented = event.defaultPrevented;
+      return wait(30);
+    },
+    clickDialogBackdrop: function () {
+      $("limit-dialog").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      return wait(30);
+    },
+    clickDialogTitle: function () { $("limit-dialog-title").click(); return wait(30); },
+    removeShowModal: function () { HTMLDialogElement.prototype.showModal = undefined; },
+    measureDialog: function (label) {
+      var snap = snapshot(label);
+      var dialog = $("limit-dialog");
+      var box = dialog.getBoundingClientRect();
+      var ok = $("limit-dialog-ok").getBoundingClientRect();
+      snap.layout = {
+        viewport: [window.innerWidth, window.innerHeight],
+        dialog: [box.left, box.top, box.right, box.bottom],
+        button: [ok.left, ok.top, ok.right, ok.bottom],
+        dialogOverflowX: dialog.scrollWidth - dialog.clientWidth,
+        dialogOverflowY: dialog.scrollHeight - dialog.clientHeight,
+        pageOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth
+      };
+      steps.push(snap);
+    },
     respondWith: function () {
       for (var i = 0; i < arguments.length; i++) queue.push(arguments[i]);
     }
@@ -470,6 +525,70 @@
     a.snap("regenerated");
     await a.send("question two");
     a.snap("after-next");
+  };
+
+  // The anonymous daily allowance is used up (with server text that must never
+  // be shown).
+  var DAILY_LIMIT = {
+    status: 429,
+    json: { error: "anonymous_daily_limit_reached", detail: SECRET, message: SECRET }
+  };
+
+  SCENARIOS.code_anonymous_daily_limit_reached = async function (a) {
+    a.respondWith(DAILY_LIMIT, ok("Fine."));
+    await a.send("first question");
+    a.snap("failed");
+    await a.clickDialogOk();
+    a.snap("closed");
+    await a.send("next question");
+    a.snap("after-new-send");
+  };
+
+  SCENARIOS.daily_limit_escape = async function (a) {
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    a.snap("open");
+    await a.cancelDialog();
+    a.snap("closed");
+  };
+
+  SCENARIOS.daily_limit_backdrop = async function (a) {
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    await a.clickDialogTitle();
+    a.snap("panel-click");
+    await a.clickDialogBackdrop();
+    a.snap("closed");
+  };
+
+  SCENARIOS.daily_limit_reopen = async function (a) {
+    a.respondWith(DAILY_LIMIT, DAILY_LIMIT);
+    await a.send("first question");
+    await a.clickDialogOk();
+    a.snap("first-closed");
+    await a.send("second question");
+    a.snap("reopened");
+    await a.cancelDialog();
+    a.snap("second-closed");
+  };
+
+  SCENARIOS.daily_limit_without_show_modal = async function (a) {
+    a.removeShowModal();
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    a.snap("failed");
+  };
+
+  // The daily-limit code on any status but 429 is not the daily limit.
+  SCENARIOS.daily_limit_wrong_status = function (a) {
+    return failThenNewSend(
+      { status: 503, json: { error: "anonymous_daily_limit_reached", detail: SECRET } }, a);
+  };
+
+  SCENARIOS.daily_limit_layout_360x640 = async function (a) {
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    a.measureDialog("open");
   };
 
   // ---- run ---------------------------------------------------------------------

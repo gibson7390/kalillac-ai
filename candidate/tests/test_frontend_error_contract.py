@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261010-math-continuation1"
-CSS_CACHE_KEY = "20261013-pre-subscription1"
+CACHE_KEY = "20261018-daily-limit1"
+CSS_CACHE_KEY = "20261018-daily-limit1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -53,6 +53,16 @@ INCOMPLETE = "Kalillac couldn't complete the request. Please try again."
 UNREADABLE = "Kalillac couldn't read that request. Please try again."
 BUSY = "Kalillac is busy right now. Please try again in a moment."
 STOPPED = "Stopped."
+
+# The anonymous daily allowance (fixed copy; typographic apostrophes).
+DAILY_LIMIT_CODE = "anonymous_daily_limit_reached"
+DAILY_LIMIT_NOTE = "You\u2019ve used today\u2019s 10 free responses."
+DAILY_LIMIT_TITLE = "Daily limit reached"
+DAILY_LIMIT_RESET = "Your free allowance resets at 12:00 AM UTC."
+DAILY_LIMIT_BUTTON = "Got it"
+DAILY_LIMIT_DIALOG = " ".join((DAILY_LIMIT_TITLE, DAILY_LIMIT_NOTE, DAILY_LIMIT_RESET, DAILY_LIMIT_BUTTON))
+DAILY_LIMIT_FORBIDDEN = ("tomorrow", "unlimited", "subscri", "upgrade", "premium", "pricing",
+                         "sign up", "sign-up", "signup", "stripe")
 
 COPY = {
     "invalid_json": UNREADABLE,
@@ -77,8 +87,10 @@ COPY = {
         "That took too long and was stopped. Please try again, or try a simpler request."
     ),
     "internal_error": "Something went wrong on Kalillac's end. Please try again.",
+    DAILY_LIMIT_CODE: DAILY_LIMIT_NOTE,
 }
-NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached"}
+NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached",
+            DAILY_LIMIT_CODE}
 
 # Text that must never reach the page: raw response fields, HTML error pages,
 # provider names and exception messages.
@@ -103,7 +115,13 @@ GENERIC_FAILURES = {
     "success_error_code": INCOMPLETE,
     "success_reply_with_error": INCOMPLETE,
     "render_exception": INCOMPLETE,
+    "daily_limit_wrong_status": INCOMPLETE,
 }
+
+DAILY_LIMIT_SCENARIOS = (
+    "daily_limit_escape", "daily_limit_backdrop", "daily_limit_reopen",
+    "daily_limit_without_show_modal", "daily_limit_layout_360x640",
+)
 
 SCENARIOS = (
     [f"code_{code}" for code in COPY]
@@ -115,6 +133,7 @@ SCENARIOS = (
         "cleared_draft_then_retry", "retry_completed_with_later_failure",
         "message_too_long_4001",
     ]
+    + list(DAILY_LIMIT_SCENARIOS)
 )
 
 
@@ -375,7 +394,10 @@ def test_backend_code_shows_fixed_copy_and_action(browser_results, code):
     failed = step(result, "failed")
     message = COPY[code]
 
-    if code == "history_too_long":
+    if code == DAILY_LIMIT_CODE:
+        assert_failed(failed, message, retry=False)
+        assert [n["kind"] for n in failed["assistants"][0]["notes"]] == ["notice-note"]
+    elif code == "history_too_long":
         assert failed["assistants"][0]["actions"] == ["New conversation"]
         assert [n["text"] for n in failed["assistants"][0]["notes"]] == [message]
     else:
@@ -661,6 +683,192 @@ def test_input_over_4000_characters_is_sent_once_and_refused_with_fixed_copy(bro
     assert_idle(failed, composer="x" * 4001)
 
 
+# --- the anonymous daily limit ----------------------------------------------------------------
+
+
+def assert_dialog_open(snap):
+    dialog = snap["limitDialog"]
+    assert dialog["open"] is True and dialog["modal"] is True, snap["label"]
+    assert dialog["text"] == DAILY_LIMIT_DIALOG
+    assert dialog["focusIsOk"] is True and snap["focusIsComposer"] is False
+
+
+def assert_dialog_closed(snap, focus_composer=True):
+    assert snap["limitDialog"]["open"] is False, snap["label"]
+    assert snap["limitDialog"]["modal"] is False
+    if focus_composer:
+        assert snap["focusIsComposer"] is True, snap["label"]
+
+
+def assert_limit_notice(snap, composer="first question", user="first question"):
+    assert_failed(snap, DAILY_LIMIT_NOTE, retry=False, user=user)
+    assert [n["kind"] for n in snap["assistants"][0]["notes"]] == ["notice-note"]
+    assert_idle(snap, composer=composer)
+
+
+def test_daily_limit_opens_the_neutral_dialog_and_got_it_closes_it(browser_results):
+    result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
+    failed, closed, after = step(result, "failed"), step(result, "closed"), step(result, "after-new-send")
+
+    assert_dialog_open(failed)
+    assert_limit_notice(failed)          # no Retry, the draft restored
+    # The inline notice stays after the dialog closes; focus returns to the composer.
+    assert_dialog_closed(closed)
+    assert_limit_notice(closed)
+    assert_dialog_closed(after)
+    assert after["assistants"][0]["text"].strip() == "Fine."
+
+
+def test_daily_limit_escape_closes_through_the_cancel_handler(browser_results):
+    result = scenario(browser_results, "daily_limit_escape")
+    assert_dialog_open(step(result, "open"))
+    closed = step(result, "closed")
+    assert closed["limitDialog"]["cancelPrevented"] is True   # One close function, not the default.
+    assert_dialog_closed(closed)
+    assert_limit_notice(closed)
+
+
+def test_daily_limit_backdrop_click_closes_but_a_panel_click_does_not(browser_results):
+    result = scenario(browser_results, "daily_limit_backdrop")
+    assert_dialog_open(step(result, "panel-click"))
+    closed = step(result, "closed")
+    assert_dialog_closed(closed)
+    assert_limit_notice(closed)
+
+
+def test_daily_limit_dialog_reopens_without_error(browser_results):
+    result = scenario(browser_results, "daily_limit_reopen")
+    assert_dialog_closed(step(result, "first-closed"))
+    reopened = step(result, "reopened")
+    assert_dialog_open(reopened)
+    assert_limit_notice(reopened, composer="second question", user="second question")
+    assert_dialog_closed(step(result, "second-closed"))
+    assert [b["message"] for b in bodies(result)] == ["first question", "second question"]
+
+
+def test_daily_limit_without_show_modal_shows_only_the_inline_notice(browser_results):
+    failed = step(scenario(browser_results, "daily_limit_without_show_modal"), "failed")
+    assert_dialog_closed(failed)
+    assert_limit_notice(failed)
+
+
+def test_daily_limit_dialog_fits_a_360_by_640_viewport(browser_results):
+    snap = step(scenario(browser_results, "daily_limit_layout_360x640"), "open")
+    assert_dialog_open(snap)
+    layout = snap["layout"]
+    assert layout["viewport"] == [360, 640]
+    left, top, right, bottom = layout["dialog"]
+    assert 0 <= left < right <= 360 and 0 <= top < bottom <= 640, layout
+    b_left, b_top, b_right, b_bottom = layout["button"]
+    assert left <= b_left < b_right <= right and top <= b_top < b_bottom <= bottom, layout
+    assert b_bottom - b_top >= 44, layout
+    assert layout["dialogOverflowX"] <= 0 and layout["dialogOverflowY"] <= 0, layout
+    assert layout["pageOverflowX"] <= 0, layout
+
+
+def test_busy_and_bare_429_keep_retry_and_never_open_the_dialog(browser_results):
+    for name in ("code_busy", "bare_429"):
+        failed = step(scenario(browser_results, name), "failed")
+        assert_failed(failed, BUSY, retry=True)
+        assert failed["limitDialog"]["open"] is False, name
+
+
+def test_dialog_stays_closed_unless_the_daily_limit_code_arrives(browser_results):
+    limit_scenarios = {f"code_{DAILY_LIMIT_CODE}", *DAILY_LIMIT_SCENARIOS} - {"daily_limit_without_show_modal"}
+    for name, result in browser_results["results"].items():
+        snaps = [s for s in result["steps"] if "limitDialog" in s]
+        assert snaps, name
+        for snap in snaps:
+            assert snap["limitDialog"] is not None, name
+            if name not in limit_scenarios:
+                assert snap["limitDialog"]["open"] is False, (name, snap["label"])
+                assert snap["limitDialog"]["text"] == DAILY_LIMIT_DIALOG   # Never rewritten.
+
+
+def test_daily_limit_never_shows_server_text(browser_results):
+    for name in (f"code_{DAILY_LIMIT_CODE}", *DAILY_LIMIT_SCENARIOS):
+        result = scenario(browser_results, name)
+        assert_clean(result)
+        for snap in result["steps"]:
+            assert snap["limitDialog"]["text"] == DAILY_LIMIT_DIALOG, (name, snap["label"])
+            for sentinel in SENTINELS:
+                assert sentinel not in snap["limitDialog"]["text"], (name, sentinel)
+
+
+def daily_limit_markup() -> str:
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    start = page.index('<dialog class="limit-dialog"')
+    return page[start:page.index("</dialog>", start) + len("</dialog>")]
+
+
+def test_daily_limit_markup_is_fixed_accessible_copy():
+    markup = daily_limit_markup()
+    page = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert page.count("<dialog") == 1
+    assert ('<dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" '
+            'aria-describedby="limit-dialog-text limit-dialog-reset">') in markup
+    assert f'<h2 class="limit-dialog-title" id="limit-dialog-title">{DAILY_LIMIT_TITLE}</h2>' in markup
+    assert f'<p class="limit-dialog-text" id="limit-dialog-text">{DAILY_LIMIT_NOTE}</p>' in markup
+    assert f'<p class="limit-dialog-text" id="limit-dialog-reset">{DAILY_LIMIT_RESET}</p>' in markup
+    assert (f'<button type="button" class="limit-dialog-ok" id="limit-dialog-ok">{DAILY_LIMIT_BUTTON}'
+            '</button>') in markup
+    assert "Retry" not in markup
+
+
+def test_daily_limit_copy_avoids_unapproved_claims():
+    source = js_source()
+    outcome = source[source.index("var OUTCOME_DAILY_LIMIT"):]
+    outcome = outcome[: outcome.index("\n")]
+    for text in (daily_limit_markup().lower(), outcome.lower(), f'"{DAILY_LIMIT_NOTE}"'.lower()):
+        for word in DAILY_LIMIT_FORBIDDEN:
+            assert word not in text, word
+    assert f'var COPY_DAILY_LIMIT = "{DAILY_LIMIT_NOTE}";' in source
+    assert 'action: null, dialog: true' in outcome
+
+
+def test_daily_limit_dialog_script_contract():
+    source = js_source()
+
+    # Only a 429 carrying the exact code opens it.
+    assert 'if (code === "anonymous_daily_limit_reached" && status !== 429) code = null;' in source
+    assert "anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT" in source
+    # Feature-detected, opened once, focus on Got it.
+    assert 'typeof limitDialog.showModal !== "function"' in source
+    assert "if (!limitDialog.open) limitDialog.showModal();" in source
+    assert "limitDialogOk.focus();" in source
+    # Escape is the cancel event: its default is prevented and one function closes.
+    cancel = source[source.index('limitDialog.addEventListener("cancel"'):]
+    cancel = cancel[: cancel.index("});")]
+    assert "event.preventDefault();" in cancel and "closeLimitDialog();" in cancel
+    assert 'limitDialogOk.addEventListener("click", closeLimitDialog);' in source
+    assert "if (event.target === limitDialog) closeLimitDialog();" in source
+    close = source[source.index("function closeLimitDialog()"):]
+    close = close[: close.index("\n  }")]
+    assert "input.focus({ preventScroll: true });" in close
+    # A settled send never pulls focus out of the open dialog.
+    assert source.count(".then(focusComposer);") == 3
+    assert "if (!inFlight && !limitDialogOpen()) input.focus({ preventScroll: true });" in source
+    # No client-side counter, countdown or lockout, and no clock.
+    for forbidden in ("Date(", "setInterval", "countdown", "remaining"):
+        assert forbidden not in source[source.index("// ---- daily-limit dialog"):source.index("function restoreDraft")], forbidden
+
+
+def test_daily_limit_dialog_styles():
+    css = (FRONTEND / "app.css").read_text(encoding="utf-8")
+    block = css[css.index("/* ---------------- Daily-limit dialog"):]
+
+    assert ".limit-dialog {" in block and "width: min(400px, calc(100vw - 2 * var(--rail)));" in block
+    assert "max-height: calc(100dvh - 32px);" in block and "overflow: auto;" in block
+    ok = block[block.index(".limit-dialog-ok {"):]
+    assert "min-height: 44px;" in ok[: ok.index("}")]
+    reduced = block[block.index("@media (prefers-reduced-motion: reduce)"):]
+    assert ".limit-dialog[open] { animation: none; }" in reduced
+    for token in ("var(--panel)", "var(--ink)", "var(--muted)", "var(--line)", "var(--radius)",
+                  "var(--shadow)", "var(--blue)", "var(--font-ui)"):
+        assert token in block, token
+
+
 def test_embedded_chat_never_messages_its_parent(browser_results):
     """Every scenario runs framed by the runner (its parent window). The chat
     posts nothing to its parent: the homepage workspace has one stable size,
@@ -682,12 +890,66 @@ def js_source() -> str:
     return re.sub(r'"\s*\+\s*\n?\s*"', "", APP_JS.read_text(encoding="utf-8"))
 
 
+REPOSITORIES = REPO / "candidate" / "kalillac_db" / "repositories"
+# Account sign-in errors reach the chat only with accounts enabled; their
+# frontend copy is a separate, later change.
+DEFERRED_UNMAPPED = {"not_authenticated"}
+
+
+def quota_error_codes() -> set[str]:
+    """The fixed code of every QuotaError subclass in the repositories, read
+    statically (the app raises these as _budget_error(status, defect.code))."""
+    import ast
+
+    classes = {}
+    for path in REPOSITORIES.glob("*.py"):
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.ClassDef):
+                bases = {b.id if isinstance(b, ast.Name) else getattr(b, "attr", None) for b in node.bases}
+                code = next((stmt.value.value for stmt in node.body
+                             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                             and getattr(stmt.targets[0], "id", None) == "code"
+                             and isinstance(stmt.value, ast.Constant)), None)
+                classes[node.name] = (bases, code)
+
+    def is_quota_error(name, seen=()):
+        if name == "QuotaError":
+            return True
+        if name not in classes or name in seen:
+            return False
+        return any(is_quota_error(base, seen + (name,)) for base in classes[name][0])
+
+    codes = set()
+    for name, (bases, code) in classes.items():
+        if is_quota_error(name):
+            # A subclass without its own code inherits its parent's.
+            current = name
+            while code is None and classes.get(current):
+                parents = [b for b in classes[current][0] if b in classes]
+                if not parents:
+                    break
+                current = parents[0]
+                code = classes[current][1]
+            if code is not None:
+                codes.add(code)
+    return codes
+
+
 def backend_error_codes() -> set[str]:
     source = BACKEND.read_text(encoding="utf-8")
     codes = set(re.findall(r'_budget_error\(\s*\d+\s*,\s*"([a-z_]+)"\s*\)', source))
     codes |= set(re.findall(r'"error"\s*:\s*"([a-z_]+)"', source))
     codes |= {"empty_message", "message_too_long", "history_too_long", "invalid_request"}
-    return codes
+    codes |= quota_error_codes()
+    return codes - DEFERRED_UNMAPPED
+
+
+def test_quota_error_codes_are_discovered_statically():
+    codes = quota_error_codes()
+    assert {DAILY_LIMIT_CODE, "busy", "service_unavailable"} <= codes, codes
+    # The deferred code is discovered too, so it cannot silently disappear.
+    assert DEFERRED_UNMAPPED <= codes
+    assert DAILY_LIMIT_CODE in backend_error_codes()
 
 
 def test_every_backend_error_code_is_mapped():

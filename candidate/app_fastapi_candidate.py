@@ -13675,6 +13675,7 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
 # for a signed-in account. No conversation content is ever persisted.
 _usage_meter = None
 _usage_quota_context = ContextVar("account_quota_request", default=None)
+_anonymous_quota_context = ContextVar("anonymous_quota_request", default=None)
 from kalillac_accounts.usage_limits import load_usage_limits
 _usage_limits = load_usage_limits()
 _usage_quota = None
@@ -13752,6 +13753,36 @@ from fastapi import Request as _FastAPIRequest
 # setting must be explicit and valid or startup fails (naming the setting,
 # never its value). When off, /api/chat below is unchanged.
 _request_limits = load_request_limits()
+
+# Optional anonymous daily allowance. Off unless explicitly enabled; when off
+# nothing anonymous is imported, no visitor cookie is read or set, and no
+# anonymous database work happens. usage_limits refuses to enable it without
+# the database and the request budget, or with accounts but without account
+# enforcement; the objects those settings produce are checked again here.
+from kalillac_accounts.usage_limits import load_anonymous_daily_limit
+
+_anonymous_daily_limit = load_anonymous_daily_limit()
+_anonymous_quota = None
+# The account cookie name when accounts are on: a request carrying it takes
+# the account quota path, which authenticates it against the database.
+_anonymous_account_cookie = None
+
+if _anonymous_daily_limit is not None:
+    _anonymous_with_accounts = os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+    if _request_limits is None or (_anonymous_with_accounts and _usage_quota is None):
+        raise RuntimeError(
+            "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED prerequisites are not active."
+        )
+
+    from kalillac_accounts.anonymous_quota import AnonymousQuota
+
+    _anonymous_quota = AnonymousQuota(_anonymous_daily_limit)
+
+    if _anonymous_with_accounts:
+        _anonymous_account_cookie = _account_settings.cookie_name
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
@@ -13949,8 +13980,11 @@ async def _acquire_bounded(acquire, release, deadline, stop):
 
 
 def _chat_core_with_account_quota(message, history, sid, resolved):
+    # The one active quota request: the account's or the anonymous visitor's.
     state = _usage_quota_context.get()
-    from kalillac_accounts.quota import QuotaError
+    if state is None:
+        state = _anonymous_quota_context.get()
+    from kalillac_db.repositories.quota import QuotaError
     try:
         state.before_work()
         state.ensure_open()
@@ -13986,6 +14020,9 @@ async def _api_chat_with_budget(request, req, history, limits):
     quota_request = _usage_quota_context.get()
     if quota_request is not None:
         quota_request.budget, quota_request.disconnected = budget, disconnected
+    anonymous_request = _anonymous_quota_context.get()
+    if anonymous_request is not None:
+        anonymous_request.budget, anonymous_request.disconnected = budget, disconnected
     watcher = asyncio.ensure_future(
         _watch_for_disconnect(request.receive, budget, disconnected)
     )
@@ -14001,7 +14038,28 @@ async def _api_chat_with_budget(request, req, history, limits):
         meter_user_id = None
 
         resolver = quota_request if quota_request is not None else meter
-        if quota_request is not None and quota_request.is_anonymous(request):
+        if anonymous_request is not None:
+            # Reserve before admission and any provider work, through the
+            # same bounded lookup capacity, deadline and disconnect rules. A
+            # reservation the request stops waiting for is not cancelled;
+            # its late worker releases it.
+            from kalillac_accounts.quota_runtime import QuotaAction
+            lookup = _start_lookup(QuotaAction(anonymous_request.reserve), request)
+
+            if lookup is None:
+                return _budget_error(429, "busy")
+
+            lookup_state = await _await_task_or_stop(
+                lookup,
+                budget.deadline,
+                disconnected,
+            )
+
+            if lookup_state != "done":
+                return stopped_response()
+
+            lookup.result()  # Raises the limit refusal or a fail-closed error.
+        elif quota_request is not None and quota_request.is_anonymous(request):
             meter_user_id = await quota_request.resolve_request_account(request)
         elif resolver is not None:
             # Bounded by the request deadline and the disconnect watcher, and
@@ -14143,7 +14201,7 @@ async def _api_chat_with_budget(request, req, history, limits):
             # The worker thread sees this budget through a copied context.
             with budget_scope(budget):
                 work = asyncio.ensure_future(
-                    run_in_threadpool(_chat_core_with_account_quota if quota_request is not None else chat_core, req.message, history, sid, True)
+                    run_in_threadpool(_chat_core_with_account_quota if quota_request is not None or anonymous_request is not None else chat_core, req.message, history, sid, True)
                 )
 
             work_state = await _await_task_or_stop(
@@ -14241,14 +14299,14 @@ async def _api_chat_with_budget(request, req, history, limits):
 
 def _release_account_quota(state):
     if state.close(False):
-        from kalillac_accounts.quota import QuotaAction
+        from kalillac_accounts.quota_runtime import QuotaAction
         async def cleanup():
             await run_in_threadpool(state.cleanup)
         _start_lookup(QuotaAction(cleanup), None)
 
 
 async def _record_sent_account_quota(state):
-    from kalillac_accounts.quota import QuotaAction
+    from kalillac_accounts.quota_runtime import QuotaAction
     task = _start_lookup(QuotaAction(state.record_sent), None)
     if task is None:
         # Durable ready capacity remains held for recovery; never mark this
@@ -14263,7 +14321,8 @@ async def _record_sent_account_quota(state):
 
 
 async def _complete_account_quota(request, state):
-    from kalillac_accounts.quota import QuotaAction, QuotaBusy
+    from kalillac_accounts.quota_runtime import QuotaAction
+    from kalillac_db.repositories.quota import QuotaBusy
     watcher = None
     if state.budget is not None:
         state.budget.ensure_open()
@@ -14287,20 +14346,42 @@ async def _complete_account_quota(request, state):
             await asyncio.gather(watcher, return_exceptions=True)
 
 
+def _account_cookie_present(request):
+    """Accounts on and an account cookie value presented. Presence only picks
+    the account quota path; that path authenticates the cookie against the
+    database and refuses an invalid session (401), never the allowance."""
+    return _anonymous_account_cookie is not None and bool(request.cookies.get(_anonymous_account_cookie))
+
+
 @api.post("/api/chat")
 async def api_chat(request: _FastAPIRequest):
-    """Typed/no-store boundary; optional account leases wrap the same pipeline."""
+    """Typed/no-store boundary; optional account or anonymous leases wrap the
+    same pipeline. At most one quota request is active per request."""
     state = token = None
+    visit = visit_token = None
     control_state, control_token = provider_controls.begin_request()
     accepted = False
     quota_errors = ()
     try:
-        if _usage_quota is not None:
+        if _anonymous_quota is not None and not _account_cookie_present(request):
+            from kalillac_accounts.anonymous_chat import AnonymousVisit
+            from kalillac_db.repositories.quota import QuotaError
+            quota_errors = (QuotaError,)
+            visit = AnonymousVisit(_anonymous_quota, request.cookies)
+            visit_token = _anonymous_quota_context.set(visit.request)
+        elif _usage_quota is not None:
             from kalillac_accounts.quota import QuotaError
             quota_errors = (QuotaError,)
             state = _usage_quota.new_request()
             token = _usage_quota_context.set(state)
         response = await _api_chat_response(request)
+        if visit is not None and response.status_code == 200:
+            # Ready capacity holds the slot before sending (rolling over to
+            # the new UTC day if midnight passed); the completed count
+            # settles only after the final body chunk.
+            await _complete_account_quota(request, visit.request)
+            from kalillac_accounts.quota_runtime import QuotaResponse
+            response = QuotaResponse(response, visit.request, _release_account_quota, _record_sent_account_quota)
         if state is not None and response.status_code == 200 and state.admission is not None and state.admission.user_id is not None:
             day = await _complete_account_quota(request, state)
             # Durable ready capacity holds the slot before sending. Successful
@@ -14313,17 +14394,17 @@ async def api_chat(request: _FastAPIRequest):
                     state.request_chars, reply_chars, successful_chats=0,
                 )
         if state is not None and response.status_code == 200 and state.admission is not None and state.admission.user_id is not None:
-            from kalillac_accounts.quota import QuotaResponse
+            from kalillac_accounts.quota_runtime import QuotaResponse
             response = QuotaResponse(response, state, _release_account_quota, _record_sent_account_quota)
         accepted = response.status_code == 200
     except Exception as defect:
         if isinstance(defect, provider_controls.CeilingStop):
             response = _budget_error(defect.status_code, defect.code)
-        elif state is not None and isinstance(defect, quota_errors):
+        elif (state is not None or visit is not None) and isinstance(defect, quota_errors):
             response = _budget_error(defect.status_code, defect.code)
-        elif state is not None and isinstance(defect, RequestCancelled):
+        elif (state is not None or visit is not None) and isinstance(defect, RequestCancelled):
             response = _cancelled_response()
-        elif state is not None and isinstance(defect, RequestDeadlineExceeded):
+        elif (state is not None or visit is not None) and isinstance(defect, RequestDeadlineExceeded):
             response = _budget_error(504, "request_timeout")
         else:
             print(f"ERROR: CHAT_ROUTE_UNEXPECTED {type(defect).__name__}")
@@ -14335,8 +14416,18 @@ async def api_chat(request: _FastAPIRequest):
             else:
                 _release_account_quota(state)
             _usage_quota_context.reset(token)
+        if visit is not None:
+            if accepted:
+                visit.request.close(True)
+            else:
+                _release_account_quota(visit.request)
+            _anonymous_quota_context.reset(visit_token)
         provider_controls.end_request(control_state, control_token)
     response.headers["Cache-Control"] = "no-store"
+    if visit is not None:
+        # The one return point: every response to an anonymous visitor
+        # carries, and so refreshes, the visitor cookie.
+        visit.attach_cookie(response)
     return response
 
 
@@ -14382,6 +14473,10 @@ async def _api_chat_response(request):
     if quota_request is not None:
         quota_request.request_chars = len(req.message) + sum(len(turn["content"]) for turn in history)
     limits = _request_limits
+
+    if limits is None and _anonymous_quota_context.get() is not None:
+        # Startup requires the request budget with the anonymous allowance.
+        return _budget_error(503, "service_unavailable")
 
     if limits is not None:
         return await _api_chat_with_budget(request, req, history, limits)
