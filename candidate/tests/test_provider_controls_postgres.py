@@ -21,8 +21,10 @@ comment are verified before any database work.
 It drives the committed code: the Alembic chain (as a NOINHERIT migration
 login assuming the owner role), the models, the provider_usage repository
 and ProviderControls with protect -> reserve -> dispatch -> release, wrapped
-as the application wraps them. Provider terminals are content-free local
-mocks; nothing leaves the runner and no application server starts.
+as the application wraps them, and the anonymous daily allowance's
+AnonymousQuota service and anonymous_usage repository. Provider terminals
+are content-free local mocks; nothing leaves the runner and no application
+server starts.
 Concurrency uses separate spawned processes, each with its own engine and
 connection; every worker group is owned by a try/finally from before its
 first child exists, and every child is terminated, killed if needed and
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 import multiprocessing
 import os
 from pathlib import Path
@@ -69,6 +72,13 @@ INSUFFICIENT_PRIVILEGE = "42501"
 SETTINGS = ("CEILING_PG_HOST", "CEILING_PG_PORT", "CEILING_PG_ADMIN_USER",
             "CEILING_PG_ADMIN_PASSWORD", "CEILING_PG_MIGRATE_PASSWORD", "CEILING_PG_APP_PASSWORD")
 STATE = {"nonce": None}  # Per-run database comment; workers receive it in their spec.
+ANONYMOUS_LIMIT = 10  # The approved KALILLAC_ANONYMOUS_DAILY_LIMIT.
+ANONYMOUS_RACERS = 16
+ANONYMOUS_BARRIER_SECONDS = 50  # Anonymous races only; provider workers keep 30.
+# One fixed UTC instant, far from midnight, for both anonymous races: the
+# parent's seeding, every worker and the row assertions share one usage date.
+RACE_NOW = datetime(2030, 6, 15, 12, tzinfo=timezone.utc)
+VISITOR = bytes(range(1, 33))  # Synthetic 32-byte visitor token; never a real browser's.
 
 
 # --- run decision (finding 2) --------------------------------------------------------------
@@ -283,6 +293,9 @@ def empty_pools(request):
         engine = request.getfixturevalue("app_engine")
         with engine.begin() as conn:
             conn.exec_driver_sql("DELETE FROM kalillac.provider_usage_pools")
+            # Slots before their visitor-days.
+            conn.exec_driver_sql("DELETE FROM kalillac.anonymous_usage_slots")
+            conn.exec_driver_sql("DELETE FROM kalillac.anonymous_usage_days")
     yield
 
 
@@ -459,6 +472,52 @@ def _worker(spec, barrier, results):
             engine.dispose()
 
 
+def _recheck_worker_environment():
+    """A spawned worker repeats the parent's refusals against the environment
+    it inherited: the disposable GitHub Actions decision, the disposable
+    settings and the libpq override refusal (also enforced by _connect)."""
+    decision, reason = authorization_decision(os.environ)
+    if decision != "run":
+        raise AssertionError("worker refused: " + reason)
+    _settings()
+
+
+def _anonymous_worker(spec, barrier, results):
+    """Child process: one anonymous reservation through the committed
+    AnonymousQuota, on its own engine and connection, released by the barrier."""
+    engine = None
+    index = spec["index"]
+    try:
+        STATE["nonce"] = spec["nonce"]
+        _recheck_worker_environment()
+        from kalillac_accounts.anonymous_quota import AnonymousQuota
+        from kalillac_db.repositories.anonymous_usage import AnonymousLimitReached
+        engine = _engine(APP, application=f"anonymous-worker-{index}", pool_size=1, max_overflow=0)
+        factory = _factory(engine)
+        now = spec["now"]
+        request = AnonymousQuota(spec["limit"], session_factory=lambda: factory,
+                                 clock=lambda: now).new_request(spec["token"])
+        with engine.connect():
+            pass  # The verified physical connection exists before the race starts.
+        barrier.wait(timeout=ANONYMOUS_BARRIER_SECONDS)
+        try:
+            request.reserve_now()
+            outcome = {"outcome": "reserved", "slot": request.lease.slot}
+        except AnonymousLimitReached as refused:
+            outcome = {"outcome": refused.code, "status": refused.status_code}
+        results.put((index, "result", outcome))
+    except BaseException as error:  # Reported to the parent, never swallowed.
+        results.put((index, "error", f"{type(error).__name__}: {error}"))
+        raise
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _anonymous_spec(index):
+    return {"index": index, "token": VISITOR, "limit": ANONYMOUS_LIMIT, "now": RACE_NOW, "nonce": STATE["nonce"]}
+
+
 def _spec(index, behavior="ok", limits=(RACERS, RACERS), anonymous=False, provider="openai",
           period=PERIOD, events=False):
     return {"index": index, "behavior": behavior, "limits": (limits[0], limits[1], period),
@@ -475,7 +534,7 @@ class Workers:
         self.barrier = None
         self.processes = []
 
-    def start(self, specs):
+    def start(self, specs, target=_worker):
         assert [s["index"] for s in specs] == list(range(len(specs)))
         # Owned by the group until close(): Process.start() drops its own
         # reference to args (bpo-30775), and a collected Barrier unlinks its
@@ -483,7 +542,7 @@ class Workers:
         # (FileNotFoundError in SemLock._rebuild).
         self.barrier = self.context.Barrier(len(specs))
         for spec in specs:
-            process = self.context.Process(target=_worker, args=(spec, self.barrier, self.results), daemon=True)
+            process = self.context.Process(target=target, args=(spec, self.barrier, self.results), daemon=True)
             self.processes.append(process)
             process.start()
         self.assert_sync_objects_owned()
@@ -574,18 +633,18 @@ class Workers:
 
 
 @contextmanager
-def worker_group(specs):
+def worker_group(specs, target=_worker):
     """Ownership starts before the first child can exist."""
     group = Workers()
     try:
-        group.start(specs)
+        group.start(specs, target)
         yield group
     finally:
         group.close()
 
 
-def race(specs):
-    with worker_group(specs) as group:
+def race(specs, target=_worker):
+    with worker_group(specs, target) as group:
         return group.results_all()
 
 
@@ -854,3 +913,194 @@ def test_rejected_requests_never_enter_the_provider_mock_or_dispatch(app_engine)
     results = race([_spec(i, limits=(1, 1)) for i in range(3)])
     assert tally(results) == Counter(busy=3)
     assert sum(r["entered"] + r["dispatched"] for r in results) == 0
+
+
+# --- 14 to 18: anonymous daily allowance (0007) ---------------------------------------------
+
+ANONYMOUS_COLUMNS = {
+    "anonymous_usage_days": ["visitor_digest", "usage_date"],
+    "anonymous_usage_slots": ["visitor_digest", "usage_date", "slot", "expires_at", "state", "completed_date"],
+}
+
+
+def anonymous_rows(engine):
+    """(visitor-days, slots) as stored, ordered."""
+    with engine.connect() as conn:
+        days = conn.exec_driver_sql(
+            "SELECT visitor_digest, usage_date FROM kalillac.anonymous_usage_days "
+            "ORDER BY usage_date, visitor_digest").all()
+        slots = conn.exec_driver_sql(
+            "SELECT visitor_digest, usage_date, slot, state, completed_date FROM kalillac.anonymous_usage_slots "
+            "ORDER BY usage_date, visitor_digest, slot").all()
+    return [tuple(r) for r in days], [tuple(r) for r in slots]
+
+
+def anonymous_quota(engine, clock=None, limit=ANONYMOUS_LIMIT, **options):
+    from kalillac_accounts.anonymous_quota import AnonymousQuota
+    factory = _factory(engine)
+    return AnonymousQuota(limit, session_factory=lambda: factory, clock=clock, **options)
+
+
+def anonymous_reserved(service, token=VISITOR):
+    request = service.new_request(token)
+    request.reserve_now()
+    return request
+
+
+def test_anonymous_first_row_race_admits_exactly_the_limit(app_engine):
+    results = race([_anonymous_spec(i) for i in range(ANONYMOUS_RACERS)], _anonymous_worker)
+    assert Counter(r["outcome"] for r in results) == Counter(
+        reserved=ANONYMOUS_LIMIT, anonymous_daily_limit_reached=ANONYMOUS_RACERS - ANONYMOUS_LIMIT)
+    assert all(r["status"] == 429 for r in results if r["outcome"] != "reserved")
+    assert sorted(r["slot"] for r in results if r["outcome"] == "reserved") == list(range(ANONYMOUS_LIMIT))
+    from kalillac_accounts.anonymous_quota import day_digest
+    digest, usage_date = day_digest(VISITOR, RACE_NOW.date()), RACE_NOW.date()
+    days, slots = anonymous_rows(app_engine)
+    assert days == [(digest, usage_date)]  # Exactly one visitor-day row, no duplicate-key failure.
+    assert slots == [(digest, usage_date, n, "pending", None) for n in range(ANONYMOUS_LIMIT)]
+
+
+def test_anonymous_last_slot_contention(app_engine):
+    from kalillac_accounts.anonymous_quota import day_digest
+    seeded = anonymous_quota(app_engine, clock=lambda: RACE_NOW)
+    for _ in range(ANONYMOUS_LIMIT - 1):
+        anonymous_reserved(seeded)  # Nine consuming pending slots at the race instant.
+    results = race([_anonymous_spec(i) for i in range(RACERS)], _anonymous_worker)
+    assert Counter(r["outcome"] for r in results) == Counter(
+        reserved=1, anonymous_daily_limit_reached=RACERS - 1)
+    assert [r["slot"] for r in results if r["outcome"] == "reserved"] == [ANONYMOUS_LIMIT - 1]
+    digest, usage_date = day_digest(VISITOR, RACE_NOW.date()), RACE_NOW.date()
+    days, slots = anonymous_rows(app_engine)
+    assert days == [(digest, usage_date)]
+    assert slots == [(digest, usage_date, n, "pending", None) for n in range(ANONYMOUS_LIMIT)]
+
+
+def test_anonymous_midnight_rollover_prepares_under_the_new_day(app_engine, monkeypatch):
+    import kalillac_accounts.anonymous_quota as service_module
+    from kalillac_accounts.anonymous_quota import day_digest
+    old_day, new_day = date(2030, 1, 1), date(2030, 1, 2)
+    clock = {"now": datetime(2030, 1, 1, 23, 59, 59, tzinfo=timezone.utc)}
+    service = anonymous_quota(app_engine, clock=lambda: clock["now"])
+    request = anonymous_reserved(service)
+    old = request.lease
+    assert (old.visitor_digest, old.usage_date) == (day_digest(VISITOR, old_day), old_day)
+
+    seen = {}
+    real = service_module.roll_over_anonymous_slot
+
+    def observed_roll_over(*args):
+        replacement = real(*args)
+        # Inside the transaction, before commit: the request still holds the
+        # old lease, and another connection sees neither change yet.
+        seen["lease_before_commit"] = request.lease
+        with _connect(APP) as other:
+            seen["visible_before_commit"] = other.execute(
+                "SELECT usage_date, state FROM kalillac.anonymous_usage_slots ORDER BY usage_date").fetchall()
+        return replacement
+    monkeypatch.setattr(service_module, "roll_over_anonymous_slot", observed_roll_over)
+
+    clock["now"] = datetime(2030, 1, 2, 0, 0, 1, tzinfo=timezone.utc)
+    assert request.complete_now() == new_day
+    new = request.lease
+    assert seen == {"lease_before_commit": old, "visible_before_commit": [(old_day, "pending")]}
+    assert new is not old and not request.holds_token
+    assert (new.visitor_digest, new.usage_date) == (day_digest(VISITOR, new_day), new_day)
+    assert new.visitor_digest != old.visitor_digest
+    days, slots = anonymous_rows(app_engine)
+    assert days == [(old.visitor_digest, old_day), (new.visitor_digest, new_day)]
+    assert slots == [(old.visitor_digest, old_day, 0, "released", None),
+                     (new.visitor_digest, new_day, 0, "ready", new_day)]
+    assert request.record_sent_now() == new_day
+    assert anonymous_rows(app_engine)[1][1] == (new.visitor_digest, new_day, 0, "completed", new_day)
+    # No stored cross-day identifier or mapping: the anonymous schema is
+    # unchanged and every row carries only its own day's digest.
+    with app_engine.connect() as conn:
+        columns = {}
+        for table, column in conn.exec_driver_sql(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'kalillac' AND table_name LIKE 'anonymous%%' "
+                "ORDER BY table_name, ordinal_position").all():
+            columns.setdefault(table, []).append(column)
+    assert columns == ANONYMOUS_COLUMNS
+    days, slots = anonymous_rows(app_engine)
+    assert all(row[0] == day_digest(VISITOR, row[1]) for row in days + slots)
+
+
+def test_anonymous_expiry_recovers_pending_and_keeps_ready_charged(app_engine):
+    from kalillac_db.repositories.anonymous_usage import AnonymousLimitReached
+    clock = {"now": datetime(2030, 3, 1, 12, tzinfo=timezone.utc)}
+    service = anonymous_quota(app_engine, clock=lambda: clock["now"], limit=3, ttl=timedelta(seconds=5))
+    pending = anonymous_reserved(service)   # Crashes before preparation.
+    ready = anonymous_reserved(service)
+    ready.complete_now()                    # Crashes after preparation, before settlement.
+    completed = anonymous_reserved(service)
+    completed.complete_now()
+    completed.record_sent_now()
+    with pytest.raises(AnonymousLimitReached):
+        anonymous_reserved(service)
+    clock["now"] += timedelta(seconds=5)
+    replacement = anonymous_reserved(service)  # Recovery frees only the expired pending slot.
+    assert replacement.lease.slot == pending.lease.slot
+    assert replacement.lease.expires_at > pending.lease.expires_at
+
+    def states():
+        return [row[2:4] for row in anonymous_rows(app_engine)[1]]
+    assert states() == [(0, "pending"), (1, "uncertain"), (2, "completed")]
+    for lease in (pending.lease, ready.lease, completed.lease):
+        service.release(lease)  # Stale, uncertain and completed: no refund.
+    assert states() == [(0, "pending"), (1, "uncertain"), (2, "completed")]
+    with pytest.raises(AnonymousLimitReached):
+        anonymous_reserved(service)  # Uncertain and completed still consume capacity.
+    assert len(states()) == 3
+
+
+def test_anonymous_pruning_skips_locked_rows_and_is_bounded(app_engine):
+    from kalillac_accounts.anonymous_quota import day_digest
+    from kalillac_db.repositories.anonymous_usage import prune_anonymous_days
+    today = date(2030, 6, 15)
+    old_days = [today - timedelta(days=n) for n in (6, 5, 4, 3, 2)]  # All older than yesterday.
+    kept_days = [today - timedelta(days=1), today]
+    seeded = {}
+    with app_engine.begin() as conn:
+        for number, day in enumerate(old_days + kept_days):
+            digest = day_digest(bytes([number + 1]) * 32, day)
+            seeded[day] = digest
+            conn.exec_driver_sql("INSERT INTO kalillac.anonymous_usage_days VALUES (%(d)s, %(u)s)",
+                                 {"d": digest, "u": day})
+            conn.exec_driver_sql(
+                "INSERT INTO kalillac.anonymous_usage_slots VALUES (%(d)s, %(u)s, 0, %(e)s, 'completed', %(u)s)",
+                {"d": digest, "u": day, "e": datetime(2030, 1, 1, tzinfo=timezone.utc)})
+    factory = _factory(app_engine)
+
+    def prune(batch):
+        started = time.monotonic()
+        with factory() as session, session.begin():
+            deleted = prune_anonymous_days(session, today, batch=batch)
+        elapsed = time.monotonic() - started
+        assert elapsed < 3, f"pruning waited {elapsed:.1f}s"  # The connection lock timeout is 8s.
+        return deleted
+
+    def remaining():
+        days, slots = anonymous_rows(app_engine)
+        assert [row[:2] for row in slots] == days  # Each remaining day keeps its own slot.
+        return [day for _, day in days]
+
+    locked_day = old_days[0]  # The oldest: first in pruning order.
+    holder = _connect(APP, autocommit=False, application="anonymous-lock-holder")
+    try:
+        assert holder.execute(
+            "SELECT usage_date FROM kalillac.anonymous_usage_days WHERE visitor_digest = %s AND usage_date = %s "
+            "FOR UPDATE", [seeded[locked_day], locked_day]).fetchall() == [(locked_day,)]
+        assert prune(2) == 2
+        assert remaining() == [locked_day] + old_days[3:] + kept_days
+        assert prune(2) == 2
+        assert remaining() == [locked_day] + kept_days
+        assert prune(2) == 0  # Only the locked row is eligible, and it is skipped.
+        assert remaining() == [locked_day] + kept_days
+    finally:
+        holder.rollback()
+        holder.close()
+    assert prune(2) == 1  # A later prune removes it once the lock is released.
+    assert remaining() == kept_days
+    assert prune(2) == 0
+    assert remaining() == kept_days
