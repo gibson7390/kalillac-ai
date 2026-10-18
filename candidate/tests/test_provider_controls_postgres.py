@@ -48,8 +48,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0006_provider_usage_pools"
+HEAD = "0007_anonymous_usage"
 CHAIN = (
+    "0007_anonymous_usage",
     "0006_provider_usage_pools",
     "0005_account_usage_slots",
     "0004_account_billing",
@@ -59,6 +60,7 @@ CHAIN = (
 )
 DATABASE = "ceiling_verify"
 OWNER, MIGRATE, APP = "ceiling_owner", "ceiling_migrate", "ceiling_app"
+ANONYMOUS_TABLES = ("anonymous_usage_days", "anonymous_usage_slots")
 PROVIDERS = ("openai", "brave", "tavily")
 PERIOD = 2_000_000_000  # One accounting period for the whole job: no rollover.
 RACERS = 8
@@ -593,7 +595,7 @@ def tally(results):
 
 # --- 1 and 2: migration endpoint, identities and privileges --------------------------------
 
-def test_alembic_has_one_head_and_migrated_exactly_to_0006(database):
+def test_alembic_has_one_head_and_migrated_exactly_to_0007(database):
     from alembic.script import ScriptDirectory
     script = ScriptDirectory.from_config(_alembic_config())
     assert script.get_heads() == [HEAD]
@@ -602,7 +604,7 @@ def test_alembic_has_one_head_and_migrated_exactly_to_0006(database):
         assert conn.execute("SELECT version_num FROM kalillac.alembic_version").fetchall() == [(HEAD,)]
         tables = {r[0] for r in conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'kalillac'").fetchall()}
-    assert "provider_usage_pools" in tables and "alembic_version" in tables
+    assert {"provider_usage_pools", *ANONYMOUS_TABLES, "alembic_version"} <= tables
 
 
 def test_roles_have_expected_identities_and_limited_privileges(database):
@@ -630,6 +632,14 @@ def test_roles_have_expected_identities_and_limited_privileges(database):
         for role, privilege, expected in checks:
             assert conn.execute("SELECT has_table_privilege(%s::name, %s::text, %s::text)",
                                 [role, table, privilege]).fetchone() == (expected,), (role, privilege)
+        # The anonymous allowance tables (0007) get the same DML-only grant.
+        for name in ANONYMOUS_TABLES:
+            assert conn.execute(
+                "SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'kalillac' AND c.relname = %s", [name]).fetchall() == [(OWNER,)], name
+            for role, privilege, expected in checks:
+                assert conn.execute("SELECT has_table_privilege(%s::name, %s::text, %s::text)",
+                                    [role, "kalillac." + name, privilege]).fetchone() == (expected,), (name, role, privilege)
         for role in (MIGRATE, APP):
             assert conn.execute("SELECT has_table_privilege(%s::name, 'kalillac.alembic_version'::text, 'SELECT'::text)",
                                 [role]).fetchone() == (False,)
@@ -647,10 +657,14 @@ def test_roles_have_expected_identities_and_limited_privileges(database):
     with _connect(MIGRATE) as conn:
         assert _identity(conn) == (MIGRATE, MIGRATE)
         _expect_sqlstate(conn, "SELECT count(*) FROM kalillac.provider_usage_pools")  # No owner rights without SET ROLE.
+        for name in ANONYMOUS_TABLES:
+            _expect_sqlstate(conn, f"SELECT count(*) FROM kalillac.{name}")
         with conn.transaction(force_rollback=True):
             conn.execute(f"SET LOCAL ROLE {OWNER}")
             assert _identity(conn) == (MIGRATE, OWNER)
             assert conn.execute("SELECT version_num FROM kalillac.alembic_version").fetchone() == (HEAD,)
+            for name in ANONYMOUS_TABLES:
+                assert conn.execute(f"SELECT count(*) FROM kalillac.{name}").fetchone() == (0,), name
         assert _identity(conn) == (MIGRATE, MIGRATE)  # SET LOCAL ended with the rolled-back transaction.
 
 
