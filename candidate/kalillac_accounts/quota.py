@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, text
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
 from kalillac_db.engine import get_session_factory
 from kalillac_db.repositories.accounts import get_signed_in_user
 from kalillac_db.repositories.entitlements import get_entitlement
@@ -17,6 +16,8 @@ from kalillac_routing.request_budget import RequestBudgetError
 from .entitlements import effective_entitlement
 from .router import load_account_settings
 from .tokens import hash_session_token
+# Shared with the anonymous allowance; re-exported for existing importers.
+from .quota_runtime import QuotaAction, QuotaResponse  # noqa: F401
 
 RESERVATION_TTL = timedelta(minutes=15)
 
@@ -200,40 +201,3 @@ class QuotaRequest:
             # Pending leases remain charged until lazy expiry recovery.
             # Ready/uncertain delivery stays charged, never free usage.
             print(f"WARN: USAGE_QUOTA_RELEASE_FAILED {type(exc).__name__}")
-
-
-class QuotaAction:
-    """Adapter reusing the app's bounded account-work admission."""
-    def __init__(self, action):
-        self.action = action
-
-    async def resolve_request_account(self, ignored):
-        return await self.action()
-
-
-class QuotaResponse(JSONResponse):
-    """Identical response bytes; compensate a known failed send only."""
-    def __init__(self, original, state, release, record_sent):
-        self.status_code, self.media_type = original.status_code, original.media_type
-        self.background, self.body = None, original.body
-        self._character_meter = original.background
-        self.raw_headers = list(original.raw_headers)
-        self._state, self._release, self._record_sent = state, release, record_sent
-
-    async def __call__(self, scope, receive, send):
-        sent = False
-        async def checked_send(message):
-            nonlocal sent
-            await send(message)
-            if message["type"] == "http.response.body" and not message.get("more_body", False):
-                sent = True
-        try:
-            await super().__call__(scope, receive, checked_send)
-        except BaseException:
-            if not sent:
-                self._release(self._state)
-            raise
-
-        await self._record_sent(self._state)
-        if self._character_meter is not None:
-            await self._character_meter()

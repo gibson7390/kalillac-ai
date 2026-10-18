@@ -687,6 +687,7 @@ def test_startup_feature_gate_is_lazy_and_explicit(enabled):
         "KALILLAC_USAGE_LIMIT_FREE_DAILY": "2" if enabled else "malformed-unused",
         "KALILLAC_USAGE_LIMIT_PAID_DAILY": "5" if enabled else "malformed-unused",
         "KALILLAC_BILLING_ENABLED": "false", "KALILLAC_REQUEST_BUDGET_ENABLED": "false",
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED": "false", "KALILLAC_ANONYMOUS_DAILY_LIMIT": "malformed-unused",
         "OPENAI_API_KEY": "", "TAVILY_API_KEY": "", "BRAVE_API_KEY": "", "DEBUG_MODE": "false",
     })
     script = """import json,socket,sys
@@ -695,11 +696,11 @@ def block(*args,**kwargs): attempts.append(1);raise AssertionError('network bloc
 socket.socket.connect=socket.socket.connect_ex=socket.getaddrinfo=block
 import app_fastapi_candidate as app
 from kalillac_db import engine
-print(json.dumps({'enabled':app._usage_quota is not None,'limits':None if app._usage_limits is None else [app._usage_limits.free_daily_chats,app._usage_limits.paid_daily_chats],'engine':engine._ENGINE is not None,'outbound':len(attempts),'quota_imported':'kalillac_accounts.quota' in sys.modules}))
+print(json.dumps({'enabled':app._usage_quota is not None,'limits':None if app._usage_limits is None else [app._usage_limits.free_daily_chats,app._usage_limits.paid_daily_chats],'engine':engine._ENGINE is not None,'outbound':len(attempts),'quota_imported':'kalillac_accounts.quota' in sys.modules,'anonymous':app._anonymous_quota is not None,'anonymous_imported':'kalillac_accounts.anonymous_quota' in sys.modules}))
 """
     result = subprocess.run([sys.executable, "-B", "-c", script], cwd=str(__import__("pathlib").Path(__file__).parents[1]), env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"enabled": enabled, "limits": [2, 5] if enabled else None, "engine": False, "outbound": 0, "quota_imported": enabled}
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"enabled": enabled, "limits": [2, 5] if enabled else None, "engine": False, "outbound": 0, "quota_imported": enabled, "anonymous": False, "anonymous_imported": False}
 
 
 def test_default_off_provider_payload_is_unchanged(foundation, monkeypatch):

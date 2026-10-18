@@ -120,14 +120,23 @@ def load_usage_limits() -> UsageLimits | None:
 #
 # A per-browser fairness limit for visitors who are not signed in.
 # KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED is off by default, and while it is
-# off nothing else is read. When it is on, KALILLAC_DB_ENABLED must be on
-# (accounts are not required) and KALILLAC_ANONYMOUS_DAILY_LIMIT must be set
-# explicitly to exactly the approved allowance; every other value is refused.
+# off nothing else is read. When it is on:
+#
+# - KALILLAC_DB_ENABLED and KALILLAC_REQUEST_BUDGET_ENABLED must be on (the
+#   allowance runs only on the bounded request-budget path);
+# - accounts are not required, but if KALILLAC_ACCOUNTS_ENABLED is on then
+#   KALILLAC_USAGE_ENFORCEMENT_ENABLED must be on too, so every signed-in
+#   request is held to an account quota;
+# - KALILLAC_ANONYMOUS_DAILY_LIMIT must be set explicitly to exactly the
+#   approved allowance; every other value is refused.
+#
 # Errors name the setting, never the value supplied for it.
 
 ANONYMOUS_FLAG = "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED"
 ANONYMOUS_DAILY_LIMIT = "KALILLAC_ANONYMOUS_DAILY_LIMIT"
 ANONYMOUS_PREREQUISITE_FLAG = "KALILLAC_DB_ENABLED"
+ANONYMOUS_BUDGET_FLAG = "KALILLAC_REQUEST_BUDGET_ENABLED"
+ANONYMOUS_ACCOUNTS_FLAG = "KALILLAC_ACCOUNTS_ENABLED"
 APPROVED_ANONYMOUS_DAILY_LIMIT = 10
 
 
@@ -143,9 +152,15 @@ def load_anonymous_daily_limit() -> int | None:
     if not anonymous_allowance_enabled():
         return None
 
-    if not _flag_enabled(ANONYMOUS_PREREQUISITE_FLAG):
+    for prerequisite in (ANONYMOUS_PREREQUISITE_FLAG, ANONYMOUS_BUDGET_FLAG):
+        if not _flag_enabled(prerequisite):
+            raise UsageLimitConfigError(
+                f"{ANONYMOUS_FLAG} requires {prerequisite}."
+            )
+
+    if _flag_enabled(ANONYMOUS_ACCOUNTS_FLAG) and not usage_enforcement_enabled():
         raise UsageLimitConfigError(
-            f"{ANONYMOUS_FLAG} requires {ANONYMOUS_PREREQUISITE_FLAG}."
+            f"{ANONYMOUS_FLAG} with {ANONYMOUS_ACCOUNTS_FLAG} requires {ENFORCEMENT_FLAG}."
         )
 
     value = os.getenv(ANONYMOUS_DAILY_LIMIT, "").strip()

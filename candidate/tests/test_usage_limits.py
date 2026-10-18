@@ -364,6 +364,7 @@ def test_unused_limit_settings_do_not_change_startup():
 ANONYMOUS_VALID = {
     usage_limits.ANONYMOUS_FLAG: "true",
     usage_limits.ANONYMOUS_PREREQUISITE_FLAG: "true",
+    usage_limits.ANONYMOUS_BUDGET_FLAG: "true",
     usage_limits.ANONYMOUS_DAILY_LIMIT: "10",
 }
 
@@ -426,6 +427,65 @@ def test_anonymous_allowance_requires_database_not_accounts(monkeypatch):
     _set(monkeypatch, ANONYMOUS_VALID)
     assert usage_limits.load_anonymous_daily_limit() == 10
     assert load_usage_limits() is None
+
+
+def test_anonymous_allowance_requires_the_request_budget(monkeypatch):
+    values = {k: v for k, v in ANONYMOUS_VALID.items() if k != usage_limits.ANONYMOUS_BUDGET_FLAG}
+
+    message = _anonymous_error(monkeypatch, values)
+    assert message == (
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED requires KALILLAC_REQUEST_BUDGET_ENABLED."
+    )
+
+    monkeypatch.setenv(usage_limits.ANONYMOUS_BUDGET_FLAG, "false")
+    assert _anonymous_error(monkeypatch, {}) == message
+
+
+def test_database_is_named_before_the_request_budget(monkeypatch):
+    values = {usage_limits.ANONYMOUS_FLAG: "true", usage_limits.ANONYMOUS_DAILY_LIMIT: "10"}
+
+    assert _anonymous_error(monkeypatch, values) == (
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED requires KALILLAC_DB_ENABLED."
+    )
+
+
+@pytest.mark.parametrize("enforcement", [None, "false", "0", "yes-please"])
+def test_anonymous_allowance_with_accounts_requires_account_enforcement(monkeypatch, enforcement):
+    values = {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_ACCOUNTS_FLAG: "true"}
+    if enforcement is not None:
+        values[ENFORCEMENT_FLAG] = enforcement
+
+    assert _anonymous_error(monkeypatch, values) == (
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED with KALILLAC_ACCOUNTS_ENABLED "
+        "requires KALILLAC_USAGE_ENFORCEMENT_ENABLED."
+    )
+
+
+def test_anonymous_allowance_with_accounts_and_enforcement_is_accepted(monkeypatch):
+    _set(monkeypatch, {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_ACCOUNTS_FLAG: "true", ENFORCEMENT_FLAG: "true"})
+
+    assert usage_limits.load_anonymous_daily_limit() == 10
+
+
+@pytest.mark.parametrize("accounts", ["false", "", "0"])
+def test_accounts_off_does_not_require_account_enforcement(monkeypatch, accounts):
+    _set(monkeypatch, {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_ACCOUNTS_FLAG: accounts})
+
+    assert usage_limits.load_anonymous_daily_limit() == 10
+
+
+@pytest.mark.parametrize("missing", ["database", "budget", "enforcement"])
+def test_prerequisite_errors_never_read_or_echo_the_limit(monkeypatch, missing):
+    values = {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_DAILY_LIMIT: "anon-leak-77"}
+    if missing == "database":
+        values[usage_limits.ANONYMOUS_PREREQUISITE_FLAG] = "false"
+    elif missing == "budget":
+        values[usage_limits.ANONYMOUS_BUDGET_FLAG] = "false"
+    else:
+        values[usage_limits.ANONYMOUS_ACCOUNTS_FLAG] = "true"
+
+    message = _anonymous_error(monkeypatch, values)
+    assert "anon-leak-77" not in message and "must be exactly" not in message
 
 
 @pytest.mark.parametrize("value", ["", "   "])
