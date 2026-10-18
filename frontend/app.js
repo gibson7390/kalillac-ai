@@ -1,8 +1,9 @@
 /* ==========================================================================
    Kalillac AI — native chat frontend (vanilla JS)
    - Same-origin POST /api/chat
-   - session_id lives ONLY in a page-memory variable. No localStorage,
-     sessionStorage, IndexedDB, cookies, or any persistent store.
+   - session_id lives ONLY in a page-memory variable. This script never reads
+     or writes localStorage, sessionStorage, IndexedDB, cookies, or any
+     persistent store.
    - Model output is parsed by the locally vendored marked, then sanitized by
      the locally vendored DOMPurify BEFORE it touches innerHTML.
    - No analytics, no tracking, no remote fonts, no CDN.
@@ -645,11 +646,15 @@
   var COPY_UNREADABLE = "Kalillac couldn't read that request. Please try again.";
   var COPY_BUSY = "Kalillac is busy right now. Please try again in a moment.";
   var COPY_STOPPED = "Stopped.";
+  var COPY_DAILY_LIMIT = "You’ve used today’s 10 free responses.";
 
   var OUTCOME_UNREACHABLE = { message: COPY_UNREACHABLE, kind: "error", action: "retry" };
   var OUTCOME_INCOMPLETE = { message: COPY_INCOMPLETE, kind: "error", action: "retry" };
   var OUTCOME_BUSY = { message: COPY_BUSY, kind: "error", action: "retry" };
   var OUTCOME_STOPPED = { message: COPY_STOPPED, kind: "notice", action: "retry" };
+  /* The anonymous daily allowance is used up: a neutral notice, no Retry, and
+     the fixed daily-limit dialog. */
+  var OUTCOME_DAILY_LIMIT = { message: COPY_DAILY_LIMIT, kind: "notice", action: null, dialog: true };
 
   var ERROR_OUTCOMES = {
     invalid_json: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
@@ -691,13 +696,18 @@
     internal_error: {
       message: "Something went wrong on Kalillac's end. Please try again.",
       kind: "error", action: "retry"
-    }
+    },
+    anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT
   };
 
   /* An HTTP response arrived but was not a usable reply. A recognized fixed
      code wins; a bare 429 is busy; anything else could not be completed. */
   function outcomeForResponse(status, data) {
     var code = data && typeof data.error === "string" ? data.error : null;
+
+    // The daily limit is only ever a 429; the same code on any other status
+    // is not a usable outcome.
+    if (code === "anonymous_daily_limit_reached" && status !== 429) code = null;
 
     if (code && Object.prototype.hasOwnProperty.call(ERROR_OUTCOMES, code)) {
       return ERROR_OUTCOMES[code];
@@ -709,6 +719,54 @@
 
   function isAbort(err) {
     return !!err && err.name === "AbortError";
+  }
+
+  // ---- daily-limit dialog ----------------------------------------------------
+  /* Its copy is fixed markup in index.html; nothing from the response is shown
+     in it. The native modal dialog keeps keyboard focus inside itself and makes
+     the page behind it inert while open. Got it, Escape (the cancel event) and
+     a click on the backdrop all close it through closeLimitDialog(), which
+     returns focus to the composer. Without showModal() only the inline thread
+     note is shown. */
+  var limitDialog = document.getElementById("limit-dialog");
+  var limitDialogOk = document.getElementById("limit-dialog-ok");
+
+  function limitDialogOpen() {
+    return !!(limitDialog && limitDialog.open);
+  }
+
+  function openLimitDialog() {
+    if (!limitDialog || !limitDialogOk || typeof limitDialog.showModal !== "function") return;
+    try {
+      if (!limitDialog.open) limitDialog.showModal();
+      limitDialogOk.focus();
+    } catch (e) {
+      // A dialog that cannot open leaves the inline note as the only notice.
+    }
+  }
+
+  function closeLimitDialog() {
+    if (limitDialog && limitDialog.open) limitDialog.close();
+    input.focus({ preventScroll: true });
+  }
+
+  /* After a send settles, the composer takes focus again unless the
+     daily-limit dialog holds it. */
+  function focusComposer() {
+    if (!inFlight && !limitDialogOpen()) input.focus({ preventScroll: true });
+  }
+
+  if (limitDialog && limitDialogOk) {
+    limitDialogOk.addEventListener("click", closeLimitDialog);
+    limitDialog.addEventListener("cancel", function (event) {
+      event.preventDefault();
+      closeLimitDialog();
+    });
+    // The panel fills the dialog box, so only a backdrop click targets the
+    // dialog element itself.
+    limitDialog.addEventListener("click", function (event) {
+      if (event.target === limitDialog) closeLimitDialog();
+    });
   }
 
   function parseJson(body) {
@@ -763,6 +821,8 @@
 
     failedExchange = exchange;
     restoreDraft(exchange);
+
+    if (outcome.dialog) openLimitDialog();
   }
 
   /* Render the reply and its actions first; only a fully rendered answer
@@ -836,8 +896,9 @@
 
     // Same-origin: the frontend is served at /app/ and the API at /api/, so no
     // CORS is involved. fetch's default credentials mode ("same-origin") lets
-    // the browser attach any same-origin cookie; this app never sets or reads
-    // one.
+    // the browser attach same-origin cookies (the server's HttpOnly daily
+    // allowance cookie, when that feature is on); this script never reads or
+    // writes cookies.
     return fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -896,9 +957,7 @@
 
     stickToBottom = true;
     var shell = addAssistantShell();
-    requestReply(newExchange(text, history, userRow, shell)).then(function () {
-      if (!inFlight) input.focus({ preventScroll: true });
-    });
+    requestReply(newExchange(text, history, userRow, shell)).then(focusComposer);
   }
 
   /* Retry a failed or stopped exchange: the same text, the same pre-send
@@ -913,9 +972,7 @@
     reclaimDraft(exchange);
 
     stickToBottom = true;
-    requestReply(exchange).then(function () {
-      if (!inFlight) input.focus({ preventScroll: true });
-    });
+    requestReply(exchange).then(focusComposer);
   }
 
   /* Retry regenerates the answer for TURN index i.
@@ -944,9 +1001,7 @@
     var history = buildHistory();
     stickToBottom = true;
     var shell = addAssistantShell();
-    requestReply(newExchange(turn.user, history, turn.userRow, shell)).then(function () {
-      if (!inFlight) input.focus({ preventScroll: true });
-    });
+    requestReply(newExchange(turn.user, history, turn.userRow, shell)).then(focusComposer);
   }
 
   /* Start a new conversation in place: forget every completed turn and the

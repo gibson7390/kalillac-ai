@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261013-pre-subscription1">
+  <link rel="stylesheet" href="app.css?v=20261018-daily-limit1">
 </head>
 <body>
   <!-- Direct full-page use at /app/ and same-origin iframe embed on the
@@ -86,11 +86,23 @@
     </div>
   </div>
 
+  <!-- The anonymous daily-limit notice. Fixed copy only; app.js opens it as a
+       native modal dialog for the anonymous_daily_limit_reached response. -->
+  <dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" aria-describedby="limit-dialog-text limit-dialog-reset">
+    <div class="limit-dialog-panel">
+      <h2 class="limit-dialog-title" id="limit-dialog-title">Daily limit reached</h2>
+      <p class="limit-dialog-text" id="limit-dialog-text">You’ve used today’s 10 free responses.</p>
+      <p class="limit-dialog-text" id="limit-dialog-reset">Your free allowance resets at 12:00 AM UTC.</p>
+      <div class="limit-dialog-actions">
+        <button type="button" class="limit-dialog-ok" id="limit-dialog-ok">Got it</button>
+      </div>
+    </div>
+  </dialog>
   <!-- Local vendored libraries only; no CDN, no remote runtime fetches. -->
   <script src="vendor/marked/marked.min.js"></script>
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
-  <script src="app.js?v=20261010-math-continuation1"></script>
+  <script src="app.js?v=20261018-daily-limit1"></script>
 </body>
 </html>

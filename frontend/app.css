@@ -907,3 +907,66 @@ body {
    center a fitting intro without clipping the beginning of an overflowing one. */
 .is-embedded .conversation.is-empty .thread { justify-content: flex-start; }
 .is-embedded .empty { flex-shrink: 0; margin-block: auto; }
+
+/* ---------------- Daily-limit dialog ----------------
+   A native modal <dialog>: the browser keeps focus inside it and makes the
+   page behind it inert. The panel fills the dialog box, so a click whose
+   target is the dialog element itself can only be on the backdrop. Sized to
+   fit a 360 x 640 phone viewport (and the homepage's embedded chat frame). */
+.limit-dialog {
+  width: min(400px, calc(100vw - 2 * var(--rail)));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font-family: var(--font-ui);
+  overflow: auto;
+}
+.limit-dialog::backdrop { background: rgba(14, 21, 38, 0.32); }
+.limit-dialog[open] { animation: limit-dialog-in var(--ease) both; }
+@keyframes limit-dialog-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.limit-dialog-panel { padding: 22px 22px 18px; }
+.limit-dialog-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.limit-dialog-text {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.limit-dialog-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+.limit-dialog-ok {
+  min-height: 44px;
+  min-width: 96px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--blue);
+  color: #ffffff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ease);
+}
+.limit-dialog-ok:hover { background: var(--blue-deep); }
+.limit-dialog-ok:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-width: 400px) {
+  .limit-dialog-panel { padding: 18px 16px 16px; }
+  .limit-dialog-ok { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .limit-dialog[open] { animation: none; }
+  .limit-dialog-ok { transition: none; }
+}

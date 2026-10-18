@@ -509,8 +509,13 @@ def test_privacy_wording_boundaries():
                   "zero data retention", "zero-retention", "retention marketing",
                   "google", "legal approval", "legally approved", "lawyer"):
         assert claim not in lower, claim
-    # "anonymous" only in the explicit disclaimer.
-    assert lower.count("anonymous") == lower.count("not a promise that the service is anonymous") == 1
+    # "anonymous" only in the explicit disclaimer and in the name of the
+    # anonymous daily allowance and its traffic -- never as a claim that the
+    # service or its users are anonymous.
+    scrubbed = lower
+    for phrase in ("anonymous daily allowance", "anonymous chat response", "anonymous traffic"):
+        scrubbed = scrubbed.replace(phrase, "")
+    assert scrubbed.count("anonymous") == scrubbed.count("not a promise that the service is anonymous") == 1
 
     # Groq and Workers AI appear only inside the one sentence saying they are
     # not in the current path (once on Privacy, once in Terms).
@@ -609,6 +614,77 @@ def test_privacy_makes_no_global_cloudflare_cookie_or_tracking_claims():
         "disabling rum disables", "disabled cloudflare security", "security is disabled",
         "security checks are disabled", "cloudflare no longer processes",
     ):
+        assert claim not in lower, claim
+
+
+DAILY_ALLOWANCE_COOKIE_SECTION = (
+    "When the anonymous daily allowance is active, Kalillac uses one strictly necessary first-party "
+    "cookie, named __Host-kalillac_visitor, to apply the free allowance of 10 successful responses per "
+    "browser per UTC day. It contains a random, opaque visitor value. It does not contain your messages, "
+    "Kalillac’s responses, or the session identifier.",
+    "The chat service sets this cookie with HttpOnly, Secure, SameSite=Lax, Path=/ and no Domain "
+    "attribute. It is sent only to the Kalillac host that set it and cannot be read by page scripts. Each "
+    "anonymous chat response refreshes its 48-hour lifetime.",
+    "Kalillac does not store the raw visitor value in its database. For each UTC day, the server derives a "
+    "one-way digest from the visitor value and date. The stored digest changes each UTC day and does not "
+    "itself provide a stable identifier across days. The database also stores the reservation state and "
+    "timestamps needed to enforce or refund the allowance.",
+    "The service is designed to retain the current and previous UTC day’s records and lazily prune older "
+    "records during later anonymous traffic. Because pruning is lazy and best-effort, older records may "
+    "remain longer when there is no anonymous traffic or cleanup cannot complete.",
+    "The allowance does not use an IP address, browser fingerprinting or account identity. Kalillac does "
+    "not use this cookie for advertising, analytics or cross-site tracking.",
+    "Clearing or refusing this cookie causes the browser to receive a new visitor value and can reset its "
+    "per-browser allowance.",
+)
+
+
+def test_privacy_discloses_the_daily_allowance_cookie_accurately():
+    text = privacy_page_text()
+    app = APP_TSX.read_text(encoding="utf-8")
+    lower = text.lower()
+
+    for paragraph in DAILY_ALLOWANCE_COOKIE_SECTION:
+        assert paragraph in text, paragraph
+    for required in (
+        # Overview, Browser storage and What you can do -- all conditional.
+        "A daily allowance cookie, when the anonymous daily allowance is active. A random visitor value used "
+        "only to apply the free daily limit, as described in Daily allowance cookie.",
+        "When the anonymous daily allowance is active, Kalillac’s chat service also sets the daily allowance "
+        "cookie described below. That cookie holds a random visitor value and none of your conversation.",
+        "When the anonymous daily allowance is active, you can clear or block its cookie in your browser. "
+        "Doing so can reset your browser’s daily allowance.",
+    ):
+        assert required in text, required
+    # The existing statement about the chat interface's own storage is kept.
+    assert ("It does not write them to localStorage, sessionStorage, IndexedDB, cookies, or the page "
+            "address.") in text
+
+    # Retention rows for the cookie and the database records.
+    assert ("<tr><td>Daily allowance cookie, when the anonymous daily allowance is active</td>"
+            "<td>Your browser</td><td>48 hours after the last anonymous chat response that refreshed it, "
+            "or when you clear it</td></tr>") in app
+    assert ("<tr><td>Daily allowance records: a per-day digest, reservation state and timestamps</td>"
+            "<td>Kalillac’s application database</td><td>Designed to keep the current and previous UTC "
+            "day. Older records are pruned lazily during later anonymous traffic and may remain longer"
+            "</td></tr>") in app
+
+    # Reachable from the page's own navigation; the Privacy date moves, Terms does not.
+    toc = app[app.index("const privacyToc"):app.index("];", app.index("const privacyToc"))]
+    assert "['browser', 'Browser storage'], ['visitor-cookie', 'Daily allowance cookie']," in toc
+    assert app.count('<DocSection id="visitor-cookie" title="Daily allowance cookie">') == 1
+    assert app.count('href="#visitor-cookie"') == 2
+    assert 'title="Privacy" toc={privacyToc} updated="Last updated: October 18, 2026"' in app
+    assert 'title="Terms of Use" toc={termsToc} updated="Last updated: October 11, 2026"' in app
+
+    # Every mention of the cookie is conditional on the allowance being active.
+    assert text.count("__Host-kalillac_visitor") == 1
+    assert text.count("When the anonymous daily allowance is active") == 3
+    assert lower.count("when the anonymous daily allowance is active") == 5
+    # No overstated guarantee about linking or deletion.
+    for claim in ("cannot be linked", "can never be linked", "never be linked", "cannot be matched",
+                  "impossible to link", "unlinkable", "deleted immediately", "immediately deleted",
+                  "pruned immediately", "immediately pruned", "always deleted", "guaranteed"):
         assert claim not in lower, claim
 
 
