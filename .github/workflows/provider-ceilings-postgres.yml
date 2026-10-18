@@ -1,0 +1,86 @@
+# Focused verification of the persistent provider ceilings on real PostgreSQL.
+#
+# Runs only when started by hand. The runner and the PostgreSQL service
+# container are disposable: GitHub destroys both when the job ends. Every
+# credential below is a fixed, throwaway value for that container only; no
+# repository secret, provider key, production or staging setting is used.
+# The test makes no network request beyond the local service container and
+# starts no application server.
+name: provider-ceilings-postgres
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-ceilings-postgres-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-admin-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CEILING_PG_DISPOSABLE: github-actions-service-container
+      CEILING_PG_HOST: 127.0.0.1
+      CEILING_PG_PORT: "5432"
+      CEILING_PG_ADMIN_USER: postgres
+      CEILING_PG_ADMIN_PASSWORD: disposable-admin-only
+      CEILING_PG_MIGRATE_PASSWORD: disposable-migrate-only
+      CEILING_PG_APP_PASSWORD: disposable-app-only
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the repository's pinned dependencies
+        run: >-
+          python -m pip install
+          -r requirements-production-lock.txt
+          -r requirements-database.txt
+          -r requirements-dev.txt
+
+      - name: Run the focused PostgreSQL provider-ceiling verification
+        working-directory: candidate
+        run: >-
+          python -m pytest tests/test_provider_controls_postgres.py -v -rA -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/provider-ceilings-postgres.xml"
+
+      # A green run must mean every focused test executed: none skipped,
+      # failed or errored, and exactly the expected number collected.
+      - name: Require every focused test to have run
+        run: |
+          python - "$RUNNER_TEMP/provider-ceilings-postgres.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          if totals != {"tests": 24, "skipped": 0, "failures": 0, "errors": 0}:
+              sys.exit("the focused PostgreSQL verification did not run completely")
+          PY
