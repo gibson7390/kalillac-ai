@@ -470,17 +470,31 @@ class Workers:
     def __init__(self):
         self.context = multiprocessing.get_context("spawn")
         self.results = self.context.Queue()
+        self.barrier = None
         self.processes = []
 
     def start(self, specs):
         assert [s["index"] for s in specs] == list(range(len(specs)))
-        barrier = self.context.Barrier(len(specs))
+        # Owned by the group until close(): Process.start() drops its own
+        # reference to args (bpo-30775), and a collected Barrier unlinks its
+        # named semaphores before spawned children can unpickle them
+        # (FileNotFoundError in SemLock._rebuild).
+        self.barrier = self.context.Barrier(len(specs))
         for spec in specs:
-            process = self.context.Process(target=_worker, args=(spec, barrier, self.results), daemon=True)
+            process = self.context.Process(target=_worker, args=(spec, self.barrier, self.results), daemon=True)
             self.processes.append(process)
             process.start()
+        self.assert_sync_objects_owned()
+
+    def assert_sync_objects_owned(self):
+        """Structural guard: while any child may still unpickle or use them,
+        the Barrier and the result Queue are held by this group."""
+        assert self.barrier is not None and self.barrier.parties == len(self.processes), \
+            "the worker barrier is not owned for the group lifetime"
+        assert self.results is not None, "the worker result queue is not owned for the group lifetime"
 
     def next_message(self, deadline):
+        self.assert_sync_objects_owned()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             pytest.fail("missing worker messages: time bound exceeded")
@@ -552,6 +566,7 @@ class Workers:
             self.results.close()
         except Exception as error:
             failures.append(f"result queue: {type(error).__name__}: {error}")
+        self.barrier = None  # Released only after every child was handled.
         if failures:
             raise AssertionError("worker cleanup failed: " + "; ".join(failures))
 
