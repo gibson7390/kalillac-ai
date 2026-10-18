@@ -11,6 +11,7 @@ from .account_entitlement import AccountEntitlement
 from .account_session import AccountSession
 from .account_usage_daily import AccountUsageDaily
 from .account_usage_slot import AccountUsageSlot
+from .anonymous_usage import AnonymousUsageDay, AnonymousUsageSlot
 from .provider_usage_pool import ProviderUsagePool
 from .base import Base
 from .stripe_webhook_event import StripeWebhookEvent
@@ -22,6 +23,8 @@ __all__ = [
     "AccountSession",
     "AccountUsageDaily",
     "AccountUsageSlot",
+    "AnonymousUsageDay",
+    "AnonymousUsageSlot",
     "ProviderUsagePool",
     "Base",
     "StripeWebhookEvent",

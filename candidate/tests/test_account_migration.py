@@ -52,7 +52,8 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0006_provider_usage_pools"]
+    assert script.get_heads() == ["0007_anonymous_usage"]
+    assert script.get_revision("0007_anonymous_usage").down_revision == "0006_provider_usage_pools"
     assert script.get_revision("0006_provider_usage_pools").down_revision == "0005_account_usage_slots"
     assert script.get_revision("0005_account_usage_slots").down_revision == "0004_account_billing"
     assert script.get_revision("0004_account_billing").down_revision == (
@@ -106,6 +107,8 @@ ACCOUNT_TABLES = (
     "stripe_webhook_events",
     "account_usage_slots",
     "provider_usage_pools",
+    "anonymous_usage_days",
+    "anonymous_usage_slots",
 )
 
 
@@ -915,3 +918,205 @@ def test_billing_migration_staging_owner_role(monkeypatch):
     migration_roles.assume_migration_owner(connection)
 
     assert connection.statements == [f"SET ROLE {STAGING_OWNER}"]
+
+
+# --- 0007: anonymous daily allowance -----------------------------------------------------------
+
+ANONYMOUS_ONLY = "0006_provider_usage_pools:0007_anonymous_usage"
+ANONYMOUS_TABLES = {"anonymous_usage_days", "anonymous_usage_slots"}
+
+
+def test_anonymous_migration_steps_up_and_down_preserving_earlier_schema():
+    from sqlalchemy import text
+
+    engine = make_sqlite_engine()
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "0006_provider_usage_pools")
+        before = set(inspect(connection).get_table_names(schema="kalillac"))
+        assert not (ANONYMOUS_TABLES & before)
+        connection.execute(text(
+            "INSERT INTO kalillac.provider_usage_pools (provider, period_start, period_seconds, "
+            "total_limit, anonymous_limit, total_attempts, anonymous_attempts) "
+            "VALUES ('openai', 0, 60, 5, 2, 1, 1)"
+        ))
+
+        command.upgrade(_config(connection=connection), "0007_anonymous_usage")
+        inspector = inspect(connection)
+        assert set(inspector.get_table_names(schema="kalillac")) == before | ANONYMOUS_TABLES
+        assert {i["name"] for i in inspector.get_indexes("anonymous_usage_days", schema="kalillac")} == {
+            "ix_anonymous_usage_days_usage_date"
+        }
+        # No backfill: both tables start empty.
+        for table in sorted(ANONYMOUS_TABLES):
+            assert connection.execute(text(f"SELECT COUNT(*) FROM kalillac.{table}")).scalar() == 0
+
+        command.downgrade(_config(connection=connection), "0006_provider_usage_pools")
+        assert set(inspect(connection).get_table_names(schema="kalillac")) == before
+        # Earlier rows survive the downgrade unchanged.
+        assert connection.execute(text(
+            "SELECT total_attempts FROM kalillac.provider_usage_pools WHERE provider = 'openai'"
+        )).scalar() == 1
+
+    engine.dispose()
+
+
+def test_anonymous_constraints_reject_malformed_rows_on_sqlite():
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    engine = make_sqlite_engine()
+    digest = "a" * 64
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "head")
+
+    def rejected(statement):
+        with engine.connect() as connection:
+            with pytest.raises(IntegrityError):
+                with connection.begin():
+                    connection.execute(text(statement))
+
+    rejected("INSERT INTO kalillac.anonymous_usage_days VALUES ('short', '2026-10-18')")
+    rejected("INSERT INTO kalillac.anonymous_usage_days VALUES ('" + "a" * 65 + "', '2026-10-18')")
+    with engine.begin() as connection:
+        connection.execute(text(f"INSERT INTO kalillac.anonymous_usage_days VALUES ('{digest}', '2026-10-18')"))
+    slot = ("INSERT INTO kalillac.anonymous_usage_slots (visitor_digest, usage_date, slot, expires_at, "
+            "state, completed_date) VALUES ('{d}', '2026-10-18', {slot}, '2026-10-18 12:00:00', '{state}', {done})")
+    rejected(slot.format(d=digest, slot=-1, state="pending", done="NULL"))
+    rejected(slot.format(d=digest, slot=0, state="unknown", done="NULL"))
+    rejected(slot.format(d="b" * 64, slot=0, state="pending", done="NULL"))  # No visitor-day row.
+    with engine.begin() as connection:
+        connection.execute(text(slot.format(d=digest, slot=0, state="completed", done="'2026-10-18'")))
+        # Deleting a visitor-day removes its leases (retention pruning).
+        connection.execute(text(f"DELETE FROM kalillac.anonymous_usage_days WHERE visitor_digest = '{digest}'"))
+        assert connection.execute(text("SELECT COUNT(*) FROM kalillac.anonymous_usage_slots")).scalar() == 0
+
+    engine.dispose()
+
+
+ANONYMOUS_COMPLETION_CHECK = (
+    "(state IN ('pending', 'released') AND completed_date IS NULL) OR "
+    "(state IN ('ready', 'uncertain', 'completed') AND completed_date IS NOT NULL "
+    "AND completed_date = usage_date)"
+)
+ANONYMOUS_OPEN_STATES = ("pending", "released")
+ANONYMOUS_FINISHED_STATES = ("ready", "uncertain", "completed")
+
+
+def test_anonymous_completion_date_must_be_null_or_the_usage_date_on_sqlite():
+    # Each UTC day has its own digest, so a lease may never sit under one
+    # usage_date while recording completion on another.
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    engine = make_sqlite_engine()
+    digest = "c" * 64
+
+    with engine.begin() as connection:
+        command.upgrade(_config(connection=connection), "head")
+        connection.execute(text(f"INSERT INTO kalillac.anonymous_usage_days VALUES ('{digest}', '2026-10-18')"))
+
+    slot = ("INSERT INTO kalillac.anonymous_usage_slots (visitor_digest, usage_date, slot, expires_at, "
+            "state, completed_date) VALUES ('{d}', '2026-10-18', {slot}, '2026-10-18 12:00:00', '{state}', {done})")
+
+    def rejected(state, done):
+        with engine.connect() as connection:
+            with pytest.raises(IntegrityError):
+                with connection.begin():
+                    connection.execute(text(slot.format(d=digest, slot=0, state=state, done=done)))
+
+    for state in ANONYMOUS_FINISHED_STATES:
+        rejected(state, "NULL")
+        rejected(state, "'2026-10-17'")  # Previous day.
+        rejected(state, "'2026-10-19'")  # Next day.
+    for state in ANONYMOUS_OPEN_STATES:
+        for done in ("'2026-10-18'", "'2026-10-17'", "'2026-10-19'"):
+            rejected(state, done)
+
+    valid = [(state, "NULL") for state in ANONYMOUS_OPEN_STATES]
+    valid += [(state, "'2026-10-18'") for state in ANONYMOUS_FINISHED_STATES]
+    with engine.begin() as connection:
+        for number, (state, done) in enumerate(valid):
+            connection.execute(text(slot.format(d=digest, slot=number, state=state, done=done)))
+        rows = connection.execute(text(
+            "SELECT state, completed_date FROM kalillac.anonymous_usage_slots ORDER BY slot"
+        )).all()
+    assert [(row[0], row[1]) for row in rows] == [
+        ("pending", None), ("released", None),
+        ("ready", "2026-10-18"), ("uncertain", "2026-10-18"), ("completed", "2026-10-18"),
+    ]
+
+    engine.dispose()
+
+
+def test_anonymous_postgresql_ddl():
+    sql = _render_postgresql_upgrade(ANONYMOUS_ONLY)
+
+    assert "CREATE TABLE kalillac.anonymous_usage_days" in sql
+    assert "CREATE TABLE kalillac.anonymous_usage_slots" in sql
+    assert "visitor_digest VARCHAR(64) NOT NULL" in sql
+    assert "CONSTRAINT ck_anonymous_usage_days_digest_length CHECK (length(visitor_digest) = 64)" in sql
+    assert "CONSTRAINT pk_anonymous_usage_days PRIMARY KEY (visitor_digest, usage_date)" in sql
+    assert "CONSTRAINT pk_anonymous_usage_slots PRIMARY KEY (visitor_digest, usage_date, slot)" in sql
+    assert "CREATE INDEX ix_anonymous_usage_days_usage_date ON kalillac.anonymous_usage_days (usage_date)" in sql
+    assert "expires_at TIMESTAMP WITH TIME ZONE NOT NULL" in sql
+    assert re.search(
+        r"CONSTRAINT fk_anonymous_usage_slots_visitor_digest_anonymous_usage_days FOREIGN KEY\s*\(visitor_digest, "
+        r"usage_date\) REFERENCES kalillac\.anonymous_usage_days \(visitor_digest, usage_date\) ON DELETE CASCADE",
+        sql,
+    )
+    for name in ("slot_non_negative", "state_valid", "completion_date_valid"):
+        assert f"CONSTRAINT ck_anonymous_usage_slots_{name} CHECK" in sql
+    assert (
+        f"CONSTRAINT ck_anonymous_usage_slots_completion_date_valid CHECK ({ANONYMOUS_COMPLETION_CHECK})"
+        in sql
+    )
+    for forbidden in ("token", "ip_", "session", "agent", "user_id", "content", "message"):
+        assert forbidden not in sql.lower().split("create table kalillac.anonymous_usage_days", 1)[1], forbidden
+
+
+def test_anonymous_migration_grants_only_dml_on_its_tables():
+    sql = _render_postgresql_upgrade(ANONYMOUS_ONLY)
+
+    grants = re.findall(r"^GRANT .*$", sql, re.MULTILINE)
+    assert grants == [
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.anonymous_usage_days TO kalillac_app;",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.anonymous_usage_slots TO kalillac_app;",
+    ]
+    for forbidden in ("ALTER DEFAULT PRIVILEGES", "OWNER TO", "SUPERUSER", "CREATE ROLE", "ALTER ROLE",
+                      "REVOKE", "ON SCHEMA", "GRANT CREATE", "TRUNCATE", "REFERENCES, TRIGGER"):
+        assert forbidden not in sql.upper(), forbidden
+
+
+def test_anonymous_migration_staging_app_role(monkeypatch):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, STAGING_APP)
+
+    grants = re.findall(r"^GRANT .*$", _render_postgresql_upgrade(ANONYMOUS_ONLY), re.MULTILINE)
+
+    assert grants == [
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.{table} TO {STAGING_APP};"
+        for table in ("anonymous_usage_days", "anonymous_usage_slots")
+    ]
+
+
+def test_anonymous_migration_invalid_app_role_is_rejected(monkeypatch):
+    monkeypatch.setenv(migration_roles.APP_ROLE_ENV, "bad role")
+
+    with pytest.raises(migration_roles.InvalidRoleName):
+        _render_postgresql_upgrade(ANONYMOUS_ONLY)
+
+
+def test_anonymous_postgresql_downgrade_drops_everything_it_created():
+    config = _config()
+    config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline@localhost/kalillac")
+    buffer = io.StringIO()
+    config.output_buffer = buffer
+
+    command.downgrade(config, "0007_anonymous_usage:0006_provider_usage_pools", sql=True)
+    sql = buffer.getvalue()
+
+    slots, index, days = (sql.index("DROP TABLE kalillac.anonymous_usage_slots"),
+                          sql.index("DROP INDEX kalillac.ix_anonymous_usage_days_usage_date"),
+                          sql.index("DROP TABLE kalillac.anonymous_usage_days"))
+    assert slots < index < days

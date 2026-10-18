@@ -357,3 +357,104 @@ def test_unused_limit_settings_do_not_change_startup():
         == "200 404 True"
     )
     assert "abc-leak-1" not in with_leftovers.stdout + with_leftovers.stderr
+
+
+# --- anonymous daily allowance (configuration only) ---------------------------------------
+
+ANONYMOUS_VALID = {
+    usage_limits.ANONYMOUS_FLAG: "true",
+    usage_limits.ANONYMOUS_PREREQUISITE_FLAG: "true",
+    usage_limits.ANONYMOUS_DAILY_LIMIT: "10",
+}
+
+# Distinctive values so a leak into an error message is unambiguous.
+ANONYMOUS_REJECTED_VALUES = [
+    "11", "9", "0", "-10", "010", "10.0", "1e1", "+10", "1_0", "0x0a", "٣٣",
+    "10 per day", "ten", "anon-leak-77", "99999999999999999999999",
+]
+
+
+def _anonymous_error(monkeypatch, values):
+    _set(monkeypatch, values)
+
+    with pytest.raises(UsageLimitConfigError) as caught:
+        usage_limits.load_anonymous_daily_limit()
+
+    return str(caught.value)
+
+
+def test_anonymous_allowance_defaults_off():
+    assert usage_limits.anonymous_allowance_enabled() is False
+    assert usage_limits.load_anonymous_daily_limit() is None
+
+
+@pytest.mark.parametrize("value", ["", "false", "0", "no", "off", "enabled", "1x"])
+def test_non_true_flag_values_leave_anonymous_allowance_off(monkeypatch, value):
+    monkeypatch.setenv(usage_limits.ANONYMOUS_FLAG, value)
+    # Leftover or malformed settings are never read while the switch is off.
+    monkeypatch.setenv(usage_limits.ANONYMOUS_DAILY_LIMIT, "anon-leak-77")
+
+    assert usage_limits.load_anonymous_daily_limit() is None
+
+
+@pytest.mark.parametrize("flag_value", ["1", "true", "TRUE", "yes", "on", " On "])
+def test_enabled_with_database_and_exactly_ten(monkeypatch, flag_value):
+    _set(monkeypatch, {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_FLAG: flag_value})
+
+    assert usage_limits.load_anonymous_daily_limit() == 10
+    assert usage_limits.APPROVED_ANONYMOUS_DAILY_LIMIT == 10
+
+
+def test_surrounding_whitespace_is_trimmed_like_other_limits(monkeypatch):
+    _set(monkeypatch, {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_DAILY_LIMIT: " 10 "})
+
+    assert usage_limits.load_anonymous_daily_limit() == 10
+
+
+def test_anonymous_allowance_requires_database_not_accounts(monkeypatch):
+    values = {k: v for k, v in ANONYMOUS_VALID.items() if k != usage_limits.ANONYMOUS_PREREQUISITE_FLAG}
+
+    message = _anonymous_error(monkeypatch, values)
+    assert message == (
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED requires KALILLAC_DB_ENABLED."
+    )
+
+    monkeypatch.setenv(usage_limits.ANONYMOUS_PREREQUISITE_FLAG, "false")
+    assert _anonymous_error(monkeypatch, {}) == message
+
+    # Accounts, metering and account enforcement stay off: not required.
+    _set(monkeypatch, ANONYMOUS_VALID)
+    assert usage_limits.load_anonymous_daily_limit() == 10
+    assert load_usage_limits() is None
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_missing_anonymous_limit_is_named(monkeypatch, value):
+    message = _anonymous_error(monkeypatch, {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_DAILY_LIMIT: value})
+
+    assert message == (
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED is enabled but "
+        "KALILLAC_ANONYMOUS_DAILY_LIMIT is not set."
+    )
+
+
+def test_unset_anonymous_limit_is_named(monkeypatch):
+    values = {k: v for k, v in ANONYMOUS_VALID.items() if k != usage_limits.ANONYMOUS_DAILY_LIMIT}
+
+    assert "KALILLAC_ANONYMOUS_DAILY_LIMIT is not set" in _anonymous_error(monkeypatch, values)
+
+
+@pytest.mark.parametrize("value", ANONYMOUS_REJECTED_VALUES)
+def test_every_other_anonymous_limit_is_rejected_without_echo(monkeypatch, value):
+    message = _anonymous_error(monkeypatch, {**ANONYMOUS_VALID, usage_limits.ANONYMOUS_DAILY_LIMIT: value})
+
+    # A fixed message: the supplied value is never echoed.
+    assert message == "KALILLAC_ANONYMOUS_DAILY_LIMIT must be exactly 10."
+
+
+def test_anonymous_allowance_is_independent_of_account_enforcement(monkeypatch):
+    # Account enforcement settings do not enable or configure the anonymous
+    # allowance, and the anonymous settings do not enable account enforcement.
+    _set(monkeypatch, VALID)
+    assert usage_limits.load_anonymous_daily_limit() is None
+    assert load_usage_limits() == UsageLimits(free_daily_chats=20, paid_daily_chats=200)
