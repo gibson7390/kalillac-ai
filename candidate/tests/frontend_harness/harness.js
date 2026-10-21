@@ -276,6 +276,51 @@
     },
     clickDialogTitle: function () { $("limit-dialog-title").click(); return wait(30); },
     removeShowModal: function () { HTMLDialogElement.prototype.showModal = undefined; },
+    // Rendered fenced code: highlighting, token colors, markup, text and
+    // page safety, plus layout, as one snapshot.
+    inspectCode: function (label) {
+      var snap = snapshot(label);
+      snap.code = Array.prototype.map.call(
+        document.querySelectorAll("#thread .msg-assistant pre > code"), function (code) {
+          var match = /(?:^|\s)language-([\w#+.-]+)/.exec(code.className || "");
+          var colors = {}, tags = {}, attrs = {};
+          Array.prototype.forEach.call(code.querySelectorAll("span"), function (span) {
+            if (!(span.className in colors)) colors[span.className] = getComputedStyle(span).color;
+          });
+          Array.prototype.forEach.call(code.querySelectorAll("*"), function (el) {
+            tags[el.tagName.toLowerCase()] = true;
+            Array.prototype.forEach.call(el.attributes, function (a) { attrs[a.name] = true; });
+          });
+          var pre = code.parentNode.getBoundingClientRect();
+          return {
+            language: match ? match[1] : "",
+            highlighted: code.classList.contains("hljs"),
+            text: code.textContent,
+            spans: code.querySelectorAll("span").length,
+            colors: colors,
+            tags: Object.keys(tags),
+            attrs: Object.keys(attrs),
+            plainColor: getComputedStyle(code).color,
+            preRight: pre.right,
+            preScrolls: code.parentNode.scrollWidth > code.parentNode.clientWidth
+          };
+        });
+      snap.inlineCode = Array.prototype.map.call(
+        document.querySelectorAll("#thread .msg-assistant :not(pre) > code"), function (c) {
+          return { text: c.textContent, spans: c.querySelectorAll("span").length, highlighted: c.classList.contains("hljs") };
+        });
+      snap.prose = Array.prototype.map.call(
+        document.querySelectorAll("#thread .msg-assistant .md > p"), text);
+      snap.page = {
+        scripts: document.querySelectorAll("#thread script").length,
+        images: document.querySelectorAll("#thread img").length,
+        alerts: window.__alerts || [],
+        executed: !!window.__executed,
+        viewport: [window.innerWidth, window.innerHeight],
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth
+      };
+      steps.push(snap);
+    },
     measureDialog: function (label) {
       var snap = snapshot(label);
       var dialog = $("limit-dialog");
@@ -583,6 +628,87 @@
   SCENARIOS.daily_limit_wrong_status = function (a) {
     return failThenNewSend(
       { status: 503, json: { error: "anonymous_daily_limit_reached", detail: SECRET } }, a);
+  };
+
+  // Fenced code in several languages, an unknown label, an unlabeled fence,
+  // script-looking code, inline code and prose after the code.
+  var CODE_REPLY = [
+    "Here is the Python version.",
+    "",
+    "```python",
+    "def greet(name):",
+    "    # Say hello.",
+    "    return f\"Hello {name}\"",
+    "```",
+    "",
+    "```javascript",
+    "const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them",
+    "console.log(`total ${total}`);",
+    "```",
+    "",
+    "```sql",
+    "SELECT email, COUNT(*) AS n FROM users WHERE active = 1 GROUP BY email HAVING COUNT(*) > 1;",
+    "```",
+    "",
+    "```json",
+    "{\"name\": \"Ada\", \"admin\": true, \"age\": 36}",
+    "```",
+    "",
+    "```html",
+    "<script>alert(\"test\")</script>",
+    "<img src=x onerror=\"window.__executed=1\">",
+    "```",
+    "",
+    "```foobarlang",
+    "some text that is not code",
+    "```",
+    "",
+    "```",
+    "unlabeled block",
+    "  keeps   spacing",
+    "```",
+    "",
+    "Inline `code` stays plain. This explanation remains normal prose outside the code block."
+  ].join("\n");
+
+  async function highlightedCode(a) {
+    window.__alerts = [];
+    window.alert = function (m) { window.__alerts.push(String(m)); };
+    a.respondWith(ok(CODE_REPLY));
+    await a.send("show me code");
+    await a.wait(100);
+    a.inspectCode("rendered");
+    await a.clickAction("Copy");
+    await a.wait(300);
+  }
+
+  SCENARIOS.syntax_highlighting = highlightedCode;
+  SCENARIOS.syntax_highlighting_360x640 = highlightedCode;
+
+  // Every required language label and its common aliases, through the real
+  // rendering pipeline, plus an unknown label and an unlabeled fence.
+  var LANGUAGE_FENCES = [
+    ["python", "def f(x):\n    return x  # ok"], ["py", "import os"],
+    ["javascript", "const x = 1;"], ["js", "let y = 'a';"],
+    ["typescript", "let n: number = 1;"], ["ts", "interface A { b: string }"],
+    ["html", "<p class=\"a\">hi</p>"], ["css", "a { color: red; }"],
+    ["json", "{\"a\": 1}"], ["sql", "SELECT 1;"],
+    ["bash", "echo \"hi\""], ["sh", "if [ -f x ]; then echo y; fi"], ["shell", "$ ls -la"],
+    ["java", "public class A {}"], ["c", "int main(void) { return 0; }"],
+    ["cpp", "#include <vector>"], ["c++", "std::vector<int> v;"],
+    ["csharp", "public class A { }"], ["c#", "var x = \"s\";"],
+    ["markdown", "# Title"], ["md", "*emphasis*"],
+    ["foobarlang", "plain text"], ["", "unlabeled"]
+  ];
+
+  SCENARIOS.highlight_languages = async function (a) {
+    var reply = LANGUAGE_FENCES.map(function (pair) {
+      return "```" + pair[0] + "\n" + pair[1] + "\n```";
+    }).join("\n\n");
+    a.respondWith(ok(reply));
+    await a.send("show me every language");
+    await a.wait(100);
+    a.inspectCode("rendered");
   };
 
   SCENARIOS.daily_limit_layout_360x640 = async function (a) {

@@ -5,7 +5,9 @@
      or writes localStorage, sessionStorage, IndexedDB, cookies, or any
      persistent store.
    - Model output is parsed by the locally vendored marked, then sanitized by
-     the locally vendored DOMPurify BEFORE it touches innerHTML.
+     the locally vendored DOMPurify BEFORE it touches innerHTML. Fenced code
+     with a known language label is then syntax-highlighted from its text by
+     the locally vendored highlight.js (re-sanitized to plain token spans).
    - No analytics, no tracking, no remote fonts, no CDN.
    ========================================================================== */
 (function () {
@@ -484,6 +486,49 @@
 
     wrapTables(shell.body);
     hardenLinks(shell.body);
+    highlightCode(shell.body);
+  }
+
+  /* Syntax highlighting for fenced code, presentation only. It runs on the
+     already-sanitized DOM and starts from each block's text content, never
+     its markup, so model text is never parsed as HTML. highlight.js escapes
+     that text into token spans; the result is sanitized again to spans with
+     class attributes only, and kept only if its text equals the original
+     exactly. Unlabeled fences, unknown labels and inline code stay plain.
+     Copy uses the stored reply text, so token markup is never copied. */
+  var CODE_LANGUAGE_RE = /(?:^|\s)language-([\w#+.-]+)(?:\s|$)/;
+  var HIGHLIGHT_PURIFY_CONFIG = {
+    ALLOWED_TAGS: ["span"],
+    ALLOWED_ATTR: ["class"],
+    ALLOW_DATA_ATTR: false
+  };
+
+  function highlightCode(container) {
+    var hljs = window.hljs;
+    if (!container || !hljs || typeof hljs.highlight !== "function" ||
+        typeof hljs.getLanguage !== "function" || !window.DOMPurify) {
+      return;
+    }
+
+    var blocks = container.querySelectorAll("pre > code");
+    for (var i = 0; i < blocks.length; i++) {
+      var code = blocks[i];
+      var match = CODE_LANGUAGE_RE.exec(code.className || "");
+      if (!match || !hljs.getLanguage(match[1])) continue;
+
+      var source = code.textContent;
+      try {
+        var tokens = hljs.highlight(source, { language: match[1], ignoreIllegals: true }).value;
+        code.innerHTML = window.DOMPurify.sanitize(tokens, HIGHLIGHT_PURIFY_CONFIG);
+        if (code.textContent === source) {
+          code.classList.add("hljs");
+        } else {
+          code.textContent = source;
+        }
+      } catch (e) {
+        code.textContent = source;
+      }
+    }
   }
 
   function showNote(shell, message, kind) {
