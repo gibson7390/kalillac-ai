@@ -4064,6 +4064,19 @@ def is_self_knowledge_request(message):
     return matches_self_knowledge_composition(message, text)
 
 
+# "Write a function that returns the time" describes what a program does at
+# run time: code, even without a language or code noun. "A function for
+# y = x^2" or "a linear function that passes through (1, 2)" stays
+# mathematical.
+FUNCTION_RUNTIME_BEHAVIOR_RE = re.compile(
+    r"\s+(?:that|which|to)\s+"
+    r"(?:returns?|prints?|tells?|takes?|accepts?|checks?|validates?|converts?|parses?"
+    r"|sorts?|reverses?|reads?|writes?|fetches?|logs?|displays?|counts?|calculates?"
+    r"|computes?|generates?|formats?|filters?|removes?|merges?|splits?|encrypts?"
+    r"|decrypts?|downloads?|uploads?|sends?)\b"
+)
+
+
 def is_code_generation_intent(message):
     """Shared detector: is the user asking us to WRITE code, as opposed
     to reporting a problem? Used by both code and debug routing so the
@@ -4104,6 +4117,10 @@ def is_code_generation_intent(message):
         # Tables, examples, forms and mathematical functions are ordinary
         # language artifacts too. Let the model resolve ambiguous intent.
         if re.search(r"\b(example|table|form|function)\b$", matched_text) and not programming_context:
+            if matched_text.endswith("function") and FUNCTION_RUNTIME_BEHAVIOR_RE.match(
+                text, generation_match.end()
+            ):
+                return True
             continue
 
         return True

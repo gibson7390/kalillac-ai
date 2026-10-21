@@ -266,3 +266,83 @@ def test_commented_code_with_a_declined_explanation_keeps_comments_and_no_prose(
     # no prose explanation follows it.
     assert SINGLE_FENCE in sent and "Do not write any sentence after the code." in sent
     assert WITH_EXPLANATION not in sent
+
+
+# --- natural routing: real classification and prompt construction ---------------------------------
+
+
+def natural(message):
+    """The route the classifier itself selects, and the prompt built for it."""
+    route = app.classify_request(message, [])
+    return route, text(message, route=route)
+
+
+@pytest.mark.parametrize("message", [
+    "Write a function that tells me what time it is.",
+    "Write a function that returns the current time.",
+    "Create a function that calculates the total.",
+    "Write a function to sort a list of names.",
+    "Write a function that tells the user why validation failed.",
+    "Write a function that explains an error code to the user.",
+])
+def test_functions_described_by_runtime_behavior_naturally_take_the_code_route(message):
+    assert app.is_code_generation_intent(message)
+    route, sent = natural(message)
+    assert route == "code"
+    # The ordinary code-generation contract: the behavior "tells", "explains"
+    # or "describes" belongs to the program, not to the answer.
+    assert SINGLE_FENCE in sent and WITH_EXPLANATION not in sent and COMMENTED not in sent
+
+
+def test_case_a_reaches_the_provider_with_the_ordinary_code_contract(pipeline):
+    code = "```python\nfrom datetime import datetime\n\ndef tell_time():\n    return datetime.now().strftime('%H:%M')\n```"
+    pipeline["text"] = code
+    assert chat(pipeline, "Write a function that tells me what time it is.") == code
+    sent = " ".join(prompt(pipeline).split())
+    assert SINGLE_FENCE in sent and WITH_EXPLANATION not in sent
+
+
+@pytest.mark.parametrize("message", [
+    "Create a function for y = x^2 and explain its derivative.",
+    "Write a linear function that passes through (1, 2).",
+    "Write a function f(x) for the cost of x items.",
+])
+def test_mathematical_functions_keep_their_non_code_route(message):
+    assert not app.is_code_generation_intent(message)
+    route, sent = natural(message)
+    assert route not in {"code", "revision", "code_continuation"}
+    assert SINGLE_FENCE not in sent and WITH_EXPLANATION not in sent
+
+
+def test_explaining_an_existing_function_is_not_new_code():
+    route, sent = natural("Explain what this function does.")
+    assert route not in {"code", "revision", "code_continuation"}
+    for contract in (SINGLE_FENCE, WITH_EXPLANATION, COMMENTED):
+        assert contract not in sent
+
+
+def test_an_unspecified_function_with_an_explanation_is_never_collapsed_into_code_only():
+    # Without a described behavior or a language, "write a function" stays as
+    # ambiguous as before (mathematical or programming); no fence contract
+    # applies. Naming the language selects code followed by prose.
+    route, sent = natural("Write a function and explain how it works.")
+    assert route not in {"code", "revision", "code_continuation"}
+    assert SINGLE_FENCE not in sent and COMMENTED not in sent
+    route, sent = natural("Write a Python function and explain how it works.")
+    assert route == "code" and WITH_EXPLANATION in sent and SINGLE_FENCE not in sent
+
+
+@pytest.mark.parametrize("message,contract", [
+    ("Write a function that tells me what time it is.", SINGLE_FENCE),               # A
+    ("Write code that explains a JSON file.", SINGLE_FENCE),                         # B
+    ("Write code without comments, then explain it afterward.", WITH_EXPLANATION),   # C
+    ("Write code and explain it, but do not add comments.", WITH_EXPLANATION),       # D
+    ("Write code only. Do not explain it.", SINGLE_FENCE),                           # E
+    ("Write commented code, but do not add an explanation afterward.", SINGLE_FENCE),  # F
+], ids=["A", "B", "C", "D", "E", "F"])
+def test_audit_cases_through_real_classification_and_prompt_construction(message, contract):
+    route, sent = natural(message)
+    assert route == "code"
+    assert contract in sent
+    others = {SINGLE_FENCE, WITH_EXPLANATION, COMMENTED} - {contract}
+    assert not any(other in sent for other in others), (message, [o for o in others if o in sent])
