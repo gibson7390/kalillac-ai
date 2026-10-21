@@ -321,15 +321,48 @@ def test_explaining_an_existing_function_is_not_new_code():
         assert contract not in sent
 
 
-def test_an_unspecified_function_with_an_explanation_is_never_collapsed_into_code_only():
-    # Without a described behavior or a language, "write a function" stays as
-    # ambiguous as before (mathematical or programming); no fence contract
-    # applies. Naming the language selects code followed by prose.
-    route, sent = natural("Write a function and explain how it works.")
-    assert route not in {"code", "revision", "code_continuation"}
+@pytest.mark.parametrize("message", [
+    "Write a function and explain how it works.",
+    "Create a function, then walk me through it.",
+    "Build a function and describe how it works afterward.",
+    "Write a function and explain it, but do not add comments.",
+    "Write a Python function and explain how it works.",
+])
+def test_a_function_with_an_explanation_of_it_takes_the_code_route(message):
+    assert app.is_code_generation_intent(message)
+    route, sent = natural(message)
+    assert route == "code"
+    # Fenced implementation, then prose after the closing fence.
+    assert WITH_EXPLANATION in sent
     assert SINGLE_FENCE not in sent and COMMENTED not in sent
-    route, sent = natural("Write a Python function and explain how it works.")
-    assert route == "code" and WITH_EXPLANATION in sent and SINGLE_FENCE not in sent
+
+
+def test_a_function_with_an_explanation_reaches_the_provider_as_code_then_prose(pipeline):
+    pipeline["text"] = CODE_THEN_PROSE
+    assert chat(pipeline, "Write a function and explain how it works.") == CODE_THEN_PROSE
+    sent = " ".join(prompt(pipeline).split())
+    assert WITH_EXPLANATION in sent and SINGLE_FENCE not in sent
+
+
+@pytest.mark.parametrize("message", [
+    "Write a function for y = x^2 and explain it.",
+    "Write a linear function passing through (1, 2) and explain it.",
+    "Write a function f(x) and explain it.",
+])
+def test_a_mathematical_function_with_an_explanation_stays_non_code(message):
+    assert not app.is_code_generation_intent(message)
+    route, sent = natural(message)
+    assert route not in {"code", "revision", "code_continuation"}
+    for contract in (SINGLE_FENCE, WITH_EXPLANATION, COMMENTED):
+        assert contract not in sent
+
+
+def test_a_bare_or_declined_function_request_stays_ambiguous_without_programming_context():
+    for message in ("Write a function.", "Write a function only. Do not explain it."):
+        assert not app.is_code_generation_intent(message), message
+    # With programming context the declined explanation is code only.
+    route, sent = natural("Write a Python function only. Do not explain it.")
+    assert route == "code" and SINGLE_FENCE in sent and WITH_EXPLANATION not in sent
 
 
 @pytest.mark.parametrize("message,contract", [

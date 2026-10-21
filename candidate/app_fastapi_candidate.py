@@ -4075,6 +4075,15 @@ FUNCTION_RUNTIME_BEHAVIOR_RE = re.compile(
     r"|computes?|generates?|formats?|filters?|removes?|merges?|splits?|encrypts?"
     r"|decrypts?|downloads?|uploads?|sends?)\b"
 )
+# Markers of a mathematical function ("a function for y = x^2", "f(x)", "a
+# linear function passing through (1, 2)"): an explanation request does not
+# make such a request code.
+MATHEMATICAL_FUNCTION_RE = re.compile(
+    r"\b[a-z]\s*=|\b[a-z]\s*\(\s*[a-z]\s*\)|\^|\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)"
+    r"|\bpass(?:es|ing)\s+through\b"
+    r"|\b(?:linear|quadratic|cubic|polynomial|exponential|logarithmic|trigonometric|piecewise"
+    r"|inverse|rational|derivative|integral|slope|intercept|graph|domain|equation|formula)\b"
+)
 
 
 def is_code_generation_intent(message):
@@ -4119,6 +4128,15 @@ def is_code_generation_intent(message):
         if re.search(r"\b(example|table|form|function)\b$", matched_text) and not programming_context:
             if matched_text.endswith("function") and FUNCTION_RUNTIME_BEHAVIOR_RE.match(
                 text, generation_match.end()
+            ):
+                return True
+            # "Write a function and explain how it works" asks for an
+            # implementation and an explanation of it; a bare "write a
+            # function" or a mathematical one stays ambiguous.
+            if (
+                matched_text.endswith("function")
+                and not MATHEMATICAL_FUNCTION_RE.search(text)
+                and _asks_for_explanation(text[generation_match.end():], CODE_EXPLANATION_REQUEST_RE)
             ):
                 return True
             continue
