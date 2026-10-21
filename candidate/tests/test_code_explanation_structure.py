@@ -215,3 +215,54 @@ def test_a_resent_code_and_prose_reply_passes_through_unchanged(pipeline):
     assert reply == CODE_THEN_PROSE
     sent = " ".join(prompt(pipeline).split())
     assert RESEND in sent and WITH_EXPLANATION in sent
+
+
+# --- false positives and negations ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("message", [
+    "Write a function that tells me what time it is.",      # describes the program, not the answer
+    "Write code that explains a JSON file.",
+    "Write a function to describe the data in a CSV file.",
+    "Write a function that tells me how many days are left.",
+])
+def test_explanation_words_describing_the_program_are_not_explanation_requests(message):
+    assert app.explicit_code_explanation_rule(message) is None
+    assert not app.requests_code_with_explanation(message)
+    sent = text(message, route="code")                        # even forced onto the code route
+    assert SINGLE_FENCE in sent and WITH_EXPLANATION not in sent and COMMENTED not in sent
+
+
+@pytest.mark.parametrize("message", [
+    "Write code without comments, then explain it afterward.",
+    "Write code and explain it, but do not add comments.",
+    "Write a Python function that sorts a list. I want you to explain it.",
+    "Write a Python script and add an explanation.",
+])
+def test_code_then_prose_even_when_comments_are_declined(message):
+    assert not app.requests_commented_code(message)
+    assert app.requests_code_with_explanation(message)
+    sent = text(message, route="code")
+    assert WITH_EXPLANATION in sent and COMMENTED not in sent and SINGLE_FENCE not in sent
+
+
+@pytest.mark.parametrize("message", [
+    "Write code only. Do not explain it.",
+    "Write a Python function. Don't explain it.",
+    "Write a Python function, but please do not add an explanation.",
+])
+def test_a_declined_explanation_keeps_the_code_only_contract(message):
+    assert app.explicit_code_explanation_rule(message) is None
+    sent = text(message, route="code")
+    assert SINGLE_FENCE in sent and WITH_EXPLANATION not in sent and COMMENTED not in sent
+
+
+def test_commented_code_with_a_declined_explanation_keeps_comments_and_no_prose():
+    message = "Write commented code, but do not add an explanation afterward."
+    assert app.requests_commented_code(message)
+    assert app.explicit_code_explanation_rule(message) is None
+    sent = text(message, route="code")
+    # The single-fence contract: the requested comments stay in the code and
+    # no prose explanation follows it.
+    assert SINGLE_FENCE in sent and "Do not write any sentence after the code." in sent
+    assert WITH_EXPLANATION not in sent

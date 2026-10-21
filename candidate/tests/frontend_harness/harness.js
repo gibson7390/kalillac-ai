@@ -685,6 +685,32 @@
   SCENARIOS.syntax_highlighting = highlightedCode;
   SCENARIOS.syntax_highlighting_360x640 = highlightedCode;
 
+  // Every required language label and its common aliases, through the real
+  // rendering pipeline, plus an unknown label and an unlabeled fence.
+  var LANGUAGE_FENCES = [
+    ["python", "def f(x):\n    return x  # ok"], ["py", "import os"],
+    ["javascript", "const x = 1;"], ["js", "let y = 'a';"],
+    ["typescript", "let n: number = 1;"], ["ts", "interface A { b: string }"],
+    ["html", "<p class=\"a\">hi</p>"], ["css", "a { color: red; }"],
+    ["json", "{\"a\": 1}"], ["sql", "SELECT 1;"],
+    ["bash", "echo \"hi\""], ["sh", "if [ -f x ]; then echo y; fi"], ["shell", "$ ls -la"],
+    ["java", "public class A {}"], ["c", "int main(void) { return 0; }"],
+    ["cpp", "#include <vector>"], ["c++", "std::vector<int> v;"],
+    ["csharp", "public class A { }"], ["c#", "var x = \"s\";"],
+    ["markdown", "# Title"], ["md", "*emphasis*"],
+    ["foobarlang", "plain text"], ["", "unlabeled"]
+  ];
+
+  SCENARIOS.highlight_languages = async function (a) {
+    var reply = LANGUAGE_FENCES.map(function (pair) {
+      return "```" + pair[0] + "\n" + pair[1] + "\n```";
+    }).join("\n\n");
+    a.respondWith(ok(reply));
+    await a.send("show me every language");
+    await a.wait(100);
+    a.inspectCode("rendered");
+  };
+
   SCENARIOS.daily_limit_layout_360x640 = async function (a) {
     a.respondWith(DAILY_LIMIT);
     await a.send("first question");

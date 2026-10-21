@@ -7377,11 +7377,44 @@ def requests_explanation_with_code_change(message):
 
 # A request for new code that also asks for an explanation of it: "write it
 # and explain how it works", "walk me through it", "then explain the bug",
-# "explain why it fails", "with an explanation".
+# "tell me how it works", "with an explanation". Only the imperative forms
+# count: "code that explains a JSON file" describes what the program does.
 CODE_EXPLANATION_REQUEST_RE = re.compile(
-    r"\b(?:explain(?:s|ed|ing)?|explanations?|describe|walk\s+(?:me\s+|us\s+)?through"
-    r"|tell\s+(?:me|us)\s+(?:why|how|what)|break\s+(?:it|this|that)\s+down)\b"
+    r"\b(?:explain|describe|explanations?|walk\s+(?:me\s+|us\s+)?through"
+    r"|break\s+(?:it|this|that)\s+down"
+    r"|tell\s+(?:me|us)\s+(?:how|why)\s+(?:it|this|that|the\s+code))\b"
 )
+# Any explanation wording, for an explicit request to explain in comments
+# ("comments explaining the bug", "comment the code to explain it").
+CODE_EXPLANATION_WORD_RE = re.compile(
+    r"\b(?:explain\w*|describ\w*|walk\s+(?:me\s+|us\s+)?through)\b"
+)
+# The wording describes the program's behavior, not a request to explain
+# the answer: "code that explains a file", "a function to describe the data"
+# (but "I want you to explain it" is a request).
+EXPLANATION_AS_BEHAVIOR_RE = re.compile(
+    r"(?:\b(?:that|which|who|can|will|should|would)|(?<!\byou )(?<!\bme )(?<!\bus )\bto)"
+    r"\s+(?:\w+ly\s+)?$"
+)
+# A negated request: "do not explain it", "no explanation", "without an
+# explanation", "don't add an explanation".
+EXPLANATION_NEGATED_RE = re.compile(
+    r"(?:\bnot|n't|\bno|\bnever|\bwithout)\s+(?:\w+\s+){0,2}$"
+)
+
+
+def _asks_for_explanation(text, pattern, behavior_clauses=True):
+    """A non-negated match of `pattern`. With behavior_clauses, a match that
+    only describes what the program does ("code that explains a file") does
+    not count either."""
+    for match in pattern.finditer(text):
+        before = text[:match.start()]
+        if EXPLANATION_NEGATED_RE.search(before):
+            continue
+        if behavior_clauses and EXPLANATION_AS_BEHAVIOR_RE.search(before):
+            continue
+        return True
+    return False
 # Explanation the user explicitly wants inside the code, as comments.
 CODE_COMMENTS_REQUEST_RE = re.compile(
     r"\b(?:inline|in-line|in-code|code)\s+comments?\b"
@@ -7403,7 +7436,7 @@ def requests_code_with_explanation(message):
     explicit request to explain inside the code."""
     text = normalize_for_router(message)
     return bool(
-        CODE_EXPLANATION_REQUEST_RE.search(text)
+        _asks_for_explanation(text, CODE_EXPLANATION_REQUEST_RE)
         and not CODE_ONLY_REQUEST_RE.search(text)
         and not CODE_COMMENTS_REQUEST_RE.search(text)
     )
@@ -7414,11 +7447,17 @@ def explicit_code_explanation_rule(message):
     None when the request does not ask for an explanation or asks for code
     only (the caller's contract then applies unchanged)."""
     text = normalize_for_router(message)
-    if CODE_ONLY_REQUEST_RE.search(text) or not CODE_EXPLANATION_REQUEST_RE.search(text):
+    if CODE_ONLY_REQUEST_RE.search(text):
         return None
     if CODE_COMMENTS_REQUEST_RE.search(text):
-        return COMMENTED_CODE_OUTPUT_RULE
-    return CODE_WITH_EXPLANATION_OUTPUT_RULE
+        # With comments requested, "comment the code to explain the bug"
+        # states the comments' purpose.
+        if _asks_for_explanation(text, CODE_EXPLANATION_WORD_RE, behavior_clauses=False):
+            return COMMENTED_CODE_OUTPUT_RULE
+        return None
+    if _asks_for_explanation(text, CODE_EXPLANATION_REQUEST_RE):
+        return CODE_WITH_EXPLANATION_OUTPUT_RULE
+    return None
 
 
 SUPPLIED_CODE_EDIT_RULE = """\

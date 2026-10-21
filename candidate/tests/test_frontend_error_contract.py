@@ -125,6 +125,14 @@ DAILY_LIMIT_SCENARIOS = (
 
 # Syntax highlighting of rendered fenced code (frontend presentation only).
 CODE_SCENARIOS = ("syntax_highlighting", "syntax_highlighting_360x640")
+# Required languages (by the label a model would write) and common aliases.
+REQUIRED_LANGUAGE_LABELS = (
+    "python", "py", "javascript", "js", "typescript", "ts", "html", "css", "json", "sql",
+    "bash", "sh", "shell", "java", "c", "cpp", "c++", "csharp", "c#", "markdown", "md",
+)
+# The vendored bundle's grammar for each required language.
+REQUIRED_GRAMMARS = ("python", "javascript", "typescript", "xml", "css", "json", "sql", "bash",
+                     "shell", "java", "c", "cpp", "csharp", "markdown")
 CODE_SOURCES = {
     "python": 'def greet(name):\n    # Say hello.\n    return f"Hello {name}"\n',
     "javascript": ("const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them\n"
@@ -169,6 +177,7 @@ SCENARIOS = (
     ]
     + list(DAILY_LIMIT_SCENARIOS)
     + list(CODE_SCENARIOS)
+    + ["highlight_languages"]
 )
 
 
@@ -991,6 +1000,32 @@ def test_script_looking_code_is_displayed_and_never_executed(browser_results, na
 @pytest.mark.parametrize("name", CODE_SCENARIOS)
 def test_copy_returns_the_original_reply_text(browser_results, name):
     assert scenario(browser_results, name)["copied"] == [CODE_REPLY]
+
+
+def test_every_required_language_label_and_alias_is_highlighted(browser_results):
+    blocks = rendered_code(browser_results, "highlight_languages")["code"]
+    assert [b["language"] for b in blocks] == list(REQUIRED_LANGUAGE_LABELS) + ["foobarlang", ""]
+    by_label = {b["language"]: b for b in blocks}
+    for label in REQUIRED_LANGUAGE_LABELS:
+        block = by_label[label]
+        assert block["highlighted"] is True and block["spans"] > 0, label
+        assert set(block["tags"]) == {"span"} and set(block["attrs"]) == {"class"}, label
+    # Unknown and unlabeled fences still fall back to plain, readable code.
+    for label, text in (("foobarlang", "plain text\n"), ("", "unlabeled\n")):
+        assert by_label[label]["highlighted"] is False and by_label[label]["spans"] == 0
+        assert by_label[label]["text"] == text
+
+
+def test_the_vendored_bundle_registers_every_required_grammar():
+    """Deterministic, browser-free: the bundle defines each grammar it
+    registers as grmr_<name> and registers every one under its name."""
+    source = HIGHLIGHT_JS.read_text(encoding="utf-8")
+    grammars = set(re.findall(r"\bgrmr_(\w+)\s*:", source))
+    assert set(REQUIRED_GRAMMARS) <= grammars, set(REQUIRED_GRAMMARS) - grammars
+    assert 'Object.keys(Pe)){\nconst n=e.replace("grmr_","").replace("_","-");Ke.registerLanguage(n,Pe[e])}' in source
+    # The aliases the browser test relies on are declared by those grammars.
+    for alias in ('"py"', '"js"', '"ts"', '"html"', '"sh"', '"c++"', '"c#"', '"md"'):
+        assert alias in source, alias
 
 
 def test_highlighted_code_fits_a_narrow_mobile_viewport(browser_results):
