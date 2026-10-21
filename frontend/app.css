@@ -781,6 +781,45 @@ body {
   line-height: inherit;
 }
 
+/* Syntax highlighting (highlight.js token classes) for fenced code with a
+   known language. Restrained, Kalillac-blue led, every token at least 4.5:1
+   against the code background (--panel-2); plain code stays --ink. Colors
+   only: no font, size, spacing or layout change, so whitespace, wrapping and
+   horizontal scrolling are exactly those of unhighlighted code. */
+.md pre code.hljs { color: var(--ink); }
+.md .hljs-keyword,
+.md .hljs-selector-tag,
+.md .hljs-name,
+.md .hljs-doctag { color: #2a41c8; }
+.md .hljs-built_in,
+.md .hljs-type,
+.md .hljs-selector-class,
+.md .hljs-selector-id { color: #0b6178; }
+.md .hljs-title.function_,
+.md .hljs-title.class_,
+.md .hljs-title,
+.md .hljs-section { color: #6a36b0; }
+.md .hljs-string,
+.md .hljs-regexp,
+.md .hljs-symbol,
+.md .hljs-char.escape_,
+.md .hljs-template-tag { color: #15693a; }
+.md .hljs-number,
+.md .hljs-literal,
+.md .hljs-variable.constant_ { color: #9a4204; }
+.md .hljs-attr,
+.md .hljs-attribute,
+.md .hljs-property,
+.md .hljs-params { color: #7a4d06; }
+.md .hljs-meta,
+.md .hljs-meta .hljs-keyword { color: #4b5876; }
+.md .hljs-comment,
+.md .hljs-quote { color: #5c677e; font-style: italic; }
+.md .hljs-addition { color: #15693a; background: #e3f4e8; }
+.md .hljs-deletion { color: #b42318; background: #fdeceb; }
+.md .hljs-emphasis { font-style: italic; }
+.md .hljs-strong { font-weight: 600; }
+
 /* Quotes are intentionally understated rather than callout-card styled. */
 .msg-assistant .md blockquote {
   margin: 12px 0 14px;
@@ -906,6 +945,13 @@ body {
 /* A capped phone workspace may need to scroll its task area. Auto margins
    center a fitting intro without clipping the beginning of an overflowing one. */
 .is-embedded .conversation.is-empty .thread { justify-content: flex-start; }
+/* The homepage's starting state: a vertical swipe that begins on the example
+   cards scrolls the homepage. The conversation scroller's
+   overscroll-behavior: contain otherwise stops that touch scroll at the
+   iframe on Android Chrome, even when the cards fit and nothing inside can
+   scroll. Only the embedded empty state chains; an active conversation and
+   the standalone /app/ keep their containment. */
+.is-embedded .conversation.is-empty { overscroll-behavior-y: auto; }
 .is-embedded .empty { flex-shrink: 0; margin-block: auto; }
 
 /* ---------------- Daily-limit dialog ----------------

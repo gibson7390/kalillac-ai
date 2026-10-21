@@ -7375,6 +7375,52 @@ def requests_explanation_with_code_change(message):
     )
 
 
+# A request for new code that also asks for an explanation of it: "write it
+# and explain how it works", "walk me through it", "then explain the bug",
+# "explain why it fails", "with an explanation".
+CODE_EXPLANATION_REQUEST_RE = re.compile(
+    r"\b(?:explain(?:s|ed|ing)?|explanations?|describe|walk\s+(?:me\s+|us\s+)?through"
+    r"|tell\s+(?:me|us)\s+(?:why|how|what)|break\s+(?:it|this|that)\s+down)\b"
+)
+# Explanation the user explicitly wants inside the code, as comments.
+CODE_COMMENTS_REQUEST_RE = re.compile(
+    r"\b(?:inline|in-line|in-code|code)\s+comments?\b"
+    r"|\bwith\s+(?:(?:explanatory|detailed|helpful|clear|thorough|good)\s+)?comments?\b"
+    r"|\bcomments?\s+(?:explaining|describing|that\s+explains?|to\s+explain)\b"
+    r"|\bcomment\s+(?:the|this|that|your|it|each|every)\b"
+    r"|\bcommented\b|\bannotat(?:e|ed|ions?)\b"
+    r"|\bexplain(?:ed|ing)?\s+(?:it\s+|this\s+|that\s+)?(?:inline|in\s+(?:the\s+)?comments?)\b"
+)
+
+
+def requests_commented_code(message):
+    """The user explicitly asked for explanation as comments inside the code."""
+    return bool(CODE_COMMENTS_REQUEST_RE.search(normalize_for_router(message)))
+
+
+def requests_code_with_explanation(message):
+    """Code plus a separate prose explanation: no code-only wording and no
+    explicit request to explain inside the code."""
+    text = normalize_for_router(message)
+    return bool(
+        CODE_EXPLANATION_REQUEST_RE.search(text)
+        and not CODE_ONLY_REQUEST_RE.search(text)
+        and not CODE_COMMENTS_REQUEST_RE.search(text)
+    )
+
+
+def explicit_code_explanation_rule(message):
+    """The output contract an explicit request to explain code selects, or
+    None when the request does not ask for an explanation or asks for code
+    only (the caller's contract then applies unchanged)."""
+    text = normalize_for_router(message)
+    if CODE_ONLY_REQUEST_RE.search(text) or not CODE_EXPLANATION_REQUEST_RE.search(text):
+        return None
+    if CODE_COMMENTS_REQUEST_RE.search(text):
+        return COMMENTED_CODE_OUTPUT_RULE
+    return CODE_WITH_EXPLANATION_OUTPUT_RULE
+
+
 SUPPLIED_CODE_EDIT_RULE = """\
 SUPPLIED CODE TO EDIT:
 - The code in the user's message is the source to modify. It is already
@@ -7400,6 +7446,33 @@ The user asked for an explanation and a change to the code.
 - Keep the explanation outside the fence. Do not turn it into code comments.
 - Preserve the original code type unless the user explicitly asks to change it.
 - Do not add follow-up questions."""
+
+CODE_WITH_EXPLANATION_OUTPUT_RULE = """\
+OUTPUT FOR CODE AND AN EXPLANATION:
+The user asked for code and an explanation of it.
+- Return the implementation in one fenced code block with the correct
+  language.
+- After the closing fence, give the requested explanation in ordinary prose.
+- Keep that explanation outside the code block. Do not put the explanation,
+  walkthrough, or description of a bug or flaw inside the code as comments;
+  use comments only where the code itself would ordinarily need them.
+- If the user asked for intentionally buggy or flawed code, keep the
+  requested flaw in the code and do not silently fix it. Describe it in the
+  prose after the fence.
+This contract governs supplied code; a limitation, recovery, or capability
+explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above."""
+
+COMMENTED_CODE_OUTPUT_RULE = """\
+OUTPUT FOR EXPLANATORY COMMENTS:
+The user explicitly asked for the explanation as comments inside the code.
+- Return the complete code in one fenced code block with the correct
+  language.
+- Put the requested explanation in comments inside the code.
+- If the user asked for intentionally buggy or flawed code, keep the
+  requested flaw in the code and do not silently fix it.
+- Do not repeat the explanation as prose before or after the code.
+This contract governs supplied code; a limitation, recovery, or capability
+explanation follows the EXPLANATORY-ONLY OUTPUT PRECEDENCE above."""
 
 
 # Code evidence is syntax, not vocabulary: prose such as "A function is a
@@ -9931,7 +10004,16 @@ Hard rules:
                 is_code_modification_followup(message, history)
                 and requests_explanation_with_code_change(message)
             ):
-                revision_output_rules = EXPLAIN_AND_EDIT_OUTPUT_RULE
+                # Explanation the user asked to have inside the code stays in
+                # comments; otherwise it is prose outside the fence.
+                if requests_commented_code(message):
+                    revision_output_rules = COMMENTED_CODE_OUTPUT_RULE
+                else:
+                    revision_output_rules = EXPLAIN_AND_EDIT_OUTPUT_RULE
+            # "Show the code and explain why it fails": the code again, with
+            # the explanation as prose after it (or in comments when asked).
+            elif explicit_code_explanation_rule(message):
+                revision_output_rules = explicit_code_explanation_rule(message)
 
             prompt = f"""
 You are Kalillac AI.
@@ -10205,13 +10287,25 @@ Do not explain what you built."""
             if requests_code_only_output(message):
                 supplied_output_rules = code_output_rules
             elif requests_explanation_with_code_change(message):
-                supplied_output_rules = EXPLAIN_AND_EDIT_OUTPUT_RULE
+                supplied_output_rules = (
+                    COMMENTED_CODE_OUTPUT_RULE
+                    if requests_commented_code(message)
+                    else EXPLAIN_AND_EDIT_OUTPUT_RULE
+                )
             else:
                 supplied_output_rules = SUPPLIED_CODE_OUTPUT_RULE
 
             code_output_rules = (
                 SUPPLIED_CODE_EDIT_RULE + "\n\n" + supplied_output_rules
             )
+        # New code: explicit intent decides the structure. Code-only wording
+        # keeps the single-fence contract; an explicit request for explanatory
+        # comments keeps the explanation in the code; any other request to
+        # explain the code gets the code first and the explanation as prose
+        # after the fence, instead of being collapsed into the code-only
+        # contract (which left comments as the only place for it).
+        elif explicit_code_explanation_rule(message):
+            code_output_rules = explicit_code_explanation_rule(message)
 
         prompt = f"""
 You are Kalillac AI.

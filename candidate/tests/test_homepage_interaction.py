@@ -1644,7 +1644,11 @@ def test_app_frontend_and_site_dependencies_are_untouched():
     frontend = git_diff_names("frontend")
     if frontend is None:
         pytest.skip(f"git or the slice base commit {SLICE_BASE} is unavailable")
-    assert set(frontend) <= {"frontend/app.css", "frontend/app.js", "frontend/index.html"}, frontend
+    # Plus exactly the two vendored highlight.js files for code highlighting
+    # (pinned by hash in test_frontend_error_contract.py).
+    assert set(frontend) <= {"frontend/app.css", "frontend/app.js", "frontend/index.html",
+                             "frontend/vendor/highlight/highlight.min.js",
+                             "frontend/vendor/highlight/LICENSE"}, frontend
 
     names = git_diff_names(
         "site/package.json", "site/package-lock.json", "site/vite.config.ts", "site/index.html",
@@ -1656,6 +1660,112 @@ def test_app_frontend_and_site_dependencies_are_untouched():
 
     package = json.loads((SITE / "package.json").read_text(encoding="utf-8"))
     assert set(package["dependencies"]) == {"lucide-react", "react", "react-dom", "wouter"}
+
+
+# --- Android: a swipe that starts on the example cards scrolls the homepage -----------------------
+
+# Where a vertical swipe may begin on a card: its background, its text, its
+# icon and its arrow.
+CARD_SWIPE_STARTS = {
+    "card background": ".hint",
+    "card text": ".hint .hint-title",
+    "card icon": ".hint .hint-icon",
+    "card arrow": ".hint .hint-arrow",
+}
+
+
+def touch_swipe(page: Page, x: float, y: float, distance: float = 260, steps: int = 20):
+    """A real touch sequence (press, move up in small steps, release) under
+    Chromium touch emulation -- the input path Android Chrome uses."""
+    dt, session = page.dt, page.session
+    dt.call("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]}, session)
+    for step_number in range(1, steps + 1):
+        dt.call("Input.dispatchTouchEvent", {"type": "touchMove",
+                "touchPoints": [{"x": x, "y": y - distance * step_number / steps}]}, session)
+        time.sleep(0.016)
+    dt.call("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []}, session)
+    time.sleep(0.6)
+
+
+@pytest.mark.parametrize("size", [VIEWPORTS["mobile"], (360, 640)], ids=["390x844", "360x640"])
+def test_touch_swipe_on_the_example_cards_scrolls_the_homepage(size, tmp_path_factory):
+    """Android Chrome: a vertical swipe that begins anywhere on a card scrolls
+    the document, without a nested scroll, and a tap still runs the card."""
+    browser = require_browser_and_build()
+    profile = tmp_path_factory.mktemp(f"edge-android-swipe-{size[0]}x{size[1]}")
+    site = Site()
+    with site.http:
+        with browser_page(browser, profile, size, True) as (dt, session):
+            page = Page(dt, session)
+            dt.call("Page.navigate", {"url": site.http.origin + "/"}, session)
+            deadline = time.monotonic() + 10
+            while not page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+                return !!f?.contentDocument?.querySelector('.hint');"""):
+                assert time.monotonic() < deadline, "the example cards did not load"
+                time.sleep(0.05)
+            time.sleep(0.4)
+
+            def place_cards():
+                # The first card a third of the way down the screen, with page
+                # left to scroll below it.
+                page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+                  const card = f.contentDocument.querySelector('.hint').getBoundingClientRect();
+                  window.scrollTo(0, window.scrollY + f.getBoundingClientRect().top + card.top - innerHeight / 3);
+                  return true;""")
+                time.sleep(0.3)
+
+            def point(selector: str):
+                return page.eval(f"""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+                  const el = f.contentDocument.querySelector({json.dumps(selector)});
+                  const a = f.getBoundingClientRect(), b = el.getBoundingClientRect();
+                  return [a.left + b.left + b.width / 2, a.top + b.top + b.height / 2];""")
+
+            def positions():
+                return page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+                  return { page: window.scrollY,
+                           inner: f.contentDocument.getElementById('conversation').scrollTop,
+                           max: document.documentElement.scrollHeight - innerHeight };""")
+
+            for name, selector in CARD_SWIPE_STARTS.items():
+                place_cards()
+                before = positions()
+                assert before["max"] - before["page"] > 200, (name, before)
+                touch_swipe(page, *point(selector))
+                after = positions()
+                assert after["page"] - before["page"] > 100, (name, before, after)
+                assert after["inner"] == before["inner"], (name, before, after)   # no nested scrolling
+
+            # Control: the same swipe outside the embedded chat scrolls the page too.
+            place_cards()
+            before = positions()
+            touch_swipe(page, size[0] / 2, 20)
+            assert positions()["page"] - before["page"] > 100
+
+            # A tap on the same card still fills the composer and sends nothing.
+            place_cards()
+            x, y = point(".hint")
+            prompt = page.eval("""return document.querySelector('[data-testid="embedded-chat"] iframe')
+              .contentDocument.querySelector('.hint').dataset.prompt;""")
+            dt.call("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]}, session)
+            dt.call("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []}, session)
+            time.sleep(0.5)
+            tapped = page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+              return { composer: f.contentDocument.getElementById('composer-input').value,
+                       requests: (f.contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length };""")
+            assert tapped == {"composer": prompt, "requests": 0}, tapped
+
+
+def test_only_the_embedded_starting_state_lets_touch_scroll_reach_the_homepage():
+    css = (REPO / "frontend" / "app.css").read_text(encoding="utf-8")
+    # The chat scroller keeps its containment everywhere else.
+    conversation = css[css.index(".conversation {"):]
+    assert "overscroll-behavior: contain;" in conversation[: conversation.index("}")]
+    assert css.count(".is-embedded .conversation.is-empty { overscroll-behavior-y: auto; }") == 1
+    declarations = re.findall(r"overscroll-behavior[-\w]*\s*:\s*[\w-]+;", css)
+    assert declarations == ["overscroll-behavior: contain;", "overscroll-behavior-y: auto;"], declarations
+    # No touch-action, nested scroller or script gesture handling was added.
+    for forbidden in ("touch-action", "touchstart", "touchmove", "pointermove", "setPointerCapture"):
+        assert forbidden not in css + (REPO / "frontend" / "app.js").read_text(encoding="utf-8"), forbidden
 
 
 def test_tools_and_privacy_promise_match_pre_subscription_scope(structure):

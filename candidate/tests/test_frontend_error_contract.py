@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261018-daily-limit1"
-CSS_CACHE_KEY = "20261018-daily-limit1"
+CACHE_KEY = "20261020-syntax-highlight1"
+CSS_CACHE_KEY = "20261020-syntax-highlight1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -123,6 +123,40 @@ DAILY_LIMIT_SCENARIOS = (
     "daily_limit_without_show_modal", "daily_limit_layout_360x640",
 )
 
+# Syntax highlighting of rendered fenced code (frontend presentation only).
+CODE_SCENARIOS = ("syntax_highlighting", "syntax_highlighting_360x640")
+CODE_SOURCES = {
+    "python": 'def greet(name):\n    # Say hello.\n    return f"Hello {name}"\n',
+    "javascript": ("const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them\n"
+                   "console.log(`total ${total}`);\n"),
+    "sql": "SELECT email, COUNT(*) AS n FROM users WHERE active = 1 GROUP BY email HAVING COUNT(*) > 1;\n",
+    "json": '{"name": "Ada", "admin": true, "age": 36}\n',
+    "html": '<script>alert("test")</script>\n<img src=x onerror="window.__executed=1">\n',
+    "foobarlang": "some text that is not code\n",
+    "": "unlabeled block\n  keeps   spacing\n",
+}
+CODE_REPLY = "\n".join([
+    "Here is the Python version.", "",
+    "```python", "def greet(name):", "    # Say hello.", '    return f"Hello {name}"', "```", "",
+    "```javascript", "const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them",
+    "console.log(`total ${total}`);", "```", "",
+    "```sql", "SELECT email, COUNT(*) AS n FROM users WHERE active = 1 GROUP BY email HAVING COUNT(*) > 1;", "```", "",
+    "```json", '{"name": "Ada", "admin": true, "age": 36}', "```", "",
+    "```html", '<script>alert("test")</script>', '<img src=x onerror="window.__executed=1">', "```", "",
+    "```foobarlang", "some text that is not code", "```", "",
+    "```", "unlabeled block", "  keeps   spacing", "```", "",
+    "Inline `code` stays plain. This explanation remains normal prose outside the code block.",
+])
+HIGHLIGHTED_LANGUAGES = ("python", "javascript", "sql", "json", "html")
+CODE_BACKGROUND = "#f1f4fa"   # --panel-2, the fenced-code background
+HIGHLIGHT_JS = FRONTEND / "vendor" / "highlight" / "highlight.min.js"
+HIGHLIGHT_LICENSE = FRONTEND / "vendor" / "highlight" / "LICENSE"
+# highlight.js 11.12.0 from @highlightjs/cdn-assets (npm), integrity-checked
+# against the registry's sha512 before vendoring.
+HIGHLIGHT_JS_SHA256 = "8ab71eb09c51f501e5e25157d9cff100e46cc29bcbfc744d0b746d451fca7f53"
+HIGHLIGHT_LICENSE_SHA256 = "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490"
+VENDORED_HIGHLIGHT = {"frontend/vendor/highlight/highlight.min.js", "frontend/vendor/highlight/LICENSE"}
+
 SCENARIOS = (
     [f"code_{code}" for code in COPY]
     + list(GENERIC_FAILURES)
@@ -134,6 +168,7 @@ SCENARIOS = (
         "message_too_long_4001",
     ]
     + list(DAILY_LIMIT_SCENARIOS)
+    + list(CODE_SCENARIOS)
 )
 
 
@@ -869,6 +904,152 @@ def test_daily_limit_dialog_styles():
         assert token in block, token
 
 
+# --- syntax highlighting ---------------------------------------------------------------------------
+
+
+def rgb(value: str) -> tuple[int, int, int]:
+    return tuple(int(part) for part in re.findall(r"\d+", value)[:3])
+
+
+def contrast(color: tuple[int, int, int], background: str) -> float:
+    def lum(c):
+        def channel(v):
+            v = v / 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b = (channel(v) for v in c)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    bg = tuple(int(background[i:i + 2], 16) for i in (1, 3, 5))
+    hi, lo = sorted((lum(color), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def rendered_code(browser_results, name):
+    return step(scenario(browser_results, name), "rendered")
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_known_languages_get_restrained_visible_token_colors(browser_results, name):
+    blocks = {b["language"]: b for b in rendered_code(browser_results, name)["code"]}
+    assert set(blocks) == set(CODE_SOURCES)
+    for language in HIGHLIGHTED_LANGUAGES:
+        block = blocks[language]
+        assert block["highlighted"] is True and block["spans"] > 0, language
+        # Only token spans with classes: no other element or attribute.
+        assert set(block["tags"]) == {"span"} and set(block["attrs"]) == {"class"}, language
+    for language, classes in {
+        "python": {"hljs-keyword", "hljs-string", "hljs-comment"},
+        "javascript": {"hljs-keyword", "hljs-string", "hljs-comment", "hljs-number"},
+        "sql": {"hljs-keyword", "hljs-number"},
+        "json": {"hljs-attr", "hljs-string", "hljs-number"},
+        "html": {"hljs-tag", "hljs-name", "hljs-attr", "hljs-string"},
+    }.items():
+        assert classes <= set(blocks[language]["colors"]), (language, blocks[language]["colors"])
+    # Keywords, strings, comments and plain code are visibly different colors.
+    python = blocks["python"]
+    distinct = {python["colors"]["hljs-keyword"], python["colors"]["hljs-string"],
+                python["colors"]["hljs-comment"], python["plainColor"]}
+    assert len(distinct) == 4, python["colors"]
+    # Every rendered token color stays readable on the code background.
+    for language in HIGHLIGHTED_LANGUAGES:
+        for token, color in blocks[language]["colors"].items():
+            assert contrast(rgb(color), CODE_BACKGROUND) >= 4.5, (language, token, color)
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_highlighting_never_changes_the_code_text(browser_results, name):
+    for block in rendered_code(browser_results, name)["code"]:
+        assert block["text"] == CODE_SOURCES[block["language"]], block["language"]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_unknown_and_unlabeled_fences_stay_readable_plain_code(browser_results, name):
+    blocks = {b["language"]: b for b in rendered_code(browser_results, name)["code"]}
+    for language in ("foobarlang", ""):
+        assert blocks[language]["highlighted"] is False and blocks[language]["spans"] == 0
+        assert blocks[language]["text"] == CODE_SOURCES[language]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_inline_code_and_prose_are_not_highlighted(browser_results, name):
+    snap = rendered_code(browser_results, name)
+    assert snap["inlineCode"] == [{"text": "code", "spans": 0, "highlighted": False}]
+    assert snap["prose"] == [
+        "Here is the Python version.",
+        "Inline code stays plain. This explanation remains normal prose outside the code block.",
+    ]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_script_looking_code_is_displayed_and_never_executed(browser_results, name):
+    snap = rendered_code(browser_results, name)
+    assert snap["page"]["scripts"] == 0 and snap["page"]["images"] == 0
+    assert snap["page"]["alerts"] == [] and snap["page"]["executed"] is False
+    html_block = next(b for b in snap["code"] if b["language"] == "html")
+    assert html_block["text"] == CODE_SOURCES["html"]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_copy_returns_the_original_reply_text(browser_results, name):
+    assert scenario(browser_results, name)["copied"] == [CODE_REPLY]
+
+
+def test_highlighted_code_fits_a_narrow_mobile_viewport(browser_results):
+    snap = rendered_code(browser_results, "syntax_highlighting_360x640")
+    assert snap["page"]["viewport"] == [360, 640]
+    assert snap["page"]["overflowX"] <= 0                      # no page-level horizontal overflow
+    assert all(block["preRight"] <= 360 for block in snap["code"])
+    # Long lines scroll inside their own block, as before.
+    assert any(block["preScrolls"] for block in snap["code"])
+
+
+def test_vendored_highlightjs_is_the_verified_local_release():
+    import hashlib
+    assert hashlib.sha256(HIGHLIGHT_JS.read_bytes()).hexdigest() == HIGHLIGHT_JS_SHA256
+    assert hashlib.sha256(HIGHLIGHT_LICENSE.read_bytes()).hexdigest() == HIGHLIGHT_LICENSE_SHA256
+    source = HIGHLIGHT_JS.read_text(encoding="utf-8")
+    assert source.startswith("/*!\n  Highlight.js v11.12.0")
+    assert "BSD 3-Clause License" in HIGHLIGHT_LICENSE.read_text(encoding="utf-8")
+    for network in ("fetch(", "XMLHttpRequest", "sendBeacon", "import(", "WebSocket", "eval(", "new Function"):
+        assert network not in source, network
+    assert {p.name for p in HIGHLIGHT_JS.parent.iterdir()} == {"highlight.min.js", "LICENSE"}
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    tag = '<script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>'
+    assert page.count(tag) == 1 and page.index(tag) < page.index('<script src="app.js?v=')
+
+
+def test_highlighting_keeps_the_sanitizer_boundary():
+    source = APP_JS.read_text(encoding="utf-8")
+    render = source[source.index("function renderAssistantText"):source.index("function highlightCode")]
+    # Highlighting runs after Markdown is sanitized, on the sanitized DOM.
+    assert render.index("renderMarkdownSafe(") < render.index("highlightCode(shell.body);")
+    block = source[source.index("function highlightCode"):]
+    block = block[: block.index("\n  }\n")]
+    assert 'container.querySelectorAll("pre > code")' in block           # fenced code only
+    assert "hljs.getLanguage(match[1])" in block                          # known labels only
+    assert "var source = code.textContent;" in block                      # from the text, not markup
+    assert "window.DOMPurify.sanitize(tokens, HIGHLIGHT_PURIFY_CONFIG)" in block
+    assert "if (code.textContent === source)" in block and "code.textContent = source;" in block
+    config = source[source.index("var HIGHLIGHT_PURIFY_CONFIG"):]
+    config = config[: config.index("};")]
+    assert 'ALLOWED_TAGS: ["span"]' in config and 'ALLOWED_ATTR: ["class"]' in config
+    for automatic in ("highlightAll", "highlightElement", "highlightBlock"):
+        assert automatic not in source, automatic
+
+
+def test_syntax_token_colors_meet_contrast_on_the_code_background():
+    css = (FRONTEND / "app.css").read_text(encoding="utf-8")
+    block = css[css.index("/* Syntax highlighting (highlight.js token classes)"):]
+    block = block[: block.index(".md .hljs-emphasis")]
+    colors = set(re.findall(r"(?<![-\w])color: (#[0-9a-f]{6});", block))
+    assert len(colors) >= 6, colors
+    for color in colors:
+        value = tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+        assert contrast(value, CODE_BACKGROUND) >= 4.5, color
+    # Colors only: no font-size, spacing or layout change for highlighted code.
+    for property_name in ("font-size", "padding", "margin", "white-space", "display", "overflow"):
+        assert property_name + ":" not in block, property_name
+
+
 def test_embedded_chat_never_messages_its_parent(browser_results):
     """Every scenario runs framed by the runner (its parent window). The chat
     posts nothing to its parent: the homepage workspace has one stable size,
@@ -1034,6 +1215,7 @@ def test_only_app_js_app_css_and_index_html_changed_in_the_frontend():
         cwd=REPO, capture_output=True, text=True, check=True,
     ).stdout.split()
 
+    # Plus exactly the two vendored highlight.js files (pinned by hash below).
     assert set(changed) | set(untracked) <= {
         "frontend/app.js", "frontend/app.css", "frontend/index.html",
-    }
+    } | VENDORED_HIGHLIGHT
