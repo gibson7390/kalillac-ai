@@ -1687,7 +1687,25 @@ def touch_swipe(page: Page, x: float, y: float, distance: float = 260, steps: in
     time.sleep(0.6)
 
 
-@pytest.mark.parametrize("size", [VIEWPORTS["mobile"], (360, 640)], ids=["390x844", "360x640"])
+# Every vertical scroll container above the first card in the embedded chat,
+# with the values that decide whether a touch swipe latches to it.
+SCROLL_ANCESTORS_JS = """const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+  const d = f.contentDocument, out = [];
+  for (let el = d.querySelector('.hint'); el; el = el.parentElement) {
+    const c = getComputedStyle(el);
+    if (el.scrollHeight > el.clientHeight + 1 || /auto|scroll/.test(c.overflowY))
+      out.push({ element: el.id ? '#' + el.id : el.tagName.toLowerCase() + '.' + [...el.classList].join('.'),
+                 overflowY: c.overflowY, overscrollBehaviorY: c.overscrollBehaviorY,
+                 scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: el.scrollTop });
+  }
+  const conv = d.getElementById('conversation');
+  return { frame: [f.contentWindow.innerWidth, f.contentWindow.innerHeight],
+           embedded: d.body.classList.contains('is-embedded'), empty: conv.classList.contains('is-empty'),
+           conversationScrollRange: conv.scrollHeight - conv.clientHeight, ancestors: out };"""
+
+
+@pytest.mark.parametrize("size", [VIEWPORTS["mobile"], (375, 667), (360, 640)],
+                         ids=["390x844", "375x667", "360x640"])
 def test_touch_swipe_on_the_example_cards_scrolls_the_homepage(size, tmp_path_factory):
     """Android Chrome: a vertical swipe that begins anywhere on a card scrolls
     the document, without a nested scroll, and a tap still runs the card."""
@@ -1726,14 +1744,22 @@ def test_touch_swipe_on_the_example_cards_scrolls_the_homepage(size, tmp_path_fa
                            inner: f.contentDocument.getElementById('conversation').scrollTop,
                            max: document.documentElement.scrollHeight - innerHeight };""")
 
+            # The embedded starting state fits its frame: nothing inside the
+            # chat has a vertical scroll range a swipe could latch to.
+            hierarchy = page.eval(SCROLL_ANCESTORS_JS)
+            assert hierarchy["embedded"] and hierarchy["empty"], hierarchy
+            assert hierarchy["conversationScrollRange"] <= 0, hierarchy
+            assert all(a["scrollHeight"] <= a["clientHeight"] for a in hierarchy["ancestors"]), hierarchy
+
             for name, selector in CARD_SWIPE_STARTS.items():
                 place_cards()
                 before = positions()
                 assert before["max"] - before["page"] > 200, (name, before)
                 touch_swipe(page, *point(selector))
                 after = positions()
-                assert after["page"] - before["page"] > 100, (name, before, after)
-                assert after["inner"] == before["inner"], (name, before, after)   # no nested scrolling
+                # On failure, report which element in the chat owns the scroll.
+                assert after["page"] - before["page"] > 100, (name, before, after, page.eval(SCROLL_ANCESTORS_JS))
+                assert after["inner"] == before["inner"], (name, before, after, page.eval(SCROLL_ANCESTORS_JS))
 
             # Control: the same swipe outside the embedded chat scrolls the page too.
             place_cards()
@@ -1757,6 +1783,13 @@ def test_touch_swipe_on_the_example_cards_scrolls_the_homepage(size, tmp_path_fa
 
 def test_only_the_embedded_starting_state_lets_touch_scroll_reach_the_homepage():
     css = (REPO / "frontend" / "app.css").read_text(encoding="utf-8")
+    # Short narrow embedded frames get the compact starting state, so it fits
+    # without a scroll range; the rule is scoped to the embedded chat.
+    compact = css[css.index("@media (max-height: 600px) and (max-width: 400px) {"):]
+    compact = compact[: compact.index("\n")]
+    assert ".is-embedded .hint { min-height: 0; padding: 9px 12px; }" in compact
+    assert all(rule.strip().startswith(".is-embedded") for rule in
+               compact[compact.index("{") + 1: compact.rindex("}")].split("}") if rule.strip())
     # The chat scroller keeps its containment everywhere else.
     conversation = css[css.index(".conversation {"):]
     assert "overscroll-behavior: contain;" in conversation[: conversation.index("}")]

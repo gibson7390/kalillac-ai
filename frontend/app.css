@@ -937,6 +937,11 @@ body {
 @media (max-width: 560px) { .empty-hints { grid-template-columns: repeat(2,minmax(0,1fr)); }.hint { padding: 12px; gap: 8px; min-height: 128px; }.hint-icon { width: 27px; height: 27px; }.hint-icon svg { width: 24px; height: 24px; }.hint-arrow { width: 12px; height: 12px; }.hint-title { font-size: 14px; }.hint-description { font-size: 13px; }.is-embedded { --rail: 16px; }.is-embedded .empty-title { font-size: 23px; } }
 @media (max-width: 400px) { .empty-hints { grid-template-columns: 1fr; gap: 10px; }.hint { min-height: 88px; padding: 13px; align-items: center; }.hint-icon { width: 34px; height: 34px; }.hint-copy { padding-right: 3px; }.hint-title { font-size: 15px; }.hint-description { font-size: 13px; margin-top: 4px; }.hint-arrow { width: 16px; height: 16px; }.is-embedded .empty-hints { margin-top: 20px; } }
 @media (max-height: 560px) and (min-width: 401px) { .is-embedded .empty-title { font-size: 22px; }.is-embedded .empty-hints { margin-top: 16px; }.is-embedded .hint { min-height: 96px; padding: 11px; }.is-embedded .thread { padding-top: 14px; } }
+/* The same for short narrow frames (one-column cards on phones such as
+   360 x 640 and 375 x 667): the starting state must fit its frame. If it
+   overflows, the conversation scroller has a scroll range and a touch swipe
+   that begins on the cards latches to it instead of scrolling the homepage. */
+@media (max-height: 600px) and (max-width: 400px) { .is-embedded .thread { padding-top: 12px; }.is-embedded .empty-title { font-size: 21px; }.is-embedded .empty-line { line-height: 1.4; }.is-embedded .empty-hints { margin-top: 12px; gap: 8px; }.is-embedded .hint { min-height: 0; padding: 9px 12px; }.is-embedded .hint-icon { width: 30px; height: 30px; }.is-embedded .hint-description { margin-top: 2px; line-height: 1.3; } }
 
 /* Keep the existing interactive composer affordances above the embedded theme. */
 .is-embedded .composer-shell:hover { border-color: #86b8fa; }

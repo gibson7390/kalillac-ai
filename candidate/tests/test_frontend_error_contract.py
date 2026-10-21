@@ -36,7 +36,7 @@ BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 CACHE_KEY = "20261020-syntax-highlight1"
-CSS_CACHE_KEY = "20261020-syntax-highlight1"
+CSS_CACHE_KEY = "20261020-embedded-fit1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
