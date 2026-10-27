@@ -1656,7 +1656,43 @@ def test_app_frontend_and_site_dependencies_are_untouched():
     )
     if names is None:
         pytest.skip(f"git or the slice base commit {SLICE_BASE} is unavailable")
-    assert names == [], names
+    # The domain migration deliberately changes only these build-boundary
+    # files. Verify their complete contents against the old baseline plus
+    # the exact reviewed edits, rather than relaxing the dependency guard.
+    approved = {
+        "site/vite.config.ts", "site/index.html",
+        "site/deployment-preserve-live-assets.txt",
+    }
+    assert set(names) == approved, names
+    for name in approved:
+        baseline = subprocess.check_output(
+            [shutil.which("git"), "show", f"{SLICE_BASE}:{name}"], cwd=REPO,
+        ).decode("utf-8")
+        if name.endswith("vite.config.ts"):
+            expected = baseline.replace(
+                "import { defineConfig } from 'vite';",
+                "import { defineConfig } from 'vite';\nimport { publicMetadata } from './public-metadata';",
+            ).replace(
+                "plugins: [react(), tailwindcss()],",
+                "plugins: [react(), tailwindcss(), publicMetadata()],",
+            )
+        elif name.endswith("index.html"):
+            expected = baseline.replace(
+                '    <meta property="og:type" content="website" />',
+                '    <meta property="og:type" content="website" />\n'
+                '    <link rel="canonical" href="https://kalillac.ai/" />\n'
+                '    <meta property="og:url" content="https://kalillac.ai/" />\n'
+                '    <meta property="og:image" content="https://kalillac.ai/assets/kalillac-ai-logo.png" />\n'
+                '    <meta property="og:image:alt" content="Kalillac AI" />',
+            ).replace(
+                '    <meta name="twitter:card" content="summary_large_image" />',
+                '    <meta name="twitter:card" content="summary_large_image" />\n'
+                '    <meta name="twitter:image" content="https://kalillac.ai/assets/kalillac-ai-logo.png" />\n'
+                '    <meta name="twitter:image:alt" content="Kalillac AI" />',
+            )
+        else:
+            expected = baseline.replace("/robots.txt\n", "").replace("/sitemap.xml\n", "")
+        assert (REPO / name).read_text(encoding="utf-8") == expected, name
 
     package = json.loads((SITE / "package.json").read_text(encoding="utf-8"))
     assert set(package["dependencies"]) == {"lucide-react", "react", "react-dom", "wouter"}

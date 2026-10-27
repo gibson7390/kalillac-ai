@@ -5,6 +5,4 @@
 /google96aef4c4924e7f64.html
 /icon-192.png
 /icon-512.png
-/robots.txt
 /site.webmanifest
-/sitemap.xml

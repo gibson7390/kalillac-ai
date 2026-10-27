@@ -32,9 +32,9 @@ CONFIG = BillingConfig(
     secret_key="sk_test_notreal",
     webhook_secret=WEBHOOK_SECRET,
     price_id="price_kalillacpaid",
-    success_url="https://kalillac.com/billing/success",
-    cancel_url="https://kalillac.com/billing/cancel",
-    portal_return_url="https://kalillac.com/account",
+    success_url="https://kalillac.ai/billing/success",
+    cancel_url="https://kalillac.ai/billing/cancel",
+    portal_return_url="https://kalillac.ai/account",
 )
 
 PERIOD_END = 1793880000  # 2026-11-05T12:00:00Z

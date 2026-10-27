@@ -156,6 +156,9 @@ def run_scenario(page: Page, origin: str, scenario, mobile: bool) -> dict:
                 headerBottom: Math.round(h.bottom),
                 sectionTop: s ? Math.round(s.getBoundingClientRect().top) : null,
                 title: (document.querySelector('h1') || {{}}).textContent || null,
+                canonical: document.querySelector('link[rel="canonical"]').href,
+                ogUrl: document.querySelector('meta[property="og:url"]').content,
+                documentTitle: document.title,
                 historyLength: history.length,
                 menuOpen: !!document.getElementById('mobile-site-menu'),
                 inlineScrollBehavior: document.documentElement.style.scrollBehavior }};""")
@@ -332,3 +335,13 @@ def test_mobile_menu_keyboard_escape_returns_focus(navigation):
         return  # The desktop menu toggle is intentionally absent.
     assert navigation["keyboardMenu"] == {"closed": True, "focus": "button-mobile-menu", "expanded": "false", "firstLink": "link-mobile-product"}
     assert navigation["apiRequests"] == []
+
+
+def test_public_metadata_follows_every_navigation(navigation):
+    for scenario in SCENARIOS:
+        result = navigation[scenario[0]]
+        path = result["expected"].split("#", 1)[0]
+        assert result["canonical"] == "https://kalillac.ai" + path
+        assert result["ogUrl"] == result["canonical"]
+        expected = {"/": "Kalillac AI", "/privacy": "Privacy", "/terms": "Terms of Use"}[path]
+        assert expected in result["documentTitle"]
