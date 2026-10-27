@@ -71,9 +71,9 @@ CONFIG = BillingConfig(
     secret_key="sk_test_secretvalue123",
     webhook_secret="whsec_secretvalue456",
     price_id=PAID_PRICE,
-    success_url="https://kalillac.com/billing/success",
-    cancel_url="https://kalillac.com/billing/cancel",
-    portal_return_url="https://kalillac.com/account",
+    success_url="https://kalillac.ai/billing/success",
+    cancel_url="https://kalillac.ai/billing/cancel",
+    portal_return_url="https://kalillac.ai/account",
 )
 
 CANDIDATE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -383,9 +383,9 @@ BILLING_ENV = {
     "KALILLAC_STRIPE_SECRET_KEY": "sk_test_secretvalue123",
     "KALILLAC_STRIPE_WEBHOOK_SECRET": "whsec_secretvalue456",
     "KALILLAC_STRIPE_PRICE_ID": PAID_PRICE,
-    "KALILLAC_BILLING_SUCCESS_URL": "https://kalillac.com/billing/success",
-    "KALILLAC_BILLING_CANCEL_URL": "https://kalillac.com/billing/cancel",
-    "KALILLAC_BILLING_PORTAL_RETURN_URL": "https://kalillac.com/account",
+    "KALILLAC_BILLING_SUCCESS_URL": "https://kalillac.ai/billing/success",
+    "KALILLAC_BILLING_CANCEL_URL": "https://kalillac.ai/billing/cancel",
+    "KALILLAC_BILLING_PORTAL_RETURN_URL": "https://kalillac.ai/account",
 }
 
 
@@ -497,9 +497,9 @@ def test_systemd_credentials_take_precedence(config_env, tmp_path):
         ("KALILLAC_STRIPE_SECRET_KEY", "pk_test_publishable"),
         ("KALILLAC_STRIPE_WEBHOOK_SECRET", "not-a-webhook-secret"),
         ("KALILLAC_STRIPE_PRICE_ID", "prod_notaprice"),
-        ("KALILLAC_BILLING_SUCCESS_URL", "http://kalillac.com/success"),
+        ("KALILLAC_BILLING_SUCCESS_URL", "http://kalillac.ai/success"),
         ("KALILLAC_BILLING_CANCEL_URL", "javascript:alert(1)"),
-        ("KALILLAC_BILLING_PORTAL_RETURN_URL", "ftp://kalillac.com"),
+        ("KALILLAC_BILLING_PORTAL_RETURN_URL", "ftp://kalillac.ai"),
     ],
 )
 def test_invalid_config_values_are_rejected_without_echo(

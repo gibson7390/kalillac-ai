@@ -61,8 +61,8 @@ from test_billing import PAID_PRICE, FakeGateway, _subscription
 
 
 URLS = dict(
-    success_url="https://kalillac.com/billing/success",
-    cancel_url="https://kalillac.com/billing/cancel",
+    success_url="https://kalillac.ai/billing/success",
+    cancel_url="https://kalillac.ai/billing/cancel",
 )
 
 
@@ -817,14 +817,14 @@ T0 = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 
 ORIGINAL_CONFIG = dict(
     price_id=PAID_PRICE,
-    success_url="https://kalillac.com/billing/success",
-    cancel_url="https://kalillac.com/billing/cancel",
+    success_url="https://kalillac.ai/billing/success",
+    cancel_url="https://kalillac.ai/billing/cancel",
 )
 
 CHANGED_CONFIG = dict(
     price_id="price_newprice",
-    success_url="https://kalillac.com/v2/billing/success",
-    cancel_url="https://kalillac.com/v2/billing/cancel",
+    success_url="https://kalillac.ai/v2/billing/success",
+    cancel_url="https://kalillac.ai/v2/billing/cancel",
 )
 
 

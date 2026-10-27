@@ -156,7 +156,8 @@ class Site:
         path = raw_path.split("?", 1)[0]
 
         if path in ("/", "/privacy", "/terms"):
-            return 200, "text/html; charset=utf-8", self.site_page()
+            page = self.site_page() if path == "/" else (SITE_DIST / (path.lstrip("/") + ".html")).read_bytes()
+            return 200, "text/html; charset=utf-8", page
         if path == "/app/":
             return 200, "text/html; charset=utf-8", self.chat_page()
         if path.startswith("/app/"):
@@ -350,7 +351,7 @@ def require_browser_and_build() -> Path:
         pytest.skip("site build output not found; run `npm run build` in site/ first")
 
     sources = [p for p in SITE_SRC.rglob("*") if p.is_file()]
-    sources += [SITE / "index.html", SITE / "vite.config.ts", SITE / "package.json"]
+    sources += [SITE / "index.html", SITE / "vite.config.ts", SITE / "public-metadata.ts", SITE / "package.json"]
     newest = max(p.stat().st_mtime for p in sources)
     assert built.stat().st_mtime >= newest, "site/dist is older than site sources; rebuild it"
 
@@ -530,10 +531,10 @@ def test_privacy_wording_boundaries():
         "That does not promise immediate deletion of the server-memory entry.",
         "OpenAI may process requests sent for model inference.",
         "When web search is used, relevant query text may be sent to Brave or Tavily, depending on which provider is used.",
-        "Cloudflare provides edge delivery and security for",
+        "Cloudflare provides reverse proxy, CDN, security and DNS services for",
         "Cloudflare can process request content while proxying it, including chat requests",
         "Cloudflare Workers AI and Groq are not part of the current active model-provider path.",
-        "Do not submit information you cannot allow OpenAI, Brave, Tavily, or Cloudflare to process.",
+        "Do not submit information you cannot allow OpenAI, Brave, Tavily, Cloudflare, or DigitalOcean to process.",
         "No account or paid subscription is currently offered.",
     ):
         assert required in text, required
@@ -551,7 +552,7 @@ def test_privacy_discloses_cloudflare_edge_security_and_analytics_precisely():
 
     for required in (
         # Edge processing: TLS terminates at Cloudflare; content is visible to it while proxied.
-        "Traffic to kalillac.com passes through Cloudflare before reaching Kalillac’s server.",
+        "Traffic to kalillac.ai passes through Cloudflare before reaching Kalillac’s server.",
         "Cloudflare terminates the browser-facing HTTPS connection",
         "forwards the request to Kalillac’s origin over a separate encrypted connection.",
         "This means Cloudflare can process request content while proxying it, including chat requests, along with "
@@ -564,7 +565,7 @@ def test_privacy_discloses_cloudflare_edge_security_and_analytics_precisely():
         "Kalillac does not use this cookie to store, reconstruct, or identify prompts, responses, or conversation "
         "history.",
         # Browser RUM is disabled; edge statistics are not.
-        "Cloudflare Web Analytics and Real User Measurements are disabled for kalillac.com.",
+        "Cloudflare Web Analytics and Real User Measurements are disabled for kalillac.ai.",
         "Kalillac does not load Cloudflare’s browser RUM beacon or send prompts, responses, or conversation content "
         "to that beacon.",
         "Cloudflare still produces traffic, operational, performance, and security information from requests "
@@ -625,8 +626,8 @@ DAILY_ALLOWANCE_COOKIE_SECTION = (
     "The chat service sets this cookie with HttpOnly, Secure, SameSite=Lax, Path=/ and no Domain "
     "attribute. It is sent only to the Kalillac host that set it and cannot be read by page scripts. Each "
     "anonymous chat response refreshes its 48-hour lifetime.",
-    "Kalillac does not store the raw visitor value in its database. For each UTC day, the server derives a "
-    "one-way digest from the visitor value and date. The stored digest changes each UTC day and does not "
+    "Kalillac does not store the raw visitor value in its PostgreSQL database. For each UTC day, the server derives a "
+    "SHA-256 digest from the visitor value and date. The stored digest changes each UTC day and does not "
     "itself provide a stable identifier across days. The database also stores the reservation state and "
     "timestamps needed to enforce or refund the allowance.",
     "The service is designed to retain the current and previous UTC day’s records and lazily prune older "
@@ -669,13 +670,13 @@ def test_privacy_discloses_the_daily_allowance_cookie_accurately():
             "day. Older records are pruned lazily during later anonymous traffic and may remain longer"
             "</td></tr>") in app
 
-    # Reachable from the page's own navigation; the Privacy date moves, Terms does not.
+    # Both documents were materially reviewed for the domain migration.
     toc = app[app.index("const privacyToc"):app.index("];", app.index("const privacyToc"))]
     assert "['browser', 'Browser storage'], ['visitor-cookie', 'Daily allowance cookie']," in toc
     assert app.count('<DocSection id="visitor-cookie" title="Daily allowance cookie">') == 1
     assert app.count('href="#visitor-cookie"') == 2
-    assert 'title="Privacy" toc={privacyToc} updated="Last updated: October 18, 2026"' in app
-    assert 'title="Terms of Use" toc={termsToc} updated="Last updated: October 11, 2026"' in app
+    assert 'title="Privacy" toc={privacyToc} updated="Last updated: October 27, 2026"' in app
+    assert 'title="Terms of Use" toc={termsToc} updated="Last updated: October 27, 2026"' in app
 
     # Every mention of the cookie is conditional on the allowance being active.
     assert text.count("__Host-kalillac_visitor") == 1
@@ -711,6 +712,9 @@ def test_site_sources_load_nothing_from_another_origin():
     css = SITE_CSS.read_text(encoding="utf-8")
 
     for tag in re.findall(r"<(?:link|script)\b[^>]*>", page):
+        if 'rel="canonical"' in tag:
+            assert tag == '<link rel="canonical" href="https://kalillac.ai/" />'
+            continue
         for url in re.findall(r"\b(?:href|src)=\"([^\"]*)\"", tag):
             assert not EXTERNAL.match(url), tag
     assert "@import url(" not in css
@@ -742,6 +746,9 @@ def test_built_site_loads_nothing_from_another_origin():
                 assert not EXTERNAL.match(url), (path, url)
 
     for tag in re.findall(r"<(?:link|script|img|iframe|source)\b[^>]*>", page):
+        if 'rel="canonical"' in tag:
+            assert tag == '<link rel="canonical" href="https://kalillac.ai/" />'
+            continue
         for url in re.findall(r"\b(?:href|src|srcset)=\"([^\"]*)\"", tag):
             assert not EXTERNAL.match(url), tag
     for rel in ("preconnect", "dns-prefetch", "prefetch"):
@@ -791,9 +798,7 @@ PRESERVED_LIVE_ASSETS = [
     "/google96aef4c4924e7f64.html",
     "/icon-192.png",
     "/icon-512.png",
-    "/robots.txt",
     "/site.webmanifest",
-    "/sitemap.xml",
 ]
 
 
