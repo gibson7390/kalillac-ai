@@ -684,9 +684,10 @@ def test_api_failure_wording_is_accurate():
 # run_web_search; all fingerprint assertions remain exact. The query-cleanup
 # slice changed only run_web_search's make_concise_query (identifiers and
 # site:/-site: operators are preserved whole); provider calls and restrictions
-# are unchanged.
+# are unchanged. The privacy-safe logging slice changed only run_web_search's
+# debug log line: it records the query's length, never the query text.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "ae99879f7331ae86beaa7ce475813cabdabeb16ade0c9fa14bacbbe255d67468",
+    "run_web_search": "f89af05d40c64e7e72ee387a75ec7af5c082382a4a88af3c9fc21201587a9fac",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
     "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
     "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",

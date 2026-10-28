@@ -143,9 +143,14 @@ SESSION_LOCK = _threading.RLock()
 def get_session_state_by_id(session_id):
     """Framework-independent session accessor. Same LRU-style capacity
     eviction and default shape as the original Gradio version, but keyed by
-    an opaque session_id string instead of a Gradio session_hash."""
+    an opaque session_id string instead of a Gradio session_hash.
+
+    An ended session is never recreated: its id raises SessionEnded for as
+    long as its tombstone exists."""
     sid = session_id or "anonymous"
     with SESSION_LOCK:
+        if _session_has_ended(sid):
+            raise SessionEnded()
         if sid not in SESSION_STATE and len(SESSION_STATE) >= MAX_SESSIONS:
             SESSION_STATE.pop(next(iter(SESSION_STATE)))
         return SESSION_STATE.setdefault(sid, {"memory": [], "search_times": []})
@@ -157,6 +162,168 @@ def get_session_state(request):
     existing deterministic tests). Delegates to the id-based accessor."""
     session_id = getattr(request, "session_hash", None) or "anonymous"
     return get_session_state_by_id(session_id)
+
+
+# --- explicit session end ("End & erase") ------------------------------------
+#
+# One synchronization discipline: SESSION_LOCK guards SESSION_STATE, the work
+# registrations and the ended-session tombstones below, from the event loop
+# and from worker threads alike. It is held only for constant-time dictionary
+# work and never across an await or a provider call. The per-session asyncio
+# locks (_session_locks) keep their separate job of serializing execution.
+#
+# Lifecycle:
+# - /api/chat registers its work under the effective session id at the moment
+#   it resolves that id, before anything can read or mutate session state, and
+#   releases the registration only when the request AND any worker thread that
+#   outlives it have finished.
+# - Ending a session removes its SESSION_STATE entry, marks every registered
+#   work item ended, cancels their request budgets, and leaves a tombstone.
+# - A tombstone makes get_session_state_by_id() and resolve_session_id() raise
+#   SessionEnded, so neither running nor queued work can recreate the entry,
+#   and a stale request presenting the ended id receives 409 session_ended.
+# - A tombstone lasts while work for its id is registered, then expires after
+#   ENDED_SESSION_TTL_SECONDS; at most MAX_ENDED_SESSIONS idle tombstones are
+#   kept. Expiry is lazy, with no timer: every access that presents an id
+#   checks its own tombstone first (_session_has_ended), and ending or
+#   releasing work prunes the rest. Unknown ids with no state and no work
+#   never get one.
+# Cancellation only refuses later provider attempts and closes Kalillac's own
+# connection; a provider may keep processing. Nothing here zeroes memory.
+
+import time as _time
+
+ENDED_SESSION_TTL_SECONDS = 300
+MAX_ENDED_SESSIONS = 2 * MAX_SESSIONS
+
+_SESSION_WORK = {}       # sid -> set of _SessionWork still able to touch that session
+_ENDED_SESSIONS = {}     # sid -> None while work is registered, else the time it drained
+
+
+def _ended_now():
+    return _time.monotonic()
+
+
+class SessionEnded(Exception):
+    """The chat session was ended; the request must not recreate its state."""
+
+
+class _SessionWork:
+    """One /api/chat request's claim on a session id.
+
+    holds counts the owners that may still touch session state: the request
+    handler, plus a worker thread that outlives it. budget is the request's
+    RequestBudget, or None when requests run without one."""
+
+    __slots__ = ("sid", "budget", "ended", "holds")
+
+    def __init__(self, sid, budget):
+        self.sid = sid
+        self.budget = budget
+        self.ended = False
+        self.holds = 1
+
+
+def _begin_session_work(session_id, budget):
+    """Resolve the effective session id and register work under it, atomically
+    with respect to ending that session. Raises SessionEnded for an ended id."""
+    with SESSION_LOCK:
+        sid = resolve_session_id(session_id)
+        work = _SessionWork(sid, budget)
+        _SESSION_WORK.setdefault(sid, set()).add(work)
+        return sid, work
+
+
+def _hold_session_work(work):
+    """A worker thread is taking over from the handler: one more owner."""
+    with SESSION_LOCK:
+        work.holds += 1
+
+
+def _release_session_work(work):
+    """Drop one owner. The last owner unregisters the work; when the session's
+    last work drains, its tombstone (if any) starts its expiry clock."""
+    with SESSION_LOCK:
+        if work.holds <= 0:
+            return
+        work.holds -= 1
+        if work.holds:
+            return
+        works = _SESSION_WORK.get(work.sid)
+        if works is not None:
+            works.discard(work)
+            if not works:
+                del _SESSION_WORK[work.sid]
+                if work.sid in _ENDED_SESSIONS:
+                    _ENDED_SESSIONS[work.sid] = _ended_now()
+        _prune_ended_sessions()
+
+
+def _session_has_ended(sid):
+    """Whether sid is ended now. An idle tombstone past its TTL is removed
+    here, so an expired id is simply unknown without waiting for some other
+    end or release to prune it. A tombstone whose session still has
+    registered work never expires. Caller holds SESSION_LOCK."""
+    if sid not in _ENDED_SESSIONS:
+        return False
+    drained = _ENDED_SESSIONS[sid]
+    if (drained is not None and sid not in _SESSION_WORK
+            and _ended_now() - drained >= ENDED_SESSION_TTL_SECONDS):
+        del _ENDED_SESSIONS[sid]
+        return False
+    return True
+
+
+def _prune_ended_sessions():
+    """Expire idle tombstones, then cap them. A tombstone whose session still
+    has registered work is never removed. Caller holds SESSION_LOCK."""
+    now = _ended_now()
+    idle = []
+    for sid, drained in list(_ENDED_SESSIONS.items()):
+        if drained is None or sid in _SESSION_WORK:
+            continue
+        if now - drained >= ENDED_SESSION_TTL_SECONDS:
+            del _ENDED_SESSIONS[sid]
+        else:
+            idle.append((drained, sid))
+    excess = len(_ENDED_SESSIONS) - MAX_ENDED_SESSIONS
+    if excess > 0:
+        for _drained, sid in sorted(idle)[:excess]:
+            del _ENDED_SESSIONS[sid]
+
+
+def end_chat_session(session_id):
+    """End one chat session: remove its temporary state, mark its registered
+    work ended and request cancellation of that work's budgets. Idempotent.
+
+    Touches nothing else: no other session, no account session, cookie,
+    database row, usage or quota record, and no provider."""
+    with SESSION_LOCK:
+        removed = SESSION_STATE.pop(session_id, None) is not None
+        works = list(_SESSION_WORK.get(session_id, ()))
+        if removed or works or _session_has_ended(session_id):
+            _ENDED_SESSIONS[session_id] = None if works else _ended_now()
+        for work in works:
+            work.ended = True
+        budgets = [work.budget for work in works if work.budget is not None]
+        _prune_ended_sessions()
+
+    for budget in budgets:
+        budget.cancel()   # refuses later attempts; running work is not interrupted
+
+    if not works:
+        cancellation = "none"
+    elif budgets:
+        cancellation = "requested"
+    else:
+        cancellation = "unavailable"
+
+    return {
+        "ended": True,
+        "kalillac_session_state": "removed" if removed else "not_found",
+        "active_requests": len(works),
+        "cancellation": cancellation,
+    }
 
 
 # --- request budget (KALILLAC_REQUEST_BUDGET_ENABLED) -------------------------
@@ -1348,7 +1515,7 @@ def run_web_search(query, include_domains=None):
             else raw_query
         )
 
-        log(f"SEARCH QUERY: {search_query}")
+        log(f"SEARCH QUERY: chars={len(search_query)}")   # never the query text
 
         search_domains = list(requested_domains)
 
@@ -1943,6 +2110,7 @@ SOURCE HANDLING:
 SESSION PRIVACY AND PROVIDERS:
 - Conversation context is temporary server-side session state in RAM, keyed to a temporary session identifier. No account is required. Kalillac AI does not intentionally provide persistent user-facing chat history or a conversation-history database.
 - Describe session state as temporary accessibility, not deletion. Never claim RAM is erased when a request ends, a tab or browser closes, or the user stops chatting; an entry may persist until eviction or service restart.
+- The chat's End & erase control is the one on-demand exception: it removes Kalillac's temporary session state for that conversation (saved session facts and search timestamps) and clears the browser's conversation, session identifier and draft. Asking running work to stop is best effort, and an AI or search provider may keep processing. It does not retract anything already sent to OpenAI or search providers, does not erase allowance, account, billing, operational or security records, and is not secure memory wiping or universal deletion.
 - Session separation is logical, application-level separation by session identifier. Never claim per-user processes, sandboxes, containers, VMs, filesystems, or separate physical memory. Sessions may share server resources, which does not mean users can reach each other's state.
 - Never imply you can access or recover a previous session, and do not ask the user to re-supply information that came from one. A calendar date alone does not make information unavailable: use supplied current-session context honestly when it contains the answer.
 - HTTPS encrypts traffic in transit to kalillac.ai. That does not mean the server cannot read requests, that providers receive nothing, or that data is encrypted at rest.
@@ -2236,6 +2404,15 @@ KALILLAC_SELF_KNOWLEDGE = {
             "Refreshing does not erase the old server RAM entry. These are "
             "reviewed source behaviors, not independent verification of the "
             "public website's deployed revision."
+        ),
+        (
+            "The chat's End & erase control removes Kalillac's temporary "
+            "session state for that conversation and clears the browser's "
+            "conversation, session identifier and draft. Stopping running "
+            "work is best effort, and a provider may keep processing. It does "
+            "not retract information already sent to AI or search providers, "
+            "does not erase allowance, account, billing, operational or "
+            "security records, and is not secure memory wiping."
         ),
         (
             "Conversation state is temporary server-side RAM state keyed to "
@@ -2692,7 +2869,7 @@ Deployment/network details are recorded facts (verification date {KALILLAC_SELF_
 - V31 native search: the model may request search_web; application code validates the tool call, enforces search controls, executes {search_provider_label()}, returns the results to the model as untrusted data, and application code owns final source-link rendering.
 - Selected semantic requests may be answered directly by the model or may use an approved native tool such as get_kalillac_runtime_facts. Routes not yet migrated continue through the legacy route-specific pipeline.
 - Provider behavior: every model request goes to OpenAI {OPENAI_MODEL}; there is no automatic fallback model or provider. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error. A tool protocol/validation failure may enter the legacy pipeline once with the same OpenAI model, except after a native brave/tavily lookup has admitted a search attempt; that lookup cannot be replayed through legacy.
-- No account or intentionally persistent user-facing chat history/profile. Conversation state is temporary server-side RAM keyed by temporary ID; entries may remain until capacity eviction or service restart. The current web frontend keeps the temporary session identifier only in page memory, so refresh/reload resets the browser-side identifier and the refreshed page does not reconnect to the prior temporary session state. The old server RAM entry may still remain until capacity eviction or service restart.
+- No account or intentionally persistent user-facing chat history/profile. Conversation state is temporary server-side RAM keyed by temporary ID; entries may remain until capacity eviction or service restart. The current web frontend keeps the temporary session identifier only in page memory, so refresh/reload resets the browser-side identifier and the refreshed page does not reconnect to the prior temporary session state. The old server RAM entry may still remain until capacity eviction or service restart. The chat's End & erase control removes that entry on demand; it does not retract data already sent to providers or erase allowance, account, billing, operational or security records.
 - OpenAI receives inference data for every model request; {search_provider_label()} receives search data only when search runs and does not generate answers. Provider retention/logging/storage/training/analytics and absence of user text from logs are not established by the application architecture alone.
 - Do not infer RAG/Chroma/vector DB, per-user containers/VMs/filesystems, hosting scale, audit/certification status, or security guarantees."""
 
@@ -2727,7 +2904,7 @@ def get_recent_user_messages(history, limit=3):
                         messages.append(str(content))
 
         except Exception as e:
-            log(f"User-turn parse warning: {e}")
+            log(f"User-turn parse warning: {type(e).__name__}")
 
     return messages[-limit:]
 
@@ -5690,7 +5867,7 @@ def get_last_assistant_message(history):
                 return normalize_history_content(turn[1])
 
         except Exception as e:
-            log(f"Last assistant parse warning: {e}")
+            log(f"Last assistant parse warning: {type(e).__name__}")
 
     return ""
 
@@ -5714,7 +5891,7 @@ def get_recent_assistant_messages(history, limit=4):
                     assistant_messages.append(assistant)
 
         except Exception as e:
-            log(f"Recent assistant parse warning: {e}")
+            log(f"Recent assistant parse warning: {type(e).__name__}")
 
         if len(assistant_messages) >= limit:
             break
@@ -5748,7 +5925,7 @@ def get_recent_conversation_context(history, limit=4):
                     turns.append(f"ASSISTANT: {assistant_text}")
 
         except Exception as e:
-            log(f"Conversation context parse warning: {e}")
+            log(f"Conversation context parse warning: {type(e).__name__}")
 
     return "\n\n".join(turns)
 
@@ -6757,8 +6934,7 @@ def enforce_code_quality(
 
         if python_errors:
             log("\n===== PYTHON CODE SAFETY CHECK FAILED =====")
-            for error in python_errors:
-                log(f"• {error}")
+            log(f"• {len(python_errors)} issue(s); details are not logged")
             log("Repairing Kalillac-reference Python output: pass 1")
             log("===== END PYTHON CODE SAFETY CHECK =====\n")
 
@@ -6779,8 +6955,7 @@ def enforce_code_quality(
 
             if final_python_errors:
                 log("\n===== PYTHON CODE REPAIR STILL FAILED =====")
-                for error in final_python_errors:
-                    log(f"• {error}")
+                log(f"• {len(final_python_errors)} issue(s); details are not logged")
                 log("Blocking violating generated Python.")
                 log("===== END PYTHON CODE REPAIR =====\n")
 
@@ -6869,8 +7044,7 @@ def enforce_code_quality(
         errors = local_errors
 
     log("\n===== HTML QUALITY CHECK FAILED =====")
-    for error in errors:
-        log(f"• {error}")
+    log(f"• {len(errors)} issue(s); details are not logged")
     log("Repairing HTML output: single model pass")
     log("===== END HTML QUALITY CHECK =====\n")
 
@@ -6898,8 +7072,7 @@ def enforce_code_quality(
 
     if final_errors:
         log("\n===== HTML REPAIR STILL HAS WARNINGS =====")
-        for error in final_errors:
-            log(f"• {error}")
+        log(f"• {len(final_errors)} issue(s); details are not logged")
         log(
             "No second model repair will be attempted; "
             "returning best complete repaired output."
@@ -9633,7 +9806,8 @@ def build_messages(message, history, route, memory):
             "live search runs.\n"
           + "- Do not claim user text is retained only for immediate processing, cannot appear "
             "in logs, or is immediately erased after a response. Temporary session entries may "
-            "remain in RAM until capacity eviction or service restart, and absence of user text "
+            "remain in RAM until capacity eviction, service restart or an explicit End & erase, "
+            "and absence of user text "
             "from operational logs is not established.\n"
           + "- Do not turn RAM-backed temporary sessions, no-account access, or lack of "
             "persistent user-facing history into claims that Kalillac is easier to audit, that "
@@ -9681,7 +9855,7 @@ def build_messages(message, history, route, memory):
               "or business model.\n"
         )
 
-    log(f"[Router] route={route!r} | message={str(message)[:80]!r}")
+    log(f"[Router] route={route!r} | message_chars={len(str(message))}")
 
     if route == "debug":
         prompt = f"""
@@ -9833,7 +10007,7 @@ RULES:
   - Kalillac's production session identifier is already an opaque, unguessable CSPRNG token generated with secrets.token_urlsafe(32), not derived from IP address, user agent, timestamp, or browser properties. HMAC is not encryption; do not describe an HMAC as encrypting or anonymizing this token.
   - Kalillac has no automatic model fallback: every model request goes to OpenAI {OPENAI_MODEL}. If OpenAI fails or returns unusable output, the request ends with a temporary model-provider-unavailable error; do not describe any other model or provider as a backup.
   - On privacy, do not say all conversation context or all user data stays only in RAM. OpenAI receives information needed for inference; {search_provider_label()} receives information needed when live search runs.
-  - Do not claim that Kalillac retains user text only for immediate processing, immediately erases it after a response, never places it in logs, or has no database/logging of any kind. Temporary session entries may remain in RAM until capacity eviction or service restart, and absence of user text from operational logs is not established.
+  - Do not claim that Kalillac retains user text only for immediate processing, immediately erases it after a response, never places it in logs, or has no database/logging of any kind. Temporary session entries may remain in RAM until capacity eviction, service restart or an explicit End & erase, and absence of user text from operational logs is not established.
   - Do not claim the design is easier to audit, independently auditable, or objectively more secure merely because sessions are RAM-backed, accounts are not required, or persistent user-facing history is absent.
   - For live search, say retrieved source links are included with successful live-search responses. Do not broaden that into `sources are always shown`.
   - Do not state or imply that OpenAI or {search_provider_label()} trains on user conversations. Their retention, deletion, logging, storage, training, and analytics practices are not established by Kalillac's application architecture and require separate current verification.
@@ -10220,13 +10394,13 @@ REFERENCE RULES:
 - Reasonable details needed by the NEW backend are allowed; when relevant, label an unverified choice in a code comment as an example implementation choice.
 - For V31 native search, preserve this order: model tool decision -> application validation -> {search_provider_label()} -> search results returned to the model as untrusted data -> application-owned source rendering. Do not describe current V31 native search as passing results to any model other than {OPENAI_MODEL}.
 - Never use eval() or exec() for arithmetic, expression parsing, or request handling; use explicit parsing/allowlisted operations.
-- Temporary server-side session state must be bounded with explicit capacity/eviction, never an unbounded global dictionary. Do not call Kalillac's temporary state a cache or claim refresh/tab/browser/session end erases it.
+- Temporary server-side session state must be bounded with explicit capacity/eviction, never an unbounded global dictionary. Do not call Kalillac's temporary state a cache or claim that refresh, closing a tab or browser, or simply stopping erases it; only the explicit End & erase control removes it on demand.
 - Use only response fields needed by the NEW implementation; do not imply Kalillac uses that schema.
 - Model ids are optional in the code: abstracting the provider call or reading ids from configuration is fine. Any model id the code does name must be exactly {OPENAI_MODEL}; Kalillac has no fallback model, so do not present any other model as part of Kalillac's configuration.
 
 VERIFIED VALUES VS EXAMPLE VALUES:
 - The only verified numeric limit supplied here is live search: {SESSION_SEARCH_LIMIT} searches per rolling {SESSION_SEARCH_WINDOW}-second window per session. Use exactly that if the code includes a search limit.
-- Kalillac's temporary session state has no verified time-based TTL or expiry duration; entries may remain until capacity eviction or service restart. Do not present any TTL as Kalillac behavior.
+- Kalillac's temporary session state has no verified time-based TTL or expiry duration; entries may remain until capacity eviction, service restart or an explicit End & erase. Do not present any TTL as Kalillac behavior.
 - Every other capacity, TTL, timeout, size, or retry value in the NEW code (for example a session capacity) is an example implementation choice. Mark each one with a comment such as `# Example value, not a verified Kalillac setting`.
 - Do not describe the code as Kalillac's actual configuration, or as built "only" from verified architecture, when it contains example values.
 """
@@ -10474,7 +10648,7 @@ Rules:
 - Explain that the requested information is not available in the current session.
 - For recall or availability, you may identify supplied current-session context or explicitly saved temporary session information as the source; never imply retrieval from an inaccessible earlier session.
 - Kalillac uses temporary server-side session state in RAM and does not intentionally provide persistent user-facing chat history, a persistent conversation-history database, or persistent user profiles.
-- In the current web frontend, the temporary session identifier exists only in page memory. Refreshing/reloading the page resets that browser-side identifier, so the refreshed page does not reconnect to the prior temporary server session. Do not claim that refresh immediately erases the old server RAM entry; it may remain until capacity eviction or service restart.
+- In the current web frontend, the temporary session identifier exists only in page memory. Refreshing/reloading the page resets that browser-side identifier, so the refreshed page does not reconnect to the prior temporary server session. Do not claim that refresh immediately erases the old server RAM entry; it may remain until capacity eviction or service restart. Only the explicit End & erase control removes it on demand, and that is not provider-side or log deletion.
 - Never imply that you can recover information that is not available in the current session.
 - Present this as part of Kalillac AI's privacy design, not as an error or malfunction.
 - Do not ask the user to repeat the information unless they specifically ask how to provide it again.
@@ -11616,8 +11790,8 @@ def chat(message, history, request=None, session_id=None):
             log("SESSION MEMORY ROUTE OVERRIDE: matched current-session fact")
 
         log("\n===== ROUTE LOG =====")
-        log(f"RAW INPUT: {message}")
-        log(f"NORMALIZED INPUT: {normalize_for_router(message)}")
+        # Metadata only: prompt, conversation and response text are never logged.
+        log(f"INPUT CHARS: {len(str(message))}")
         log(f"ROUTE SELECTED: {route}")
         log(f"MEMORY ITEMS: {len(memory)}")
 
@@ -11736,7 +11910,7 @@ def chat(message, history, request=None, session_id=None):
 
             log("MEMORY WRITTEN: no")
             log("MODEL CALLED: no")
-            log(f"CALCULATOR RESULT: {result}")
+            log("CALCULATOR RESULT: computed")
             log("===== END ROUTE LOG =====\n")
 
             if result is None:
@@ -13528,9 +13702,15 @@ def resolve_session_id(session_id):
     otherwise unknown ids get a fresh CSPRNG token. This prevents a caller from
     choosing arbitrary server-side session keys while keeping normal reload and
     eviction behavior unchanged.
+
+    An id that was explicitly ended raises SessionEnded while its tombstone
+    lasts, so a stale request learns the session ended instead of silently
+    starting a new one.
     """
     if session_id:
         with SESSION_LOCK:
+            if _session_has_ended(session_id):
+                raise SessionEnded()
             if session_id in SESSION_STATE:
                 return session_id
     return new_session_id()
@@ -13625,6 +13805,11 @@ chat_core = provider_controls.guard_chat(chat_core)
 
 # ---------------------------- FastAPI models ------------------------------
 
+# The only shape a chat session id can take (it is minted by
+# secrets.token_urlsafe). Shared by /api/chat and /api/chat/session/end.
+_CHAT_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_\-]{1,128}")
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., description="User message")
     history: list = Field(default_factory=list)
@@ -13655,7 +13840,7 @@ class ChatRequest(BaseModel):
             return None
         v = str(v)
         # Opaque token; accept only sane length/charset, else treat as absent.
-        if len(v) > 128 or not re.fullmatch(r"[A-Za-z0-9_\-]{1,128}", v):
+        if not _CHAT_SESSION_ID_RE.fullmatch(v):
             return None
         return v
 
@@ -14161,7 +14346,7 @@ def _chat_core_with_account_quota(message, history, sid, resolved):
     return chat_core(message, history, sid, resolved)
 
 
-async def _api_chat_with_budget(request, req, history, limits):
+async def _api_chat_with_budget(request, req, history, limits, session):
     """The /api/chat lifecycle under a RequestBudget.
 
     One budget covers account resolution, the queue waits and the worker.
@@ -14258,7 +14443,9 @@ async def _api_chat_with_budget(request, req, history, limits):
         if time.monotonic() >= budget.deadline:
             return _budget_error(504, "request_timeout")
 
-        sid = resolve_session_id(req.session_id)
+        # Resolve the id and register this work (with its budget, so ending the
+        # session can cancel it) in one critical section.
+        sid, session.work = _begin_session_work(req.session_id, budget)
         if provider_controls.SERVICE is not None:
             provider_controls.account_status(meter_user_id is not None)
             provider_controls.session_admit(get_session_state_by_id(sid), SESSION_LOCK)
@@ -14309,13 +14496,15 @@ async def _api_chat_with_budget(request, req, history, limits):
         queue_deadline = min(queue_wait_deadline, budget.deadline)
         request_deadline_selected = budget.deadline <= queue_wait_deadline
 
-        def _release_when_worker_exits(fut, _sem=sem, _sid=sid, _entry=entry):
+        def _release_when_worker_exits(fut, _sem=sem, _sid=sid, _entry=entry, _work=session.work):
             # Consume the detached worker's outcome so nothing is left
             # unretrieved, then release what it was holding -- once --
-            # including its admitted-chat reservation.
+            # including its admitted-chat reservation and its claim on the
+            # session registration.
             _consume_outcome(fut)
             _release_chat_resources(_sem, _sid, _entry)
             admission.release()
+            _release_session_work(_work)
 
         try:
             for acquire, release in (
@@ -14365,6 +14554,10 @@ async def _api_chat_with_budget(request, req, history, limits):
             if waiting:
                 _chat_waiting -= 1
                 waiting = False
+
+            # A request that waited while its session was ended never starts.
+            if session.work.ended:
+                return _session_ended_response()
 
             # The worker thread sees this budget through a copied context.
             with budget_scope(budget):
@@ -14437,6 +14630,7 @@ async def _api_chat_with_budget(request, req, history, limits):
                     # admissions and transfers the release to its exit.
                     budget.cancel()
                     handed_off = True
+                    _hold_session_work(session.work)
                     work.add_done_callback(_release_when_worker_exits)
 
             if not handed_off:
@@ -14519,6 +14713,35 @@ def _account_cookie_present(request):
     the account quota path; that path authenticates the cookie against the
     database and refuses an invalid session (401), never the allowance."""
     return _anonymous_account_cookie is not None and bool(request.cookies.get(_anonymous_account_cookie))
+
+
+@api.post("/api/chat/session/end")
+async def api_chat_session_end(request: _FastAPIRequest):
+    """End one AI conversation session ("End & erase").
+
+    Removes Kalillac's temporary state for that chat session, ends its
+    registered work and requests cancellation of that work. It is not a
+    logout: account sessions, cookies, database records (allowance, usage,
+    billing) and anything already sent to a provider are untouched, and a
+    provider may keep processing after cancellation. Not gated by the chat
+    concurrency limits; it does constant-time in-memory work only."""
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        return _budget_error(415, "unsupported_media_type")
+
+    try:
+        raw = await request.json()
+    except Exception:
+        return _budget_error(400, "invalid_json")
+
+    if not isinstance(raw, dict):
+        return _budget_error(400, "invalid_body")
+
+    session_id = raw.get("session_id")
+    if not isinstance(session_id, str) or not _CHAT_SESSION_ID_RE.fullmatch(session_id):
+        return _budget_error(422, "invalid_request")
+
+    return JSONResponse(content=end_chat_session(session_id), headers=_NO_STORE)
 
 
 @api.post("/api/chat")
@@ -14637,6 +14860,34 @@ async def _api_chat_response(request):
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
 
+    # session.work is this request's registration under its effective session
+    # id, set by the dispatch the moment the id is resolved. The handler's own
+    # claim on it is released here, exactly once; a worker that outlives the
+    # handler holds its own claim until it really exits.
+    session = SimpleNamespace(work=None)
+    try:
+        response = await _api_chat_dispatch(request, req, history, session)
+    except SessionEnded:
+        response = _session_ended_response()
+    finally:
+        if session.work is not None:
+            _release_session_work(session.work)
+
+    # Ending the session wins over every outcome of its work, including a
+    # reply that finished after the session ended: that reply is discarded.
+    if session.work is not None and session.work.ended:
+        response = _session_ended_response()
+
+    return response
+
+
+def _session_ended_response():
+    return _budget_error(409, "session_ended")
+
+
+async def _api_chat_dispatch(request, req, history, session):
+    """Run a validated chat request. Registers its work under the effective
+    session id (session.work) at the moment that id is resolved."""
     quota_request = _usage_quota_context.get()
     if quota_request is not None:
         quota_request.request_chars = len(req.message) + sum(len(turn["content"]) for turn in history)
@@ -14647,7 +14898,7 @@ async def _api_chat_response(request):
         return _budget_error(503, "service_unavailable")
 
     if limits is not None:
-        return await _api_chat_with_budget(request, req, history, limits)
+        return await _api_chat_with_budget(request, req, history, limits, session)
 
     # Usage metering only: decide once, at acceptance and before any chat
     # resource is taken, which signed-in account (if any) this request
@@ -14673,8 +14924,9 @@ async def _api_chat_response(request):
     # for serialization AND passed to chat_core(resolved=True), so a new
     # session never gets one id for locking and another for the pipeline.
     # resolve_session_id() holds SESSION_LOCK only for a dict lookup and
-    # releases it before any await below.
-    sid = resolve_session_id(req.session_id)
+    # releases it before any await below. The work is registered under that
+    # id in the same critical section, before anything can touch its state.
+    sid, session.work = _begin_session_work(req.session_id, None)
 
     sem = _get_chat_semaphore()
 
@@ -14701,6 +14953,10 @@ async def _api_chat_response(request):
 
         _chat_waiting -= 1
         waiting = False
+
+        # A request that waited while its session was ended never starts.
+        if session.work.ended:
+            return _session_ended_response()
 
         # chat_core is synchronous and calls out to OpenAI/Tavily. Running it
         # directly here would block the event loop for the whole model call and
@@ -14733,11 +14989,14 @@ async def _api_chat_response(request):
             # thread actually finishes, so neither limit is exceeded by an
             # orphaned execution. Release happens in a loop callback.
             handed_off = True
+            # The worker keeps its own claim on the session registration.
+            _hold_session_work(session.work)
 
-            def _on_done(fut, _sem=sem, _sid=sid, _entry=entry):
+            def _on_done(fut, _sem=sem, _sid=sid, _entry=entry, _work=session.work):
                 if not fut.cancelled():
                     fut.exception()  # mark retrieved; nothing to report
                 _release_chat_resources(_sem, _sid, _entry)
+                _release_session_work(_work)
 
             work.add_done_callback(_on_done)
             raise

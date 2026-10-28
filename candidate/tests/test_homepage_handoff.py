@@ -675,7 +675,8 @@ def test_privacy_discloses_the_daily_allowance_cookie_accurately():
     assert "['browser', 'Browser storage'], ['visitor-cookie', 'Daily allowance cookie']," in toc
     assert app.count('<DocSection id="visitor-cookie" title="Daily allowance cookie">') == 1
     assert app.count('href="#visitor-cookie"') == 2
-    assert 'title="Privacy" toc={privacyToc} updated="Last updated: October 27, 2026"' in app
+    # Privacy was materially updated again for End & erase.
+    assert 'title="Privacy" toc={privacyToc} updated="Last updated: October 28, 2026"' in app
     assert 'title="Terms of Use" toc={termsToc} updated="Last updated: October 27, 2026"' in app
 
     # Every mention of the cookie is conditional on the allowance being active.

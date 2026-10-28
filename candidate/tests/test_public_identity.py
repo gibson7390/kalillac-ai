@@ -138,7 +138,8 @@ def test_built_legal_pages_describe_current_service(path, tmp_path_factory):
         "OpenAI", "Brave", "Tavily", "Cloudflare", "DigitalOcean",
         "cannot allow OpenAI, Brave, Tavily, Cloudflare, or DigitalOcean to process.",
         "No account or paid subscription is currently offered.",
-        "Last updated: October 27, 2026",
+        # Privacy was materially updated again for End & erase; Terms was not.
+        "Last updated: October 28, 2026" if path == "/privacy" else "Last updated: October 27, 2026",
     ):
         assert phrase in text, (path, phrase)
     assert re.search(r"18|eighteen", text)
