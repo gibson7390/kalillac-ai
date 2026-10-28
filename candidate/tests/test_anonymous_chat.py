@@ -365,7 +365,7 @@ def test_valid_account_uses_only_its_account_quota(accounts):
         response = post(c, account=ACCOUNT_TOKEN)
         refused = post(c, account=ACCOUNT_TOKEN)
     assert response.status_code == 200 and response.json()["reply"] == REPLY
-    assert refused.status_code == 429 and refused.json() == {"error": "busy"}  # The account's own limit.
+    assert refused.status_code == 429 and refused.json() == {"error": "daily_limit_reached"}  # The account's own limit.
     no_visitor_cookie(response)
     no_visitor_cookie(refused)
     assert states(accounts) == [] and visitor_days(accounts) == []

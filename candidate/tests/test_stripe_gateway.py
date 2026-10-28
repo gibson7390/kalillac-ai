@@ -35,6 +35,8 @@ CONFIG = BillingConfig(
     success_url="https://kalillac.ai/billing/success",
     cancel_url="https://kalillac.ai/billing/cancel",
     portal_return_url="https://kalillac.ai/account",
+    mode="test",
+    allowed_price_ids=frozenset({"price_kalillacpaid"}),
 )
 
 PERIOD_END = 1793880000  # 2026-11-05T12:00:00Z
@@ -47,11 +49,12 @@ def _sign(payload: bytes, secret: str = WEBHOOK_SECRET, timestamp=None) -> str:
     return f"t={timestamp},v1={digest}"
 
 
-def _event(event_type, data_object, event_id="evt_test_1"):
+def _event(event_type, data_object, event_id="evt_test_1", livemode=False):
     return json.dumps(
         {
             "id": event_id,
             "object": "event",
+            "livemode": livemode,
             "type": event_type,
             "api_version": stripe.api_version,
             "data": {"object": data_object},
@@ -98,6 +101,34 @@ def test_valid_signature_is_accepted(gateway):
     assert event.subscription_id == "sub_123"
     assert event.customer_id == "cus_123"
     assert event.kalillac_user_id == "11111111-1111-1111-1111-111111111111"
+    assert event.livemode is False
+
+
+@pytest.mark.parametrize("livemode", [True, False])
+def test_signed_event_livemode_is_parsed(gateway, livemode):
+    payload = _event("customer.subscription.updated", SUBSCRIPTION, livemode=livemode)
+
+    assert gateway.parse_webhook(payload, _sign(payload)).livemode is livemode
+
+
+@pytest.mark.parametrize("raw", [None, "true", "false", 1, 0, "missing"])
+def test_non_boolean_or_missing_livemode_matches_neither_mode(gateway, raw):
+    event = json.loads(_event("customer.subscription.updated", SUBSCRIPTION))
+    if raw == "missing":
+        del event["livemode"]
+    else:
+        event["livemode"] = raw
+    payload = json.dumps(event).encode()
+
+    assert gateway.parse_webhook(payload, _sign(payload)).livemode is None
+
+
+def test_tampered_livemode_fails_signature_verification(gateway):
+    payload = _event("customer.subscription.updated", SUBSCRIPTION, livemode=False)
+    signature = _sign(payload)
+
+    with pytest.raises(InvalidWebhookSignature):
+        gateway.parse_webhook(payload.replace(b'"livemode": false', b'"livemode": true'), signature)
 
 
 def test_tampered_payload_is_rejected(gateway):

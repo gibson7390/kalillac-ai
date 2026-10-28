@@ -73,7 +73,8 @@ def test_successful_account_requests_use_last_slot_once(foundation, monkeypatch,
         first = request(client)
         second = request(client)
     assert first.status_code == 200 and first.json()["reply"] == REPLY
-    assert second.status_code == 429 and second.json() == {"error": "busy"}
+    # The only slot is settled: the day's allowance is used, not busy.
+    assert second.status_code == 429 and second.json() == {"error": "daily_limit_reached"}
     assert second.headers["cache-control"] == "no-store"
     assert foundation["calls"] == (["native"] if native else ["legacy"])
     with foundation["factory"]() as session:
@@ -234,14 +235,14 @@ def test_cross_midnight_charges_completion_day_and_character_meter(foundation, m
 
 
 def test_midnight_full_new_day_cannot_be_bypassed(foundation):
-    from kalillac_db.repositories.quota import QuotaBusy
+    from kalillac_db.repositories.quota import QuotaDailyLimitReached
     from kalillac_db.repositories.usage import increment_daily_usage
     foundation["now"] = NOW.replace(hour=23, minute=59, second=59)
     state = admitted(foundation)
     foundation["now"] += timedelta(seconds=2)
     with foundation["factory"]() as session, session.begin():
         increment_daily_usage(session, foundation["user_id"], foundation["now"].date(), request_chars=0, response_chars=0)
-    with pytest.raises(QuotaBusy): state.service.complete(state.admission, state)
+    with pytest.raises(QuotaDailyLimitReached): state.service.complete(state.admission, state)
     state.service.release(state.admission)
 
 
@@ -437,12 +438,12 @@ def test_cancellation_during_ready_preparation_does_not_count_success(foundation
 
 
 def test_committed_success_survives_new_service_instance(foundation):
-    from kalillac_db.repositories.quota import QuotaBusy
+    from kalillac_db.repositories.quota import QuotaDailyLimitReached
     state = admitted(foundation)
     state.service.complete(state.admission, state)
     state.service.record_sent(state.admission)
     # Crash after durable completion cannot turn already-consumed usage free.
-    with pytest.raises(QuotaBusy): admitted(foundation, quota_service(foundation))
+    with pytest.raises(QuotaDailyLimitReached): admitted(foundation, quota_service(foundation))
 
 
 def test_expired_pipeline_cannot_return_success(foundation, monkeypatch):
@@ -526,14 +527,14 @@ from account_test_db import make_sqlite_file_engine, make_session_factory
 from kalillac_accounts.quota import UsageQuota
 from kalillac_accounts.usage_limits import UsageLimits
 from kalillac_accounts.tokens import hash_session_token
-from kalillac_db.repositories.quota import QuotaBusy
+from kalillac_db.repositories.quota import QuotaDailyLimitReached
 import sys
 engine=make_sqlite_file_engine(sys.argv[1]); factory=make_session_factory(engine)
 service=UsageQuota(UsageLimits(1,3),session_factory=lambda:factory,clock=lambda:datetime(2026,10,11,12,tzinfo=timezone.utc))
 try:
  service.reserve(hash_session_token('synthetic-account-session'),service.new_request())
  raise AssertionError('restart granted extra capacity')
-except QuotaBusy: print('blocked; outbound='+str(len(attempts)))
+except QuotaDailyLimitReached: print('blocked; outbound='+str(len(attempts)))
 finally: engine.dispose()
 """
     env = dict(os.environ, PYTHONPATH=str(__import__("pathlib").Path(__file__).parents[1]) + os.pathsep + str(__import__("pathlib").Path(__file__).parent))
@@ -661,17 +662,19 @@ def test_upgrade_does_not_invalidate_already_reserved_free_slot(foundation):
 
 def test_downgrade_honors_existing_leases_but_no_new_paid_slots(foundation):
     from kalillac_db.repositories.entitlements import set_entitlement_tier
-    from kalillac_db.repositories.quota import QuotaBusy
+    from kalillac_db.repositories.quota import QuotaBusy, QuotaDailyLimitReached
     with foundation["factory"]() as session, session.begin():
         set_entitlement_tier(session, foundation["user_id"], "paid", source="test")
     pending = [admitted(foundation) for _ in range(3)]
     with foundation["factory"]() as session, session.begin():
         set_entitlement_tier(session, foundation["user_id"], "free", source="test")
+    # Pending leases hold the capacity: temporarily busy.
     with pytest.raises(QuotaBusy): admitted(foundation)
     for state in pending:
         state.service.complete(state.admission, state)
         state.service.record_sent(state.admission)
-    with pytest.raises(QuotaBusy): admitted(foundation)
+    # Settled usage now fills the free allowance.
+    with pytest.raises(QuotaDailyLimitReached): admitted(foundation)
 
 
 
@@ -796,12 +799,13 @@ def test_failed_send_with_full_lookup_capacity_never_records_success(foundation,
 
 def test_ready_crash_expiry_holds_capacity_without_false_success(foundation):
     from kalillac_db.models import AccountUsageSlot
-    from kalillac_db.repositories.quota import QuotaBusy
+    from kalillac_db.repositories.quota import QuotaDailyLimitReached
     state = admitted(foundation)
     state.service.complete(state.admission, state)
-    # A crash after preparation cannot prove whether a body was sent.
+    # A crash after preparation cannot prove whether a body was sent; the
+    # uncertain delivery stays charged against the day.
     foundation["now"] += timedelta(minutes=16)
-    with pytest.raises(QuotaBusy): admitted(foundation, quota_service(foundation))
+    with pytest.raises(QuotaDailyLimitReached): admitted(foundation, quota_service(foundation))
     with foundation["factory"]() as session:
         row = session.scalar(select(AccountUsageDaily))
         assert row is None or row.successful_chats == 0
@@ -815,7 +819,7 @@ def test_ready_crash_expiry_holds_capacity_without_false_success(foundation):
 def test_full_after_send_capacity_does_not_make_unknown_delivery_free(foundation, monkeypatch):
     import asyncio
     from kalillac_db.models import AccountUsageSlot
-    from kalillac_db.repositories.quota import QuotaBusy
+    from kalillac_db.repositories.quota import QuotaDailyLimitReached
     class Request:
         cookies = {SETTINGS.cookie_name: TOKEN}
         async def json(self): return {"message": MESSAGE}
@@ -826,7 +830,7 @@ def test_full_after_send_capacity_does_not_make_unknown_delivery_free(foundation
         async def send(message): pass
         await response({"type": "http"}, receive, send)
     asyncio.run(scenario())
-    with pytest.raises(QuotaBusy): admitted(foundation)
+    with pytest.raises(QuotaDailyLimitReached): admitted(foundation)
     with foundation["factory"]() as session:
         row = session.scalar(select(AccountUsageDaily))
         assert row.successful_chats == 0
@@ -838,6 +842,7 @@ def test_full_after_send_capacity_does_not_make_unknown_delivery_free(foundation
 def test_repository_free_upgrade_downgrade_honors_all_same_day_leases(foundation, completion_order):
     from kalillac_db.repositories.quota import (
         lock_account, reserve_slot, complete_slot, record_sent_slot, QuotaBusy,
+        QuotaDailyLimitReached,
     )
     factory, user_id = foundation["factory"], foundation["user_id"]
     leases = []
@@ -859,7 +864,7 @@ def test_repository_free_upgrade_downgrade_honors_all_same_day_leases(foundation
                 assert record_sent_slot(session, leases[index]) == NOW.date()
     with factory() as session:
         assert session.scalar(select(AccountUsageDaily)).successful_chats == 3
-    with pytest.raises(QuotaBusy):
+    with pytest.raises(QuotaDailyLimitReached):
         with factory() as session, session.begin():
             lock_account(session, user_id)
             reserve_slot(session, user_id, NOW.date(), 1, NOW, timedelta(minutes=15))
@@ -915,7 +920,8 @@ def test_pipeline_free_upgrade_downgrade_preserves_pending_responses(foundation,
                     response = await task
                     assert response.status_code == 200 and response.json()["reply"] == REPLY
                 denied = await chat()
-                assert denied.status_code == 429 and denied.json() == {"error": "busy"}
+                # All three are settled: the free allowance is used up.
+                assert denied.status_code == 429 and denied.json() == {"error": "daily_limit_reached"}
             finally:
                 for event in finish: event.set()
                 await asyncio.gather(*tasks, return_exceptions=True)
@@ -925,3 +931,136 @@ def test_pipeline_free_upgrade_downgrade_preserves_pending_responses(foundation,
         row = session.scalar(select(AccountUsageDaily))
         assert (row.successful_chats, row.request_chars, row.response_chars) == (3, 3 * len(MESSAGE), 3 * len(REPLY))
         assert list(session.scalars(select(AccountUsageSlot.state))) == ["completed"] * 3
+
+
+
+# --- daily_limit_reached versus busy ----------------------------------------------------------
+
+
+def test_daily_limit_is_its_own_stable_code():
+    from kalillac_db.repositories.quota import QuotaBusy, QuotaDailyLimitReached, QuotaError
+    assert issubclass(QuotaDailyLimitReached, QuotaError)
+    assert not issubclass(QuotaDailyLimitReached, QuotaBusy)
+    assert (QuotaDailyLimitReached.status_code, QuotaDailyLimitReached.code) == (429, "daily_limit_reached")
+    assert (QuotaBusy.status_code, QuotaBusy.code) == (429, "busy")
+
+
+def _repository_reserve(foundation, limit):
+    from kalillac_db.repositories.quota import lock_account, reserve_slot
+    with foundation["factory"]() as session, session.begin():
+        lock_account(session, foundation["user_id"])
+        return reserve_slot(session, foundation["user_id"], NOW.date(), limit, NOW, timedelta(minutes=15))
+
+
+def _repository_settle(foundation, lease):
+    from kalillac_db.repositories.quota import lock_account, complete_slot, record_sent_slot
+    with foundation["factory"]() as session, session.begin():
+        lock_account(session, foundation["user_id"])
+        complete_slot(session, lease, NOW, lease.daily_limit)
+        record_sent_slot(session, lease)
+
+
+def test_repository_distinguishes_charged_exhaustion_from_pending_holds(foundation):
+    from kalillac_db.repositories.quota import QuotaBusy, QuotaDailyLimitReached, lock_account, release_slot
+    first = _repository_reserve(foundation, 2)
+    second = _repository_reserve(foundation, 2)
+    # Both slots pending: they may still be released.
+    with pytest.raises(QuotaBusy):
+        _repository_reserve(foundation, 2)
+    _repository_settle(foundation, first)
+    # One settled, one pending: still temporary.
+    with pytest.raises(QuotaBusy):
+        _repository_reserve(foundation, 2)
+    # Releasing the pending lease frees its capacity for a new reservation.
+    with foundation["factory"]() as session, session.begin():
+        lock_account(session, foundation["user_id"])
+        release_slot(session, second)
+    third = _repository_reserve(foundation, 2)
+    _repository_settle(foundation, third)
+    # Both settled: the day's allowance is used.
+    with pytest.raises(QuotaDailyLimitReached):
+        _repository_reserve(foundation, 2)
+    with foundation["factory"]() as session:
+        assert session.scalar(select(AccountUsageDaily)).successful_chats == 2
+
+
+def test_prepared_but_unsettled_delivery_counts_as_charged(foundation):
+    from kalillac_db.repositories.quota import QuotaDailyLimitReached, lock_account, complete_slot
+    lease = _repository_reserve(foundation, 1)
+    with foundation["factory"]() as session, session.begin():
+        lock_account(session, foundation["user_id"])
+        complete_slot(session, lease, NOW, 1)   # ready, not yet recorded as sent
+    with pytest.raises(QuotaDailyLimitReached):
+        _repository_reserve(foundation, 1)
+
+
+def test_paid_account_exhaustion_is_also_daily_limit_reached(foundation):
+    from kalillac_db.repositories.entitlements import set_entitlement_tier
+    with foundation["factory"]() as session, session.begin():
+        set_entitlement_tier(session, foundation["user_id"], "paid", source="test",
+                             expires_at=NOW + timedelta(days=30))
+    with TestClient(app.api) as client:
+        allowed = [request(client) for _ in range(3)]
+        refused = request(client)
+    assert [r.status_code for r in allowed] == [200, 200, 200]
+    assert refused.status_code == 429 and refused.json() == {"error": "daily_limit_reached"}
+    assert refused.headers["cache-control"] == "no-store"
+    with foundation["factory"]() as session:
+        assert session.scalar(select(AccountUsageDaily)).successful_chats == 3
+
+
+def test_expired_paid_entitlement_falls_back_to_the_free_daily_limit(foundation):
+    from kalillac_db.repositories.entitlements import set_entitlement_tier
+    with foundation["factory"]() as session, session.begin():
+        set_entitlement_tier(session, foundation["user_id"], "paid", source="test",
+                             expires_at=NOW - timedelta(seconds=1))
+    with TestClient(app.api) as client:
+        first = request(client)
+        refused = request(client)
+    assert first.status_code == 200
+    assert refused.status_code == 429 and refused.json() == {"error": "daily_limit_reached"}
+
+
+def test_daily_limit_refusal_does_no_provider_work_and_reserves_nothing(foundation):
+    from kalillac_db.models import AccountUsageSlot
+    with TestClient(app.api) as client:
+        assert request(client).status_code == 200
+        calls = list(foundation["calls"])
+        refused = request(client)
+    assert refused.json() == {"error": "daily_limit_reached"}
+    assert foundation["calls"] == calls
+    with foundation["factory"]() as session:
+        assert list(session.scalars(select(AccountUsageSlot.state))) == ["completed"]
+
+
+@pytest.mark.parametrize("budgeted", [False, True], ids=["unbudgeted", "budgeted"])
+def test_lookup_capacity_saturation_stays_busy(foundation, monkeypatch, budgeted):
+    from kalillac_db.models import AccountUsageSlot
+    install_budget(monkeypatch, budgeted)
+    monkeypatch.setattr(app, "_lookups_outstanding", app.MAX_QUEUED_CHATS)
+    with TestClient(app.api) as client:
+        response = request(client)
+    assert response.status_code == 429 and response.json() == {"error": "busy"}
+    assert not foundation["calls"]
+    with foundation["factory"]() as session:
+        assert session.scalar(select(AccountUsageSlot)) is None
+
+
+@pytest.mark.parametrize("budgeted", [False, True], ids=["unbudgeted", "budgeted"])
+def test_chat_queue_saturation_stays_busy_and_releases_the_lease(foundation, monkeypatch, budgeted):
+    import asyncio
+    from kalillac_db.models import AccountUsageSlot
+    install_budget(monkeypatch, budgeted)
+    if budgeted:
+        monkeypatch.setattr(app, "_chats_admitted", app.MAX_CONCURRENT_CHATS + app.MAX_QUEUED_CHATS)
+    else:
+        monkeypatch.setattr(app, "_chat_semaphore", asyncio.Semaphore(0))
+        monkeypatch.setattr(app, "_chat_waiting", app.MAX_QUEUED_CHATS)
+    with TestClient(app.api) as client:
+        response = request(client)
+    assert response.status_code == 429 and response.json() == {"error": "busy"}
+    assert not foundation["calls"]
+    with foundation["factory"]() as session:
+        # The admitted lease was released, so the allowance is untouched.
+        assert list(session.scalars(select(AccountUsageSlot.state))) in ([], ["released"])
+        assert session.scalar(select(AccountUsageDaily)) is None

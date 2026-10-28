@@ -57,7 +57,14 @@ from account_test_db import (
     make_sqlite_engine,
     make_sqlite_file_engine,
 )
-from test_billing import PAID_PRICE, FakeGateway, _subscription
+from test_billing import (
+    ALLOWED_PRICES,
+    PAID_EXPIRY,
+    PAID_PRICE,
+    PERIOD_END,
+    FakeGateway,
+    _subscription,
+)
 
 
 URLS = dict(
@@ -378,7 +385,8 @@ def _deliver(factory, gateway, event_id, event_type, *, user=None,
         "valid",
         gateway=gateway,
         session_factory=factory,
-        paid_price_id=PAID_PRICE,
+        allowed_price_ids=ALLOWED_PRICES,
+        livemode=False,
     ).result
 
 
@@ -498,6 +506,65 @@ def test_simultaneous_duplicate_deliveries_reconcile_once(file_db, gateway):
     assert sorted(results) == ["duplicate", "processed"]
     assert gateway.retrieve_calls == ["sub_1"]
     assert _count(file_db, StripeWebhookEvent) == 1
+
+
+def _stored_expiry(factory, user_id):
+    with factory() as session:
+        row = session.get(AccountEntitlement, user_id)
+        value = row.expires_at
+    # SQLite returns naive datetimes; PostgreSQL returns aware ones.
+    return (row.tier, None if value is None else value.replace(tzinfo=timezone.utc))
+
+
+def test_concurrent_events_converge_on_one_bounded_expiry(file_db, gateway):
+    user_id = _add_user(file_db, "a@example.com")
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+
+    results = _in_threads(*[
+        (lambda n=n: _deliver(
+            file_db, gateway, f"evt_{n}", "customer.subscription.updated", user=user_id
+        ))
+        for n in range(6)
+    ])
+
+    assert results == ["processed"] * 6
+    assert _stored_expiry(file_db, user_id) == ("paid", PAID_EXPIRY)
+
+
+def test_serialized_renewal_and_stale_event_keep_the_newest_expiry(file_db, gateway):
+    # The older event holds the lock with the old period while Stripe's truth
+    # renews; the later reconciliation re-fetches and commits the new period.
+    user_id = _add_user(file_db, "a@example.com")
+    renewed = PERIOD_END + timedelta(days=30)
+    truth = {"period_end": PERIOD_END}
+    first_fetched = threading.Event()
+    release_first = threading.Event()
+
+    def retrieve(subscription_id):
+        state = _subscription(user_id, current_period_end=truth["period_end"])
+        if not first_fetched.is_set():
+            first_fetched.set()
+            assert release_first.wait(timeout=20)
+        return state
+
+    gateway.retrieve_subscription = retrieve
+    results = {}
+    one = threading.Thread(target=lambda: results.__setitem__("old", _deliver(
+        file_db, gateway, "evt_old", "customer.subscription.updated", user=user_id)))
+    one.start()
+    assert first_fetched.wait(timeout=20)
+    truth["period_end"] = renewed
+    two = threading.Thread(target=lambda: results.__setitem__("new", _deliver(
+        file_db, gateway, "evt_new", "customer.subscription.updated", user=user_id)))
+    two.start()
+    two.join(timeout=1.0)
+    assert two.is_alive()  # Waiting on the account lock.
+    release_first.set()
+    one.join(timeout=30)
+    two.join(timeout=30)
+
+    assert results == {"old": "processed", "new": "processed"}
+    assert _stored_expiry(file_db, user_id) == ("paid", renewed + service.PAID_ENTITLEMENT_GRACE)
 
 
 def test_duplicate_seen_only_under_the_lock_is_clean(memory_db, gateway, monkeypatch):
@@ -1225,7 +1292,7 @@ def test_completed_session_for_a_different_terminal_subscription_holds(
     ],
 )
 def test_entitlement_mapping_is_unchanged(status, tier):
-    assert tier_for_subscription(_subscription(None, status=status), PAID_PRICE) == tier
+    assert tier_for_subscription(_subscription(None, status=status), ALLOWED_PRICES) == tier
 
 
 # --- webhook linkage: delayed and conflicting subscriptions -----------------------------

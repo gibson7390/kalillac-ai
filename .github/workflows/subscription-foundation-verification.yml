@@ -1,0 +1,205 @@
+# Verification for the subscription foundation: accounts, entitlements, usage
+# quotas and Stripe billing.
+#
+# suites: the existing account, entitlement, usage and billing test files on
+# SQLite with an injected fake Stripe gateway. The real Stripe adapter is
+# exercised through the stripe library itself, without any request.
+#
+# billing-postgres: the billing service's locking, idempotency and rollback
+# checks (candidate/tools/verify_billing_postgres.py) against a disposable
+# PostgreSQL service container, migrated with the repository's Alembic chain.
+# The tool only accepts the database kalillac_staging and role
+# kalillac_staging_app, so the container is provisioned with those names.
+#
+# Network: installing pinned dependencies may contact the Python package
+# index. The test run is protected by candidate/tests/conftest.py, which
+# refuses every non-loopback connection; the PostgreSQL job connects only to
+# its local service container. Every credential below is a fixed throwaway
+# value for that container. No repository secret, Stripe key, production or
+# staging setting is used, and nothing contacts Stripe.
+name: subscription-foundation-verification
+
+on:
+  pull_request:
+    paths:
+      - "candidate/**"
+      - "requirements-*.txt"
+      - ".github/workflows/subscription-foundation-verification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: subscription-foundation-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  suites:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # May contact the Python package index.
+      - name: Install the repository's pinned dependencies
+        run: >-
+          python -m pip install
+          -r requirements-production-lock.txt
+          -r requirements-database.txt
+          -r requirements-billing.txt
+          -r requirements-dev.txt
+
+      # conftest.py blocks every non-loopback connection for the whole run.
+      - name: Run the account, entitlement, usage and billing suites
+        working-directory: candidate
+        run: >-
+          python -m pytest
+          tests/test_billing.py
+          tests/test_billing_concurrency.py
+          tests/test_stripe_gateway.py
+          tests/test_accounts.py
+          tests/test_entitlements.py
+          tests/test_usage_limits.py
+          tests/test_usage_metering.py
+          tests/test_usage_enforcement.py
+          tests/test_anonymous_quota.py
+          tests/test_anonymous_chat.py
+          tests/test_account_migration.py
+          tests/test_db_foundation.py
+          tests/test_db_engine_concurrency.py
+          -v -rA -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/subscription-foundation.xml"
+
+      # A green run must mean every test executed: exactly the expected
+      # number collected (829, from `pytest --collect-only` over the files
+      # above), and none skipped, failed or errored. A missing stripe package
+      # would skip the Stripe adapter tests, so it fails the run instead.
+      - name: Require every test to have run
+        run: |
+          python - "$RUNNER_TEMP/subscription-foundation.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          if totals != {"tests": 829, "skipped": 0, "failures": 0, "errors": 0}:
+              sys.exit("the subscription foundation verification did not run completely")
+          PY
+
+  billing-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-admin-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PG_ADMIN_PASSWORD: disposable-admin-only
+      PG_MIGRATE_PASSWORD: disposable-migrate-only
+      PG_APP_PASSWORD: disposable-app-only
+      KALILLAC_DB_HOST: 127.0.0.1
+      KALILLAC_DB_PORT: "5432"
+      KALILLAC_DB_NAME: kalillac_staging
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # May contact the Python package index.
+      - name: Install the repository's pinned dependencies
+        run: >-
+          python -m pip install
+          -r requirements-production-lock.txt
+          -r requirements-database.txt
+          -r requirements-billing.txt
+          -r requirements-dev.txt
+
+      # The same role layout as the PostgreSQL provider-ceiling tests: a
+      # NOLOGIN owner, a NOINHERIT migration login that is a member of it, and
+      # a runtime login with schema USAGE only (migrations grant table DML).
+      - name: Provision the disposable database and roles
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+          from psycopg import sql
+          ident, literal = sql.Identifier, sql.Literal
+          owner, migrate, app = "kalillac_staging_owner", "kalillac_staging_migrate", "kalillac_staging_app"
+          database = "kalillac_staging"
+          def connect(dbname):
+              return psycopg.connect(host="127.0.0.1", port=5432, user="postgres", dbname=dbname,
+                                     password=os.environ["PG_ADMIN_PASSWORD"], autocommit=True)
+          with connect("postgres") as conn:
+              assert conn.execute("SELECT count(*) FROM pg_database WHERE datname = %s", [database]).fetchone() == (0,)
+              conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(ident(owner)))
+              conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
+                  ident(migrate), literal(os.environ["PG_MIGRATE_PASSWORD"])))
+              conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
+                  ident(app), literal(os.environ["PG_APP_PASSWORD"])))
+              conn.execute(sql.SQL("GRANT {} TO {}").format(ident(owner), ident(migrate)))
+              conn.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(ident(database), ident(owner)))
+              conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(ident(database)))
+              conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}").format(
+                  ident(database), ident(migrate), ident(app)))
+          with connect(database) as conn:
+              conn.execute("REVOKE ALL ON SCHEMA public FROM PUBLIC")
+              conn.execute(sql.SQL("CREATE SCHEMA kalillac AUTHORIZATION {}").format(ident(owner)))
+              conn.execute(sql.SQL("GRANT USAGE ON SCHEMA kalillac TO {}").format(ident(app)))
+          PY
+
+      # env.py assumes the owner role, so migrated objects are owner-owned
+      # and the runtime role receives table DML only.
+      - name: Apply the Alembic migrations
+        working-directory: candidate
+        env:
+          KALILLAC_DB_ENABLED: "true"
+          KALILLAC_DB_USER: kalillac_staging_migrate
+          KALILLAC_MIGRATION_OWNER_ROLE: kalillac_staging_owner
+          KALILLAC_MIGRATION_APP_ROLE: kalillac_staging_app
+        run: KALILLAC_DB_PASSWORD="$PG_MIGRATE_PASSWORD" python -m alembic upgrade head
+
+      # The tool uses an in-process fake Stripe; it never contacts Stripe.
+      # A green run requires its exit status 0 and every check passing.
+      - name: Run the PostgreSQL billing verification
+        working-directory: candidate
+        env:
+          KALILLAC_DB_USER: kalillac_staging_app
+        run: |
+          set -o pipefail
+          KALILLAC_DB_PASSWORD="$PG_APP_PASSWORD" python tools/verify_billing_postgres.py \
+            --expect-db kalillac_staging --expect-user kalillac_staging_app \
+            | tee "$RUNNER_TEMP/billing-postgres.log"
+          grep -qx "RESULT: 10/10 checks passed" "$RUNNER_TEMP/billing-postgres.log"

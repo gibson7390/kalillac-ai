@@ -31,7 +31,13 @@ from kalillac_db.repositories.billing import get_billing
 
 from .config import BillingConfig
 from .gateway import BillingGateway, BillingProviderError, InvalidWebhookSignature
-from .service import ReconciliationConflict, process_webhook, start_checkout
+from .service import (
+    ReconciliationConflict,
+    SubscriptionStateInvalid,
+    WebhookModeMismatch,
+    process_webhook,
+    start_checkout,
+)
 
 
 # Stripe events are small; this bounds memory for unauthenticated input.
@@ -245,11 +251,22 @@ def build_billing_router(
                     signature,
                     gateway=gateway,
                     session_factory=factory(),
-                    paid_price_id=config.price_id,
+                    allowed_price_ids=config.allowed_price_ids,
+                    livemode=config.livemode,
                 )
             )
         except InvalidWebhookSignature:
             return _error(400, "invalid_signature")
+        except WebhookModeMismatch:
+            # Signed, but for the other Stripe mode: nothing read, written,
+            # or recorded.
+            print("WARN: STRIPE_WEBHOOK_MODE_MISMATCH")
+            return _error(400, "livemode_mismatch")
+        except SubscriptionStateInvalid:
+            # A paying subscription without a usable period end: rolled
+            # back and unrecorded, so Stripe retries.
+            print("WARN: STRIPE_WEBHOOK_INVALID_SUBSCRIPTION_STATE")
+            return _error(500, "subscription_state_invalid")
         except ReconciliationConflict:
             # Two different nonterminal subscriptions for one account:
             # nothing written, event left unrecorded, so Stripe keeps

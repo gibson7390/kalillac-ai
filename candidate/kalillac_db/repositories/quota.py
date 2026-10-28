@@ -7,7 +7,7 @@ BEGIN IMMEDIATE; they are not evidence of PostgreSQL locking.
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import uuid
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import func, select, update
 from ..models import AccountUsageDaily, AccountUsageSlot, User
 from .usage import get_daily_usage, increment_daily_usage
 
@@ -18,8 +18,17 @@ class QuotaError(Exception):
 
 
 class QuotaBusy(QuotaError):
+    """Capacity is held by in-flight (pending) leases that may still be
+    released: a temporary condition, reported with the generic busy code."""
     status_code = 429
     code = "busy"
+
+
+class QuotaDailyLimitReached(QuotaError):
+    """The account's charged usage for the UTC day has reached its limit;
+    no in-flight lease can free it."""
+    status_code = 429
+    code = "daily_limit_reached"
 
 
 class QuotaIdentityInvalid(QuotaError):
@@ -61,23 +70,33 @@ def expire_pending(session, user_id, day, now):
     ).values(state="uncertain").execution_options(synchronize_session=False))
 
 
-def capacity_used(session, user_id, day):
+def capacity_breakdown(session, user_id, day):
+    """(charged, pending) for the day. Charged usage is settled chats plus
+    ready/uncertain leases (delivery may have happened; never refunded).
+    Pending leases still hold capacity but can be released."""
     row = get_daily_usage(session, user_id, day)
     completed = row.successful_chats if row else 0
-    pending = session.scalar(select(func.count()).select_from(AccountUsageSlot).where(
-        AccountUsageSlot.user_id == user_id,
-        or_(
-            and_(AccountUsageSlot.usage_date == day, AccountUsageSlot.state == "pending"),
-            and_(AccountUsageSlot.completed_date == day, AccountUsageSlot.state.in_(("ready", "uncertain"))),
-        ),
-    ))
-    return completed + pending
+    def count(*condition):
+        return session.scalar(select(func.count()).select_from(AccountUsageSlot).where(
+            AccountUsageSlot.user_id == user_id, *condition))
+    prepared = count(AccountUsageSlot.completed_date == day, AccountUsageSlot.state.in_(("ready", "uncertain")))
+    pending = count(AccountUsageSlot.usage_date == day, AccountUsageSlot.state == "pending")
+    return completed + prepared, pending
+
+
+def ensure_capacity(session, user_id, day, limit):
+    """Refuse when the day is full: daily_limit_reached once charged usage
+    alone reaches the limit, otherwise busy while pending leases fill it."""
+    charged, pending = capacity_breakdown(session, user_id, day)
+    if charged >= limit:
+        raise QuotaDailyLimitReached()
+    if charged + pending >= limit:
+        raise QuotaBusy()
 
 
 def reserve_slot(session, user_id, day, limit, now, ttl):
     expire_pending(session, user_id, day, now)
-    if capacity_used(session, user_id, day) >= limit:
-        raise QuotaBusy()
+    ensure_capacity(session, user_id, day, limit)
     row = session.scalar(select(AccountUsageSlot).where(
         AccountUsageSlot.user_id == user_id, AccountUsageSlot.usage_date == day,
         AccountUsageSlot.state == "released",
@@ -115,10 +134,10 @@ def complete_slot(session, reservation, now, completion_limit):
     # Same-day preparation moves already admitted capacity from pending to
     # ready without increasing it. Honor every valid lease, including a free
     # lease followed by an upgrade and downgrade before completion.
-    if day != reservation.usage_date and capacity_used(session, reservation.user_id, day) >= completion_limit:
+    if day != reservation.usage_date:
         # Preserve completion-day UTC counting; crossing midnight must not
         # bypass the new day's allowance or a now-expired paid entitlement.
-        raise QuotaBusy()
+        ensure_capacity(session, reservation.user_id, day, completion_limit)
     row.state, row.completed_date = "ready", day
     session.flush()
     return day
