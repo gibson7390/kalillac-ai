@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261020-embedded-fit1">
+  <link rel="stylesheet" href="app.css?v=20261028-end-erase2">
 </head>
 <body>
   <!-- Direct full-page use at /app/ and same-origin iframe embed on the
@@ -54,8 +54,25 @@
     </main>
 
     <div class="dock">
+      <!-- What End & erase did. Fixed copy chosen by app.js; never server text. -->
+      <div class="erase-receipt" id="erase-receipt" role="status" aria-live="polite" hidden>
+        <p class="erase-receipt-text" id="erase-receipt-text"></p>
+        <p class="erase-receipt-note" id="erase-receipt-note"></p>
+        <button type="button" class="erase-receipt-retry" id="erase-retry" hidden>Retry erase</button>
+      </div>
       <form class="composer" id="composer" autocomplete="off">
         <div class="composer-shell" id="composer-shell">
+          <!-- End & erase: in the composer so it is visible both full-page and in
+               the homepage's embedded chat (which hides the header). Its label
+               is visible text at every width. Always shown; disabled only when
+               there is nothing to end or erase. -->
+          <button type="button" class="erase-btn" id="erase-btn" aria-haspopup="dialog" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>
+            </svg>
+            <span class="erase-btn-label">End &amp; erase</span>
+          </button>
           <label for="composer-input" class="sr-only">Message Kalillac AI</label>
           <textarea id="composer-input" rows="1"
             placeholder="Message Kalillac AI…"
@@ -98,12 +115,24 @@
       </div>
     </div>
   </dialog>
+  <!-- The End & erase confirmation. Fixed copy; app.js opens it as a native
+       modal dialog and only End & erase confirms. -->
+  <dialog class="erase-dialog" id="erase-dialog" aria-labelledby="erase-dialog-title" aria-describedby="erase-dialog-text">
+    <div class="erase-dialog-panel">
+      <h2 class="erase-dialog-title" id="erase-dialog-title">End and erase this conversation?</h2>
+      <p class="erase-dialog-text" id="erase-dialog-text">This clears the conversation and any unsent draft from this device and asks Kalillac to remove its temporary memory of this session. This can’t be undone.</p>
+      <div class="erase-dialog-actions">
+        <button type="button" class="erase-dialog-cancel" id="erase-dialog-cancel">Cancel</button>
+        <button type="button" class="erase-dialog-confirm" id="erase-dialog-confirm">End &amp; erase</button>
+      </div>
+    </div>
+  </dialog>
   <!-- Local vendored libraries only; no CDN, no remote runtime fetches. -->
   <script src="vendor/marked/marked.min.js"></script>
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261020-syntax-highlight1"></script>
+  <script src="app.js?v=20261028-end-erase2"></script>
 </body>
 </html>

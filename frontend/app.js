@@ -37,6 +37,19 @@
      emptied. */
   var draftRevision = 0;
 
+  /* Bumped by End & erase. A request started before it belongs to the erased
+     conversation: when it settles, nothing it carries is shown, kept or
+     restored, and it no longer owns the Send/Stop control. */
+  var conversationEpoch = 0;
+
+  /* End & erase requests, per opaque session id: { attempt, state } where
+     state is "pending", "removed", "not_found" or "failed". Only an id's
+     latest attempt may record its result. The map holds just the ids of the
+     current erase round and empties once every one is confirmed, so it never
+     accumulates. Never any content. */
+  var eraseAttempts = {};
+  var eraseAttemptSeq = 0;
+
   var conversation = document.getElementById("conversation");
   var thread = document.getElementById("thread");
   var emptyState = document.getElementById("empty");
@@ -662,9 +675,11 @@
     if (!busy) syncSendEnabled();
     input.readOnly = busy;                      // readOnly, not disabled, so the
                                                 // iOS keyboard does not dismiss
+    syncEraseEnabled();
   }
 
   function syncSendEnabled() {
+    syncEraseEnabled();
     if (inFlight) return;
     actionBtn.disabled = input.value.trim().length === 0;
   }
@@ -700,6 +715,12 @@
   /* The anonymous daily allowance is used up: a neutral notice, no Retry, and
      the fixed daily-limit dialog. */
   var OUTCOME_DAILY_LIMIT = { message: COPY_DAILY_LIMIT, kind: "notice", action: null, dialog: true };
+  /* The conversation's session was ended (End & erase, possibly elsewhere): the
+     next message starts a new session. */
+  var OUTCOME_SESSION_ENDED = {
+    message: "This conversation was ended. Your next message starts a new one.",
+    kind: "notice", action: null
+  };
 
   var ERROR_OUTCOMES = {
     invalid_json: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
@@ -742,7 +763,9 @@
       message: "Something went wrong on Kalillac's end. Please try again.",
       kind: "error", action: "retry"
     },
-    anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT
+    anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT,
+    session_ended: OUTCOME_SESSION_ENDED,
+    unsupported_media_type: { message: COPY_UNREADABLE, kind: "error", action: "retry" }
   };
 
   /* An HTTP response arrived but was not a usable reply. A recognized fixed
@@ -864,6 +887,8 @@
       addFailureAction(exchange.shell, "new-conversation", startNewConversation);
     }
 
+    if (outcome === OUTCOME_SESSION_ENDED) SESSION_ID = null;
+
     failedExchange = exchange;
     restoreDraft(exchange);
 
@@ -899,6 +924,7 @@
 
   function handleResponse(exchange, res) {
     return res.text().then(function (body) {
+      if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
       var data = parseJson(body);
 
       if (!res.ok) {
@@ -921,12 +947,14 @@
 
       completeExchange(exchange, reply, data.session_id);
     }, function (err) {
+      if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
       // The response arrived but its body could not be read.
       failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
     });
   }
 
   function requestReply(exchange) {
+    exchange.epoch = conversationEpoch;
     setBusy(true);
     clearActions(exchange.shell);
     setThinking(exchange.shell);
@@ -951,8 +979,10 @@
       signal: controller.signal
     })
       .then(function (res) {
+        if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
         return handleResponse(exchange, res);
       }, function (err) {
+        if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
         /* No HTTP response was received. A user Stop is "Stopped."; only a
            genuine fetch rejection means the server could not be reached.
            NOTE: /api/chat is a non-streaming provider call, so aborting the
@@ -962,10 +992,13 @@
         failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
       })
       .then(null, function () {
+        if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
         // A failure after the response arrived (processing or rendering).
         failExchange(exchange, OUTCOME_INCOMPLETE);
       })
       .then(function () {
+        // After End & erase this request no longer owns the controls.
+        if (exchange.epoch !== conversationEpoch) return;
         controller = null;
         setBusy(false);
         autoGrow();
@@ -991,6 +1024,7 @@
 
     // A deliberate new message replaces any failed exchange still on screen.
     discardFailedExchange();
+    dismissSettledEraseReceipt();
 
     // Snapshot history BEFORE this turn: prior completed exchanges only.
     var history = buildHistory();
@@ -1078,6 +1112,243 @@
       try { controller.abort(); } catch (e) { /* already settled */ }
     }
   }
+
+  // ---- End & erase ---------------------------------------------------------------
+  /* Ends the conversation on this device and asks the server to remove its
+     temporary session memory. Confirmation is a native modal dialog with fixed
+     copy (index.html). On confirmation: abort the browser request, clear every
+     turn, the failed exchange, the rendered thread, the session id and the
+     composer draft, then -- only when a session id existed -- send a separate
+     request to /api/chat/session/end for it (and ask again for any earlier id
+     whose removal is still unconfirmed). Cookies (the daily-allowance cookie or
+     an account cookie) are never touched. The receipt below states what was
+     and was not erased; it never shows server text. */
+  var eraseBtn = document.getElementById("erase-btn");
+  var eraseDialog = document.getElementById("erase-dialog");
+  var eraseConfirm = document.getElementById("erase-dialog-confirm");
+  var eraseCancel = document.getElementById("erase-dialog-cancel");
+  var eraseReceipt = document.getElementById("erase-receipt");
+  var eraseReceiptText = document.getElementById("erase-receipt-text");
+  var eraseReceiptNote = document.getElementById("erase-receipt-note");
+  var eraseRetry = document.getElementById("erase-retry");
+
+  var RECEIPT_REMOVED = "Ended on this device. Kalillac removed this session’s temporary conversation memory. Any active response was asked to stop.";
+  var RECEIPT_NOT_FOUND = "Ended on this device. Kalillac found no temporary session memory to remove.";
+  var RECEIPT_LIMITS = "Information already sent to AI or search providers, required allowance records, and operational or security logs are not erased by this action. Provider processing may not stop immediately.";
+  var RECEIPT_FAILED = "Cleared from this device, but Kalillac could not confirm removal of its temporary server memory.";
+  var RECEIPT_LOCAL = "Cleared from this device. No Kalillac session had been confirmed for this conversation.";
+  var ERASE_CONFIRM_FALLBACK = "End and erase this conversation? This clears it from this device " +
+                               "and asks Kalillac to remove its temporary memory of this session. " +
+                               "This can’t be undone.";
+
+  function hasErasable() {
+    return inFlight || TURNS.length > 0 || !!failedExchange || !!SESSION_ID ||
+           input.value !== "" || !!thread.querySelector(".msg");
+  }
+
+  function syncEraseEnabled() {
+    if (eraseBtn) eraseBtn.disabled = !hasErasable();
+  }
+
+  function showEraseReceipt(text, withLimits, retry) {
+    if (!eraseReceipt) return;
+    eraseReceiptText.textContent = text;
+    eraseReceiptNote.textContent = withLimits ? RECEIPT_LIMITS : "";
+    eraseReceiptNote.hidden = !withLimits;
+    eraseRetry.hidden = !retry;
+    eraseRetry.disabled = false;
+    eraseReceipt.classList.toggle("is-failed", !!retry);
+    eraseReceipt.hidden = false;
+  }
+
+  function eraseIdsIn(state) {
+    return Object.keys(eraseAttempts).filter(function (id) {
+      return eraseAttempts[id].state === state;
+    });
+  }
+
+  /* A confirmed or local-only receipt makes way for the next conversation; an
+     unconfirmed removal stays on screen with Retry erase until it succeeds. */
+  function dismissSettledEraseReceipt() {
+    if (eraseReceipt && !eraseReceipt.hidden && Object.keys(eraseAttempts).length === 0) {
+      eraseReceipt.hidden = true;
+    }
+  }
+
+  /* One separate POST per id with its own AbortController: never the chat
+     request's controller or signal. keepalive lets it outlive a page close
+     where the browser allows; it does not guarantee delivery. After
+     ERASE_TIMEOUT_MS the request is aborted and counts as unconfirmed. The
+     timer is cleared however the request settles. Resolves "removed",
+     "not_found" or null (unconfirmed). */
+  var ERASE_TIMEOUT_MS = 10000;
+
+  function postEraseRequest(sessionId) {
+    return new Promise(function (resolve) {
+      var eraseAbort = new AbortController();
+      var settled = false;
+      var timer = setTimeout(function () {
+        eraseAbort.abort();
+        finish(null);
+      }, ERASE_TIMEOUT_MS);
+
+      function finish(state) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(state);
+      }
+
+      fetch("/api/chat/session/end", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+        keepalive: true,
+        signal: eraseAbort.signal
+      })
+        .then(function (res) {
+          return res.text().then(function (body) {
+            var data = parseJson(body);
+            if (!res.ok || !data || data.ended !== true) return null;
+            var state = data.kalillac_session_state;
+            return state === "removed" || state === "not_found" ? state : null;
+          });
+        })
+        .then(finish, function () { finish(null); });
+    });
+  }
+
+  /* The receipt reflects the whole erase round once nothing in it is pending:
+     any unconfirmed id gets the failure receipt and Retry erase; otherwise
+     "removed" if any id was removed, else "not found". A fully confirmed
+     round is then forgotten. */
+  function renderEraseRound() {
+    if (eraseIdsIn("pending").length) return;
+
+    if (eraseIdsIn("failed").length) {
+      showEraseReceipt(RECEIPT_FAILED, false, true);
+      return;
+    }
+
+    var removed = eraseIdsIn("removed").length > 0;
+    eraseAttempts = {};
+    showEraseReceipt(removed ? RECEIPT_REMOVED : RECEIPT_NOT_FOUND, true, false);
+  }
+
+  /* Starts a new attempt for each id. Only an id's latest attempt may record
+     its result, so an older completion can never overwrite a newer one, and
+     ids completing out of order each keep their own result. */
+  function requestErase(ids) {
+    if (eraseRetry) eraseRetry.disabled = true;
+
+    ids.forEach(function (id) {
+      var attempt = ++eraseAttemptSeq;
+      eraseAttempts[id] = { attempt: attempt, state: "pending" };
+
+      postEraseRequest(id).then(function (state) {
+        var entry = eraseAttempts[id];
+        if (!entry || entry.attempt !== attempt) return;   // superseded or forgotten
+        entry.state = state || "failed";
+        renderEraseRound();
+      });
+    });
+  }
+
+  function endAndErase() {
+    // The opaque id is the only thing kept, and only for the request below.
+    var sessionId = SESSION_ID;
+    var requestWasActive = inFlight;
+
+    conversationEpoch++;
+    if (controller) {
+      try { controller.abort(); } catch (e) { /* already settled */ }
+    }
+    controller = null;
+
+    TURNS.length = 0;
+    SESSION_ID = null;
+    failedExchange = null;
+    while (thread.firstChild) {
+      thread.removeChild(thread.firstChild);
+    }
+    showEmptyState();
+
+    input.value = "";
+    draftRevision++;
+    stickToBottom = true;
+    setBusy(false);
+    autoGrow();
+    syncSendEnabled();
+    input.focus({ preventScroll: true });
+
+    if (sessionId) {
+      // Earlier unconfirmed ids are asked again; pending ones keep their
+      // in-flight attempt.
+      var ids = eraseIdsIn("failed");
+      if (ids.indexOf(sessionId) === -1) ids.push(sessionId);
+      requestErase(ids);
+    } else if (Object.keys(eraseAttempts).length === 0) {
+      // No server session was ever confirmed to this page: nothing to ask the
+      // server to remove. An earlier erase still in progress or unconfirmed
+      // keeps its own receipt.
+      showEraseReceipt(RECEIPT_LOCAL, requestWasActive, false);
+    }
+  }
+
+  function eraseDialogOpen() {
+    return !!(eraseDialog && eraseDialog.open);
+  }
+
+  function closeEraseDialog() {
+    if (eraseDialogOpen()) eraseDialog.close();
+    if (eraseBtn && !eraseBtn.disabled) eraseBtn.focus({ preventScroll: true });
+  }
+
+  function openEraseDialog() {
+    if (!hasErasable()) return;
+
+    if (eraseDialog && eraseCancel && typeof eraseDialog.showModal === "function") {
+      try {
+        // The opener holds focus, so closing the dialog returns focus to it.
+        if (eraseBtn) eraseBtn.focus({ preventScroll: true });
+        if (!eraseDialog.open) eraseDialog.showModal();
+        eraseCancel.focus();   // the safe choice has focus first
+        return;
+      } catch (e) {
+        // Fall through to the browser's own confirmation.
+      }
+    }
+
+    if (window.confirm(ERASE_CONFIRM_FALLBACK)) endAndErase();
+  }
+
+  if (eraseBtn) eraseBtn.addEventListener("click", openEraseDialog);
+
+  if (eraseDialog && eraseConfirm && eraseCancel) {
+    eraseConfirm.addEventListener("click", function () {
+      if (eraseDialogOpen()) eraseDialog.close();
+      endAndErase();
+    });
+    eraseCancel.addEventListener("click", closeEraseDialog);
+    eraseDialog.addEventListener("cancel", function (event) {
+      event.preventDefault();
+      closeEraseDialog();
+    });
+    // The panel fills the dialog box, so only a backdrop click targets the
+    // dialog element itself.
+    eraseDialog.addEventListener("click", function (event) {
+      if (event.target === eraseDialog) closeEraseDialog();
+    });
+  }
+
+  if (eraseRetry) {
+    eraseRetry.addEventListener("click", function () {
+      var failed = eraseIdsIn("failed");
+      if (failed.length) requestErase(failed);
+    });
+  }
+
+  syncEraseEnabled();
 
   // ---- composer behavior ---------------------------------------------------
   function autoGrow() {

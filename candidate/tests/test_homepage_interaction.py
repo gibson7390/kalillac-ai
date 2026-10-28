@@ -278,7 +278,7 @@ def run_composer_scenario(page: Page) -> dict:
 
     r["geometry"] = page.eval("""const c = window.__cx, cs = el => c.win().getComputedStyle(el);
       return { shell: c.abs(c.el('composer-shell')), input: c.abs(c.el('composer-input')),
-               send: c.abs(c.el('send-btn')),
+               send: c.abs(c.el('send-btn')), erase: c.abs(c.el('erase-btn')),
                shellCursor: cs(c.el('composer-shell')).cursor, inputCursor: cs(c.el('composer-input')).cursor,
                caretColor: cs(c.el('composer-input')).caretColor, inputColor: cs(c.el('composer-input')).color,
                shellBackground: cs(c.el('composer-shell')).backgroundColor,
@@ -296,11 +296,16 @@ def run_composer_scenario(page: Page) -> dict:
     time.sleep(0.25)
     r["borderHover"] = page.eval(border)
     page.dt.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 1, "y": 1}, page.session)
+    # The padding gap before Send: beside the field, or, in a phone-width
+    # frame where the field has the first row to itself, between End & erase
+    # and Send on the second.
+    erase = r["geometry"]["erase"]
+    before_send = field["right"] if send["top"] < field["bottom"] else erase["right"]
     points = {
         "above": (mid_x, shell["top"] + 4),
         "below": (mid_x, shell["bottom"] - 4),
         "left": (shell["left"] + 6, mid_y),
-        "between-field-and-send": ((field["right"] + send["left"]) / 2, send["top"] + send["height"] / 2),
+        "between-field-and-send": ((before_send + send["left"]) / 2, send["top"] + send["height"] / 2),
     }
 
     # ---- padding presses focus the field and change nothing ---------------------------------
@@ -1917,3 +1922,171 @@ def test_short_portrait_cta_shows_focused_composer_and_reachable_cards(size, red
                 assert card_state["docScrollWidth"] <= card_state["innerWidth"]
                 assert card_state["childScrollWidth"] <= card_state["childInnerWidth"]
             assert not any("/api/" in path for path in site.http.paths)
+
+
+
+# ---- End & erase: discoverable and operable everywhere the chat appears --------------------------
+# The control's label is visible text (never only a tooltip or a screen-reader
+# label), in the homepage's embedded chat and on a direct /app/ visit, down to
+# a 360 x 640 phone, by keyboard and by touch, with and without reduced motion.
+# Nothing is erased here: every path ends at Cancel or Escape, and nothing is
+# sent.
+
+ERASE_STATE = r"""const c = window.__cx, b = c.el('erase-btn'), label = b.querySelector('.erase-btn-label');
+  const cs = c.win().getComputedStyle(b), ls = c.win().getComputedStyle(label), dialog = c.el('erase-dialog');
+  return { button: c.abs(b), label: c.abs(label), shell: c.abs(c.el('composer-shell')),
+    input: c.abs(c.el('composer-input')), send: c.abs(c.el('send-btn')),
+    labelText: label.textContent, labelDisplay: ls.display, labelVisibility: ls.visibility,
+    labelOpacity: ls.opacity, labelClip: ls.clip, labelClipPath: ls.clipPath,
+    labelFontSize: parseFloat(ls.fontSize), labelTruncated: label.scrollWidth > label.clientWidth + 1,
+    disabled: b.disabled, transition: cs.transitionDuration,
+    focusIsButton: c.doc().activeElement === b, focusVisible: b.matches(':focus-visible'),
+    outlineStyle: cs.outlineStyle,
+    dialogOpen: dialog.open, focusIsCancel: c.doc().activeElement === c.el('erase-dialog-cancel'),
+    cancel: dialog.open ? c.abs(c.el('erase-dialog-cancel')) : null,
+    embedded: c.doc().body.classList.contains('is-embedded'),
+    innerWidth, innerHeight, docScrollWidth: document.documentElement.scrollWidth,
+    childInnerWidth: c.win().innerWidth, childScrollWidth: c.doc().documentElement.scrollWidth,
+    ...c.state() };"""
+
+ERASE_VIEWPORTS = {
+    # name: (page, size, phone, reduced motion)
+    "embedded-desktop": ("/", VIEWPORTS["desktop"], False, False),
+    "embedded-mobile-reduced-motion": ("/", VIEWPORTS["mobile"], True, True),
+    "embedded-360x640": ("/", (360, 640), True, False),
+    "direct-360x640": ("/app/", (360, 640), True, False),
+    "direct-desktop-reduced-motion": ("/app/", VIEWPORTS["desktop"], False, True),
+}
+
+
+def key(page: Page, name: str, code: str, vk: int, modifiers: int = 0):
+    """A real (trusted) key press, delivered to whatever has focus."""
+    for kind in ("rawKeyDown", "keyUp"):
+        page.dt.call("Input.dispatchKeyEvent", {"type": kind, "key": name, "code": code,
+                                                "windowsVirtualKeyCode": vk, "modifiers": modifiers},
+                     page.session)
+
+
+def run_erase_scenario(page: Page) -> dict:
+    r: dict = {}
+    page.eval(COMPOSER_HELPERS)
+    page.eval("""for (let i = 0; i < 400 && !(window.__cx.doc() && window.__cx.el('composer-input')); i++)
+        await window.__cx.wait(25);
+      await window.__cx.wait(300); return true;""")
+
+    def state():
+        return page.eval(ERASE_STATE)
+
+    r["idle"] = state()
+    page.eval("""window.__cx.setValue('a draft to keep');
+      window.__cx.el('erase-btn').scrollIntoView({block: 'center'});
+      await window.__cx.wait(900); return true;""")
+    r["draft"] = state()
+
+    # Keyboard only: from the message field, Shift+Tab reaches End & erase,
+    # Enter opens the dialog with Cancel focused, Escape closes it.
+    page.eval("window.__cx.el('composer-input').focus(); await window.__cx.wait(100); return true;")
+    key(page, "Tab", "Tab", 9, modifiers=8)
+    time.sleep(0.2)
+    r["tabbed"] = state()
+    press(page, "Enter", "Enter", 13, text="\r")
+    time.sleep(0.3)
+    r["keyboardOpen"] = state()
+    key(page, "Escape", "Escape", 27)
+    time.sleep(0.3)
+    r["keyboardClosed"] = state()
+
+    # Touch or mouse: a real press on the visible control, then on Cancel.
+    button = r["keyboardClosed"]["button"]
+    page.click(button["left"] + button["width"] / 2, button["top"] + button["height"] / 2)
+    time.sleep(0.3)
+    r["pressOpen"] = state()
+    cancel = r["pressOpen"]["cancel"]
+    if cancel:
+        page.click(cancel["left"] + cancel["width"] / 2, cancel["top"] + cancel["height"] / 2)
+        time.sleep(0.3)
+    r["pressClosed"] = state()
+    return r
+
+
+@pytest.fixture(scope="module", params=list(ERASE_VIEWPORTS))
+def erase_control(request, tmp_path_factory):
+    browser = require_browser_and_build()
+    path, size, phone, reduced = ERASE_VIEWPORTS[request.param]
+    profile = tmp_path_factory.mktemp(f"edge-erase-{request.param}")
+    site = Site()
+    site.child_passive = path == "/app/"
+
+    with site.http:
+        with browser_page(browser, profile, size, phone, reduced_motion=reduced) as (devtools, session):
+            page = Page(devtools, session)
+            devtools.call("Page.navigate", {"url": site.http.origin + path}, session)
+            time.sleep(0.5)
+            result = run_erase_scenario(page)
+
+    shutil.rmtree(profile, ignore_errors=True)
+    result.update(name=request.param, path=path, size=size, reduced=reduced)
+    return result
+
+
+def inside(inner: dict, outer: dict, slack: float = 0.5) -> bool:
+    return (inner["left"] >= outer["left"] - slack and inner["right"] <= outer["right"] + slack
+            and inner["top"] >= outer["top"] - slack and inner["bottom"] <= outer["bottom"] + slack)
+
+
+def test_erase_label_is_visible_text_that_fits_beside_the_composer(erase_control):
+    s = erase_control["draft"]
+    assert s["embedded"] is (erase_control["path"] == "/")
+    assert s["labelText"] == "End & erase"
+    assert s["labelDisplay"] != "none" and s["labelVisibility"] == "visible"
+    assert float(s["labelOpacity"]) == 1 and s["labelClip"] in ("auto", "") and s["labelClipPath"] == "none"
+    assert s["labelFontSize"] >= 12 and s["label"]["width"] >= 40 and s["labelTruncated"] is False
+    assert inside(s["label"], s["button"]) and inside(s["button"], s["shell"])
+    # A comfortable control that never overlaps the message field or Send. In
+    # a phone-width frame the field takes the first row and End & erase and
+    # Send share the second; otherwise all three share one row.
+    assert s["button"]["height"] >= 36
+    assert inside(s["send"], s["shell"]) and s["button"]["right"] < s["send"]["left"]
+    if s["childInnerWidth"] <= 400:
+        assert s["input"]["bottom"] <= s["button"]["top"] and s["input"]["bottom"] <= s["send"]["top"]
+        assert abs(s["button"]["top"] - s["send"]["top"]) <= 1
+        assert s["input"]["width"] >= s["shell"]["width"] - 40, s["input"]
+    else:
+        assert s["button"]["right"] <= s["input"]["left"] and s["input"]["right"] <= s["send"]["left"]
+        assert s["input"]["width"] >= 200, s["input"]
+    assert s["button"]["top"] >= 0 and s["button"]["bottom"] <= s["innerHeight"]   # on screen
+    assert s["docScrollWidth"] <= s["innerWidth"] and s["childScrollWidth"] <= s["childInnerWidth"]
+
+
+def test_erase_is_disabled_only_without_anything_to_erase(erase_control):
+    assert erase_control["idle"]["disabled"] is True
+    assert erase_control["idle"]["labelText"] == "End & erase"      # still visible while disabled
+    assert erase_control["draft"]["disabled"] is False
+
+
+def test_erase_is_reachable_and_operable_by_keyboard(erase_control):
+    tabbed = erase_control["tabbed"]
+    assert tabbed["focusIsButton"] is True and tabbed["focusVisible"] is True
+    assert tabbed["outlineStyle"] != "none"
+    opened = erase_control["keyboardOpen"]
+    assert opened["dialogOpen"] is True and opened["focusIsCancel"] is True   # the safe choice first
+    closed = erase_control["keyboardClosed"]
+    assert closed["dialogOpen"] is False and closed["focusIsButton"] is True
+    assert closed["value"] == "a draft to keep"
+
+
+def test_erase_opens_with_a_real_press_and_cancel_keeps_everything(erase_control):
+    opened = erase_control["pressOpen"]
+    assert opened["dialogOpen"] is True and opened["focusIsCancel"] is True
+    closed = erase_control["pressClosed"]
+    assert closed["dialogOpen"] is False and closed["value"] == "a draft to keep"
+    assert closed["requests"] == []                                  # nothing was sent
+
+
+def test_erase_control_follows_the_motion_preference(erase_control):
+    duration = erase_control["draft"]["transition"]
+    parts = duration.replace(" ", "").split(",")
+    if erase_control["reduced"]:
+        assert set(parts) == {"0s"}, duration
+    else:
+        assert any(part != "0s" for part in parts), duration

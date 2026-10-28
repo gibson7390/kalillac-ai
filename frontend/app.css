@@ -1021,3 +1021,153 @@ body {
   .limit-dialog[open] { animation: none; }
   .limit-dialog-ok { transition: none; }
 }
+
+/* ---------------- End & erase ----------------
+   The control sits at the left edge of the composer box, so it is visible in
+   the full page and in the homepage's embedded chat (which hides the header).
+   As tall as Send (38px), with its "End & erase" label as visible text at
+   every width, touch included: an icon alone would be ambiguous. Disabled
+   only when there is nothing to end or erase. */
+.erase-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 38px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease), border-color var(--ease);
+}
+.erase-btn svg { flex: 0 0 auto; width: 15px; height: 15px; }
+.erase-btn:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.erase-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.erase-btn:disabled { opacity: 0.45; cursor: default; }
+/* Phone-width frames: one row cannot hold the field, the visible label and
+   Send without crushing the field, so the field takes the full first row and
+   End & erase (left) and Send (right) share the second. */
+@media (max-width: 400px) {
+  .composer-shell { flex-wrap: wrap; row-gap: 6px; }
+  .composer textarea { order: -1; flex: 1 0 100%; }
+  .erase-btn { margin-right: auto; }
+}
+/* Short narrow embedded frames (360 x 640): the second row must not push the
+   compact starting state past its frame, so the composer gives back the
+   height that row costs. */
+@media (max-height: 600px) and (max-width: 400px) {
+  .is-embedded .composer { padding-top: 8px; padding-bottom: 8px; }
+  .is-embedded .composer-shell { padding-top: 6px; padding-bottom: 6px; row-gap: 4px; }
+}
+
+/* The receipt: what End & erase did and did not erase. One box above the
+   composer, inside the same rail; a failed removal stays visible with Retry. */
+.erase-receipt {
+  margin: 10px var(--rail) 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--ink);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.erase-receipt[hidden] { display: none; }
+.erase-receipt.is-failed { border-color: var(--danger); background: var(--danger-soft); }
+.erase-receipt-text { margin: 0; }
+.erase-receipt-note { margin: 4px 0 0; color: var(--muted); }
+.erase-receipt-note[hidden] { display: none; }
+.erase-receipt-retry {
+  margin-top: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--danger);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.erase-receipt-retry[hidden] { display: none; }
+.erase-receipt-retry:disabled { opacity: 0.6; cursor: default; }
+.erase-receipt-retry:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* The confirmation: a native modal <dialog>, sized like the daily-limit
+   dialog to fit a 360 x 640 phone viewport and the embedded chat frame. */
+.erase-dialog {
+  width: min(400px, calc(100vw - 2 * var(--rail)));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font-family: var(--font-ui);
+  overflow: auto;
+}
+.erase-dialog::backdrop { background: rgba(14, 21, 38, 0.32); }
+.erase-dialog-panel { padding: 22px 22px 18px; }
+.erase-dialog-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.erase-dialog-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.erase-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.erase-dialog-cancel,
+.erase-dialog-confirm {
+  min-height: 44px;
+  min-width: 96px;
+  padding: 0 18px;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.erase-dialog-cancel {
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+}
+.erase-dialog-confirm {
+  border: 0;
+  background: var(--danger);
+  color: #ffffff;
+}
+.erase-dialog-cancel:focus-visible,
+.erase-dialog-confirm:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-width: 400px) {
+  .erase-dialog-panel { padding: 18px 16px 16px; }
+  .erase-dialog-cancel,
+  .erase-dialog-confirm { flex: 1 1 auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .erase-btn { transition: none; }
+}

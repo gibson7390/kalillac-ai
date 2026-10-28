@@ -314,6 +314,10 @@ def test_account_schema_holds_identity_only():
         "kalillac.account_usage_daily",
         "kalillac.account_usage_slots",
         "kalillac.provider_usage_pools",
+        # The anonymous daily allowance: hashed visitor digests and counts,
+        # no identity or conversation data.
+        "kalillac.anonymous_usage_days",
+        "kalillac.anonymous_usage_slots",
         *billing_tables,
     }
 
@@ -390,13 +394,18 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "account_usage_daily",
         "account_usage_slots",
         "provider_usage_pools",
+        "anonymous_usage_days",
+        "anonymous_usage_slots",
         "account_billing",
         "stripe_webhook_events",
     }
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
-    from kalillac_db.models import AccountUsageSlot
+    from kalillac_db.models import AccountUsageSlot, AnonymousUsageDay, AnonymousUsageSlot
     assert _count(db, AccountUsageSlot) == 0
+    # Registering and signing in never creates anonymous allowance rows.
+    assert _count(db, AnonymousUsageDay) == 0
+    assert _count(db, AnonymousUsageSlot) == 0
 
     # No temporary chat session was created or touched.
     assert app.SESSION_STATE == chat_state_before

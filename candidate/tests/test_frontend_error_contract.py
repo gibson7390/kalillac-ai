@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261020-syntax-highlight1"
-CSS_CACHE_KEY = "20261020-embedded-fit1"
+CACHE_KEY = "20261028-end-erase2"
+CSS_CACHE_KEY = "20261028-end-erase2"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -88,9 +88,13 @@ COPY = {
     ),
     "internal_error": "Something went wrong on Kalillac's end. Please try again.",
     DAILY_LIMIT_CODE: DAILY_LIMIT_NOTE,
+    # End & erase: a chat request for an ended session, and the end endpoint's
+    # content-type refusal (never expected from /api/chat; mapped so it is fixed copy).
+    "session_ended": "This conversation was ended. Your next message starts a new one.",
+    "unsupported_media_type": UNREADABLE,
 }
 NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached",
-            DAILY_LIMIT_CODE}
+            DAILY_LIMIT_CODE, "session_ended"}
 
 # Text that must never reach the page: raw response fields, HTML error pages,
 # provider names and exception messages.
@@ -849,7 +853,9 @@ def test_daily_limit_markup_is_fixed_accessible_copy():
     markup = daily_limit_markup()
     page = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert page.count("<dialog") == 1
+    # Exactly two native dialogs: this one and the End & erase confirmation.
+    assert page.count("<dialog") == 2
+    assert page.count('<dialog class="erase-dialog" id="erase-dialog"') == 1
     assert ('<dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" '
             'aria-describedby="limit-dialog-text limit-dialog-reset">') in markup
     assert f'<h2 class="limit-dialog-title" id="limit-dialog-title">{DAILY_LIMIT_TITLE}</h2>' in markup

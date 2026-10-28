@@ -86,6 +86,32 @@
   var scenarioName = new URLSearchParams(location.search).get("scenario") || "";
   var queue = [];
   var requests = [];
+  var deferred = {};
+
+  // ---- scenario page: the End & erase timeout, under the scenario's control --
+  // app.js aborts an erase request after 10 seconds. Those timers are held
+  // here instead of running, so a scenario fires them when it chooses and
+  // never waits ten seconds; every other timer is real.
+  var ERASE_TIMEOUT_MS = 10000;
+  var eraseTimers = [];
+  var realSetTimeout = window.setTimeout;
+  var realClearTimeout = window.clearTimeout;
+
+  window.setTimeout = function (fn, delay) {
+    if (delay === ERASE_TIMEOUT_MS) {
+      var timer = { id: "erase-timer-" + eraseTimers.length, fn: fn, cleared: false, fired: false };
+      eraseTimers.push(timer);
+      return timer.id;
+    }
+    return realSetTimeout.apply(window, arguments);
+  };
+
+  window.clearTimeout = function (id) {
+    for (var i = 0; i < eraseTimers.length; i++) {
+      if (eraseTimers[i].id === id) { eraseTimers[i].cleared = true; return; }
+    }
+    return realClearTimeout.apply(window, arguments);
+  };
 
   function abortError() {
     return new DOMException("The user aborted a request.", "AbortError");
@@ -99,6 +125,18 @@
     if (spec.hang) {
       return new Promise(function (resolve, reject) {
         if (signal) signal.addEventListener("abort", function () { reject(abortError()); });
+      });
+    }
+
+    // Pending until the scenario settles it by name (api.settle), so
+    // completion order is explicit. ignoreAbort models a response that
+    // arrives even though the request was aborted.
+    if (spec.defer) {
+      return new Promise(function (resolve, reject) {
+        deferred[spec.defer] = { resolve: resolve, reject: reject };
+        if (signal && !spec.ignoreAbort) {
+          signal.addEventListener("abort", function () { reject(abortError()); });
+        }
       });
     }
 
@@ -129,6 +167,13 @@
   window.fetch = function (url, init) {
     var record = { url: String(url), method: init && init.method };
     try { record.body = JSON.parse(init.body); } catch (e) { record.body = null; }
+    record.keepalive = !!(init && init.keepalive);
+    record.contentType = init && init.headers ? init.headers["Content-Type"] || null : null;
+    record.hasSignal = !!(init && init.signal);
+    record.aborted = false;
+    if (init && init.signal) {
+      init.signal.addEventListener("abort", function () { record.aborted = true; });
+    }
     requests.push(record);
 
     var spec = queue.shift();
@@ -211,7 +256,34 @@
       conversationEmpty: $("conversation").classList.contains("is-empty"),
       focusIsComposer: document.activeElement === input,
       requestCount: requests.length,
-      limitDialog: dialogState()
+      limitDialog: dialogState(),
+      erase: eraseState()
+    };
+  }
+
+  function eraseState() {
+    var button = $("erase-btn");
+    var dialog = $("erase-dialog");
+    var receipt = $("erase-receipt");
+    if (!button || !dialog || !receipt) return null;
+    var modal = false;
+    try { modal = dialog.open && dialog.matches(":modal"); } catch (e) { modal = null; }
+    var retry = $("erase-retry");
+    return {
+      buttonDisabled: button.disabled,
+      buttonText: button.textContent.replace(/\s+/g, " ").trim(),
+      dialogOpen: dialog.open,
+      dialogModal: modal,
+      dialogText: dialog.textContent.replace(/\s+/g, " ").trim(),
+      focusIsCancel: document.activeElement === $("erase-dialog-cancel"),
+      focusIsButton: document.activeElement === button,
+      receiptShown: !receipt.hidden,
+      receiptText: text($("erase-receipt-text")),
+      receiptNote: $("erase-receipt-note").hidden ? null : text($("erase-receipt-note")),
+      retryShown: !retry.hidden,
+      retryDisabled: retry.disabled,
+      receiptRole: receipt.getAttribute("role"),
+      receiptLive: receipt.getAttribute("aria-live")
     };
   }
 
@@ -336,6 +408,35 @@
       };
       steps.push(snap);
     },
+    clickErase: function () { $("erase-btn").click(); return wait(30); },
+    confirmErase: function () { $("erase-dialog-confirm").click(); return wait(60); },
+    cancelEraseButton: function () { $("erase-dialog-cancel").click(); return wait(30); },
+    escapeEraseDialog: function () {
+      var event = new Event("cancel", { cancelable: true });
+      $("erase-dialog").dispatchEvent(event);
+      lastCancelPrevented = event.defaultPrevented;
+      return wait(30);
+    },
+    clickEraseBackdrop: function () {
+      $("erase-dialog").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      return wait(30);
+    },
+    clickRetryErase: function () { $("erase-retry").click(); return wait(60); },
+    // Completes a deferred response with an ordinary spec.
+    settle: function (name, spec) {
+      var pending = deferred[name];
+      if (!pending) throw new Error("HARNESS: nothing deferred as " + name);
+      delete deferred[name];
+      respond(spec, null).then(pending.resolve, pending.reject);
+      return wait(60);
+    },
+    // Fires every erase timeout that is still armed.
+    fireEraseTimeouts: function () {
+      eraseTimers.forEach(function (timer) {
+        if (!timer.cleared && !timer.fired) { timer.fired = true; timer.fn(); }
+      });
+      return wait(60);
+    },
     respondWith: function () {
       for (var i = 0; i < arguments.length; i++) queue.push(arguments[i]);
     }
@@ -352,7 +453,8 @@
     empty_message: 422, message_too_long: 422, history_too_long: 422,
     processing_limit_reached: 422, busy: 429, request_cancelled: 499,
     service_unavailable: 503, model_provider_unavailable: 503,
-    request_timeout: 504, internal_error: 500
+    request_timeout: 504, internal_error: 500,
+    session_ended: 409, unsupported_media_type: 415
   };
 
   // A failed send, then a deliberate new message that succeeds.
@@ -717,6 +819,208 @@
     a.measureDialog("open");
   };
 
+  // ---- End & erase ---------------------------------------------------------------
+  var ENDED = function (state) {
+    return { status: 200, json: { ended: true, kalillac_session_state: state,
+                                  active_requests: 0, cancellation: "none" } };
+  };
+
+  // Enabled only when there is a conversation, a session or a draft.
+  SCENARIOS.erase_enablement = async function (a) {
+    a.snap("initial");
+    a.type("a draft");
+    a.snap("draft");
+    a.type("");
+    a.snap("cleared");
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.snap("conversation");
+  };
+
+  // Cancel, Escape and the backdrop all keep the conversation and send nothing.
+  SCENARIOS.erase_cancel_paths = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.type("my draft");
+    await a.clickErase();
+    a.snap("open");
+    await a.cancelEraseButton();
+    a.snap("after-cancel");
+    await a.clickErase();
+    await a.escapeEraseDialog();
+    a.snap("after-escape");
+    await a.clickErase();
+    await a.clickEraseBackdrop();
+    a.snap("after-backdrop");
+  };
+
+  SCENARIOS.erase_removed = async function (a) {
+    a.respondWith(ok("Answer one.", "s-1"), ok("Answer two.", "s-1"), ENDED("removed"), ok("Fresh.", "s-2"));
+    await a.send("question one");
+    await a.send("question two");
+    a.type("an unsent draft");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("erased");
+    await a.send("a new question");
+    a.snap("after-new-send");
+  };
+
+  SCENARIOS.erase_not_found = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("not_found"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("erased");
+  };
+
+  // The server cannot confirm removal: the device is still cleared, the
+  // receipt says so, and Retry erase asks again with the same opaque id.
+  SCENARIOS.erase_failure_then_retry = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { status: 503, json: { error: "service_unavailable", detail: SECRET } },
+                  ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("failed");
+    await a.clickRetryErase();
+    a.snap("retried");
+  };
+
+  SCENARIOS.erase_network_failure = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { reject: "Failed to fetch " + SECRET },
+                  { status: 200, json: { ended: true, kalillac_session_state: "bogus" } });
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("failed");
+    await a.clickRetryErase();
+    a.snap("still-failed");
+  };
+
+  // Erasing while a reply is in flight: the browser request is aborted, a
+  // separate erase request is sent, and nothing from the old exchange returns.
+  SCENARIOS.erase_in_flight = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { hang: true }, ENDED("removed"));
+    await a.send("question one");
+    await a.send("question two");
+    a.snap("in-flight");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.wait(60);
+    a.snap("erased");
+  };
+
+  // No session id ever reached the page: clear locally, call nothing.
+  SCENARIOS.erase_without_session = async function (a) {
+    a.type("only a draft");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("erased");
+  };
+
+  SCENARIOS.erase_first_message_in_flight = async function (a) {
+    a.respondWith({ hang: true });
+    await a.send("first question");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.wait(60);
+    a.snap("erased");
+  };
+
+  var ERASE_FAILED = { status: 503, json: { error: "service_unavailable" } };
+
+  // Two overlapping erase rounds, the newer completing first: erase A stays
+  // pending, B is begun and erased, B is removed, then A fails. Retry erase is
+  // offered for A alone, and its success settles the round.
+  SCENARIOS.erase_overlap_newer_first = async function (a) {
+    a.respondWith(ok("Answer A.", "s-A"), { defer: "A" }, ok("Answer B.", "s-B"), { defer: "B" },
+                  ENDED("not_found"));
+    await a.send("question A");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("a-pending");
+    await a.send("question B");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("both-pending");
+    await a.settle("B", ENDED("removed"));
+    a.snap("b-removed-a-pending");
+    await a.settle("A", ERASE_FAILED);
+    a.snap("a-failed");
+    await a.clickRetryErase();
+    a.snap("a-retried");
+    // The settled round is forgotten: a later local-only erase is just that.
+    a.type("a draft only");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("later-local-erase");
+  };
+
+  // The inverse order: A fails while B is still pending; nothing is decided
+  // until B settles too.
+  SCENARIOS.erase_overlap_older_first = async function (a) {
+    a.respondWith(ok("Answer A.", "s-A"), { defer: "A" }, ok("Answer B.", "s-B"), { defer: "B" },
+                  ENDED("not_found"));
+    await a.send("question A");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.send("question B");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.settle("A", ERASE_FAILED);
+    a.snap("a-failed-b-pending");
+    await a.settle("B", ENDED("removed"));
+    a.snap("b-removed");
+    await a.clickRetryErase();
+    a.snap("a-retried");
+  };
+
+  // Every id not found: the round reports "not found", never "removed".
+  SCENARIOS.erase_overlap_all_not_found = async function (a) {
+    a.respondWith(ok("Answer A.", "s-A"), { defer: "A" }, ok("Answer B.", "s-B"), { defer: "B" });
+    await a.send("question A");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.send("question B");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.settle("B", ENDED("not_found"));
+    await a.settle("A", ENDED("not_found"));
+    a.snap("settled");
+  };
+
+  // The erase request times out: it is aborted and offers Retry erase. A late
+  // answer to the timed-out attempt cannot change the outcome of the retry.
+  SCENARIOS.erase_timeout_then_retry = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { defer: "first", ignoreAbort: true }, { defer: "second" },
+                  ENDED("not_found"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("pending");
+    await a.fireEraseTimeouts();
+    a.snap("timed-out");
+    await a.clickRetryErase();
+    a.snap("retry-pending");
+    await a.settle("first", ENDED("removed"));         // stale: the timed-out attempt
+    a.snap("stale-answer");
+    await a.settle("second", ERASE_FAILED);
+    a.snap("retry-failed");
+    await a.clickRetryErase();
+    a.snap("final");
+  };
+
+  // A chat reply of session_ended forgets the ended session id.
+  SCENARIOS.session_ended_reply = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { status: 409, json: { error: "session_ended" } }, ok("Fresh.", "s-2"));
+    await a.send("question one");
+    await a.send("question two");
+    a.snap("ended");
+    await a.send("question three");
+    a.snap("after-new-send");
+  };
+
   // ---- run ---------------------------------------------------------------------
   window.addEventListener("load", function () {
     var scenario = SCENARIOS[scenarioName];
@@ -726,7 +1030,8 @@
         error: error || null,
         steps: steps,
         requests: requests,
-        copied: copied
+        copied: copied,
+        eraseTimers: eraseTimers.map(function (t) { return { cleared: t.cleared, fired: t.fired }; })
       };
     };
 
