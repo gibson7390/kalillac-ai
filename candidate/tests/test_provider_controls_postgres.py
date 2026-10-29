@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0007_anonymous_usage"
+HEAD = "0008_account_recovery_tokens"
 CHAIN = (
+    "0008_account_recovery_tokens",
     "0007_anonymous_usage",
     "0006_provider_usage_pools",
     "0005_account_usage_slots",
@@ -654,7 +655,7 @@ def tally(results):
 
 # --- 1 and 2: migration endpoint, identities and privileges --------------------------------
 
-def test_alembic_has_one_head_and_migrated_exactly_to_0007(database):
+def test_alembic_has_one_head_and_migrated_exactly_to_head(database):
     from alembic.script import ScriptDirectory
     script = ScriptDirectory.from_config(_alembic_config())
     assert script.get_heads() == [HEAD]
@@ -663,7 +664,7 @@ def test_alembic_has_one_head_and_migrated_exactly_to_0007(database):
         assert conn.execute("SELECT version_num FROM kalillac.alembic_version").fetchall() == [(HEAD,)]
         tables = {r[0] for r in conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'kalillac'").fetchall()}
-    assert {"provider_usage_pools", *ANONYMOUS_TABLES, "alembic_version"} <= tables
+    assert {"provider_usage_pools", *ANONYMOUS_TABLES, "account_recovery_tokens", "alembic_version"} <= tables
 
 
 def test_roles_have_expected_identities_and_limited_privileges(database):

@@ -111,3 +111,12 @@ def revoke_account_session(
         )
         .values(revoked_at=now)
     )
+
+
+def revoke_all_account_sessions(session: Session, user_id: uuid.UUID, now: datetime) -> None:
+    """Revoke every unrevoked device for one account, including expired sessions."""
+    session.execute(
+        update(AccountSession)
+        .where(AccountSession.user_id == user_id, AccountSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )

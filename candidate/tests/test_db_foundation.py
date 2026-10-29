@@ -39,6 +39,7 @@ def test_only_approved_account_tables_exist():
     assert set(Base.metadata.tables) == {
         "kalillac.users",
         "kalillac.account_sessions",
+        "kalillac.account_recovery_tokens",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
         "kalillac.account_usage_slots",
