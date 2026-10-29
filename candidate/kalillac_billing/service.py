@@ -51,6 +51,14 @@ Webhook (process_webhook):
    different nonterminal subscriptions are a conflict: rolled back, left
    unrecorded, and surfaced as non-2xx. Entitlement never decides linkage.
 
+Operator recovery (reconcile_account) repairs one account from the ids it
+has stored locally (a linked subscription, or a stored Checkout Session),
+under the same account lock and through the same policy as webhooks
+(_reconcile_subscription). It records no webhook event, and only links a
+subscription that Stripe's own metadata assigns to that account. Its
+transaction alone carries fixed lock and statement timeouts (SET LOCAL);
+a timeout rolls back and raises ReconciliationBusy.
+
 Access policy: paid while Stripe reports active, trialing, or past_due
 (dunning) for a Price in the configured allowed set (all of which grant the
 same paid entitlement); free for every other status, including unknown
@@ -74,7 +82,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 import uuid
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from kalillac_db.models import AccountBilling, User
@@ -560,6 +569,70 @@ def _linkage_decision(existing, state: SubscriptionState) -> str:
     return "conflict"
 
 
+def _reconcile_subscription(
+    session: Session,
+    user_id: uuid.UUID,
+    state: SubscriptionState,
+    *,
+    allowed_price_ids: frozenset[str],
+    checkout_completed: bool = False,
+) -> str:
+    """The one reconciliation policy, shared by verified webhooks and
+    operator recovery. Runs inside the caller's transaction, after
+    lock_account(user_id), with Stripe's current subscription state.
+
+    Returns "belongs_elsewhere" (nothing written), "ignored_historical"
+    (nothing written), or "applied" (billing and entitlement updated).
+    Raises ReconciliationConflict or SubscriptionStateInvalid before any
+    write. checkout_completed: the state came from the account's own
+    completed Checkout Session, so its pending attempt is cleared whatever
+    the tier; otherwise only a paid subscription clears it.
+    """
+
+    if _belongs_elsewhere(session, user_id, state):
+        return "belongs_elsewhere"
+
+    decision = _linkage_decision(get_billing(session, user_id), state)
+
+    if decision == "conflict":
+        raise ReconciliationConflict()
+
+    if decision == "ignore":
+        return "ignored_historical"
+
+    tier = tier_for_subscription(state, allowed_price_ids)
+
+    # Validated before any write: an invalid paid state raises here and the
+    # transaction leaves everything as it was.
+    expires_at = paid_entitlement_expiry(state) if tier == TIER_PAID else None
+
+    billing = upsert_billing_state(
+        session,
+        user_id,
+        stripe_customer_id=state.customer_id,
+        stripe_subscription_id=state.subscription_id,
+        stripe_price_id=state.price_id,
+        subscription_status=state.status,
+        cancel_at_period_end=state.cancel_at_period_end,
+        current_period_end=state.current_period_end,
+    )
+
+    if tier == TIER_PAID or checkout_completed:
+        # The Checkout attempt has done its job.
+        clear_pending_checkout(billing)
+
+    # Paid always carries its bounded expiry; free has none.
+    set_entitlement_tier(
+        session,
+        user_id,
+        tier,
+        source=ENTITLEMENT_SOURCE,
+        expires_at=expires_at,
+    )
+
+    return "applied"
+
+
 def _unmatched(session: Session, event: WebhookEvent) -> WebhookOutcome:
     record_webhook_event(session, event.event_id, event.event_type)
     print(f"WARN: STRIPE_WEBHOOK_UNMATCHED {event.event_type}")
@@ -615,53 +688,23 @@ def process_webhook(
             # Authoritative state, fetched while holding the account lock.
             state = gateway.retrieve_subscription(event.subscription_id)
 
-            if _belongs_elsewhere(session, user_id, state):
+            # Raises ReconciliationConflict (roll back, event left
+            # unrecorded) or SubscriptionStateInvalid before any write.
+            result = _reconcile_subscription(
+                session,
+                user_id,
+                state,
+                allowed_price_ids=allowed_price_ids,
+            )
+
+            if result == "belongs_elsewhere":
                 return _unmatched(session, event)
 
-            decision = _linkage_decision(get_billing(session, user_id), state)
-
-            if decision == "conflict":
-                # Roll back and leave the event unrecorded; nothing changes.
-                raise ReconciliationConflict()
-
-            if decision == "ignore":
+            if result == "ignored_historical":
                 # A delayed terminal event for an older subscription: keep
                 # the current linkage, entitlement, and pending Checkout.
                 record_webhook_event(session, event.event_id, event.event_type)
                 return WebhookOutcome("ignored_historical")
-
-            if decision == "apply":
-                tier = tier_for_subscription(state, allowed_price_ids)
-
-                # Validated before any write: an invalid paid state raises
-                # here and the transaction leaves everything as it was.
-                expires_at = (
-                    paid_entitlement_expiry(state) if tier == TIER_PAID else None
-                )
-
-                billing = upsert_billing_state(
-                    session,
-                    user_id,
-                    stripe_customer_id=state.customer_id,
-                    stripe_subscription_id=state.subscription_id,
-                    stripe_price_id=state.price_id,
-                    subscription_status=state.status,
-                    cancel_at_period_end=state.cancel_at_period_end,
-                    current_period_end=state.current_period_end,
-                )
-
-                if tier == TIER_PAID:
-                    # The Checkout attempt has done its job.
-                    clear_pending_checkout(billing)
-
-                # Paid always carries its bounded expiry; free has none.
-                set_entitlement_tier(
-                    session,
-                    user_id,
-                    tier,
-                    source=ENTITLEMENT_SOURCE,
-                    expires_at=expires_at,
-                )
 
             # Recorded only after reconciliation, in the same transaction.
             record_webhook_event(session, event.event_id, event.event_type)
@@ -673,4 +716,252 @@ def process_webhook(
             if webhook_event_processed(session, event.event_id):
                 return WebhookOutcome("duplicate")
 
+        raise
+
+
+# --- operator recovery ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReconcileOutcome:
+    """subscription_reconciled | checkout_recovered | checkout_open |
+    checkout_expired | nothing_to_reconcile | account_not_found"""
+
+    result: str
+
+
+class ReconciliationRefused(Exception):
+    """Operator recovery found provider evidence it must not act on.
+
+    Raised inside the reconciliation transaction, so nothing is written.
+    code is one stable value and the only detail carried:
+    - ownership_mismatch: the subscription or its customer belongs to
+      another account, or the account is linked to a different customer;
+    - owner_metadata_missing / owner_metadata_mismatch: a subscription
+      recovered through Checkout does not name exactly this account;
+    - checkout_state_unrecognized / subscription_state_unrecognized: Stripe
+      returned a state that is not proven usable (an unknown Checkout
+      status, a completed Checkout without a subscription, or an object
+      other than the one requested).
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ReconciliationBusy(Exception):
+    """Operator reconciliation hit its lock or statement timeout (for
+    example, a webhook held the account lock longer than the limit). The
+    transaction rolled back; carries no details."""
+
+
+# Fixed bounds for the operator transaction only; not configurable, so an
+# operator cannot disable or widen them. SET LOCAL ends with the
+# transaction, so the pooled connection, webhooks, Checkout and account
+# requests keep their own settings.
+OPERATOR_LOCK_TIMEOUT = "5s"
+OPERATOR_STATEMENT_TIMEOUT = "30s"
+OPERATOR_TIMEOUT_STATEMENTS = (
+    f"SET LOCAL lock_timeout = '{OPERATOR_LOCK_TIMEOUT}'",
+    f"SET LOCAL statement_timeout = '{OPERATOR_STATEMENT_TIMEOUT}'",
+)
+
+# PostgreSQL SQLSTATEs: lock_not_available (lock_timeout) and
+# query_canceled (statement_timeout).
+_OPERATOR_TIMEOUT_SQLSTATES = frozenset({"55P03", "57014"})
+
+
+def _apply_operator_limits(session: Session) -> None:
+    dialect = session.get_bind().dialect.name
+
+    if dialect == "postgresql":
+        for statement in OPERATOR_TIMEOUT_STATEMENTS:
+            session.execute(text(statement))
+        return
+
+    if dialect == "sqlite":
+        # Test databases only: SQLite has no such settings, and its own
+        # busy timeout bounds waiting.
+        return
+
+    # Never run unbounded against an unrecognized database.
+    raise RuntimeError("Operator reconciliation requires PostgreSQL.")
+
+
+def _is_operator_timeout(exc: DBAPIError) -> bool:
+    original = exc.orig
+    sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    return sqlstate in _OPERATOR_TIMEOUT_SQLSTATES
+
+
+def _require_requested_subscription(
+    state: SubscriptionState,
+    subscription_id: str,
+) -> None:
+    """Stripe must return the subscription asked for, with a status. An
+    unknown status string still follows the shared policy (free,
+    nonterminal); a missing one is malformed and is not applied."""
+
+    if state.subscription_id != subscription_id or not (
+        isinstance(state.status, str) and state.status
+    ):
+        raise ReconciliationRefused("subscription_state_unrecognized")
+
+
+def _refresh_linked_subscription(
+    session: Session,
+    user_id: uuid.UUID,
+    billing: AccountBilling,
+    gateway: BillingGateway,
+    allowed_price_ids: frozenset[str],
+) -> ReconcileOutcome:
+    subscription_id = billing.stripe_subscription_id
+    state = gateway.retrieve_subscription(subscription_id)
+    _require_requested_subscription(state, subscription_id)
+
+    result = _reconcile_subscription(
+        session,
+        user_id,
+        state,
+        allowed_price_ids=allowed_price_ids,
+    )
+
+    if result == "belongs_elsewhere":
+        raise ReconciliationRefused("ownership_mismatch")
+
+    if result != "applied":
+        # The linked subscription itself is never historical; anything else
+        # is not proven and is not reported as success.
+        raise ReconciliationRefused("subscription_state_unrecognized")
+
+    return ReconcileOutcome("subscription_reconciled")
+
+
+def _recover_from_checkout(
+    session: Session,
+    user_id: uuid.UUID,
+    billing: AccountBilling,
+    gateway: BillingGateway,
+    allowed_price_ids: frozenset[str],
+) -> ReconcileOutcome:
+    session_id = billing.stripe_checkout_session_id
+    checkout = gateway.retrieve_checkout_session(session_id)
+
+    if checkout.session_id != session_id:
+        raise ReconciliationRefused("checkout_state_unrecognized")
+
+    if checkout.status == "open":
+        # Still payable: nothing to repair and nothing written.
+        return ReconcileOutcome("checkout_open")
+
+    if checkout.status == "expired":
+        # Confirmed dead: clear only this stored attempt, so a later
+        # Checkout can begin through the guarded path.
+        _discard_session(session_id)(billing)
+        return ReconcileOutcome("checkout_expired")
+
+    if checkout.status != "complete" or not checkout.subscription_id:
+        raise ReconciliationRefused("checkout_state_unrecognized")
+
+    state = gateway.retrieve_subscription(checkout.subscription_id)
+    _require_requested_subscription(state, checkout.subscription_id)
+
+    # A subscription not yet linked here is linked only when Stripe's own
+    # metadata names exactly this account.
+    if not state.kalillac_user_id:
+        raise ReconciliationRefused("owner_metadata_missing")
+
+    if _parse_user_id(state.kalillac_user_id) != user_id:
+        raise ReconciliationRefused("owner_metadata_mismatch")
+
+    result = _reconcile_subscription(
+        session,
+        user_id,
+        state,
+        allowed_price_ids=allowed_price_ids,
+        checkout_completed=True,
+    )
+
+    if result == "belongs_elsewhere":
+        raise ReconciliationRefused("ownership_mismatch")
+
+    if result != "applied":
+        raise ReconciliationRefused("subscription_state_unrecognized")
+
+    return ReconcileOutcome("checkout_recovered")
+
+
+def reconcile_account(
+    user_id: uuid.UUID,
+    *,
+    gateway: BillingGateway,
+    session_factory: sessionmaker[Session],
+    allowed_price_ids: frozenset[str],
+) -> ReconcileOutcome:
+    """Repair one account's billing and entitlement from its own stored
+    Stripe evidence, for an operator (never an HTTP route).
+
+    One transaction, under the same account lock as Checkout and webhooks:
+    1. lock the account row, then read its billing row;
+    2. a linked subscription -> re-fetch exactly that subscription and apply
+       it through the shared webhook policy (_reconcile_subscription);
+    3. otherwise a stored Checkout Session -> re-fetch exactly that session:
+       open -> checkout_open, nothing written; expired -> clear that pending
+       attempt, checkout_expired; complete -> fetch its subscription, which
+       must name this account in its metadata, apply it, and clear the
+       attempt, checkout_recovered;
+    4. nothing stored -> nothing_to_reconcile, without any Stripe call.
+    A linked subscription Stripe has ended (canceled, incomplete_expired)
+    alongside a stored Checkout Session is the re-subscribe case: step 3
+    runs, and the shared linkage rule replaces the ended subscription.
+
+    Only the account's locally stored ids are used; no caller can supply a
+    subscription or session id. No webhook event is recorded.
+
+    The transaction first sets the fixed operator limits
+    (OPERATOR_TIMEOUT_STATEMENTS), so waiting for the account lock or any
+    statement is bounded; a timeout raises ReconciliationBusy. Raises
+    BillingProviderError, SubscriptionStateInvalid, ReconciliationConflict,
+    ReconciliationRefused, or ReconciliationBusy, each after rolling
+    everything back.
+    """
+
+    if not isinstance(user_id, uuid.UUID):
+        raise TypeError("user_id must be a UUID.")
+
+    try:
+        with session_factory() as session, session.begin():
+            # Before the lock: nothing has been read, fetched, or written.
+            _apply_operator_limits(session)
+
+            if not lock_account(session, user_id):
+                return ReconcileOutcome("account_not_found")
+
+            # A fresh session, read after the lock: nothing cached predates it.
+            billing = get_billing(session, user_id)
+
+            if billing is None:
+                return ReconcileOutcome("nothing_to_reconcile")
+
+            linked = billing.stripe_subscription_id
+
+            if billing.stripe_checkout_session_id and (
+                linked is None or _is_terminal(billing.subscription_status)
+            ):
+                return _recover_from_checkout(
+                    session, user_id, billing, gateway, allowed_price_ids
+                )
+
+            if linked:
+                return _refresh_linked_subscription(
+                    session, user_id, billing, gateway, allowed_price_ids
+                )
+
+            return ReconcileOutcome("nothing_to_reconcile")
+    except DBAPIError as exc:
+        # The transaction has already rolled back. Neither the driver's
+        # message nor its SQL is carried on.
+        if _is_operator_timeout(exc):
+            raise ReconciliationBusy() from None
         raise

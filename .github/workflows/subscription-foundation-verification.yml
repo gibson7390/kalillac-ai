@@ -1,12 +1,13 @@
 # Verification for the subscription foundation: accounts, entitlements, usage
-# quotas and Stripe billing.
+# quotas, Stripe billing and operator subscription reconciliation.
 #
 # suites: the existing account, entitlement, usage and billing test files on
 # SQLite with an injected fake Stripe gateway. The real Stripe adapter is
 # exercised through the stripe library itself, without any request.
 #
 # billing-postgres: the billing service's locking, idempotency and rollback
-# checks (candidate/tools/verify_billing_postgres.py) against a disposable
+# checks, including operator reconciliation
+# (candidate/tools/verify_billing_postgres.py), against a disposable
 # PostgreSQL service container, migrated with the repository's Alembic chain.
 # The tool only accepts the database kalillac_staging and role
 # kalillac_staging_app, so the container is provisioned with those names.
@@ -69,6 +70,8 @@ jobs:
           python -m pytest
           tests/test_billing.py
           tests/test_billing_concurrency.py
+          tests/test_billing_reconciliation.py
+          tests/test_billing_reconcile_tool.py
           tests/test_stripe_gateway.py
           tests/test_accounts.py
           tests/test_entitlements.py
@@ -84,7 +87,7 @@ jobs:
           --junitxml="$RUNNER_TEMP/subscription-foundation.xml"
 
       # A green run must mean every test executed: exactly the expected
-      # number collected (829, from `pytest --collect-only` over the files
+      # number collected (978, from `pytest --collect-only` over the files
       # above), and none skipped, failed or errored. A missing stripe package
       # would skip the Stripe adapter tests, so it fails the run instead.
       - name: Require every test to have run
@@ -96,7 +99,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 829, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 978, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the subscription foundation verification did not run completely")
           PY
 
@@ -202,4 +205,4 @@ jobs:
           KALILLAC_DB_PASSWORD="$PG_APP_PASSWORD" python tools/verify_billing_postgres.py \
             --expect-db kalillac_staging --expect-user kalillac_staging_app \
             | tee "$RUNNER_TEMP/billing-postgres.log"
-          grep -qx "RESULT: 10/10 checks passed" "$RUNNER_TEMP/billing-postgres.log"
+          grep -qx "RESULT: 17/17 checks passed" "$RUNNER_TEMP/billing-postgres.log"
