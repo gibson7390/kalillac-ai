@@ -310,6 +310,7 @@ def test_account_schema_holds_identity_only():
     assert set(Base.metadata.tables) == {
         "kalillac.users",
         "kalillac.account_sessions",
+        "kalillac.account_recovery_tokens",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
         "kalillac.account_usage_slots",
@@ -390,6 +391,7 @@ def test_account_creation_creates_no_conversation_state(client, db):
     assert tables == {
         "users",
         "account_sessions",
+        "account_recovery_tokens",
         "account_entitlements",
         "account_usage_daily",
         "account_usage_slots",

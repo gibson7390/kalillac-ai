@@ -34,6 +34,7 @@ from kalillac_db.repositories.accounts import (
     revoke_account_session,
     set_password_hash,
 )
+from kalillac_db.repositories.billing import lock_account
 from kalillac_db.repositories.entitlements import (
     create_default_entitlement,
     get_entitlement,
@@ -297,6 +298,16 @@ def build_account_router(
             )
 
             if user is None or not password_ok or not user.is_active:
+                return None
+
+            # A password reset may commit while Argon2 runs. Recheck under the
+            # account lock a reset also takes: either the reset sees and
+            # revokes this session, or this login sees the replaced password.
+            verified_hash = user.password_hash
+            lock_account(session, user.id)
+            session.refresh(user)
+
+            if user.password_hash != verified_hash or not user.is_active:
                 return None
 
             if needs_rehash(user.password_hash):

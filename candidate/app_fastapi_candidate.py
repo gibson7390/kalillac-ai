@@ -14021,6 +14021,16 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
     api.include_router(build_account_router(settings=_account_settings))
 
 
+# Recovery is separately default-off and has no built-in email adapter. Enabling
+# it without an explicit gateway fails closed before any database or provider I/O.
+if os.getenv("KALILLAC_ACCOUNT_RECOVERY_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    from kalillac_accounts.recovery_router import build_recovery_router
+
+    api.include_router(build_recovery_router())
+
+
 # Optional aggregate usage metering. Off unless explicitly enabled; when off,
 # /api/chat never inspects the account cookie, no usage database call occurs,
 # and /api/account/usage does not exist. When on, it is the single deliberate
