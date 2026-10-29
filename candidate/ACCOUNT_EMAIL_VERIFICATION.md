@@ -1,8 +1,9 @@
 # Account email-verification foundation
 
-Backend-only and default-off. There is no verification page, real email adapter,
-environment-selected provider, production activation, automatic sign-in, email change,
-account deletion, MFA, shared throttling or retention/pruning job. Registration, login,
+Backend-only and default-off, and production remains off. There is no verification page,
+production activation, automatic sign-in, email change, account deletion, MFA, shared
+throttling or retention/pruning job. Email goes through the separately reviewed,
+default-off Resend adapter described in EMAIL_DELIVERY.md. Registration, login,
 logout, password recovery, paid access, webhooks, reconciliation and the Customer Portal
 are unchanged.
 
@@ -14,10 +15,13 @@ exactly as before.
 
 When on, startup requires KALILLAC_ACCOUNTS_ENABLED, KALILLAC_DB_ENABLED,
 KALILLAC_ACCOUNT_EMAIL_VERIFICATION_URL (absolute HTTPS; HTTP only for loopback or
-localhost; no credentials, query or fragment), a valid KALILLAC_EMAIL_FROM, and a
-code-supplied EmailVerificationGateway with send_email_verification(to, link). The gateway
-is a separate protocol from the recovery EmailGateway, whose contract is unchanged. The
-main application supplies no gateway, so setting the flag alone fails at startup.
+localhost; no credentials, query or fragment), a valid KALILLAC_EMAIL_FROM, and an
+EmailVerificationGateway with send_email_verification(to, link). The gateway is a separate
+protocol from the recovery EmailGateway, whose contract is unchanged. The application builds
+it only through email_provider.build_email_gateway, which requires
+KALILLAC_EMAIL_PROVIDER=resend and a valid KALILLAC_RESEND_API_KEY (see EMAIL_DELIVERY.md);
+anything missing or invalid fails startup before routes are installed, and startup
+contacts no provider.
 
 ## Account state
 
@@ -49,7 +53,8 @@ active/email/verified state, stop if inactive or verified, invalidate unused tok
 the new token's hashes, deliver through the gateway inside the transaction, commit. A
 delivery failure rolls the whole issuance back; a commit failure after delivery leaves the
 delivered credential unusable. Because the account row stays locked until delivery and
-commit finish, a future real gateway must bound its delivery time.
+commit finish, the gateway must bound its delivery time; the Resend adapter caps each
+attempt at about 5 seconds with no retries.
 
 POST /api/account/email-verification/confirm takes exactly {"token":"..."}. The canonical
 32-byte URL-safe encoding is checked before database access. Malformed, unknown, expired,

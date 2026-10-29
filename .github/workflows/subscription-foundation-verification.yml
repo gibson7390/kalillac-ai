@@ -86,6 +86,8 @@ jobs:
           tests/test_email_verification_concurrency.py
           tests/test_email_verification_migration.py
           tests/test_email_verification_postgres_verifier.py
+          tests/test_resend_gateway.py
+          tests/test_email_provider.py
           tests/test_session_end.py
           tests/test_chat_error_integrity.py
           tests/test_entitlements.py
@@ -101,7 +103,7 @@ jobs:
           --junitxml="$RUNNER_TEMP/subscription-foundation.xml"
 
       # A green run must mean every test executed: exactly the expected
-      # number collected (1415, from `pytest --collect-only` over the files
+      # number collected (1551, from `pytest --collect-only` over the files
       # above), and none skipped, failed or errored. A missing stripe package
       # would skip the Stripe adapter tests, so it fails the run instead.
       - name: Require every test to have run
@@ -113,7 +115,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 1415, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 1551, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the subscription foundation verification did not run completely")
           PY
 
