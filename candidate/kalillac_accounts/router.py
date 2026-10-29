@@ -74,6 +74,10 @@ class AccountSettings:
     session_days: int = 14
     # See rate_limit.client_identifier before enabling.
     trust_cloudflare_client_ip: bool = False
+    # KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED. While false, /me and
+    # Checkout are exactly as before; while true, /me adds email_verified and
+    # new Checkout sessions require a verified email.
+    email_verification_enabled: bool = False
 
     @property
     def cookie_name(self) -> str:
@@ -97,6 +101,9 @@ def load_account_settings() -> AccountSettings:
         cookie_secure=secure.strip().lower() in _TRUE_VALUES,
         session_days=max(1, days),
         trust_cloudflare_client_ip=trust_cloudflare_client_ip(),
+        email_verification_enabled=os.getenv(
+            "KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED", ""
+        ).strip().lower() in _TRUE_VALUES,
     )
 
 
@@ -379,7 +386,17 @@ def build_account_router(
 
         def work(session: Session) -> dict[str, Any] | None:
             user = get_signed_in_user(session, token_hash, checked_at)
-            return _user_json(user) if user else None
+
+            if user is None:
+                return None
+
+            payload = _user_json(user)
+
+            if settings.email_verification_enabled:
+                # A boolean only; the verification time is never exposed.
+                payload["user"]["email_verified"] = user.email_verified_at is not None
+
+            return payload
 
         payload = await run_in_threadpool(run_in_transaction, work)
 

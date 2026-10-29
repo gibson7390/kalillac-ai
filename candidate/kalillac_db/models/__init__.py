@@ -9,6 +9,7 @@ their product/privacy designs are approved.
 from .account_billing import AccountBilling
 from .account_entitlement import AccountEntitlement
 from .account_session import AccountSession
+from .account_email_verification_token import AccountEmailVerificationToken
 from .account_recovery_token import AccountRecoveryToken
 from .account_usage_daily import AccountUsageDaily
 from .account_usage_slot import AccountUsageSlot
@@ -22,6 +23,7 @@ __all__ = [
     "AccountBilling",
     "AccountEntitlement",
     "AccountSession",
+    "AccountEmailVerificationToken",
     "AccountRecoveryToken",
     "AccountUsageDaily",
     "AccountUsageSlot",

@@ -14031,6 +14031,19 @@ if os.getenv("KALILLAC_ACCOUNT_RECOVERY_ENABLED", "").strip().lower() in {
     api.include_router(build_recovery_router())
 
 
+# Email verification is separately default-off with no built-in email adapter.
+# Enabling it without an explicit gateway fails closed before any database or
+# provider I/O. While off, Checkout and /api/account/me are unchanged.
+if os.getenv("KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    from kalillac_accounts.email_verification_router import (
+        build_email_verification_router,
+    )
+
+    api.include_router(build_email_verification_router())
+
+
 # Optional aggregate usage metering. Off unless explicitly enabled; when off,
 # /api/chat never inspects the account cookie, no usage database call occurs,
 # and /api/account/usage does not exist. When on, it is the single deliberate

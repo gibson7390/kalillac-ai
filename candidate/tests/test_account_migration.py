@@ -52,7 +52,8 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0008_account_recovery_tokens"]
+    assert script.get_heads() == ["0009_account_email_verification"]
+    assert script.get_revision("0009_account_email_verification").down_revision == "0008_account_recovery_tokens"
     assert script.get_revision("0008_account_recovery_tokens").down_revision == "0007_anonymous_usage"
     assert script.get_revision("0007_anonymous_usage").down_revision == "0006_provider_usage_pools"
     assert script.get_revision("0006_provider_usage_pools").down_revision == "0005_account_usage_slots"
@@ -119,7 +120,8 @@ def _expected_grants(role: str) -> list[str]:
         f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE kalillac.{table} "
         f"TO {role};"
         for table in ACCOUNT_TABLES
-    ] + [f"GRANT SELECT, INSERT, UPDATE ON TABLE kalillac.account_recovery_tokens TO {role};"]
+    ] + [f"GRANT SELECT, INSERT, UPDATE ON TABLE kalillac.account_recovery_tokens TO {role};",
+         f"GRANT SELECT, INSERT, UPDATE ON TABLE kalillac.account_email_verification_tokens TO {role};"]
 
 
 def _render_postgresql_upgrade(revision_range: str = "head") -> str:
