@@ -2,7 +2,9 @@
 
 Drives kalillac_billing.service against an actual PostgreSQL database with
 an in-process fake Stripe gateway: no Stripe credentials, no network calls
-to Stripe, no app server, no pytest.
+to Stripe, no app server, no pytest. Covers Checkout, webhooks, and operator
+reconciliation (reconcile_account); lock waits in the operator checks are
+observed in pg_stat_activity rather than inferred from elapsed time.
 
 Destination is fixed: database kalillac_staging as runtime role
 kalillac_staging_app. Arguments and environment must name exactly those,
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import getpass
@@ -65,9 +68,13 @@ from kalillac_billing.gateway import (  # noqa: E402
 )
 from kalillac_billing.service import (  # noqa: E402
     PAID_ENTITLEMENT_GRACE,
+    ReconciliationBusy,
     ReconciliationConflict,
+    ReconciliationRefused,
+    SubscriptionStateInvalid,
     checkout_idempotency_key,
     process_webhook,
+    reconcile_account,
     start_checkout,
 )
 from kalillac_db.models import (  # noqa: E402
@@ -86,9 +93,11 @@ REQUIRED_ROLE = "kalillac_staging_app"
 
 # Server-side bounds on every harness connection. The longest deliberate
 # hold is HOLD_SECONDS, so these leave ample margin while guaranteeing that
-# no statement or lock wait can hang indefinitely.
+# no statement or lock wait can hang indefinitely. Both differ from the
+# operator transaction's own limits (service.OPERATOR_TIMEOUT_STATEMENTS),
+# so a check can tell which settings a transaction is running under.
 LOCK_TIMEOUT = "10s"
-STATEMENT_TIMEOUT = "30s"
+STATEMENT_TIMEOUT = "45s"
 
 # Deliberate observation window while a lock or fake call is held.
 HOLD_SECONDS = 1.5
@@ -134,6 +143,7 @@ class FakeStripe:
     sessions_by_id: dict = field(default_factory=dict)
     checkout_calls: list = field(default_factory=list)
     retrieve_calls: list = field(default_factory=list)
+    checkout_retrieve_calls: list = field(default_factory=list)
     hold_create: threading.Event | None = None
     retrieve_hook: object = None
     fail_retrieve: bool = False
@@ -164,6 +174,8 @@ class FakeStripe:
             return self.sessions_by_id[self.sessions_by_key[key]]
 
     def retrieve_checkout_session(self, session_id):
+        with self.lock:
+            self.checkout_retrieve_calls.append(session_id)
         return self.sessions_by_id[session_id]
 
     def create_portal_session(self, **kwargs):  # pragma: no cover - unused
@@ -655,6 +667,334 @@ def check_older_subscription_protection(ctx):
     assert len(stripe.checkout_calls) == calls_before
 
 
+# --- operator reconciliation ------------------------------------------------------------
+
+
+def reconcile(ctx, stripe, user_id):
+    return reconcile_account(
+        user_id,
+        gateway=stripe,
+        session_factory=ctx.factory,
+        allowed_price_ids=frozenset({PRICE}),
+    ).result
+
+
+def completed_checkout(ctx, stripe, user_id, sub_name, **overrides):
+    """A stored Checkout Session (created through start_checkout) that
+    Stripe now reports complete, whose webhook never arrived."""
+
+    assert checkout(ctx, stripe, user_id).outcome == "url"
+
+    with ctx.factory() as session:
+        session_id = session.get(AccountBilling, user_id).stripe_checkout_session_id
+
+    stripe.sessions_by_id[session_id] = CheckoutSessionState(
+        session_id=session_id,
+        status="complete",
+        url=None,
+        expires_at=None,
+        subscription_id=ctx.sub_id(sub_name),
+    )
+    state = subscription(ctx, user_id, sub_name, "active")
+    stripe.subscriptions[ctx.sub_id(sub_name)] = (
+        dataclasses.replace(state, **overrides) if overrides else state
+    )
+    return session_id
+
+
+def tagged_event_count(ctx) -> int:
+    prefix = f"evt_verify_{ctx.run_id}_"
+
+    with ctx.factory() as session:
+        return session.scalar(
+            select(func.count()).select_from(StripeWebhookEvent).where(
+                func.substr(StripeWebhookEvent.event_id, 1, len(prefix)) == prefix
+            )
+        )
+
+
+def wait_for_lock_waiter(ctx) -> None:
+    """Return once another harness connection is waiting on a lock, as
+    PostgreSQL itself reports it. The deadline only bounds a hung check."""
+
+    deadline = time.monotonic() + WAIT_TIMEOUT
+
+    with ctx.engine.connect() as connection:
+        while True:
+            waiting = connection.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE usename = current_user "
+                    "AND application_name = 'kalillac-billing-verify' "
+                    "AND wait_event_type = 'Lock' "
+                    "AND pid <> pg_backend_pid()"
+                )
+            ).scalar()
+            connection.rollback()
+
+            if waiting:
+                return
+
+            if time.monotonic() > deadline:
+                raise AssertionError("no connection waited for the account lock")
+
+            time.sleep(0.05)
+
+
+def check_operator_recovers_missed_webhook(ctx):
+    user_id = add_user(ctx)
+    stripe = FakeStripe()
+    completed_checkout(ctx, stripe, user_id, "recover")
+    events_before = tagged_event_count(ctx)
+
+    assert reconcile(ctx, stripe, user_id) == "checkout_recovered"
+
+    state = account_state(ctx, user_id)
+    assert state["billing"]["stripe_subscription_id"] == ctx.sub_id("recover")
+    assert state["billing"]["stripe_customer_id"] == ctx.customer_id(user_id)
+    assert state["billing"]["subscription_status"] == "active"
+    assert state["billing"]["stripe_checkout_session_id"] is None
+    assert state["billing"]["checkout_attempt_id"] is None
+    assert state["entitlement"]["tier"] == "paid"
+    assert state["entitlement"]["expires_at"] == (
+        datetime(2026, 12, 1, tzinfo=timezone.utc) + PAID_ENTITLEMENT_GRACE
+    ), state["entitlement"]["expires_at"]
+    # No synthetic webhook event is recorded.
+    assert tagged_event_count(ctx) == events_before
+
+    # A rerun only refreshes the now-linked subscription.
+    assert reconcile(ctx, stripe, user_id) == "subscription_reconciled"
+    rerun = account_state(ctx, user_id)["entitlement"]
+    assert (rerun["tier"], rerun["expires_at"]) == (
+        state["entitlement"]["tier"], state["entitlement"]["expires_at"]
+    )
+
+    # Without owner metadata, nothing is linked.
+    other = add_user(ctx)
+    completed_checkout(ctx, stripe, other, "unowned", kalillac_user_id=None)
+    before = account_state(ctx, other)
+
+    try:
+        reconcile(ctx, stripe, other)
+    except ReconciliationRefused as refused:
+        assert refused.code == "owner_metadata_missing"
+    else:
+        raise AssertionError("unowned subscription was linked")
+
+    assert account_state(ctx, other) == before
+
+
+def check_operator_waits_for_account_lock(ctx):
+    user_id = add_user(ctx)
+    stripe = FakeStripe()
+    stripe.subscriptions[ctx.sub_id("op_wait")] = subscription(
+        ctx, user_id, "op_wait", "active"
+    )
+    assert deliver(ctx, stripe, user_id, "op_wait", "op_wait",
+                   "customer.subscription.created") == "processed"
+    calls_before = len(stripe.retrieve_calls)
+
+    with account_row_locked(ctx, user_id):
+        thread, box = ctx.start(lambda: reconcile(ctx, stripe, user_id))
+        wait_for_lock_waiter(ctx)
+        assert thread.is_alive()
+        # Waiting on the row lock, before any Stripe call.
+        assert len(stripe.retrieve_calls) == calls_before
+
+    assert finish(thread, box) == "subscription_reconciled"
+    assert len(stripe.retrieve_calls) == calls_before + 1
+
+
+def check_webhook_and_operator_serialize(ctx):
+    user_id = add_user(ctx)
+    stripe = FakeStripe()
+    truth = {"status": "active"}
+    first_fetched = threading.Event()
+    release = ctx.hold()
+
+    def retrieve(subscription_id):
+        state = subscription(ctx, user_id, "serial", truth["status"])
+        if not first_fetched.is_set():
+            first_fetched.set()
+            wait_or_fail(release, "serialize-test release")
+        return state
+
+    stripe.retrieve_hook = retrieve
+
+    webhook = ctx.start(lambda: deliver(ctx, stripe, user_id, "serial", "serial",
+                                        "customer.subscription.created"))
+    wait_or_fail(first_fetched, "webhook to fetch")
+
+    operator = ctx.start(lambda: reconcile(ctx, stripe, user_id))
+    wait_for_lock_waiter(ctx)
+    assert len(stripe.retrieve_calls) == 1, "operator fetched before the lock"
+
+    # Stripe's truth changes before the webhook commits its older fetch.
+    truth["status"] = "canceled"
+    release.set()
+
+    assert finish(*webhook) == "processed"
+    assert finish(*operator) == "subscription_reconciled"
+    assert len(stripe.retrieve_calls) == 2
+
+    # The operator read after the webhook committed: the newer state wins.
+    state = account_state(ctx, user_id)
+    assert state["billing"]["subscription_status"] == "canceled"
+    assert state["entitlement"]["tier"] == "free"
+    assert state["entitlement"]["expires_at"] is None
+    assert event_recorded(ctx, "serial")
+
+
+def check_operator_rollback_on_failure(ctx):
+    user_id = add_user(ctx)
+    stripe = FakeStripe()
+    completed_checkout(ctx, stripe, user_id, "op_fail")
+    before = account_state(ctx, user_id)
+    assert before["billing"]["stripe_checkout_session_id"] is not None
+
+    stripe.fail_retrieve = True
+    try:
+        reconcile(ctx, stripe, user_id)
+    except BillingProviderError:
+        pass
+    else:
+        raise AssertionError("provider failure did not propagate")
+    assert account_state(ctx, user_id) == before
+    stripe.fail_retrieve = False
+
+    stripe.subscriptions[ctx.sub_id("op_fail")] = dataclasses.replace(
+        stripe.subscriptions[ctx.sub_id("op_fail")], current_period_end=None
+    )
+    try:
+        reconcile(ctx, stripe, user_id)
+    except SubscriptionStateInvalid:
+        pass
+    else:
+        raise AssertionError("invalid period end did not propagate")
+    assert account_state(ctx, user_id) == before
+
+    stripe.subscriptions[ctx.sub_id("op_fail")] = subscription(
+        ctx, user_id, "op_fail", "active"
+    )
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("simulated entitlement write failure")
+
+    # Restored by the runner after all workers have stopped.
+    ctx.patch(service, "set_entitlement_tier", failing)
+
+    try:
+        reconcile(ctx, stripe, user_id)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("entitlement failure did not propagate")
+
+    # The billing link and checkout clear were rolled back with it.
+    assert account_state(ctx, user_id) == before
+
+
+def check_operator_lock_is_per_account(ctx):
+    locked_user = add_user(ctx)
+    other_user = add_user(ctx)
+    stripe = FakeStripe()
+    stripe.subscriptions[ctx.sub_id("op_other")] = subscription(
+        ctx, other_user, "op_other", "active"
+    )
+    assert deliver(ctx, stripe, other_user, "op_other", "op_other",
+                   "customer.subscription.created") == "processed"
+
+    with account_row_locked(ctx, locked_user):
+        # Bounded only against a hang: it must complete while A stays locked.
+        thread, box = ctx.start(lambda: reconcile(ctx, stripe, other_user))
+        thread.join(timeout=WAIT_TIMEOUT)
+        assert not thread.is_alive(), "other account blocked by A's lock"
+
+    assert finish(thread, box) == "subscription_reconciled"
+
+
+def show_timeouts(session_or_connection):
+    return (
+        session_or_connection.execute(text("SHOW lock_timeout")).scalar(),
+        session_or_connection.execute(text("SHOW statement_timeout")).scalar(),
+    )
+
+
+def check_operator_transaction_limits(ctx):
+    """The operator transaction runs with lock_timeout=5s and
+    statement_timeout=30s; webhooks keep the connection's own settings, and
+    the operator limits end with its transaction."""
+
+    user_id = add_user(ctx)
+    stripe = FakeStripe()
+    stripe.subscriptions[ctx.sub_id("limits")] = subscription(
+        ctx, user_id, "limits", "active"
+    )
+    seen = []
+    real_lock = service.lock_account
+
+    def observing_lock(session, locked_user):
+        # Runs where the account lock is requested, inside the transaction.
+        seen.append(show_timeouts(session))
+        return real_lock(session, locked_user)
+
+    # Restored by the runner after all workers have stopped.
+    ctx.patch(service, "lock_account", observing_lock)
+
+    assert deliver(ctx, stripe, user_id, "limits", "limits",
+                   "customer.subscription.created") == "processed"
+    assert seen == [(LOCK_TIMEOUT, STATEMENT_TIMEOUT)], seen
+
+    # One pinned connection: the operator transaction, then the same
+    # connection again once that transaction has ended.
+    with ctx.engine.connect() as connection:
+        factory = sessionmaker(bind=connection, expire_on_commit=False)
+        result = reconcile_account(
+            user_id,
+            gateway=stripe,
+            session_factory=factory,
+            allowed_price_ids=frozenset({PRICE}),
+        ).result
+        assert result == "subscription_reconciled"
+        assert seen[1] == ("5s", "30s"), seen
+        after = show_timeouts(connection)
+        connection.rollback()
+
+    assert after == (LOCK_TIMEOUT, STATEMENT_TIMEOUT), after
+
+    assert deliver(ctx, stripe, user_id, "limits_again", "limits") == "processed"
+    assert seen[2] == (LOCK_TIMEOUT, STATEMENT_TIMEOUT), seen
+
+
+def check_operator_lock_timeout_is_bounded(ctx):
+    """A held account row lock ends the operator wait at its own 5s
+    lock_timeout with ReconciliationBusy, and nothing changes."""
+
+    user_id = add_user(ctx)
+    stripe = FakeStripe()
+    completed_checkout(ctx, stripe, user_id, "busy")
+    before = account_state(ctx, user_id)
+    checkout_calls = len(stripe.checkout_retrieve_calls)
+    events_before = tagged_event_count(ctx)
+
+    with account_row_locked(ctx, user_id):
+        started = time.monotonic()
+        thread, box = ctx.start(lambda: reconcile(ctx, stripe, user_id))
+        # PostgreSQL itself reports the operator waiting on the lock.
+        wait_for_lock_waiter(ctx)
+        thread.join(timeout=WAIT_TIMEOUT)
+        assert not thread.is_alive(), "operator wait was not bounded"
+        elapsed = time.monotonic() - started
+
+    assert isinstance(box.get("error"), ReconciliationBusy), box
+    # Ended by the operator's 5s limit, not the harness's own 10s.
+    assert elapsed < 9.0, elapsed
+    assert account_state(ctx, user_id) == before
+    assert len(stripe.checkout_retrieve_calls) == checkout_calls
+    assert stripe.retrieve_calls == []
+    assert tagged_event_count(ctx) == events_before
+
+
 CHECKS = [
     check_runtime_privileges,
     check_cascade_rolled_back,
@@ -666,6 +1006,13 @@ CHECKS = [
     check_rollback_on_fetch_failure,
     check_rollback_after_partial_write,
     check_older_subscription_protection,
+    check_operator_recovers_missed_webhook,
+    check_operator_waits_for_account_lock,
+    check_webhook_and_operator_serialize,
+    check_operator_rollback_on_failure,
+    check_operator_lock_is_per_account,
+    check_operator_transaction_limits,
+    check_operator_lock_timeout_is_bounded,
 ]
 
 
