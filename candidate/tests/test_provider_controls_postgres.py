@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0008_account_recovery_tokens"
+HEAD = "0009_account_email_verification"
 CHAIN = (
+    "0009_account_email_verification",
     "0008_account_recovery_tokens",
     "0007_anonymous_usage",
     "0006_provider_usage_pools",
@@ -664,7 +665,8 @@ def test_alembic_has_one_head_and_migrated_exactly_to_head(database):
         assert conn.execute("SELECT version_num FROM kalillac.alembic_version").fetchall() == [(HEAD,)]
         tables = {r[0] for r in conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'kalillac'").fetchall()}
-    assert {"provider_usage_pools", *ANONYMOUS_TABLES, "account_recovery_tokens", "alembic_version"} <= tables
+    assert {"provider_usage_pools", *ANONYMOUS_TABLES, "account_recovery_tokens",
+            "account_email_verification_tokens", "alembic_version"} <= tables
 
 
 def test_roles_have_expected_identities_and_limited_privileges(database):

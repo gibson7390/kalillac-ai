@@ -64,3 +64,10 @@ class User(Base):
         default=True,
         server_default=true(),
     )
+
+    # Set only by email-verification confirmation; NULL means unverified.
+    # Never exposed: account responses carry only an email_verified boolean.
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )

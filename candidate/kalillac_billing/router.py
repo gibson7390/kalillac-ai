@@ -8,6 +8,10 @@ Account routes (cookie-authenticated, same rules as every account endpoint):
 Stripe route (authenticated only by the Stripe signature):
 - POST /api/billing/stripe/webhook
 
+While email verification is enabled (AccountSettings), Checkout refuses an
+unverified account with 403 email_verification_required before any Stripe
+call or billing write.
+
 Request bodies on the account routes are ignored entirely: the Price,
 customer, URLs, and tier are all server-controlled. No route here writes
 billing state or entitlement; only verified webhook reconciliation does.
@@ -126,12 +130,21 @@ def build_billing_router(
 
     @router.post("/api/account/billing/checkout")
     async def checkout(request: Request):
-        found = await signed_in(request, lambda session, user: user.id)
+        found = await signed_in(
+            request,
+            lambda session, user: (user.id, user.email_verified_at is not None),
+        )
 
         if found is None:
             return _error(401, "not_authenticated")
 
-        user_id = found[1]
+        user_id, email_verified = found[1]
+
+        # Read-only so far: refused before start_checkout, so before any
+        # Stripe call or billing write. Portal, webhooks and reconciliation
+        # are unaffected, and a verified address never becomes unverified.
+        if settings.email_verification_enabled and not email_verified:
+            return _error(403, "email_verification_required")
 
         # Attempt ids, session ids, keys, and expiry are all server-side;
         # the request body is never read.

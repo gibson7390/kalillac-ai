@@ -40,7 +40,7 @@ def test_upgrade_downgrade_preserves_existing_rows_and_indexes():
             (user_id, "migration@example.com", "existing-hash"),
         )
         before = connection.exec_driver_sql("SELECT * FROM kalillac.users").fetchall()
-        command.upgrade(_config(connection=connection), "head")
+        command.upgrade(_config(connection=connection), "0008_account_recovery_tokens")
         assert set(inspect(connection).get_table_names("kalillac")) == previous | {"account_recovery_tokens"}
         assert inspect(connection).get_indexes("account_recovery_tokens", schema="kalillac") == [
             {"name": "ix_account_recovery_tokens_user_id", "column_names": ["user_id"], "unique": 0, "dialect_options": {}}

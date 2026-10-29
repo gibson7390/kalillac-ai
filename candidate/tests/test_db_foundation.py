@@ -40,6 +40,7 @@ def test_only_approved_account_tables_exist():
         "kalillac.users",
         "kalillac.account_sessions",
         "kalillac.account_recovery_tokens",
+        "kalillac.account_email_verification_tokens",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
         "kalillac.account_usage_slots",

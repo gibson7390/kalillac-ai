@@ -1,5 +1,6 @@
 # Verification for the subscription foundation: accounts, entitlements, usage
-# quotas, account recovery, Stripe billing and operator subscription reconciliation.
+# quotas, account recovery, email verification, Stripe billing and operator
+# subscription reconciliation.
 #
 # suites: the existing account, entitlement, usage and billing test files on
 # SQLite with an injected fake Stripe gateway. The real Stripe adapter is
@@ -80,6 +81,13 @@ jobs:
           tests/test_account_recovery_concurrency.py
           tests/test_account_recovery_migration.py
           tests/test_recovery_postgres_verifier.py
+          tests/test_email_verification.py
+          tests/test_email_verification_rate_limit.py
+          tests/test_email_verification_concurrency.py
+          tests/test_email_verification_migration.py
+          tests/test_email_verification_postgres_verifier.py
+          tests/test_session_end.py
+          tests/test_chat_error_integrity.py
           tests/test_entitlements.py
           tests/test_usage_limits.py
           tests/test_usage_metering.py
@@ -93,7 +101,7 @@ jobs:
           --junitxml="$RUNNER_TEMP/subscription-foundation.xml"
 
       # A green run must mean every test executed: exactly the expected
-      # number collected (1181, from `pytest --collect-only` over the files
+      # number collected (1415, from `pytest --collect-only` over the files
       # above), and none skipped, failed or errored. A missing stripe package
       # would skip the Stripe adapter tests, so it fails the run instead.
       - name: Require every test to have run
@@ -105,7 +113,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 1181, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 1415, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the subscription foundation verification did not run completely")
           PY
 
@@ -212,6 +220,18 @@ jobs:
           KALILLAC_DB_PASSWORD="$PG_MIGRATE_PASSWORD" python -m alembic downgrade 0007_anonymous_usage
           KALILLAC_DB_PASSWORD="$PG_MIGRATE_PASSWORD" python -m alembic upgrade head
 
+      # Round-trip only email verification (0009) the same way.
+      - name: Verify PostgreSQL email-verification downgrade and upgrade
+        working-directory: candidate
+        env:
+          KALILLAC_DB_ENABLED: "true"
+          KALILLAC_DB_USER: kalillac_staging_migrate
+          KALILLAC_MIGRATION_OWNER_ROLE: kalillac_staging_owner
+          KALILLAC_MIGRATION_APP_ROLE: kalillac_staging_app
+        run: |
+          KALILLAC_DB_PASSWORD="$PG_MIGRATE_PASSWORD" python -m alembic downgrade 0008_account_recovery_tokens
+          KALILLAC_DB_PASSWORD="$PG_MIGRATE_PASSWORD" python -m alembic upgrade head
+
       # The tool uses an in-process fake Stripe; it never contacts Stripe.
       # A green run requires its exit status 0 and every check passing.
       - name: Run the PostgreSQL billing verification
@@ -236,3 +256,15 @@ jobs:
             --expect-db kalillac_staging --expect-user kalillac_staging_app \
             | tee "$RUNNER_TEMP/recovery-postgres.log"
           test "$(tail -n 1 "$RUNNER_TEMP/recovery-postgres.log")" = "RESULT: 14/14 checks passed"
+
+      # Provider-neutral in-memory email only. No real delivery or Stripe call.
+      - name: Run the PostgreSQL email-verification verification
+        working-directory: candidate
+        env:
+          KALILLAC_DB_USER: kalillac_staging_app
+        run: |
+          set -o pipefail
+          KALILLAC_DB_PASSWORD="$PG_APP_PASSWORD" python tools/verify_email_verification_postgres.py \
+            --expect-db kalillac_staging --expect-user kalillac_staging_app \
+            | tee "$RUNNER_TEMP/email-verification-postgres.log"
+          test "$(tail -n 1 "$RUNNER_TEMP/email-verification-postgres.log")" = "RESULT: 15/15 checks passed"
