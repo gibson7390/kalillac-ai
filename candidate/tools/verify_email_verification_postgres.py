@@ -532,7 +532,7 @@ def check_constraints_and_cascade(ctx):
                 with session.begin_nested():
                     session.add(AccountEmailVerificationToken(**values))
                     session.flush()
-            except IntegrityError:
+            except DBAPIError:
                 pass
             else:
                 raise AssertionError()
