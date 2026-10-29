@@ -123,7 +123,7 @@ def test_config_repr_does_not_disclose_url_or_email(gateway):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_application_startup_flag_is_off_and_cannot_select_real_gateway(enabled):
+def test_application_startup_flag_is_off_and_requires_explicit_email_provider(enabled):
     env = dict(os.environ)
     for name in list(env):
         if name.startswith("KALILLAC_") or name == "CREDENTIALS_DIRECTORY":
@@ -138,8 +138,10 @@ def test_application_startup_flag_is_off_and_cannot_select_real_gateway(enabled)
     result = subprocess.run([sys.executable, "-B", "-c", code],
                             cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True)
     if enabled:
+        # No KALILLAC_EMAIL_PROVIDER: startup fails before any route is installed.
         assert result.returncode != 0
-        assert "explicitly provided EmailGateway" in result.stderr
+        assert "KALILLAC_EMAIL_PROVIDER must be one of: resend." in result.stderr
+        assert ENV["KALILLAC_ACCOUNT_RECOVERY_URL"] not in result.stderr
     else:
         assert result.returncode == 0 and "RECOVERY_ROUTES=False" in result.stdout
 

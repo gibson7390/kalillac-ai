@@ -1,4 +1,6 @@
-"""Provider-neutral email boundary. No adapter is supplied or selected by environment."""
+"""Provider-neutral email boundary. The recovery and verification services
+depend only on these protocols. The one adapter, resend_gateway, is chosen
+explicitly by email_provider while recovery or verification is enabled."""
 from typing import Protocol, runtime_checkable
 
 

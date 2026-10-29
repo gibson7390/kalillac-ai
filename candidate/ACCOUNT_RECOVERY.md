@@ -1,8 +1,9 @@
 # Account recovery foundation
 
-This is backend-only and default-off. No email adapter, reset page, email verification,
+This is backend-only and default-off, and production remains off. No reset page,
 automatic sign-in, account deletion, password-change endpoint, MFA or production
-activation is included. Chat, temporary conversation memory, drafts, uploads, billing,
+activation is included. Email goes through the separately reviewed, default-off Resend
+adapter described in EMAIL_DELIVERY.md. Chat, temporary conversation memory, drafts, uploads, billing,
 entitlements and usage are outside recovery.
 
 ## Configuration and email boundary
@@ -14,14 +15,14 @@ validate before routes are installed:
 - KALILLAC_ACCOUNT_RECOVERY_URL: absolute HTTPS; HTTP only for literal loopback or
   localhost development. No credentials, query string or fragment.
 - KALILLAC_EMAIL_FROM: the existing normalized account-email format.
-- An explicit code-supplied EmailGateway implementing send_password_reset(to, link)
-  and send_password_changed(to).
+- An EmailGateway implementing send_password_reset(to, link) and
+  send_password_changed(to).
 
-There is no environment-selected gateway and no real adapter in this slice. The main
-application provides none, so environment changes alone cannot activate recovery.
-A future adapter and any activation require a separate review. The gateway owns its
-sender/provider configuration; recovery validates the configured sender but does not
-contact a provider or select one.
+The application builds the gateway only through email_provider.build_email_gateway,
+which requires KALILLAC_EMAIL_PROVIDER=resend and a valid KALILLAC_RESEND_API_KEY (see
+EMAIL_DELIVERY.md); anything missing or invalid fails startup before routes are installed.
+The recovery service stays provider-neutral: it only calls the gateway protocol. Startup
+contacts no provider. Production activation still requires a separate review.
 
 ## HTTP contracts
 
@@ -87,8 +88,9 @@ database dialects fail closed. Errors/conflicts roll back the complete mutation.
 Reset-email delivery is inside the issuance transaction, after the public response.
 A delivery failure rolls the entire issuance back, leaving no usable failed-delivery
 credential even when a separate cleanup query could not run. A commit failure also leaves
-the delivered credential unusable. A future gateway must bound its delivery call before
-activation, because the account lock is held until that call and commit complete.
+the delivered credential unusable. Because the account lock is held until delivery and
+commit complete, the gateway must bound its delivery call; the Resend adapter caps each
+attempt at about 5 seconds with no retries.
 Password-changed notification is outside the transaction after commit, and failure never
 undoes the reset.
 
@@ -127,6 +129,7 @@ per-run tagged users (which cascade). CI performs migration 0008 downgrade/upgra
 the separate migration role. The verifier has 14 fixed checks and must end with exactly:
 RESULT: 14/14 checks passed.
 
-This slice has no retention/pruning job or production rollout. A separately reviewed email
-adapter, reset UI, activation/retention plan and shared throttling before multi-worker
-scaling remain prerequisites for future production recovery.
+This slice has no retention/pruning job or production rollout. The Resend activation
+prerequisites in EMAIL_DELIVERY.md, a reset UI, an activation/retention plan and shared
+throttling before multi-worker scaling remain prerequisites for future production
+recovery.

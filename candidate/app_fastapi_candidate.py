@@ -14021,27 +14021,35 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
     api.include_router(build_account_router(settings=_account_settings))
 
 
-# Recovery is separately default-off and has no built-in email adapter. Enabling
-# it without an explicit gateway fails closed before any database or provider I/O.
-if os.getenv("KALILLAC_ACCOUNT_RECOVERY_ENABLED", "").strip().lower() in {
+# Account recovery and email verification are each default-off. While both are
+# off nothing email-related is imported and provider settings are ignored. When
+# either is on, the explicitly selected provider (KALILLAC_EMAIL_PROVIDER=resend
+# only) and its settings must validate before any route is installed; building
+# the gateway contacts no provider. While verification is off, Checkout and
+# /api/account/me are unchanged.
+_recovery_enabled = os.getenv("KALILLAC_ACCOUNT_RECOVERY_ENABLED", "").strip().lower() in {
     "1", "true", "yes", "on",
-}:
-    from kalillac_accounts.recovery_router import build_recovery_router
+}
+_email_verification_enabled = os.getenv(
+    "KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 
-    api.include_router(build_recovery_router())
+if _recovery_enabled or _email_verification_enabled:
+    from kalillac_accounts.email_provider import build_email_gateway
 
+    _email_gateway = build_email_gateway()
 
-# Email verification is separately default-off with no built-in email adapter.
-# Enabling it without an explicit gateway fails closed before any database or
-# provider I/O. While off, Checkout and /api/account/me are unchanged.
-if os.getenv("KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED", "").strip().lower() in {
-    "1", "true", "yes", "on",
-}:
-    from kalillac_accounts.email_verification_router import (
-        build_email_verification_router,
-    )
+    if _recovery_enabled:
+        from kalillac_accounts.recovery_router import build_recovery_router
 
-    api.include_router(build_email_verification_router())
+        api.include_router(build_recovery_router(gateway=_email_gateway))
+
+    if _email_verification_enabled:
+        from kalillac_accounts.email_verification_router import (
+            build_email_verification_router,
+        )
+
+        api.include_router(build_email_verification_router(gateway=_email_gateway))
 
 
 # Optional aggregate usage metering. Off unless explicitly enabled; when off,

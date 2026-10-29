@@ -8,8 +8,8 @@ never returned, stored or logged.
 Delivery happens inside the issuance transaction, while the account row is
 locked: a failed send rolls the whole issuance back, so no failed-delivery
 credential is ever committed, and a commit failure after delivery leaves the
-delivered credential unusable. A future real gateway must therefore bound
-its delivery time before activation.
+delivered credential unusable. The gateway must therefore bound its delivery
+time (the Resend adapter caps each attempt at about 5 seconds).
 """
 from __future__ import annotations
 

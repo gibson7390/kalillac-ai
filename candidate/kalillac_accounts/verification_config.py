@@ -1,8 +1,8 @@
 """Default-off email-verification configuration; explicit code-supplied gateway required.
 
-There is no environment-selected gateway and no real adapter. The main
-application supplies none, so environment changes alone cannot activate
-verification: enabling the flag without a gateway fails at startup.
+The gateway is supplied in code. The application builds one only through
+email_provider.build_email_gateway, which requires an explicit, valid
+KALILLAC_EMAIL_PROVIDER and its settings; anything invalid fails at startup.
 """
 from __future__ import annotations
 
