@@ -64,6 +64,7 @@ from kalillac_billing.gateway import (  # noqa: E402
     WebhookEvent,
 )
 from kalillac_billing.service import (  # noqa: E402
+    PAID_ENTITLEMENT_GRACE,
     ReconciliationConflict,
     checkout_idempotency_key,
     process_webhook,
@@ -191,6 +192,7 @@ class FakeStripe:
             subscription_id=data.get("subscription"),
             customer_id=data.get("customer"),
             kalillac_user_id=data.get("user"),
+            livemode=data.get("livemode", False),
         )
 
 
@@ -331,7 +333,8 @@ def deliver(ctx, stripe, user_id, event_name, sub_name,
         SIGNATURE,
         gateway=stripe,
         session_factory=ctx.factory,
-        paid_price_id=PRICE,
+        allowed_price_ids=frozenset({PRICE}),
+        livemode=False,
     ).result
 
 
@@ -524,6 +527,13 @@ def check_duplicate_webhook_reconciles_once(ctx):
             )
         )
     assert count == 1
+
+    # The paid entitlement carries its bounded expiry (TIMESTAMPTZ round trip).
+    entitlement = account_state(ctx, user_id)["entitlement"]
+    assert entitlement["tier"] == "paid"
+    assert entitlement["expires_at"] == (
+        datetime(2026, 12, 1, tzinfo=timezone.utc) + PAID_ENTITLEMENT_GRACE
+    ), entitlement["expires_at"]
 
 
 def check_fetch_after_lock_ordering(ctx):

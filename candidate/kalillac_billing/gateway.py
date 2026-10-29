@@ -52,13 +52,16 @@ class CheckoutSessionState:
 
 @dataclass(frozen=True)
 class WebhookEvent:
-    """Only the fields needed to locate the subscription and the account."""
+    """Only the fields needed to check the event's mode and to locate the
+    subscription and the account. livemode is None when the event did not
+    carry a boolean, which never matches either mode."""
 
     event_id: str
     event_type: str
     subscription_id: str | None
     customer_id: str | None
     kalillac_user_id: str | None
+    livemode: bool | None
 
 
 class BillingGateway(Protocol):

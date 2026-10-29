@@ -146,12 +146,16 @@ def webhook_event_from_stripe(event: Any) -> WebhookEvent:
         subscription_id = None
         kalillac_user_id = None
 
+    livemode = _field(event, "livemode")
+
     return WebhookEvent(
         event_id=_field(event, "id"),
         event_type=event_type,
         subscription_id=subscription_id,
         customer_id=_id_of(_field(obj, "customer")),
         kalillac_user_id=kalillac_user_id,
+        # Only a real boolean counts; anything else fails the mode check.
+        livemode=livemode if isinstance(livemode, bool) else None,
     )
 
 

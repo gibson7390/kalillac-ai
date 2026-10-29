@@ -33,8 +33,10 @@ prove an earlier request under the key produced no session, so the next
 request retries the same key with the same parameters.
 
 Webhook (process_webhook):
-1. Verify the Stripe signature (failure -> 400 upstream); ignore irrelevant
-   types; skip ids already recorded.
+1. Verify the Stripe signature (failure -> 400 upstream); refuse an event
+   whose livemode is not the configured Stripe mode (WebhookModeMismatch,
+   nothing read or written, never recorded); ignore irrelevant types; skip
+   ids already recorded.
 2. Locate the Kalillac account from the signed event and local links.
 3. One transaction: lock the account row; re-check the event id; fetch the
    CURRENT subscription from Stripe while holding the lock; update billing
@@ -50,9 +52,19 @@ Webhook (process_webhook):
    unrecorded, and surfaced as non-2xx. Entitlement never decides linkage.
 
 Access policy: paid while Stripe reports active, trialing, or past_due
-(dunning) for the configured paid Price; free for every other status,
-including unknown future ones. cancel_at_period_end stays paid while the
-status is still paying; the eventual cancellation makes it free.
+(dunning) for a Price in the configured allowed set (all of which grant the
+same paid entitlement); free for every other status, including unknown
+future ones, and for any Price outside the set. cancel_at_period_end stays
+paid while the status is still paying; the eventual cancellation makes it
+free.
+
+A paid entitlement always expires: at the subscription's current period end
+plus PAID_ENTITLEMENT_GRACE. Each reconciliation (renewal included) rewrites
+it from Stripe's current state, so a lost or delayed cancellation webhook
+cannot leave access open beyond that. A paid-looking subscription without a
+valid period end is refused (SubscriptionStateInvalid): the transaction rolls
+back, the event stays unrecorded so Stripe retries, and the stored state is
+left as it was.
 """
 
 from __future__ import annotations
@@ -110,14 +122,47 @@ REPLACEABLE_SUBSCRIPTION_STATUSES = frozenset({"canceled", "incomplete_expired"}
 
 ENTITLEMENT_SOURCE = "stripe"
 
+# How long paid access outlives the subscription's recorded period end. The
+# one place this policy is defined.
+PAID_ENTITLEMENT_GRACE = timedelta(days=7)
 
-def tier_for_subscription(state: SubscriptionState, paid_price_id: str) -> str:
+
+def tier_for_subscription(
+    state: SubscriptionState,
+    allowed_price_ids: frozenset[str],
+) -> str:
     """Kalillac access for a Stripe subscription state."""
 
-    if state.status in PAID_STATUSES and state.price_id == paid_price_id:
+    if isinstance(allowed_price_ids, str):
+        # A single string would make "in" a substring test.
+        raise TypeError("allowed_price_ids must be a set of Price ids.")
+
+    if state.status in PAID_STATUSES and state.price_id in allowed_price_ids:
         return TIER_PAID
 
     return TIER_FREE
+
+
+class SubscriptionStateInvalid(Exception):
+    """A paid-looking subscription has no valid current_period_end.
+
+    Raised inside the reconciliation transaction before anything is
+    written, so the stored state is kept and the event stays unrecorded
+    (Stripe retries). Carries no details.
+    """
+
+
+def paid_entitlement_expiry(state: SubscriptionState) -> datetime:
+    """End of paid access for a paying subscription: its period end plus
+    PAID_ENTITLEMENT_GRACE. Raises SubscriptionStateInvalid without a
+    timezone-aware period end, so paid access is never open-ended."""
+
+    period_end = state.current_period_end
+
+    if not isinstance(period_end, datetime) or period_end.utcoffset() is None:
+        raise SubscriptionStateInvalid()
+
+    return period_end.astimezone(timezone.utc) + PAID_ENTITLEMENT_GRACE
 
 
 def is_paying_status(status: str | None) -> bool:
@@ -472,6 +517,14 @@ class ReconciliationConflict(Exception):
     """
 
 
+class WebhookModeMismatch(Exception):
+    """A verified event's livemode is not the configured Stripe mode.
+
+    Raised before any database access: nothing is read, written, or
+    recorded, so the event is never marked processed. Carries no details.
+    """
+
+
 def _is_terminal(status: str | None) -> bool:
     return status in REPLACEABLE_SUBSCRIPTION_STATUSES
 
@@ -519,12 +572,19 @@ def process_webhook(
     *,
     gateway: BillingGateway,
     session_factory: sessionmaker[Session],
-    paid_price_id: str,
+    allowed_price_ids: frozenset[str],
+    livemode: bool,
 ) -> WebhookOutcome:
     """Verify and reconcile one delivery. Raises InvalidWebhookSignature for
-    a bad signature; any other exception means "not processed, retry"."""
+    a bad signature and WebhookModeMismatch for an event of the other
+    Stripe mode; any other exception means "not processed, retry"."""
 
     event = gateway.parse_webhook(payload, signature)
+
+    # Before anything else, irrelevant types included: an event from the
+    # other mode is never acknowledged, read against, or recorded.
+    if not isinstance(livemode, bool) or event.livemode is not livemode:
+        raise WebhookModeMismatch()
 
     if event.event_type not in RELEVANT_EVENT_TYPES:
         return WebhookOutcome("ignored")
@@ -571,6 +631,14 @@ def process_webhook(
                 return WebhookOutcome("ignored_historical")
 
             if decision == "apply":
+                tier = tier_for_subscription(state, allowed_price_ids)
+
+                # Validated before any write: an invalid paid state raises
+                # here and the transaction leaves everything as it was.
+                expires_at = (
+                    paid_entitlement_expiry(state) if tier == TIER_PAID else None
+                )
+
                 billing = upsert_billing_state(
                     session,
                     user_id,
@@ -582,18 +650,17 @@ def process_webhook(
                     current_period_end=state.current_period_end,
                 )
 
-                tier = tier_for_subscription(state, paid_price_id)
-
                 if tier == TIER_PAID:
                     # The Checkout attempt has done its job.
                     clear_pending_checkout(billing)
 
+                # Paid always carries its bounded expiry; free has none.
                 set_entitlement_tier(
                     session,
                     user_id,
                     tier,
                     source=ENTITLEMENT_SOURCE,
-                    expires_at=None,
+                    expires_at=expires_at,
                 )
 
             # Recorded only after reconciliation, in the same transaction.

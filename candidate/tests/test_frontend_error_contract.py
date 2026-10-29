@@ -1113,9 +1113,10 @@ def js_source() -> str:
 
 
 REPOSITORIES = REPO / "candidate" / "kalillac_db" / "repositories"
-# Account sign-in errors reach the chat only with accounts enabled; their
-# frontend copy is a separate, later change.
-DEFERRED_UNMAPPED = {"not_authenticated"}
+# Account errors reach the chat only with accounts enabled; their frontend
+# copy is a separate, later change. Until then the chat shows an unmapped
+# 429 (daily_limit_reached) with its existing busy outcome.
+DEFERRED_UNMAPPED = {"not_authenticated", "daily_limit_reached"}
 
 
 def quota_error_codes() -> set[str]:
@@ -1172,6 +1173,14 @@ def test_quota_error_codes_are_discovered_statically():
     # The deferred code is discovered too, so it cannot silently disappear.
     assert DEFERRED_UNMAPPED <= codes
     assert DAILY_LIMIT_CODE in backend_error_codes()
+
+
+def test_account_daily_limit_falls_back_to_the_busy_outcome_until_mapped():
+    # No frontend copy yet: the code is unmapped, and a bare 429 is busy.
+    source = js_source()
+    assert "daily_limit_reached" in quota_error_codes()
+    assert not re.search(r"(?<![a-z_])daily_limit_reached\s*:", source)
+    assert "if (status === 429) return OUTCOME_BUSY;" in source
 
 
 def test_every_backend_error_code_is_mapped():

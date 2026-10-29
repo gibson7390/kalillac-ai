@@ -10,7 +10,7 @@ entitlement, usage, and Private Session behavior are unchanged.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import subprocess
@@ -47,7 +47,11 @@ from kalillac_billing.gateway import (
     WebhookEvent,
 )
 from kalillac_billing.router import MAX_WEBHOOK_BYTES, build_billing_router
-from kalillac_billing.service import PAID_STATUSES, tier_for_subscription
+from kalillac_billing.service import (
+    PAID_ENTITLEMENT_GRACE,
+    PAID_STATUSES,
+    tier_for_subscription,
+)
 from kalillac_db.models import (
     AccountBilling,
     AccountEntitlement,
@@ -65,7 +69,13 @@ EMAIL = "person@example.com"
 SETTINGS = AccountSettings(cookie_secure=True, session_days=14)
 COOKIE = SETTINGS.cookie_name
 PAID_PRICE = "price_kalillacpaid"
-PERIOD_END = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+# A second Price (for example annual) granting the same paid entitlement.
+ANNUAL_PRICE = "price_kalillacannual"
+ALLOWED_PRICES = frozenset({PAID_PRICE, ANNUAL_PRICE})
+# Relative to the real clock: paid access now expires after the period end
+# plus the grace, so a fixed date would turn these tests into a time bomb.
+PERIOD_END = (datetime.now(timezone.utc) + timedelta(days=30)).replace(microsecond=0)
+PAID_EXPIRY = PERIOD_END + PAID_ENTITLEMENT_GRACE
 
 CONFIG = BillingConfig(
     secret_key="sk_test_secretvalue123",
@@ -74,6 +84,8 @@ CONFIG = BillingConfig(
     success_url="https://kalillac.ai/billing/success",
     cancel_url="https://kalillac.ai/billing/cancel",
     portal_return_url="https://kalillac.ai/account",
+    mode="test",
+    allowed_price_ids=ALLOWED_PRICES,
 )
 
 CANDIDATE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -209,6 +221,8 @@ class FakeGateway:
             subscription_id=data.get("subscription"),
             customer_id=data.get("customer"),
             kalillac_user_id=data.get("user"),
+            # Test-mode events unless a test says otherwise.
+            livemode=data.get("livemode", False),
         )
 
 
@@ -305,7 +319,11 @@ def _user_id(db, email=EMAIL):
 def _entitlement(db, email=EMAIL):
     with db() as session:
         row = session.get(AccountEntitlement, _user_id(db, email))
-        return (row.tier, row.source, row.expires_at)
+        expires_at = row.expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            # SQLite returns naive datetimes; PostgreSQL returns aware ones.
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return (row.tier, row.source, expires_at)
 
 
 def _billing(db, email=EMAIL):
@@ -382,7 +400,9 @@ BILLING_ENV = {
     "KALILLAC_BILLING_ENABLED": "true",
     "KALILLAC_STRIPE_SECRET_KEY": "sk_test_secretvalue123",
     "KALILLAC_STRIPE_WEBHOOK_SECRET": "whsec_secretvalue456",
+    "KALILLAC_STRIPE_MODE": "test",
     "KALILLAC_STRIPE_PRICE_ID": PAID_PRICE,
+    "KALILLAC_STRIPE_ALLOWED_PRICE_IDS": f"{PAID_PRICE},{ANNUAL_PRICE}",
     "KALILLAC_BILLING_SUCCESS_URL": "https://kalillac.ai/billing/success",
     "KALILLAC_BILLING_CANCEL_URL": "https://kalillac.ai/billing/cancel",
     "KALILLAC_BILLING_PORTAL_RETURN_URL": "https://kalillac.ai/account",
@@ -484,6 +504,7 @@ def test_systemd_credentials_take_precedence(config_env, tmp_path):
     (tmp_path / "stripe_secret_key").write_text("sk_live_fromcredential\n")
     (tmp_path / "stripe_webhook_secret").write_text("whsec_fromcredential\n")
     config_env.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    config_env.setenv("KALILLAC_STRIPE_MODE", "live")
 
     config = load_billing_config()
 
@@ -882,7 +903,7 @@ def test_checkout_completed_reconciles_to_paid(client, db, gateway):
     assert response.status_code == 200
     assert response.json()["result"] == "processed"
     assert gateway.retrieve_calls == ["sub_1"]
-    assert _entitlement(db) == ("paid", "stripe", None)
+    assert _entitlement(db) == ("paid", "stripe", PAID_EXPIRY)
 
     billing = _billing(db)
     assert (
@@ -945,9 +966,11 @@ def test_status_to_entitlement_mapping(client, db, gateway, status, tier):
 
     _deliver(client, f"evt_{status}", "customer.subscription.updated", user=user_id)
 
-    assert _entitlement(db) == (tier, "stripe", None)
+    assert _entitlement(db) == (
+        tier, "stripe", PAID_EXPIRY if tier == "paid" else None
+    )
     assert tier_for_subscription(
-        _subscription(user_id, status=status), PAID_PRICE
+        _subscription(user_id, status=status), ALLOWED_PRICES
     ) == tier
 
 
@@ -1301,3 +1324,561 @@ def test_registration_remains_free(client, db):
 
     assert _entitlement(db) == ("free", "registration", None)
     assert _billing(db) is None
+
+
+# --- Stripe mode guard ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mode, key",
+    [
+        ("test", "sk_test_secretvalue123"),
+        ("test", "rk_test_secretvalue123"),
+        ("live", "sk_live_secretvalue123"),
+        ("live", "rk_live_secretvalue123"),
+    ],
+)
+def test_test_and_live_modes_are_accepted_with_a_matching_key(config_env, mode, key):
+    config_env.setenv("KALILLAC_STRIPE_MODE", mode)
+    config_env.setenv("KALILLAC_STRIPE_SECRET_KEY", key)
+
+    config = load_billing_config()
+
+    assert (config.mode, config.livemode) == (mode, mode == "live")
+    assert "secretvalue" not in repr(config)
+
+
+def test_missing_mode_is_rejected(config_env):
+    config_env.delenv("KALILLAC_STRIPE_MODE")
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "KALILLAC_STRIPE_MODE is not set" in str(raised.value)
+
+
+@pytest.mark.parametrize("bad_mode", ["production", "TEST", "Live", "sandbox", "true"])
+def test_invalid_mode_is_rejected_without_echo(config_env, bad_mode):
+    config_env.setenv("KALILLAC_STRIPE_MODE", bad_mode)
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "KALILLAC_STRIPE_MODE must be test or live" in str(raised.value)
+    assert bad_mode not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "mode, key",
+    [
+        ("test", "sk_live_secretvalue123"),
+        ("test", "rk_live_secretvalue123"),
+        ("live", "sk_test_secretvalue123"),
+        ("live", "rk_test_secretvalue123"),
+    ],
+)
+def test_secret_key_of_the_other_mode_is_rejected_without_echo(config_env, mode, key):
+    config_env.setenv("KALILLAC_STRIPE_MODE", mode)
+    config_env.setenv("KALILLAC_STRIPE_SECRET_KEY", key)
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "does not match KALILLAC_STRIPE_MODE" in str(raised.value)
+    assert "secretvalue" not in str(raised.value)
+
+
+def test_systemd_credential_key_must_match_the_mode(config_env, tmp_path):
+    (tmp_path / "stripe_secret_key").write_text("sk_live_fromcredential\n")
+    (tmp_path / "stripe_webhook_secret").write_text("whsec_fromcredential\n")
+    config_env.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()   # KALILLAC_STRIPE_MODE=test
+
+    assert "fromcredential" not in str(raised.value)
+
+
+def test_startup_refuses_a_key_of_the_other_mode():
+    result = _run_app_with({**BILLING_ENV, "KALILLAC_STRIPE_MODE": "live"})
+
+    assert result.returncode != 0
+    assert "does not match KALILLAC_STRIPE_MODE" in result.stderr
+    assert "secretvalue" not in result.stderr
+
+
+@pytest.mark.parametrize("missing", ["KALILLAC_STRIPE_MODE", "KALILLAC_STRIPE_ALLOWED_PRICE_IDS"])
+def test_startup_requires_mode_and_allowed_prices(missing):
+    result = _run_app_with({k: v for k, v in BILLING_ENV.items() if k != missing})
+
+    assert result.returncode != 0
+    assert "BillingConfigError" in result.stderr
+    assert f"{missing} is not set" in result.stderr
+
+
+# --- allowed Price set --------------------------------------------------------------------
+
+
+def test_allowed_prices_are_parsed_into_one_set(config_env):
+    config_env.setenv(
+        "KALILLAC_STRIPE_ALLOWED_PRICE_IDS", f" {ANNUAL_PRICE} , {PAID_PRICE} "
+    )
+
+    config = load_billing_config()
+
+    assert config.allowed_price_ids == ALLOWED_PRICES
+    assert config.price_id == PAID_PRICE
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_allowed_price_list_is_rejected(config_env, value):
+    config_env.setenv("KALILLAC_STRIPE_ALLOWED_PRICE_IDS", value)
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "KALILLAC_STRIPE_ALLOWED_PRICE_IDS is not set" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        ",",
+        f"{PAID_PRICE},",
+        f",{PAID_PRICE}",
+        f"{PAID_PRICE},,{ANNUAL_PRICE}",
+        f"{PAID_PRICE}, ,{ANNUAL_PRICE}",
+        f"{PAID_PRICE};{ANNUAL_PRICE}",
+        f"{PAID_PRICE} {ANNUAL_PRICE}",
+        f"{PAID_PRICE},prod_notaprice",
+        f"{PAID_PRICE},price_",
+        f"{PAID_PRICE},price_has-dash",
+    ],
+)
+def test_malformed_allowed_price_list_is_rejected_without_echo(config_env, value):
+    config_env.setenv("KALILLAC_STRIPE_ALLOWED_PRICE_IDS", value)
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "KALILLAC_STRIPE_ALLOWED_PRICE_IDS has an invalid format" in str(raised.value)
+    assert "notaprice" not in str(raised.value) and "has-dash" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"{PAID_PRICE},{PAID_PRICE}",
+        f"{PAID_PRICE}, {ANNUAL_PRICE} ,{PAID_PRICE}",
+    ],
+)
+def test_duplicate_allowed_price_is_rejected(config_env, value):
+    config_env.setenv("KALILLAC_STRIPE_ALLOWED_PRICE_IDS", value)
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "contains a duplicate Price" in str(raised.value)
+
+
+def test_checkout_price_must_be_in_the_allowed_set(config_env):
+    config_env.setenv("KALILLAC_STRIPE_ALLOWED_PRICE_IDS", ANNUAL_PRICE)
+
+    with pytest.raises(BillingConfigError) as raised:
+        load_billing_config()
+
+    assert "KALILLAC_STRIPE_PRICE_ID must be one of" in str(raised.value)
+    assert PAID_PRICE not in str(raised.value)
+
+
+# --- webhook livemode -------------------------------------------------------------------
+
+
+def test_webhook_of_the_configured_mode_is_accepted(client, db, gateway):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+
+    response = _deliver(client, "evt_1", "customer.subscription.created",
+                        user=user_id, extra={"livemode": False})
+
+    assert response.status_code == 200
+    assert response.json()["result"] == "processed"
+
+
+@pytest.mark.parametrize("livemode", [True, None, "false", 0])
+@pytest.mark.parametrize(
+    "event_type", ["customer.subscription.created", "checkout.session.completed", "invoice.paid"]
+)
+def test_webhook_of_the_other_mode_is_rejected_and_not_recorded(
+    client, db, gateway, capsys, livemode, event_type
+):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    before = _entitlement(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+
+    response = _deliver(client, "evt_other_mode", event_type,
+                        user=user_id, extra={"livemode": livemode})
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "livemode_mismatch"}
+    assert response.headers["cache-control"] == "no-store"
+    # Rejected before any read: nothing fetched, written, or recorded.
+    assert gateway.retrieve_calls == []
+    assert _count(db, StripeWebhookEvent) == 0
+    assert _count(db, AccountBilling) == 0
+    assert _entitlement(db) == before
+    output = capsys.readouterr().out
+    assert "STRIPE_WEBHOOK_MODE_MISMATCH" in output
+    assert "evt_other_mode" not in output
+
+
+def test_mode_mismatch_never_changes_an_existing_subscription(client, db, gateway):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+    _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+    paid = _entitlement(db)
+
+    gateway.subscriptions["sub_1"] = _subscription(user_id, status="canceled")
+    rejected = _deliver(client, "evt_2", "customer.subscription.deleted",
+                        user=user_id, extra={"livemode": True})
+
+    assert rejected.status_code == 400
+    assert _entitlement(db) == paid == ("paid", "stripe", PAID_EXPIRY)
+    assert _billing(db).subscription_status == "active"
+    assert _count(db, StripeWebhookEvent) == 1
+
+    # The same event id is still unprocessed: a correct-mode delivery of it
+    # reconciles normally.
+    accepted = _deliver(client, "evt_2", "customer.subscription.deleted", user=user_id)
+    assert accepted.json()["result"] == "processed"
+    assert _entitlement(db) == ("free", "stripe", None)
+
+
+def test_rejection_is_deterministic_for_repeated_deliveries(client, db, gateway):
+    _register_and_login(client)
+    gateway.subscriptions["sub_1"] = _subscription(_user_id(db))
+
+    responses = [
+        _deliver(client, "evt_x", "customer.subscription.created",
+                 user=_user_id(db), extra={"livemode": True})
+        for _ in range(3)
+    ]
+
+    assert [(r.status_code, r.json()) for r in responses] == [
+        (400, {"error": "livemode_mismatch"})
+    ] * 3
+    assert _count(db, StripeWebhookEvent) == 0
+
+
+def test_live_configuration_accepts_live_and_rejects_test_events(db, gateway):
+    from kalillac_billing.service import WebhookModeMismatch, process_webhook
+
+    with db() as session, session.begin():
+        user = User(email=EMAIL, password_hash="h")
+        session.add(user)
+        session.flush()
+        user_id = user.id
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+
+    def deliver(event_id, livemode):
+        payload = json.dumps({
+            "id": event_id, "type": "customer.subscription.created",
+            "subscription": "sub_1", "customer": "cus_1",
+            "user": str(user_id), "livemode": livemode,
+        }).encode()
+        return process_webhook(
+            payload, "valid", gateway=gateway, session_factory=db,
+            allowed_price_ids=ALLOWED_PRICES, livemode=True,
+        )
+
+    with pytest.raises(WebhookModeMismatch):
+        deliver("evt_test_mode", False)
+    assert _count(db, StripeWebhookEvent) == 0
+
+    assert deliver("evt_live_mode", True).result == "processed"
+    assert _entitlement(db)[0] == "paid"
+
+
+# --- allowed Prices grant one paid entitlement --------------------------------------
+
+
+@pytest.mark.parametrize("price", [PAID_PRICE, ANNUAL_PRICE], ids=["monthly", "annual"])
+def test_each_allowed_price_grants_paid(client, db, gateway, price):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, price_id=price)
+
+    _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+
+    assert _entitlement(db) == ("paid", "stripe", PAID_EXPIRY)
+    assert _billing(db).stripe_price_id == price
+
+
+@pytest.mark.parametrize("price", ["price_unlisted", None])
+def test_unlisted_price_never_grants_paid(price):
+    for status in PAID_STATUSES:
+        state = _subscription(None, status=status, price_id=price)
+        assert tier_for_subscription(state, ALLOWED_PRICES) == "free"
+
+
+def test_allowed_prices_must_be_a_set_not_one_string():
+    # "in" on a string would match substrings of a Price id.
+    with pytest.raises(TypeError):
+        tier_for_subscription(_subscription(None, price_id="price_kalillac"), PAID_PRICE)
+
+
+def test_rotating_the_checkout_price_does_not_downgrade_existing_subscribers(
+    client, db, gateway
+):
+    from kalillac_billing.service import process_webhook
+
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, price_id=PAID_PRICE)
+    _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+
+    # Operator rotates new Checkouts to the annual Price; the monthly Price
+    # stays allowed.
+    rotated = BillingConfig(
+        secret_key=CONFIG.secret_key,
+        webhook_secret=CONFIG.webhook_secret,
+        price_id=ANNUAL_PRICE,
+        success_url=CONFIG.success_url,
+        cancel_url=CONFIG.cancel_url,
+        portal_return_url=CONFIG.portal_return_url,
+        mode="test",
+        allowed_price_ids=ALLOWED_PRICES,
+    )
+    renewed = PERIOD_END + timedelta(days=30)
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, price_id=PAID_PRICE, current_period_end=renewed
+    )
+    payload = json.dumps({
+        "id": "evt_renewal", "type": "customer.subscription.updated",
+        "subscription": "sub_1", "customer": "cus_1", "user": str(user_id),
+    }).encode()
+
+    outcome = process_webhook(
+        payload, "valid", gateway=gateway, session_factory=db,
+        allowed_price_ids=rotated.allowed_price_ids, livemode=rotated.livemode,
+    )
+
+    assert outcome.result == "processed"
+    assert _entitlement(db) == ("paid", "stripe", renewed + PAID_ENTITLEMENT_GRACE)
+
+
+def test_checkout_uses_only_the_default_price_even_with_others_allowed(
+    client, db, gateway
+):
+    token = _register_and_login(client)
+
+    response = client.post("/api/account/billing/checkout", headers=_as(client, token),
+                           json={"price_id": ANNUAL_PRICE, "price": ANNUAL_PRICE})
+
+    assert response.status_code == 200
+    assert [call["price_id"] for call in gateway.checkout_calls] == [CONFIG.price_id]
+    assert CONFIG.price_id == PAID_PRICE != ANNUAL_PRICE
+
+
+# --- bounded paid lifetime -------------------------------------------------------------
+
+
+def test_paid_grace_is_one_named_seven_day_policy():
+    assert PAID_ENTITLEMENT_GRACE == timedelta(days=7)
+    assert PAID_EXPIRY - PERIOD_END == timedelta(days=7)
+
+
+@pytest.mark.parametrize("status", sorted(PAID_STATUSES))
+def test_paid_expiry_is_period_end_plus_grace(client, db, gateway, status):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, status=status)
+
+    _deliver(client, "evt_1", "customer.subscription.updated", user=user_id)
+
+    tier, source, expires_at = _entitlement(db)
+    assert (tier, source) == ("paid", "stripe")
+    # Never open-ended.
+    assert expires_at == PERIOD_END + timedelta(days=7)
+
+
+def test_scheduled_cancellation_is_paid_only_through_period_plus_grace(
+    client, db, gateway
+):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, cancel_at_period_end=True)
+
+    _deliver(client, "evt_1", "customer.subscription.updated", user=user_id)
+
+    assert _entitlement(db) == ("paid", "stripe", PAID_EXPIRY)
+    assert _billing(db).cancel_at_period_end is True
+
+
+def test_renewal_moves_the_expiry_forward(client, db, gateway):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+    _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+
+    renewed = PERIOD_END + timedelta(days=31)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, current_period_end=renewed)
+    _deliver(client, "evt_2", "customer.subscription.updated", user=user_id)
+
+    assert _entitlement(db) == ("paid", "stripe", renewed + PAID_ENTITLEMENT_GRACE)
+
+
+def test_non_utc_period_end_is_normalized(client, db, gateway):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    offset = timezone(timedelta(hours=-5))
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, current_period_end=PERIOD_END.astimezone(offset)
+    )
+
+    _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+
+    assert _entitlement(db) == ("paid", "stripe", PAID_EXPIRY)
+
+
+INVALID_PERIOD_ENDS = [
+    None,
+    PERIOD_END.replace(tzinfo=None),          # naive: ambiguous instant
+    PERIOD_END.isoformat(),                   # not a datetime
+    int(PERIOD_END.timestamp()),
+]
+
+
+@pytest.mark.parametrize("period_end", INVALID_PERIOD_ENDS, ids=["none", "naive", "str", "int"])
+@pytest.mark.parametrize("status", sorted(PAID_STATUSES))
+def test_paid_subscription_without_valid_period_end_is_refused(
+    client, db, gateway, capsys, status, period_end
+):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, status=status, current_period_end=period_end
+    )
+
+    response = _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+
+    assert response.status_code == 500
+    assert response.json() == {"error": "subscription_state_invalid"}
+    assert _count(db, StripeWebhookEvent) == 0
+    assert _count(db, AccountBilling) == 0
+    assert _entitlement(db) == ("free", "registration", None)
+    assert "STRIPE_WEBHOOK_INVALID_SUBSCRIPTION_STATE" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("period_end", INVALID_PERIOD_ENDS, ids=["none", "naive", "str", "int"])
+def test_invalid_period_end_preserves_the_prior_valid_state_and_stays_retryable(
+    client, db, gateway, period_end
+):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(user_id)
+    _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+    before_entitlement = _entitlement(db)
+    before_billing = _billing(db)
+
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, status="past_due", cancel_at_period_end=True,
+        current_period_end=period_end,
+    )
+    refused = _deliver(client, "evt_2", "customer.subscription.updated", user=user_id)
+
+    assert refused.status_code == 500
+    assert _entitlement(db) == before_entitlement == ("paid", "stripe", PAID_EXPIRY)
+    after_billing = _billing(db)
+    assert (
+        after_billing.subscription_status,
+        after_billing.cancel_at_period_end,
+        after_billing.current_period_end,
+    ) == (
+        before_billing.subscription_status,
+        before_billing.cancel_at_period_end,
+        before_billing.current_period_end,
+    )
+    assert _count(db, StripeWebhookEvent) == 1
+
+    # Stripe's retry after the state is valid again reconciles normally.
+    renewed = PERIOD_END + timedelta(days=30)
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, status="past_due", current_period_end=renewed
+    )
+    retry = _deliver(client, "evt_2", "customer.subscription.updated", user=user_id)
+
+    assert retry.json()["result"] == "processed"
+    assert _entitlement(db) == ("paid", "stripe", renewed + PAID_ENTITLEMENT_GRACE)
+
+
+@pytest.mark.parametrize(
+    "status", ["canceled", "incomplete_expired", "unpaid", "incomplete", "paused", "some_future_status"]
+)
+def test_free_subscription_needs_no_period_end(client, db, gateway, status):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, status=status, current_period_end=None
+    )
+
+    response = _deliver(client, "evt_1", "customer.subscription.updated", user=user_id)
+
+    assert response.json()["result"] == "processed"
+    assert _entitlement(db) == ("free", "stripe", None)
+
+
+def test_unlisted_price_without_period_end_is_simply_free(client, db, gateway):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    gateway.subscriptions["sub_1"] = _subscription(
+        user_id, price_id="price_unlisted", current_period_end=None
+    )
+
+    response = _deliver(client, "evt_1", "customer.subscription.created", user=user_id)
+
+    assert response.json()["result"] == "processed"
+    assert _entitlement(db) == ("free", "stripe", None)
+
+
+@pytest.mark.parametrize(
+    "days_ago, tier",
+    [(8, "free"), (7, "free"), (6, "paid")],
+)
+def test_effective_entitlement_follows_the_bounded_expiry(
+    client, db, gateway, days_ago, tier
+):
+    # A subscription whose Stripe period ended days_ago and whose renewal or
+    # cancellation webhook never arrived: access ends with the grace.
+    token = _register_and_login(client)
+    user_id = _user_id(db)
+    period_end = datetime.now(timezone.utc) - timedelta(days=days_ago, seconds=1)
+    gateway.subscriptions["sub_1"] = _subscription(user_id, current_period_end=period_end)
+    _deliver(client, "evt_1", "customer.subscription.updated", user=user_id)
+
+    assert _entitlement(db)[0] == "paid"   # Stored tier; access is computed.
+    response = client.get("/api/account/entitlements", headers=_as(client, token))
+
+    assert response.json()["entitlements"]["tier"] == tier
+    assert response.json()["entitlements"]["higher_usage_access"] is (tier == "paid")
+
+
+def test_no_reconciliation_path_writes_open_ended_paid_access(client, db, gateway):
+    _register_and_login(client)
+    user_id = _user_id(db)
+    sequence = [
+        _subscription(user_id, status="trialing"),
+        _subscription(user_id, status="active", price_id=ANNUAL_PRICE),
+        _subscription(user_id, status="past_due", cancel_at_period_end=True),
+        _subscription(user_id, status="canceled", current_period_end=None),
+        _subscription(user_id, status="active"),
+    ]
+
+    for index, state in enumerate(sequence):
+        gateway.subscriptions["sub_1"] = state
+        _deliver(client, f"evt_{index}", "customer.subscription.updated", user=user_id)
+        tier, _, expires_at = _entitlement(db)
+        assert (tier == "paid") is (expires_at is not None), (index, tier, expires_at)
