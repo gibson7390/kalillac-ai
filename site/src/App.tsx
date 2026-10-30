@@ -26,6 +26,8 @@ const IS_FRAMED = (() => {
 function SiteHeader() {
   const [open, setOpen] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
+  // Styling hook only: the header marks the current page's own link.
+  const [location] = useLocation();
   const close = () => setOpen(false);
   useEffect(() => {
     if (!open) return;
@@ -39,7 +41,7 @@ function SiteHeader() {
     return () => document.removeEventListener('keydown', escape);
   }, [open]);
   return (
-    <header className="site-header">
+    <header className="site-header" data-route={location.slice(1) || 'home'}>
       <div className="container-wide site-header-inner">
         <Link href="/" className="brand" data-testid="link-home-brand" onClick={close} aria-label="Kalillac AI home">
           <img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" />
@@ -86,10 +88,6 @@ function OrbitalAssistant() {
   return <div className="orbital-wrap" aria-hidden="true"><span className="orbit-dot blue"/><span className="orbit-dot mint"/></div>;
 }
 
-// Space kept between the sticky site header and the chat workspace when the
-// CTA brings it into view.
-const COMPOSER_GAP_BELOW_HEADER = 16;
-
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -106,19 +104,23 @@ function useChatWorkspace() {
 
   /* Move the workspace to just below the sticky site header when it is not
      already fully visible there -- smoothly, or instantly when reduced
-     motion is requested. Never moves the page when it is already in view. */
+     motion is requested. Never moves the page when it is already in view.
+     The landing offset is the slot's own CSS scroll-margin-top: the header's
+     height (including the top safe-area inset) plus breathing room, so the
+     chat's heading is never under the header. */
   const bringIntoView = useCallback(() => {
     const slot = slotRef.current;
     if (!slot) return;
 
     const header = document.querySelector('.site-header');
     const headerBottom = header ? header.getBoundingClientRect().bottom : 0;
+    const offset = parseFloat(getComputedStyle(slot).scrollMarginTop) || headerBottom;
     const card = slot.getBoundingClientRect();
     const fullyVisible = card.top >= headerBottom && card.bottom <= window.innerHeight;
 
     if (!fullyVisible) {
       window.scrollTo({
-        top: Math.max(0, window.scrollY + card.top - headerBottom - COMPOSER_GAP_BELOW_HEADER),
+        top: Math.max(0, window.scrollY + card.top - offset),
         // 'auto' (not the newer 'instant', which older browsers reject with
         // a TypeError) is immediate here: under reduced motion the site CSS
         // forces scroll-behavior: auto.
@@ -303,18 +305,48 @@ function DocSection({ id, title, children }: DocSectionProps) {
   return <section className="doc-section" id={id}><h2>{title}</h2>{children}</section>;
 }
 
+/* The section being read: the first one inside the band just below the
+   sticky header. It stays on the last section seen while the reader is
+   between two, so the marker never flickers off. */
+function useCurrentSection(toc: [string, string][]) {
+  const [current, setCurrent] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof IntersectionObserver !== 'function') return;
+    const visible = new Set<string>();
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) visible.add(entry.target.id);
+        else visible.delete(entry.target.id);
+      }
+      const first = toc.find(([id]) => visible.has(id));
+      if (first) setCurrent(first[0]);
+    }, { rootMargin: '-96px 0px -55% 0px' });
+    for (const [id] of toc) {
+      const section = document.getElementById(id);
+      if (section) observer.observe(section);
+    }
+    return () => observer.disconnect();
+  }, [toc]);
+  return current;
+}
+
 function DocLayout({ title, lede, children, toc, updated }: { title: string; lede: ReactNode; children: ReactNode; toc: [string, string][]; updated: string }) {
+  const current = useCurrentSection(toc);
   return (
     <div className="site-shell">
       <SiteHeader />
       <main className="doc">
-        <div className="doc-inner">
-          <Link href="/" className="doc-home" data-testid="link-doc-home">← Home</Link>
-          <h1 className="doc-title">{title}</h1>
-          {lede}
-          <nav className="doc-toc" aria-label="On this page"><h2>On this page</h2><ol>{toc.map(([id, label]) => <li key={id}><a href={`#${id}`}>{label}</a></li>)}</ol></nav>
-          {children}
-          <p className="doc-updated">{updated}</p>
+        <div className="doc-shell">
+          <div className="doc-head">
+            <Link href="/" className="doc-home" data-testid="link-doc-home">← Home</Link>
+            <h1 className="doc-title">{title}</h1>
+            {lede}
+          </div>
+          <nav className="doc-toc" aria-label="On this page"><h2>On this page</h2><ol>{toc.map(([id, label]) => <li key={id}><a href={`#${id}`} aria-current={current === id ? 'location' : undefined}>{label}</a></li>)}</ol></nav>
+          <div className="doc-body">
+            {children}
+            <p className="doc-updated">{updated}</p>
+          </div>
         </div>
       </main>
       <SiteFooter />

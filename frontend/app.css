@@ -6,17 +6,20 @@
    Mobile-first. No remote fonts, no CDN, no tracking.
    ========================================================================== */
 
+/* Token values follow the public site's (site/src/index.css): Kalillac blue,
+   pale-blue layers, crisp hairlines, restrained layered shadows, one motion
+   curve. Sizes and spacing below are unchanged; this layer is surface only. */
 :root {
-  --paper: #fafbfd;
+  --paper: #f6f8fc;
   --panel: #ffffff;
   --panel-2: #f1f4fa;
   --ink: #0e1526;
   --muted: #5c677e;
-  --line: #e2e7f1;
-  --line-strong: #cfd7e6;
-  --blue: #3e5bff;
-  --blue-deep: #2a41c8;
-  --blue-soft: #e7ecfd;
+  --line: #e2e9f4;
+  --line-strong: #cdd8ea;
+  --blue: #0069ff;
+  --blue-deep: #0053cf;
+  --blue-soft: #eaf3ff;
   --live: #12a15c;
   --live-soft: #e3f7ec;
   --danger: #b42318;
@@ -29,9 +32,12 @@
 
   --radius: 12px;
   --radius-sm: 9px;
-  --shadow: 0 1px 2px rgba(14, 21, 38, 0.05), 0 8px 24px rgba(14, 21, 38, 0.07);
+  --shadow: 0 1px 2px rgba(14, 21, 38, 0.05), 0 24px 48px -20px rgba(14, 21, 38, 0.28);
   --shadow-soft: 0 1px 2px rgba(14, 21, 38, 0.04);
-  --ease: 160ms ease;
+  --shadow-reading: 0 1px 2px rgba(14, 21, 38, 0.04), 0 10px 24px -18px rgba(14, 21, 38, 0.2);
+  --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  --shine: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 60%);
+  --ease: 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
   --rail: clamp(14px, 4vw, 22px);
 }
 
@@ -45,7 +51,7 @@ html, body {
 }
 
 body {
-  background: var(--paper);
+  background: radial-gradient(ellipse 70% 40% at 50% -6%, rgba(0, 105, 255, 0.07), transparent 70%), var(--paper);
   color: var(--ink);
   font-family: var(--font-ui);
   font-size: 16px;
@@ -78,6 +84,17 @@ body {
   overflow: hidden;
 }
 
+/* A full-page visit on a wide screen: the conversation is one white reading
+   column on the lit page field, set off by two hairlines. */
+@media (min-width: 960px) {
+  body:not(.is-embedded) .app {
+    background: var(--panel);
+    border-inline: 1px solid var(--line);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6), 0 30px 80px -40px rgba(14, 21, 38, 0.18);
+  }
+  body:not(.is-embedded) .app-header { background: var(--panel); }
+}
+
 /* ---------------- Header ----------------
    Deliberately low-profile: 52px of chrome, one hairline, no shadow. The
    conversation is the product; the header just labels it. */
@@ -99,9 +116,9 @@ body {
 }
 
 .brand-logo {
-  height: 24px;
+  height: 30px;
   width: auto;
-  max-width: 130px;
+  max-width: 160px;
   object-fit: contain;
   display: block;
 }
@@ -139,11 +156,12 @@ body {
   padding: 4px 10px;
   border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: var(--panel);
+  background: linear-gradient(180deg, #fff, #f7faff);
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
+  box-shadow: var(--inner-light), var(--shadow-soft);
 }
 
 .session-dot {
@@ -151,6 +169,7 @@ body {
   height: 6px;
   border-radius: 50%;
   background: var(--blue);
+  box-shadow: 0 0 0 3px rgba(0, 105, 255, 0.14);
   flex: 0 0 auto;
 }
 
@@ -280,11 +299,12 @@ body {
 
 /* User: compact blue chip, right-aligned. Distinct without being cartoonish. */
 .msg-user .bubble {
-  background: var(--blue);
+  background-color: var(--blue);
+  background-image: var(--shine);
   color: #fff;
   padding: 10px 14px;
   border-radius: 14px 14px 4px 14px;
-  box-shadow: 0 1px 2px rgba(42, 65, 200, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 1px 2px rgba(0, 50, 140, 0.2), 0 6px 16px -8px rgba(0, 105, 255, 0.5);
   font-size: 15.5px;
 }
 
@@ -300,7 +320,11 @@ body {
   border-left: 3px solid var(--blue);
   border-radius: 4px var(--radius) var(--radius) 4px;
   padding: 13px 16px;
-  box-shadow: var(--shadow-soft);
+  box-shadow: var(--shadow-reading);
+}
+/* Long answers keep a comfortable line length on wide screens. */
+@media (min-width: 820px) {
+  .msg-assistant .bubble { max-width: 46rem; }
 }
 
 .msg-role {
@@ -465,6 +489,7 @@ body {
 .error-note {
   background: var(--danger-soft);
   border: 1px solid #f3c9c5;
+  border-left: 3px solid var(--danger);
   color: var(--danger);
   border-radius: var(--radius-sm);
   padding: 10px 13px;
@@ -483,6 +508,7 @@ body {
   flex: 0 0 auto;
   background: var(--panel);
   border-top: 1px solid var(--line);
+  box-shadow: 0 -14px 28px -26px rgba(14, 21, 38, 0.3);
   padding-bottom: env(safe-area-inset-bottom, 0);
 }
 
@@ -503,7 +529,7 @@ body {
   border: 1px solid var(--line-strong);
   border-radius: 16px;
   background: var(--panel);
-  box-shadow: var(--shadow-soft);
+  box-shadow: var(--inner-light), 0 1px 2px rgba(14, 21, 38, 0.05), 0 10px 24px -18px rgba(14, 21, 38, 0.3);
   transition: border-color var(--ease), box-shadow var(--ease);
   /* The whole box is the typing area: its padding shows the text cursor and
      a click there focuses the field (app.js). Send keeps its own cursor. */
@@ -513,12 +539,12 @@ body {
 /* A restrained hover cue that the whole box is an input; the focus ring
    below (declared later, same specificity) takes over once it has focus. */
 .composer-shell:hover {
-  border-color: rgba(62, 91, 255, 0.45);
+  border-color: rgba(0, 105, 255, 0.45);
 }
 
 .composer-shell:focus-within {
   border-color: var(--blue);
-  box-shadow: 0 0 0 3px var(--blue-soft);
+  box-shadow: 0 0 0 3px rgba(0, 105, 255, 0.14), 0 10px 24px -18px rgba(0, 80, 200, 0.4);
 }
 
 .composer textarea {
@@ -551,21 +577,24 @@ body {
   height: 38px;
   border: none;
   border-radius: 12px;
-  background: var(--blue);
+  background-color: var(--blue);
+  background-image: var(--shine);
   color: #fff;
   cursor: pointer;
-  transition: background var(--ease), opacity var(--ease), transform var(--ease);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 2px rgba(0, 40, 120, 0.25), 0 6px 14px -6px rgba(0, 105, 255, 0.55);
+  transition: background-color var(--ease), opacity var(--ease), transform var(--ease), box-shadow var(--ease);
 }
 .action-btn svg { width: 19px; height: 19px; }
-.action-btn:hover { background: var(--blue-deep); }
+.action-btn:hover { background-color: var(--blue-deep); }
 .action-btn:active { transform: scale(0.94); }
-.action-btn:focus-visible { outline: 3px solid var(--blue-soft); outline-offset: 2px; }
-.action-btn:disabled { opacity: 0.35; cursor: default; }
-.action-btn:disabled:hover { background: var(--blue); }
+.action-btn:focus-visible { outline: 3px solid rgba(0, 105, 255, 0.35); outline-offset: 2px; }
+/* Nothing to send: a flat, quiet control rather than a faded bright one. */
+.action-btn:disabled { opacity: 0.35; cursor: default; box-shadow: none; }
+.action-btn:disabled:hover { background-color: var(--blue); }
 
 .action-btn .icon-stop { display: none; }
-.action-btn.is-stop { background: var(--ink); }
-.action-btn.is-stop:hover { background: #000; }
+.action-btn.is-stop { background-color: var(--ink); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 1px 2px rgba(14, 21, 38, 0.3); }
+.action-btn.is-stop:hover { background-color: #000; }
 .action-btn.is-stop .icon-send { display: none; }
 .action-btn.is-stop .icon-stop { display: block; }
 
@@ -928,12 +957,12 @@ body {
 
 /* Functional task cards: same .hint/data-prompt handler, no new chat protocol. */
 .empty-hints { gap: 12px; }
-.hint { display: flex; align-items: flex-start; gap: 11px; min-width: 0; min-height: 112px; padding: 16px 13px; border-color: #dce8fb; border-radius: 12px; background: white; color: #101d39; box-shadow: 0 3px 10px #236acf05; }
+.hint { display: flex; align-items: flex-start; gap: 11px; min-width: 0; min-height: 112px; padding: 16px 13px; border-color: #dce8fb; border-radius: 12px; background: linear-gradient(180deg, #fbfdff, #fff 55%); color: #101d39; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 8px 20px -16px rgba(16, 38, 80, 0.22); transition: border-color var(--ease), color var(--ease), background var(--ease), box-shadow var(--ease); }
 .hint-icon { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: #eff6ff; color: #0069ff; }.hint-icon svg { width: 27px; height: 27px; }.hint-learning .hint-icon { color: #008b89; background: #eafbf7; }
 .hint-copy { flex: 1; min-width: 0; }.hint-title { display: block; color: #101d39; font-size: 15px; font-weight: 750; line-height: 1.25; }.hint-description { display: block; color: #586780; font-size: 13px; line-height: 1.45; margin-top: 6px; }.hint-arrow { flex: none; width: 15px; height: 15px; color: #0069ff; margin-top: 2px; }
-.hint:hover,.hint:focus-visible { background: #f2f7ff; border-color: #0069ff; }.hint:focus-visible { outline: 3px solid #0056d8; outline-offset: 3px; }.hint.hint-guide-active { border-color: #a4c6fa; background: #f8fbff; box-shadow: none; }
+.hint:hover,.hint:focus-visible { background: #f3f8ff; border-color: #0069ff; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 10px 24px -16px rgba(0, 80, 200, 0.3); }.hint:active { background: #eaf3ff; box-shadow: none; }.hint:focus-visible { outline: 3px solid #0056d8; outline-offset: 3px; }.hint.hint-guide-active { border-color: #a4c6fa; background: #f8fbff; box-shadow: none; }
 .is-embedded { --blue: #0069ff; --blue-deep: #0053cf; --blue-soft: #eaf3ff; --paper: #fff; --rail: 20px; }
-.is-embedded .thread { padding-top: 20px; }.is-embedded .empty { padding: 0 0 4px; width: 100%; }.is-embedded .empty-title { font-size: 24px; font-weight: 800; color: #0b1737; }.is-embedded .empty-line { font-size: 14px; max-width: 44ch; }.is-embedded .empty-hints { margin-top: 24px; }.is-embedded .composer { border-top: 1px solid #e3edfa; padding-top: 12px; padding-bottom: 14px; }.is-embedded .composer-shell { border-color: #dae6fa; box-shadow: 0 2px 8px #236acf08; }
+.is-embedded .thread { padding-top: 20px; }.is-embedded .empty { padding: 0 0 4px; width: 100%; }.is-embedded .empty-title { font-size: 24px; font-weight: 800; color: #0b1737; }.is-embedded .empty-line { font-size: 14px; max-width: 44ch; }.is-embedded .empty-hints { margin-top: 24px; }.is-embedded .composer { border-top: 1px solid #e3edfa; padding-top: 12px; padding-bottom: 14px; }.is-embedded .composer-shell { border-color: #d6e3f7; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 8px 20px -16px rgba(16, 38, 80, 0.28); }
 @media (max-width: 560px) { .empty-hints { grid-template-columns: repeat(2,minmax(0,1fr)); }.hint { padding: 12px; gap: 8px; min-height: 128px; }.hint-icon { width: 27px; height: 27px; }.hint-icon svg { width: 24px; height: 24px; }.hint-arrow { width: 12px; height: 12px; }.hint-title { font-size: 14px; }.hint-description { font-size: 13px; }.is-embedded { --rail: 16px; }.is-embedded .empty-title { font-size: 23px; } }
 @media (max-width: 400px) { .empty-hints { grid-template-columns: 1fr; gap: 10px; }.hint { min-height: 88px; padding: 13px; align-items: center; }.hint-icon { width: 34px; height: 34px; }.hint-copy { padding-right: 3px; }.hint-title { font-size: 15px; }.hint-description { font-size: 13px; margin-top: 4px; }.hint-arrow { width: 16px; height: 16px; }.is-embedded .empty-hints { margin-top: 20px; } }
 @media (max-height: 560px) and (min-width: 401px) { .is-embedded .empty-title { font-size: 22px; }.is-embedded .empty-hints { margin-top: 16px; }.is-embedded .hint { min-height: 96px; padding: 11px; }.is-embedded .thread { padding-top: 14px; } }
@@ -945,7 +974,7 @@ body {
 
 /* Keep the existing interactive composer affordances above the embedded theme. */
 .is-embedded .composer-shell:hover { border-color: #86b8fa; }
-.is-embedded .composer-shell:focus-within { border-color: #0069ff; box-shadow: 0 0 0 3px #0069ff1f; }
+.is-embedded .composer-shell:focus-within { border-color: #0069ff; box-shadow: 0 0 0 3px #0069ff1f, 0 8px 20px -16px rgba(0, 80, 200, 0.4); }
 
 /* A capped phone workspace may need to scroll its task area. Auto margins
    center a fitting intro without clipping the beginning of an overflowing one. */
@@ -1046,10 +1075,12 @@ body {
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background var(--ease), color var(--ease), border-color var(--ease);
+  transition: background var(--ease), color var(--ease), border-color var(--ease), box-shadow var(--ease);
 }
 .erase-btn svg { flex: 0 0 auto; width: 15px; height: 15px; }
+.erase-btn:not(:disabled) { color: #46526a; box-shadow: var(--shadow-soft); }
 .erase-btn:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.erase-btn:active:not(:disabled) { background: #fbdedb; box-shadow: none; }
 .erase-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .erase-btn:disabled { opacity: 0.45; cursor: default; }
 /* Phone-width frames: one row cannot hold the field, the visible label and
@@ -1070,19 +1101,46 @@ body {
 
 /* The receipt: what End & erase did and did not erase. One box above the
    composer, inside the same rail; a failed removal stays visible with Retry. */
+/* One compact notice in the workspace: a white surface with a teal edge for
+   a completed erase (red when removal is unconfirmed), and a Dismiss
+   control. It fades out over 160 ms (at once under reduced motion). */
 .erase-receipt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   margin: 10px var(--rail) 0;
-  padding: 10px 12px;
+  padding: 10px 8px 10px 12px;
   border: 1px solid var(--line);
+  border-left: 3px solid #008c8d;
   border-radius: var(--radius-sm);
-  background: var(--panel-2);
+  background: var(--panel);
   color: var(--ink);
-  font-size: 13.5px;
+  font-size: 13px;
   line-height: 1.45;
+  box-shadow: var(--shadow-reading);
+  transition: opacity 160ms ease;
 }
 .erase-receipt[hidden] { display: none; }
-.erase-receipt.is-failed { border-color: var(--danger); background: var(--danger-soft); }
-.erase-receipt-text { margin: 0; }
+.erase-receipt.is-leaving { opacity: 0; }
+.erase-receipt.is-failed { border-color: #f3c9c5; border-left-color: var(--danger); background: var(--danger-soft); }
+.erase-receipt-body { flex: 1 1 auto; min-width: 0; }
+.erase-receipt-dismiss {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease), border-color var(--ease);
+}
+.erase-receipt-dismiss:hover { color: var(--ink); background: var(--panel-2); }
+.erase-receipt-dismiss:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.erase-receipt-text { margin: 0; font-weight: 600; }
 .erase-receipt-note { margin: 4px 0 0; color: var(--muted); }
 .erase-receipt-note[hidden] { display: none; }
 .erase-receipt-retry {
@@ -1160,7 +1218,10 @@ body {
   border: 0;
   background: var(--danger);
   color: #ffffff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 1px 2px rgba(120, 20, 10, 0.25);
 }
+.erase-dialog-cancel:hover { border-color: #a9bcdc; background: #f7faff; }
+.erase-dialog-confirm:hover { background: #9c1e14; }
 .erase-dialog-cancel:focus-visible,
 .erase-dialog-confirm:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 @media (max-width: 400px) {
@@ -1170,4 +1231,63 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .erase-btn { transition: none; }
+  .erase-receipt { transition: none; }
+}
+
+/* ---------------- Daily-limit note ----------------
+   Shown after the daily-limit dialog closes, directly above the composer:
+   one line of fixed copy while sending is paused. */
+.limit-notice {
+  margin: 10px var(--rail) 0;
+  padding: 9px 12px;
+  border: 1px solid #d9e4f6;
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-sm);
+  background: #f4f8ff;
+  color: #33445f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.limit-notice[hidden] { display: none; }
+.limit-notice-text { margin: 0; }
+.limit-notice-text strong { color: var(--ink); font-weight: 650; }
+
+/* ---------------- Example prompts: placement ----------------
+   Under the heading in a wide frame, where the "Or start with an example"
+   label is not needed; after the composer in a phone-width frame (moved there
+   by app.js), as a compact two-column set of rows. */
+.starter { width: 100%; display: flex; flex-direction: column; align-items: center; }
+.empty .starter-label { display: none; }
+.starter-dock { padding: 0 var(--rail); }
+.starter-dock:empty { display: none; }
+.starter-dock .starter { align-items: stretch; padding: 2px 0 14px; }
+.starter-dock .starter-label {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.starter-dock .empty-hints .hint { min-height: 52px; padding: 8px 10px; gap: 8px; align-items: center; }
+.starter-dock .empty-hints { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 0; max-width: none; }
+.starter-dock .empty-hints .hint-icon { width: 28px; height: 28px; border-radius: 8px; }
+.starter-dock .empty-hints .hint-icon svg { width: 18px; height: 18px; }
+.starter-dock .empty-hints .hint-title { font-size: 13px; font-weight: 700; line-height: 1.25; }
+.starter-dock .empty-hints .hint-description { display: none; }
+.starter-dock .empty-hints .hint-arrow { width: 12px; height: 12px; margin-top: 0; }
+/* The narrowest frames: one row per example, so each title stays on one line. */
+@media (max-width: 359px) {
+  .starter-dock .empty-hints { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .starter-dock .empty-hints .hint { min-height: 44px; padding-block: 6px; }
+}
+
+/* Phone-width empty state: heading, composer and examples read as one
+   centred group instead of a heading at the top and a composer stranded at
+   the bottom. Once a conversation starts, the usual layout returns (the
+   transcript scrolls, the composer is pinned at the bottom). */
+@media (max-width: 560px) and (min-height: 480px) {
+  .conversation.is-empty { flex: 0 0 auto; margin-top: auto; }
+  .conversation.is-empty .thread { padding-bottom: 6px; }
+  .conversation.is-empty + .dock { margin-bottom: auto; border-top: 0; box-shadow: none; background: transparent; }
+  .is-embedded .conversation.is-empty + .dock .composer { border-top: 0; padding-top: 4px; }
 }

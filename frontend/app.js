@@ -425,6 +425,7 @@
       emptyState.parentNode.removeChild(emptyState);
     }
     conversation.classList.remove("is-empty");
+    placeStarter();
   }
 
   function showEmptyState() {
@@ -432,6 +433,32 @@
       thread.appendChild(emptyState);
     }
     conversation.classList.add("is-empty");
+    placeStarter();
+  }
+
+  /* The example prompts belong to the empty state. In a wide frame they sit
+     under the heading, above the composer at the bottom. In a phone-width
+     frame they move into the dock after the composer, so the DOM -- and with
+     it the keyboard and screen-reader order -- is heading, composer, then the
+     examples, exactly as they appear. Once a conversation starts they are
+     detached wherever they are. */
+  var starter = document.getElementById("starter");
+  var starterDock = document.getElementById("starter-dock");
+  var compactStarter = window.matchMedia ? window.matchMedia("(max-width: 560px)") : null;
+
+  function placeStarter() {
+    if (!starter || !emptyState) return;
+    var home = compactStarter && compactStarter.matches && starterDock ? starterDock : emptyState;
+    if (!emptyState.parentNode) {
+      if (starter.parentNode) starter.parentNode.removeChild(starter);
+    } else if (starter.parentNode !== home) {
+      home.appendChild(starter);
+    }
+  }
+
+  if (compactStarter) {
+    if (compactStarter.addEventListener) compactStarter.addEventListener("change", placeStarter);
+    else if (compactStarter.addListener) compactStarter.addListener(placeStarter);
   }
 
   function addUserMessage(text) {
@@ -681,7 +708,7 @@
   function syncSendEnabled() {
     syncEraseEnabled();
     if (inFlight) return;
-    actionBtn.disabled = input.value.trim().length === 0;
+    actionBtn.disabled = limitHeld || input.value.trim().length === 0;
   }
 
   // ---- history payload -----------------------------------------------------
@@ -798,24 +825,79 @@
      note is shown. */
   var limitDialog = document.getElementById("limit-dialog");
   var limitDialogOk = document.getElementById("limit-dialog-ok");
+  var limitNotice = document.getElementById("limit-notice");
 
   function limitDialogOpen() {
     return !!(limitDialog && limitDialog.open);
   }
 
+  /* Returns whether the modal dialog opened. */
   function openLimitDialog() {
-    if (!limitDialog || !limitDialogOk || typeof limitDialog.showModal !== "function") return;
+    if (!limitDialog || !limitDialogOk || typeof limitDialog.showModal !== "function") return false;
     try {
       if (!limitDialog.open) limitDialog.showModal();
       limitDialogOk.focus();
+      return true;
     } catch (e) {
-      // A dialog that cannot open leaves the inline note as the only notice.
+      // A dialog that cannot open leaves the composer note as the only notice.
+      return false;
     }
   }
 
   function closeLimitDialog() {
     if (limitDialog && limitDialog.open) limitDialog.close();
+    showLimitNotice();
     input.focus({ preventScroll: true });
+  }
+
+  /* The allowance hold. The server's 429 is the only authority: this page
+     never counts responses. After it, sending pauses on this page -- the
+     composer stays editable -- until 00:00 UTC, the documented reset of the
+     anonymous allowance, read from this device's clock. A wrong clock only
+     moves when the pause lifts; the server still decides, and a refusal after
+     that simply shows this flow again. A reload also lifts it. */
+  var DAY_MS = 86400000;
+  var limitHeld = false;
+  var limitHoldTimer = null;
+
+  function msUntilUtcReset() {
+    return DAY_MS - (Date.now() % DAY_MS) + 1000;
+  }
+
+  function holdForDailyLimit() {
+    limitHeld = true;
+    if (limitHoldTimer !== null) clearTimeout(limitHoldTimer);
+    limitHoldTimer = setTimeout(releaseDailyLimit, msUntilUtcReset());
+    actionBtn.setAttribute("aria-describedby", "limit-notice");
+    syncSendEnabled();
+  }
+
+  function releaseDailyLimit() {
+    limitHeld = false;
+    limitHoldTimer = null;
+    if (limitNotice) limitNotice.hidden = true;
+    actionBtn.removeAttribute("aria-describedby");
+    syncSendEnabled();
+  }
+
+  function showLimitNotice() {
+    if (limitNotice && limitHeld) limitNotice.hidden = false;
+  }
+
+  /* A refused prompt was never sent as a turn: its optimistic rows are
+     removed (the empty state returns if nothing else is on screen), its text
+     goes back into the composer, and one dialog explains why. */
+  function rejectForDailyLimit(exchange) {
+    var rows = [exchange.userRow, exchange.shell.row];
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].parentNode) rows[i].parentNode.removeChild(rows[i]);
+    }
+    if (failedExchange === exchange) failedExchange = null;
+    if (!thread.querySelector(".msg")) showEmptyState();
+
+    restoreDraft(exchange);
+    holdForDailyLimit();
+    if (!openLimitDialog()) showLimitNotice();
   }
 
   /* After a send settles, the composer takes focus again unless the
@@ -878,6 +960,11 @@
 
   function failExchange(exchange, outcome) {
     exchange.outcome = outcome;
+    // The daily limit is not an answer: no Kalillac row, no Retry.
+    if (outcome.dialog) {
+      rejectForDailyLimit(exchange);
+      return;
+    }
     clearActions(exchange.shell);
     showNote(exchange.shell, outcome.message, outcome.kind);
 
@@ -891,8 +978,6 @@
 
     failedExchange = exchange;
     restoreDraft(exchange);
-
-    if (outcome.dialog) openLimitDialog();
   }
 
   /* Render the reply and its actions first; only a fully rendered answer
@@ -1020,7 +1105,8 @@
   // ---- send ----------------------------------------------------------------
   function send() {
     var text = input.value.trim();
-    if (!text || inFlight) return;
+    // Paused by the daily limit: Enter, Send and touch all end here.
+    if (!text || inFlight || limitHeld) return;
 
     // A deliberate new message replaces any failed exchange still on screen.
     discardFailedExchange();
@@ -1042,7 +1128,7 @@
   /* Retry a failed or stopped exchange: the same text, the same pre-send
      history and the same rows. Nothing new is added to the thread. */
   function retryExchange(exchange) {
-    if (inFlight || failedExchange !== exchange) return;
+    if (inFlight || limitHeld || failedExchange !== exchange) return;
 
     /* Ownership is not renewed here: the exchange may restore its text again
        only if this reclaim emptied the composer itself, which leaves the
@@ -1060,7 +1146,7 @@
      user message is not re-appended to the DOM, so it is never duplicated, and
      buildHistory() stays exactly in step with what is on screen. */
   function retryTurn(index) {
-    if (inFlight) return;
+    if (inFlight || limitHeld) return;
     var turn = TURNS[index];
     if (!turn || !turn.userRow) return;
 
@@ -1150,8 +1236,62 @@
     if (eraseBtn) eraseBtn.disabled = !hasErasable();
   }
 
+  /* The notice leaves on its own about RECEIPT_SHOW_MS after it appears,
+     counted in RECEIPT_TICK_MS steps that do not count while the pointer is
+     over it or focus is inside it, so reading or reaching Dismiss never loses
+     it. An unconfirmed removal (with Retry erase) stays until dismissed or
+     retried. Dismiss closes it at any time. It leaves with a short fade, or at
+     once under reduced motion, and takes no space afterwards. */
+  var eraseReceiptDismiss = document.getElementById("erase-receipt-dismiss");
+  var RECEIPT_SHOW_MS = 12000;
+  var RECEIPT_TICK_MS = 250;
+  var RECEIPT_FADE_MS = 160;
+  var receiptLeft = 0;
+  var receiptTicker = null;
+  var receiptHeld = false;
+  var receiptFadeTimer = null;
+
+  function stopReceiptTicker() {
+    if (receiptTicker !== null) {
+      window.clearInterval(receiptTicker);
+      receiptTicker = null;
+    }
+  }
+
+  function receiptHolding() {
+    return receiptHeld || eraseReceipt.contains(document.activeElement);
+  }
+
+  function hideEraseReceipt() {
+    if (!eraseReceipt || eraseReceipt.hidden) return;
+    stopReceiptTicker();
+    var hadFocus = eraseReceipt.contains(document.activeElement);
+    var reduce = window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function finish() {
+      receiptFadeTimer = null;
+      eraseReceipt.hidden = true;
+      eraseReceipt.classList.remove("is-leaving");
+      if (hadFocus) input.focus({ preventScroll: true });
+    }
+
+    if (reduce) {
+      finish();
+      return;
+    }
+    eraseReceipt.classList.add("is-leaving");
+    receiptFadeTimer = window.setTimeout(finish, RECEIPT_FADE_MS);
+  }
+
   function showEraseReceipt(text, withLimits, retry) {
     if (!eraseReceipt) return;
+    stopReceiptTicker();
+    if (receiptFadeTimer !== null) {
+      window.clearTimeout(receiptFadeTimer);
+      receiptFadeTimer = null;
+    }
+    eraseReceipt.classList.remove("is-leaving");
     eraseReceiptText.textContent = text;
     eraseReceiptNote.textContent = withLimits ? RECEIPT_LIMITS : "";
     eraseReceiptNote.hidden = !withLimits;
@@ -1159,7 +1299,21 @@
     eraseRetry.disabled = false;
     eraseReceipt.classList.toggle("is-failed", !!retry);
     eraseReceipt.hidden = false;
+
+    if (retry) return;                // stays until dismissed or retried
+    receiptLeft = RECEIPT_SHOW_MS;
+    receiptTicker = window.setInterval(function () {
+      if (receiptHolding()) return;
+      receiptLeft -= RECEIPT_TICK_MS;
+      if (receiptLeft <= 0) hideEraseReceipt();
+    }, RECEIPT_TICK_MS);
   }
+
+  if (eraseReceipt) {
+    eraseReceipt.addEventListener("mouseenter", function () { receiptHeld = true; });
+    eraseReceipt.addEventListener("mouseleave", function () { receiptHeld = false; });
+  }
+  if (eraseReceiptDismiss) eraseReceiptDismiss.addEventListener("click", hideEraseReceipt);
 
   function eraseIdsIn(state) {
     return Object.keys(eraseAttempts).filter(function (id) {
@@ -1171,6 +1325,7 @@
      unconfirmed removal stays on screen with Retry erase until it succeeds. */
   function dismissSettledEraseReceipt() {
     if (eraseReceipt && !eraseReceipt.hidden && Object.keys(eraseAttempts).length === 0) {
+      stopReceiptTicker();
       eraseReceipt.hidden = true;
     }
   }
@@ -1325,11 +1480,24 @@
   if (eraseBtn) eraseBtn.addEventListener("click", openEraseDialog);
 
   if (eraseDialog && eraseConfirm && eraseCancel) {
+    // Only a confirmation made while the dialog is open erases, so a repeated
+    // click or key press can erase -- and ask the server -- only once.
     eraseConfirm.addEventListener("click", function () {
-      if (eraseDialogOpen()) eraseDialog.close();
+      if (!eraseDialogOpen()) return;
+      eraseDialog.close();
       endAndErase();
     });
     eraseCancel.addEventListener("click", closeEraseDialog);
+    // Tab and Shift+Tab cycle between the dialog's two buttons.
+    eraseDialog.addEventListener("keydown", function (event) {
+      if (event.key !== "Tab") return;
+      var target = event.shiftKey ? eraseCancel : eraseConfirm;
+      var other = target === eraseCancel ? eraseConfirm : eraseCancel;
+      if (document.activeElement === target || !eraseDialog.contains(document.activeElement)) {
+        event.preventDefault();
+        other.focus();
+      }
+    });
     eraseDialog.addEventListener("cancel", function (event) {
       event.preventDefault();
       closeEraseDialog();
@@ -1521,6 +1689,7 @@
   if (isEmbedded) document.body.classList.add("is-embedded");
 
   if (emptyState) conversation.classList.add("is-empty");
+  placeStarter();
   syncSendEnabled();
   // Standalone, the composer takes focus at once. Framed by the homepage it
   // does not: focusing it on load would scroll the homepage down to the chat

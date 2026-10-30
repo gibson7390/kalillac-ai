@@ -97,11 +97,31 @@
   var realSetTimeout = window.setTimeout;
   var realClearTimeout = window.clearTimeout;
 
+  // The daily-limit pause lifts at the next 00:00 UTC by the device clock.
+  // The clock is fixed at noon UTC, so that timer is about twelve hours long;
+  // timers of a minute or more are held here and fired by a scenario.
+  var FIXED_NOW = Date.UTC(2026, 9, 30, 12, 0, 0);
+  Date.now = function () { return FIXED_NOW; };
+  var LONG_TIMER_MS = 60000;
+  var longTimers = [];
+
+  // The End & erase notice counts its 12 seconds in 250 ms ticks. Those
+  // intervals are held too, and a scenario advances them tick by tick.
+  var RECEIPT_TICK_MS = 250;
+  var tickers = [];
+  var realSetInterval = window.setInterval;
+  var realClearInterval = window.clearInterval;
+
   window.setTimeout = function (fn, delay) {
     if (delay === ERASE_TIMEOUT_MS) {
       var timer = { id: "erase-timer-" + eraseTimers.length, fn: fn, cleared: false, fired: false };
       eraseTimers.push(timer);
       return timer.id;
+    }
+    if (delay >= LONG_TIMER_MS) {
+      var held = { id: "long-timer-" + longTimers.length, fn: fn, delay: delay, cleared: false, fired: false };
+      longTimers.push(held);
+      return held.id;
     }
     return realSetTimeout.apply(window, arguments);
   };
@@ -110,7 +130,26 @@
     for (var i = 0; i < eraseTimers.length; i++) {
       if (eraseTimers[i].id === id) { eraseTimers[i].cleared = true; return; }
     }
+    for (var j = 0; j < longTimers.length; j++) {
+      if (longTimers[j].id === id) { longTimers[j].cleared = true; return; }
+    }
     return realClearTimeout.apply(window, arguments);
+  };
+
+  window.setInterval = function (fn, delay) {
+    if (delay === RECEIPT_TICK_MS) {
+      var ticker = { id: "ticker-" + tickers.length, fn: fn, cleared: false };
+      tickers.push(ticker);
+      return ticker.id;
+    }
+    return realSetInterval.apply(window, arguments);
+  };
+
+  window.clearInterval = function (id) {
+    for (var i = 0; i < tickers.length; i++) {
+      if (tickers[i].id === id) { tickers[i].cleared = true; return; }
+    }
+    return realClearInterval.apply(window, arguments);
   };
 
   function abortError() {
@@ -257,7 +296,22 @@
       focusIsComposer: document.activeElement === input,
       requestCount: requests.length,
       limitDialog: dialogState(),
+      limitNotice: limitNoticeState(),
+      sendDescribedBy: button.getAttribute("aria-describedby"),
       erase: eraseState()
+    };
+  }
+
+  function limitNoticeState() {
+    var notice = $("limit-notice");
+    if (!notice) return null;
+    return {
+      shown: !notice.hidden && getComputedStyle(notice).display !== "none",
+      text: notice.textContent.replace(/\s+/g, " ").trim(),
+      role: notice.getAttribute("role"),
+      live: notice.getAttribute("aria-live"),
+      count: document.querySelectorAll(".limit-notice:not([hidden])").length,
+      armedResets: longTimers.filter(function (t) { return !t.cleared && !t.fired; }).length
     };
   }
 
@@ -283,7 +337,13 @@
       retryShown: !retry.hidden,
       retryDisabled: retry.disabled,
       receiptRole: receipt.getAttribute("role"),
-      receiptLive: receipt.getAttribute("aria-live")
+      receiptLive: receipt.getAttribute("aria-live"),
+      receiptDisplay: getComputedStyle(receipt).display,
+      receiptHeight: receipt.getBoundingClientRect().height,
+      receiptLeaving: receipt.classList.contains("is-leaving"),
+      dismissText: text($("erase-receipt-dismiss")),
+      focusIsConfirm: document.activeElement === $("erase-dialog-confirm"),
+      armedTickers: tickers.filter(function (t) { return !t.cleared; }).length
     };
   }
 
@@ -333,6 +393,8 @@
       };
     },
     snap: function (label) { steps.push(snapshot(label)); },
+    snapshotOnly: function (label) { return snapshot(label); },
+    push: function (snap) { steps.push(snap); },
     // The daily-limit dialog's three close paths, a click inside its panel,
     // the showModal() fallback and a layout measurement.
     clickDialogOk: function () { $("limit-dialog-ok").click(); return wait(30); },
@@ -422,6 +484,54 @@
       return wait(30);
     },
     clickRetryErase: function () { $("erase-retry").click(); return wait(60); },
+    // Every other way to submit: Enter in the field, the form's own submit
+    // and a click on Send even while it is disabled.
+    pressEnter: function () {
+      $("composer-input").dispatchEvent(new KeyboardEvent("keydown",
+        { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      return wait(30);
+    },
+    submitForm: function () { $("composer").requestSubmit(); return wait(30); },
+    // Fires the held daily-limit release (the next 00:00 UTC).
+    fireLimitReset: function () {
+      longTimers.forEach(function (timer) {
+        if (!timer.cleared && !timer.fired) { timer.fired = true; timer.fn(); }
+      });
+      return wait(30);
+    },
+    longTimerDelays: function () {
+      return longTimers.map(function (t) { return t.delay; });
+    },
+    // Advances the End & erase notice countdown by n ticks of 250 ms.
+    tickReceipt: function (n) {
+      for (var k = 0; k < n; k++) {
+        tickers.forEach(function (ticker) { if (!ticker.cleared) ticker.fn(); });
+      }
+      return wait(0);
+    },
+    hoverReceipt: function (on) {
+      $("erase-receipt").dispatchEvent(new MouseEvent(on ? "mouseenter" : "mouseleave"));
+      return wait(0);
+    },
+    focusDismiss: function () { $("erase-receipt-dismiss").focus(); return wait(0); },
+    blurDismiss: function () { $("erase-receipt-dismiss").blur(); return wait(0); },
+    clickDismiss: function () { $("erase-receipt-dismiss").click(); return wait(0); },
+    // prefers-reduced-motion: reduce, as app.js reads it at dismissal time.
+    forceReducedMotion: function () {
+      var real = window.matchMedia.bind(window);
+      window.matchMedia = function (query) {
+        if (query === "(prefers-reduced-motion: reduce)") return { matches: true, media: query };
+        return real(query);
+      };
+    },
+    // A Tab (or Shift+Tab) key press inside the open erase dialog.
+    tabInEraseDialog: function (shift) {
+      var event = new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey: !!shift,
+                                                bubbles: true, cancelable: true });
+      document.activeElement.dispatchEvent(event);
+      return wait(10);
+    },
+    focusEraseConfirm: function () { $("erase-dialog-confirm").focus(); return wait(10); },
     // Completes a deferred response with an ordinary spec.
     settle: function (name, spec) {
       var pending = deferred[name];
@@ -681,14 +791,40 @@
     json: { error: "anonymous_daily_limit_reached", detail: SECRET, message: SECRET }
   };
 
+  // The refused prompt is rolled back into the composer, one dialog explains
+  // it, then one note stays beside the composer while sending is paused. No
+  // way of submitting sends anything until the 00:00 UTC release fires.
   SCENARIOS.code_anonymous_daily_limit_reached = async function (a) {
     a.respondWith(DAILY_LIMIT, ok("Fine."));
     await a.send("first question");
     a.snap("failed");
     await a.clickDialogOk();
     a.snap("closed");
+    a.clickSend();
+    await a.pressEnter();
+    await a.submitForm();
+    a.clickSend();
+    await a.wait(60);
+    a.snap("blocked");
+    a.type("first question, revised");
+    a.snap("edited");
+    var delays = a.longTimerDelays();
+    await a.fireLimitReset();
+    var released = a.snapshotOnly("released");
+    released.longTimerDelays = delays;
+    a.push(released);
     await a.send("next question");
     a.snap("after-new-send");
+  };
+
+  // A refusal after a completed exchange removes only the refused rows.
+  SCENARIOS.daily_limit_after_conversation = async function (a) {
+    a.respondWith(ok("Earlier answer.", "s-1"), DAILY_LIMIT);
+    await a.send("earlier question");
+    await a.send("second question");
+    a.snap("refused");
+    await a.clickDialogOk();
+    a.snap("closed");
   };
 
   SCENARIOS.daily_limit_escape = async function (a) {
@@ -708,12 +844,18 @@
     a.snap("closed");
   };
 
+  // While paused, a second attempt neither sends nor reopens the dialog;
+  // after the release a new refusal opens it once more.
   SCENARIOS.daily_limit_reopen = async function (a) {
     a.respondWith(DAILY_LIMIT, DAILY_LIMIT);
     await a.send("first question");
     await a.clickDialogOk();
     a.snap("first-closed");
     await a.send("second question");
+    a.snap("blocked");
+    await a.fireLimitReset();
+    a.clickSend();
+    await a.wait(60);
     a.snap("reopened");
     await a.cancelDialog();
     a.snap("second-closed");
@@ -864,6 +1006,97 @@
     a.snap("erased");
     await a.send("a new question");
     a.snap("after-new-send");
+  };
+
+  // The completion notice leaves by itself after 48 ticks of 250 ms (12 s),
+  // with a 160 ms fade, and leaves nothing behind.
+  SCENARIOS.erase_notice_auto_dismiss = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("shown");
+    await a.tickReceipt(47);
+    a.snap("tick-47");
+    await a.tickReceipt(1);
+    a.snap("tick-48");
+    await a.wait(250);
+    a.snap("dismissed");
+  };
+
+  // Hovering or focusing the notice pauses the countdown; it resumes with
+  // the time that was left, not from the start.
+  SCENARIOS.erase_notice_pause_resume = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.tickReceipt(20);
+    await a.hoverReceipt(true);
+    await a.tickReceipt(100);
+    a.snap("hovered");
+    await a.hoverReceipt(false);
+    await a.focusDismiss();
+    await a.tickReceipt(100);
+    a.snap("focused");
+    await a.blurDismiss();
+    await a.tickReceipt(27);
+    a.snap("resumed-47");
+    await a.tickReceipt(1);
+    await a.wait(250);
+    a.snap("dismissed");
+  };
+
+  // Dismiss closes it at once (after the fade) and hands focus to the composer.
+  SCENARIOS.erase_notice_manual_dismiss = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.focusDismiss();
+    a.snap("focused");
+    await a.clickDismiss();
+    a.snap("leaving");
+    await a.wait(250);
+    a.snap("dismissed");
+  };
+
+  // Under reduced motion it is removed at once, without a fade.
+  SCENARIOS.erase_notice_reduced_motion = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.forceReducedMotion();
+    await a.clickDismiss();
+    a.snap("dismissed");
+  };
+
+  // Focus cycles inside the dialog; Cancel returns focus to End & erase.
+  SCENARIOS.erase_dialog_focus = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    await a.clickErase();
+    a.snap("open");
+    await a.tabInEraseDialog(true);
+    a.snap("shift-tab-from-cancel");
+    await a.tabInEraseDialog(false);
+    a.snap("tab-from-confirm");
+    await a.cancelEraseButton();
+    a.snap("cancelled");
+  };
+
+  // A repeated confirmation erases, and asks the server, exactly once.
+  SCENARIOS.erase_confirm_once = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    $("erase-dialog-confirm").click();
+    $("erase-dialog-confirm").click();
+    $("erase-dialog-confirm").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    $("erase-dialog-confirm").click();
+    await a.wait(120);
+    a.snap("erased");
   };
 
   SCENARIOS.erase_not_found = async function (a) {

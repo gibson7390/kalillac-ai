@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261028-end-erase2">
+  <link rel="stylesheet" href="app.css?v=20261030-secure-luxury2">
 </head>
 <body>
   <!-- Direct full-page use at /app/ and same-origin iframe embed on the
@@ -40,12 +40,17 @@
             Bring a difficult question, a rough draft, broken code, or something current.
           </p>
           <!-- Each example only fills the composer; nothing is sent until the
-               visitor sends it. -->
+               visitor sends it. In a phone-width frame app.js moves this
+               block below the composer (#starter-dock), so the reading and
+               keyboard order is heading, composer, then examples. -->
+          <div class="starter" id="starter">
+          <p class="starter-label" id="starter-label">Or start with an example</p>
           <div class="empty-hints" role="group" aria-label="Example prompts">
             <button type="button" class="hint hint-research" aria-label="Research the current web" aria-describedby="hint-description-0" data-prompt="Find this week’s biggest technology stories"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></span><span class="hint-copy"><span class="hint-title">Research the current web</span><span class="hint-description" id="hint-description-0">Get up-to-date information with sources.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
             <button type="button" class="hint hint-writing" aria-label="Write and revise" aria-describedby="hint-description-1" data-prompt="Draft a professional email"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></svg></span><span class="hint-copy"><span class="hint-title">Write and revise</span><span class="hint-description" id="hint-description-1">Improve your writing, brainstorm, and get feedback.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
             <button type="button" class="hint hint-code" aria-label="Code and debug" aria-describedby="hint-description-2" data-prompt="Build a simple Python password generator"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m8 5-7 7 7 7m8-14 7 7-7 7"/></svg></span><span class="hint-copy"><span class="hint-title">Code and debug</span><span class="hint-description" id="hint-description-2">Build, fix, and explain code in plain language.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
             <button type="button" class="hint hint-learning" aria-label="Learn anything" aria-describedby="hint-description-3" data-prompt="Explain how encryption works"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 18h6M9 22h6M9 14c-1-1-3-3-3-6a6 6 0 0 1 12 0c0 3-2 5-3 6v1H9Z"/></svg></span><span class="hint-copy"><span class="hint-title">Learn anything</span><span class="hint-description" id="hint-description-3">Get clear explanations on complex topics.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+          </div>
           </div>
         </div>
 
@@ -56,9 +61,17 @@
     <div class="dock">
       <!-- What End & erase did. Fixed copy chosen by app.js; never server text. -->
       <div class="erase-receipt" id="erase-receipt" role="status" aria-live="polite" hidden>
-        <p class="erase-receipt-text" id="erase-receipt-text"></p>
-        <p class="erase-receipt-note" id="erase-receipt-note"></p>
-        <button type="button" class="erase-receipt-retry" id="erase-retry" hidden>Retry erase</button>
+        <div class="erase-receipt-body">
+          <p class="erase-receipt-text" id="erase-receipt-text"></p>
+          <p class="erase-receipt-note" id="erase-receipt-note"></p>
+          <button type="button" class="erase-receipt-retry" id="erase-retry" hidden>Retry erase</button>
+        </div>
+        <button type="button" class="erase-receipt-dismiss" id="erase-receipt-dismiss">Dismiss</button>
+      </div>
+      <!-- After the daily-limit dialog: one compact note beside the composer.
+           Fixed copy; app.js only shows or hides it. -->
+      <div class="limit-notice" id="limit-notice" role="status" aria-live="polite" hidden>
+        <p class="limit-notice-text"><strong>You’ve used today’s 10 free responses.</strong> Your free allowance resets at 12:00 AM UTC. Your message wasn’t sent; it is still in the message box.</p>
       </div>
       <form class="composer" id="composer" autocomplete="off">
         <div class="composer-shell" id="composer-shell">
@@ -92,6 +105,8 @@
           </button>
         </div>
       </form>
+      <!-- Phone-width frames: the example prompts live here, after the composer. -->
+      <div class="starter-dock" id="starter-dock"></div>
 
       <footer class="app-footer">
         <span>Free · adults 18+</span>
@@ -133,6 +148,6 @@
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261028-end-erase2"></script>
+  <script src="app.js?v=20261030-secure-luxury2"></script>
 </body>
 </html>

@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261028-end-erase2"
-CSS_CACHE_KEY = "20261028-end-erase2"
+CACHE_KEY = "20261030-secure-luxury2"
+CSS_CACHE_KEY = "20261030-secure-luxury2"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -124,7 +124,7 @@ GENERIC_FAILURES = {
 
 DAILY_LIMIT_SCENARIOS = (
     "daily_limit_escape", "daily_limit_backdrop", "daily_limit_reopen",
-    "daily_limit_without_show_modal", "daily_limit_layout_360x640",
+    "daily_limit_without_show_modal", "daily_limit_layout_360x640", "daily_limit_after_conversation",
 )
 
 # Syntax highlighting of rendered fenced code (frontend presentation only).
@@ -443,16 +443,17 @@ def test_backend_code_shows_fixed_copy_and_action(browser_results, code):
     message = COPY[code]
 
     if code == DAILY_LIMIT_CODE:
-        assert_failed(failed, message, retry=False)
-        assert [n["kind"] for n in failed["assistants"][0]["notes"]] == ["notice-note"]
-    elif code == "history_too_long":
-        assert failed["assistants"][0]["actions"] == ["New conversation"]
-        assert [n["text"] for n in failed["assistants"][0]["notes"]] == [message]
+        # Not an answer: the refused prompt is rolled back into the composer
+        # and sending pauses (its own tests cover the dialog and the note).
+        assert_limit_paused(failed, notice=False)
     else:
-        assert_failed(failed, message, retry=code not in NO_RETRY)
-
-    # The submitted text is restored and controls are idle again.
-    assert_idle(failed, composer="first question")
+        if code == "history_too_long":
+            assert failed["assistants"][0]["actions"] == ["New conversation"]
+            assert [n["text"] for n in failed["assistants"][0]["notes"]] == [message]
+        else:
+            assert_failed(failed, message, retry=code not in NO_RETRY)
+        # The submitted text is restored and controls are idle again.
+        assert_idle(failed, composer="first question")
     assert_clean(result)
 
     # The failure never enters history, and a deliberate new send replaces it.
@@ -748,23 +749,73 @@ def assert_dialog_closed(snap, focus_composer=True):
         assert snap["focusIsComposer"] is True, snap["label"]
 
 
-def assert_limit_notice(snap, composer="first question", user="first question"):
-    assert_failed(snap, DAILY_LIMIT_NOTE, retry=False, user=user)
-    assert [n["kind"] for n in snap["assistants"][0]["notes"]] == ["notice-note"]
-    assert_idle(snap, composer=composer)
+LIMIT_NOTICE_TEXT = ("You’ve used today’s 10 free responses. Your free allowance resets at 12:00 AM UTC. "
+                     "Your message wasn’t sent; it is still in the message box.")
 
 
-def test_daily_limit_opens_the_neutral_dialog_and_got_it_closes_it(browser_results):
+def assert_limit_paused(snap, composer="first question", users=(), notice=True):
+    """The refused prompt left no row and no assistant notice behind; its text
+    is back in the editable composer; sending is paused; and the one composer
+    note is shown (after the dialog closes) or not (while it is open)."""
+    assert snap["users"] == list(users), snap["label"]
+    assert all(not row["notes"] for row in snap["assistants"]), snap["label"]   # no quota bubble
+    assert DAILY_LIMIT_NOTE not in snap["threadText"], snap["label"]
+    assert snap["composer"] == composer and snap["readOnly"] is False, snap["label"]
+    assert snap["sendIsStop"] is False and snap["sendLabel"] == "Send message"
+    assert snap["sendDisabled"] is True, snap["label"]                      # paused, though a draft exists
+    assert snap["sendDescribedBy"] == "limit-notice"
+    note = snap["limitNotice"]
+    assert note["shown"] is notice and note["count"] == (1 if notice else 0), snap["label"]
+    assert note["text"] == LIMIT_NOTICE_TEXT and note["role"] == "status" and note["live"] == "polite"
+
+
+def test_daily_limit_rolls_back_the_prompt_into_the_composer_and_opens_one_dialog(browser_results):
     result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
-    failed, closed, after = step(result, "failed"), step(result, "closed"), step(result, "after-new-send")
+    failed, closed = step(result, "failed"), step(result, "closed")
 
     assert_dialog_open(failed)
-    assert_limit_notice(failed)          # no Retry, the draft restored
-    # The inline notice stays after the dialog closes; focus returns to the composer.
+    # No user bubble, no Kalillac row: the empty state is back, the text is in the composer.
+    assert_limit_paused(failed, notice=False)
+    assert failed["rowOrder"] == [] and failed["emptyShown"] is True
+    # Got it: the dialog closes, one composer note replaces it, focus returns to the draft.
     assert_dialog_closed(closed)
-    assert_limit_notice(closed)
+    assert_limit_paused(closed)
+
+
+def test_daily_limit_pause_ignores_every_submission_path_and_keeps_the_draft_editable(browser_results):
+    result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
+    blocked, edited = step(result, "blocked"), step(result, "edited")
+
+    # Send clicks, Enter and the form's own submit sent nothing and reopened nothing.
+    assert_limit_paused(blocked)
+    assert blocked["requestCount"] == 1 and blocked["limitDialog"]["open"] is False
+    # The composer stays editable while paused.
+    assert_limit_paused(edited, composer="first question, revised")
+    assert edited["requestCount"] == 1
+
+
+def test_daily_limit_pause_lifts_at_the_next_utc_midnight(browser_results):
+    result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
+    released, after = step(result, "released"), step(result, "after-new-send")
+
+    # The harness clock reads 12:00:00 UTC: one release timer, 12 hours (+1 s) out.
+    assert released["longTimerDelays"] == [12 * 3600 * 1000 + 1000]
+    assert released["limitNotice"]["shown"] is False and released["limitNotice"]["count"] == 0
+    assert released["sendDisabled"] is False and released["sendDescribedBy"] is None
+    assert released["composer"] == "first question, revised"
     assert_dialog_closed(after)
-    assert after["assistants"][0]["text"].strip() == "Fine."
+    assert after["users"] == ["next question"] and after["assistants"][0]["text"].strip() == "Fine."
+    assert [b["message"] for b in bodies(result)] == ["first question", "next question"]
+
+
+def test_daily_limit_after_a_conversation_removes_only_the_refused_rows(browser_results):
+    result = scenario(browser_results, "daily_limit_after_conversation")
+    refused, closed = step(result, "refused"), step(result, "closed")
+    assert_dialog_open(refused)
+    for snap, notice in ((refused, False), (closed, True)):
+        assert_limit_paused(snap, composer="second question", users=["earlier question"], notice=notice)
+        assert snap["rowOrder"] == ["user", "assistant"]
+        assert snap["assistants"][0]["text"].strip() == "Earlier answer."
 
 
 def test_daily_limit_escape_closes_through_the_cancel_handler(browser_results):
@@ -773,7 +824,7 @@ def test_daily_limit_escape_closes_through_the_cancel_handler(browser_results):
     closed = step(result, "closed")
     assert closed["limitDialog"]["cancelPrevented"] is True   # One close function, not the default.
     assert_dialog_closed(closed)
-    assert_limit_notice(closed)
+    assert_limit_paused(closed)
 
 
 def test_daily_limit_backdrop_click_closes_but_a_panel_click_does_not(browser_results):
@@ -781,23 +832,29 @@ def test_daily_limit_backdrop_click_closes_but_a_panel_click_does_not(browser_re
     assert_dialog_open(step(result, "panel-click"))
     closed = step(result, "closed")
     assert_dialog_closed(closed)
-    assert_limit_notice(closed)
+    assert_limit_paused(closed)
 
 
-def test_daily_limit_dialog_reopens_without_error(browser_results):
+def test_daily_limit_dialog_opens_once_per_refusal(browser_results):
     result = scenario(browser_results, "daily_limit_reopen")
     assert_dialog_closed(step(result, "first-closed"))
+    # A second attempt while paused: nothing sent, no second dialog, still one note.
+    blocked = step(result, "blocked")
+    assert_dialog_closed(blocked, focus_composer=False)
+    assert_limit_paused(blocked, composer="second question")
+    assert blocked["requestCount"] == 1
+    # After the release, a new refusal opens the dialog again, once.
     reopened = step(result, "reopened")
     assert_dialog_open(reopened)
-    assert_limit_notice(reopened, composer="second question", user="second question")
+    assert_limit_paused(reopened, composer="second question", notice=False)
     assert_dialog_closed(step(result, "second-closed"))
     assert [b["message"] for b in bodies(result)] == ["first question", "second question"]
 
 
-def test_daily_limit_without_show_modal_shows_only_the_inline_notice(browser_results):
+def test_daily_limit_without_show_modal_shows_only_the_composer_note(browser_results):
     failed = step(scenario(browser_results, "daily_limit_without_show_modal"), "failed")
-    assert_dialog_closed(failed)
-    assert_limit_notice(failed)
+    assert_dialog_closed(failed, focus_composer=False)
+    assert_limit_paused(failed)
 
 
 def test_daily_limit_dialog_fits_a_360_by_640_viewport(browser_results):
@@ -870,11 +927,17 @@ def test_daily_limit_copy_avoids_unapproved_claims():
     source = js_source()
     outcome = source[source.index("var OUTCOME_DAILY_LIMIT"):]
     outcome = outcome[: outcome.index("\n")]
-    for text in (daily_limit_markup().lower(), outcome.lower(), f'"{DAILY_LIMIT_NOTE}"'.lower()):
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    note = page[page.index('<div class="limit-notice"'):]
+    note = note[: note.index("</div>")]
+    for text in (daily_limit_markup().lower(), outcome.lower(), f'"{DAILY_LIMIT_NOTE}"'.lower(), note.lower()):
         for word in DAILY_LIMIT_FORBIDDEN:
             assert word not in text, word
     assert f'var COPY_DAILY_LIMIT = "{DAILY_LIMIT_NOTE}";' in source
     assert 'action: null, dialog: true' in outcome
+    # The composer note is fixed markup with the dialog's own reset wording.
+    assert '<div class="limit-notice" id="limit-notice" role="status" aria-live="polite" hidden>' in note
+    assert DAILY_LIMIT_RESET in note
 
 
 def test_daily_limit_dialog_script_contract():
@@ -899,9 +962,22 @@ def test_daily_limit_dialog_script_contract():
     # A settled send never pulls focus out of the open dialog.
     assert source.count(".then(focusComposer);") == 3
     assert "if (!inFlight && !limitDialogOpen()) input.focus({ preventScroll: true });" in source
-    # No client-side counter, countdown or lockout, and no clock.
-    for forbidden in ("Date(", "setInterval", "countdown", "remaining"):
-        assert forbidden not in source[source.index("// ---- daily-limit dialog"):source.index("function restoreDraft")], forbidden
+    # No client-side counter or countdown: the server's 429 is the only
+    # authority. After it, sending pauses on this page until the documented
+    # 00:00 UTC reset; the device clock is read only to find that moment.
+    region = source[source.index("// ---- daily-limit dialog"):source.index("function restoreDraft")]
+    for forbidden in ("Date(", "setInterval", "countdown", "remaining", "localStorage", "sessionStorage"):
+        assert forbidden not in region, forbidden
+    assert region.count("Date.now()") == 1
+    assert "return DAY_MS - (Date.now() % DAY_MS) + 1000;" in region
+    assert "limitHoldTimer = setTimeout(releaseDailyLimit, msUntilUtcReset());" in region
+    # Every way to send checks the pause; the rejected rows are removed.
+    assert "if (!text || inFlight || limitHeld) return;" in source
+    assert "if (inFlight || limitHeld || failedExchange !== exchange) return;" in source
+    assert "if (inFlight || limitHeld) return;" in source
+    assert "actionBtn.disabled = limitHeld || input.value.trim().length === 0;" in source
+    reject = region[region.index("function rejectForDailyLimit"):]
+    assert "restoreDraft(exchange);" in reject and "removeChild(rows[i])" in reject
 
 
 def test_daily_limit_dialog_styles():

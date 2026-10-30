@@ -42,7 +42,8 @@ SCENARIOS = (
     "erase_failure_then_retry", "erase_network_failure", "erase_in_flight",
     "erase_without_session", "erase_first_message_in_flight", "session_ended_reply",
     "erase_overlap_newer_first", "erase_overlap_older_first", "erase_overlap_all_not_found",
-    "erase_timeout_then_retry",
+    "erase_timeout_then_retry", "erase_notice_auto_dismiss", "erase_notice_pause_resume",
+    "erase_notice_manual_dismiss", "erase_notice_reduced_motion", "erase_dialog_focus", "erase_confirm_once",
 )
 
 
@@ -166,6 +167,78 @@ def test_confirmed_erase_clears_everything_and_reports_removal(erase_results):
     after = step(result, "after-new-send")
     assert after["users"] == ["a new question"]
     assert after["erase"]["receiptShown"] is False
+
+
+def assert_notice_shown(snap):
+    e = snap["erase"]
+    assert e["receiptShown"] is True and e["receiptDisplay"] != "none" and e["receiptLeaving"] is False, snap["label"]
+    assert e["receiptText"] == RECEIPT_REMOVED and e["receiptNote"] == RECEIPT_LIMITS
+    assert e["dismissText"] == "Dismiss" and e["receiptRole"] == "status" and e["receiptLive"] == "polite"
+
+
+def assert_notice_gone(snap):
+    """Hidden, out of the layout (no gray block, no hole), countdown stopped,
+    and the clean empty workspace remains."""
+    e = snap["erase"]
+    assert e["receiptShown"] is False and e["receiptDisplay"] == "none" and e["receiptHeight"] == 0, snap["label"]
+    assert e["armedTickers"] == 0, snap["label"]
+    assert snap["emptyShown"] is True and snap["users"] == [] and snap["composer"] == ""
+
+
+def test_completion_notice_dismisses_itself_after_twelve_seconds(erase_results):
+    result = run(erase_results, "erase_notice_auto_dismiss")
+    assert_notice_shown(step(result, "shown"))
+    assert step(result, "shown")["erase"]["armedTickers"] == 1
+    assert_notice_shown(step(result, "tick-47"))            # 11.75 s: still there
+    leaving = step(result, "tick-48")                       # 12 s: the 160 ms fade starts
+    assert leaving["erase"]["receiptShown"] is True and leaving["erase"]["receiptLeaving"] is True
+    assert_notice_gone(step(result, "dismissed"))
+    assert len(endpoint_requests(result)) == 1
+
+
+def test_hover_and_focus_pause_the_countdown_and_it_resumes_where_it_stopped(erase_results):
+    result = run(erase_results, "erase_notice_pause_resume")
+    # 20 ticks counted, then 100 ticks while hovered and 100 while focused: none counted.
+    assert_notice_shown(step(result, "hovered"))
+    assert_notice_shown(step(result, "focused"))
+    # 20 + 27 = 47 counted ticks: still shown. One more ends it.
+    assert_notice_shown(step(result, "resumed-47"))
+    assert_notice_gone(step(result, "dismissed"))
+
+
+def test_dismiss_closes_the_notice_and_returns_focus_to_the_composer(erase_results):
+    result = run(erase_results, "erase_notice_manual_dismiss")
+    assert_notice_shown(step(result, "focused"))
+    assert step(result, "leaving")["erase"]["receiptLeaving"] is True
+    dismissed = step(result, "dismissed")
+    assert_notice_gone(dismissed)
+    assert dismissed["focusIsComposer"] is True
+
+
+def test_reduced_motion_removes_the_notice_at_once_without_a_fade(erase_results):
+    snap = step(run(erase_results, "erase_notice_reduced_motion"), "dismissed")
+    assert snap["erase"]["receiptLeaving"] is False
+    assert_notice_gone(snap)
+
+
+def test_dialog_keeps_focus_inside_and_cancel_returns_it_to_the_control(erase_results):
+    result = run(erase_results, "erase_dialog_focus")
+    assert step(result, "open")["erase"]["focusIsCancel"] is True
+    assert step(result, "shift-tab-from-cancel")["erase"]["focusIsConfirm"] is True
+    assert step(result, "tab-from-confirm")["erase"]["focusIsCancel"] is True
+    cancelled = step(result, "cancelled")
+    assert cancelled["erase"]["dialogOpen"] is False and cancelled["erase"]["focusIsButton"] is True
+    assert cancelled["users"] == ["question"]
+    assert endpoint_requests(result) == []
+
+
+def test_repeated_confirmation_erases_exactly_once(erase_results):
+    result = run(erase_results, "erase_confirm_once")
+    erased = step(result, "erased")
+    assert_cleared(erased)
+    (end,) = endpoint_requests(result)
+    erase_request(end, "s-1")
+    assert erased["erase"]["receiptText"] == RECEIPT_REMOVED
 
 
 def test_not_found_receipt(erase_results):
@@ -371,6 +444,14 @@ def test_markup_is_accessible_fixed_copy():
     assert ('<div class="erase-receipt" id="erase-receipt" role="status" aria-live="polite" hidden>'
             in page)
     assert '<button type="button" class="erase-receipt-retry" id="erase-retry" hidden>Retry erase</button>' in page
+    # A clearly labelled manual dismiss control inside the notice.
+    receipt = page[page.index('<div class="erase-receipt"'):page.index('<div class="limit-notice"')]
+    assert '<button type="button" class="erase-receipt-dismiss" id="erase-receipt-dismiss">Dismiss</button>' in receipt
+    # The 12-second lifetime, its pausable 250 ms ticks and the 160 ms exit fade.
+    source = APP_JS.read_text(encoding="utf-8")
+    for constant in ("var RECEIPT_SHOW_MS = 12000;", "var RECEIPT_TICK_MS = 250;", "var RECEIPT_FADE_MS = 160;"):
+        assert constant in source, constant
+    assert ".erase-receipt { transition: none; }" in css
 
 
 def test_receipt_copy_is_exact_and_makes_no_overclaims():

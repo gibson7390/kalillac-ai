@@ -1501,8 +1501,16 @@ def test_starting_state_is_removed_after_the_first_message(homepage_conversation
 
 def test_composer_stays_pinned_at_the_bottom_of_the_workspace(homepage_conversation):
     run = homepage_conversation
-    # Same composer position from the empty state to a long, overflowing transcript.
-    base = run["idle"]["composer"]
+    # Desktop: the same composer position from the empty state to a long,
+    # overflowing transcript. Phones: the empty state stacks the heading, the
+    # composer and the examples (test_phone_empty_state_reads_heading_composer_then_examples);
+    # from the first exchange on, the composer is pinned at the bottom.
+    phone = run["viewport"] == "mobile"
+    base = run["firstReplied" if phone else "idle"]["composer"]
+    if phone:
+        slot = run["firstReplied"]["slot"]
+        assert slot[1] + slot[3] - base["bottom"] <= 40, (base, slot)     # at the bottom of the card
+        assert run["idle"]["composer"]["bottom"] < base["top"], run["idle"]["composer"]   # empty: higher up
     for label in ("firstReplied", "longReplied", "afterError", "afterStop", "readingEarlier"):
         composer = run[label]["composer"]
         assert abs(composer["bottom"] - base["bottom"]) <= 1 and abs(composer["top"] - base["top"]) <= 1, label
@@ -1905,12 +1913,14 @@ def test_short_portrait_cta_shows_focused_composer_and_reachable_cards(size, red
             assert samples[-6:] == [samples[-1]] * 6
             if reduced:
                 assert samples[0] == samples[-1], samples
-            # Every card remains reachable within the independent chat scroller.
+            # Every card remains reachable inside the workspace, below the composer.
             for index, (title, prompt) in enumerate(zip(TASK_LABELS, EXAMPLE_PROMPTS)):
                 box = page.eval(f"""const ix = window.__ix, card = ix.doc().querySelectorAll('.hint')[{index}];
                   card.scrollIntoView({{block: 'nearest', behavior: 'instant'}});
                   await ix.wait(100); return ix.childRect(card);""")
-                assert after["conversation"]["top"] <= box["top"] and box["bottom"] <= after["conversation"]["bottom"], box
+                # Phones list the examples after the composer, inside the frame.
+                assert after["frame"]["top"] <= box["top"] and box["bottom"] <= after["frame"]["bottom"], box
+                assert box["top"] >= after["composer"]["bottom"], (box, after["composer"])
                 assert box["width"] >= 44 and box["height"] >= 44
                 page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
                 card_state = page.eval(state_js)
@@ -2090,3 +2100,98 @@ def test_erase_control_follows_the_motion_preference(erase_control):
         assert set(parts) == {"0s"}, duration
     else:
         assert any(part != "0s" for part in parts), duration
+
+
+# ---- Phones: the CTA, the chat's starting order and the opaque header ---------------------------
+# The CTA lands the workspace below the sticky header with the chat's whole
+# heading in view and focuses the composer -- only then, never on load, and
+# without a second scroll. The empty state reads heading, composer, then the
+# compact examples, in the DOM as on screen. The header is opaque.
+
+PHONE_CTA_STATE = r"""const ix = window.__ix, d = ix.doc(), h = document.querySelector('.site-header');
+  const title = d.querySelector('.empty-title'), shell = d.getElementById('composer-shell');
+  const label = d.querySelector('.starter-label'), hints = [...d.querySelectorAll('.hint')];
+  const after = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const focusables = [...d.querySelectorAll('textarea, button:not([disabled]), a[href]')]
+    .filter(e => e.getClientRects().length);
+  const hs = getComputedStyle(h);
+  return { ...ix.focusState(), scrollY: Math.round(scrollY), innerWidth, innerHeight,
+    header: ix.rect(h), title: ix.childRect(title), composer: ix.childRect(shell),
+    hints: hints.map(e => ix.childRect(e)), frame: ix.rect(ix.frame()), card: ix.rect(ix.card()),
+    labelText: label ? label.textContent.trim() : null, labelShown: !!label && label.getClientRects().length > 0,
+    domOrder: after(title, shell) && hints.every(e => after(shell, e)),
+    tabOrder: focusables.indexOf(d.getElementById('composer-input')) < focusables.indexOf(hints[0]),
+    headerBackground: hs.backgroundColor, headerBackdrop: hs.backdropFilter,
+    docScrollWidth: document.documentElement.scrollWidth,
+    childScrollWidth: d.documentElement.scrollWidth, childInnerWidth: ix.frame().contentWindow.innerWidth };"""
+
+
+@pytest.mark.parametrize("size", [(320, 640), (390, 844)], ids=["320x640", "390x844"])
+@pytest.mark.parametrize("variant", ["motion", "reduced-motion", "safe-area"])
+def test_phone_cta_shows_the_whole_chat_heading_below_the_header(size, variant, tmp_path_factory):
+    browser = require_browser_and_build()
+    profile = tmp_path_factory.mktemp(f"edge-phone-cta-{size[0]}-{variant}")
+    site = Site()
+    with site.http:
+        with browser_page(browser, profile, size, True, reduced_motion=variant == "reduced-motion") as (dt, session):
+            page = Page(dt, session)
+            dt.call("Page.navigate", {"url": site.http.origin + "/"}, session)
+            deadline = time.monotonic() + 10
+            while not page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
+                return !!f?.contentDocument?.getElementById('composer-input');"""):
+                assert time.monotonic() < deadline, "the real chat composer did not load"
+                time.sleep(0.05)
+            page.eval(HELPERS.replace("\ntrue\n", "") + "return true;")
+            if variant == "safe-area":
+                # A notched phone in standalone mode: the header grows by the top
+                # inset (here 47px) and every offset follows the same token.
+                page.eval("document.querySelector('.site-shell').style.setProperty('--k-header-h', "
+                          "'calc(64px + 47px)'); return true;")
+            time.sleep(0.4)
+            loaded = page.eval(PHONE_CTA_STATE)
+            cta = page.eval("return window.__ix.rect(document.querySelector('[data-testid=\"button-start-session\"]'));")
+            page.click(cta["left"] + cta["width"] / 2, cta["top"] + cta["height"] / 2)
+            samples = page.eval("return await window.__ix.sample(1800, 40);")
+            landed = page.eval(PHONE_CTA_STATE)
+            time.sleep(0.6)
+            settled = page.eval(PHONE_CTA_STATE)
+
+    # Nothing is focused or scrolled merely because the page loaded.
+    assert loaded["scrollY"] == 0 and not (loaded["parentActive"] and loaded["childActive"]), loaded
+    # The opaque header: nothing behind it can show through, blur or not.
+    assert loaded["headerBackground"] == "rgb(255, 255, 255)", loaded["headerBackground"]
+    if variant == "safe-area":
+        assert loaded["header"]["height"] == 64 + 47
+    # Heading, composer, then the compact examples -- in the DOM, the tab order and on screen.
+    assert loaded["domOrder"] and loaded["tabOrder"], loaded
+    assert loaded["labelShown"] and loaded["labelText"] == "Or start with an example"
+    assert loaded["title"]["bottom"] <= loaded["composer"]["top"]
+    assert all(h["top"] >= loaded["composer"]["bottom"] for h in loaded["hints"]), loaded["hints"]
+    assert len(loaded["hints"]) == 4 and all(h["height"] >= 44 for h in loaded["hints"])
+    # The CTA: settled, the whole heading below the header, composer in view and focused.
+    assert samples[-6:] == [samples[-1]] * 6, samples
+    if variant == "reduced-motion":
+        assert samples[0] == samples[-1], samples[:5]
+    for state in (landed, settled):
+        assert state["parentActive"] and state["childActive"], state
+        assert state["title"]["top"] >= state["header"]["bottom"] + 8, (state["title"], state["header"])
+        assert state["composer"]["bottom"] <= state["innerHeight"], state["composer"]
+        assert abs(state["card"]["top"] - (state["header"]["bottom"] + GAP_BELOW_HEADER)) <= 1, state["card"]
+        assert state["docScrollWidth"] <= state["innerWidth"]
+        assert state["childScrollWidth"] <= state["childInnerWidth"]
+    # Focusing the composer caused no second scroll.
+    assert settled["scrollY"] == landed["scrollY"] == samples[-1]
+    assert not any("/api/" in path for path in site.http.paths)
+
+
+def test_header_offset_and_cta_landing_share_one_css_token():
+    css = SITE_CSS.read_text(encoding="utf-8")
+    app = APP_TSX.read_text(encoding="utf-8")
+    assert ".site-shell { --k-header-h: calc(72px + env(safe-area-inset-top, 0px)); }" in css
+    assert ".site-shell { --k-header-h: calc(64px + env(safe-area-inset-top, 0px)); }" in css
+    assert "height: var(--k-header-h); padding-top: env(safe-area-inset-top, 0px);" in css
+    assert "scroll-margin-top: calc(var(--k-header-h) + 16px);" in css
+    header = css[css.index(".site-header { position: sticky;"):]
+    header = header[: header.index("}")]
+    assert "background: #fff;" in header and "backdrop-filter" not in header
+    assert "parseFloat(getComputedStyle(slot).scrollMarginTop)" in app
