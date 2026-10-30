@@ -2,7 +2,8 @@
 # fixes: the router and response-structure tests, the continuation, resend and
 # revision tests, the chat frontend's browser tests (including syntax
 # highlighting) and the built homepage's browser tests (including the Chromium
-# mobile touch-emulation scroll test).
+# mobile touch-emulation scroll test), and the default-off account pages
+# against a fake same-origin account API.
 #
 # Chromium touch emulation is not real Android Chrome; real-device Android
 # verification remains a separate manual acceptance test.
@@ -117,11 +118,12 @@ jobs:
           tests/test_homepage_handoff.py
           tests/test_homepage_interaction.py
           tests/test_public_identity.py
+          tests/test_account_ui.py
           -v -rA -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/code-structure-frontend-verification.xml"
 
       # A green run must mean every focused test executed: exactly the
-      # expected number collected (1345, from `pytest --collect-only` over the
+      # expected number collected (1431, from `pytest --collect-only` over the
       # files above), none failed or errored, and no skip except
       # the homepage tests' own per-viewport skips. A missing browser, site
       # build or git history fails the run instead of skipping.
@@ -147,6 +149,6 @@ jobs:
                       unexpected.append(f"{case.get('classname')}::{case.get('name')}: {reason.strip()}")
           for line in unexpected:
               print("unexpected skip:", line)
-          if totals["tests"] != 1345 or totals["failures"] or totals["errors"] or unexpected:
+          if totals["tests"] != 1431 or totals["failures"] or totals["errors"] or unexpected:
               sys.exit("the focused verification did not run completely")
           PY

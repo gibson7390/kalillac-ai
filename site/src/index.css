@@ -1,4 +1,7 @@
 @import 'tailwindcss';
+/* Account pages ship their own lazily loaded stylesheet and use no utilities,
+   so they add nothing to the site-wide CSS. */
+@source not "./account";
 
 @custom-variant dark (&:is(.dark *));
 

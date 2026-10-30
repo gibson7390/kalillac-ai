@@ -1,0 +1,199 @@
+/* Account pages. Loaded only with the account routes, and scoped to them: the
+   homepage, Privacy and Terms never request this file, and every rule below
+   sits under .acct or .account-shell.
+
+   One calm account surface on a soft field: the task owns most of the width,
+   a short route-specific note sits in a tinted column inside the same surface
+   (below the task on small screens). Kalillac's navy type, one blue primary
+   action, hairline #e1e9f5 rules, 10px controls, teal only for a confirmed
+   result. Every state carries a written title and its own marker shape, so
+   none depends on color alone. */
+
+/* The account shell fills the viewport so a short page never shows a strip
+   below the footer. */
+.account-shell { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; background: #f6f8fc; }
+.account-shell > main { flex: 1 0 auto; }
+.acct { --acct-line: #e1e9f5; --acct-ink: #0b1737; --acct-soft: #43536e; --acct-muted: #5a6883;
+        padding: 40px 0 56px; background: #f6f8fc; }
+.acct-frame { width: min(960px, calc(100% - 80px)); margin-inline: auto; }
+
+.acct-surface { display: grid; grid-template-columns: minmax(0, 1fr) 300px; overflow: hidden;
+                background: #fff; border: 1px solid var(--acct-line); border-radius: 18px;
+                box-shadow: 0 1px 2px rgba(17, 39, 68, .04), 0 14px 36px rgba(17, 39, 68, .06); }
+.acct-primary { min-width: 0; padding: 44px 52px 48px; }
+.acct-title { margin: 12px 0 0; color: var(--k-navy); font-size: clamp(30px, 2.7vw, 38px); font-weight: 800;
+              line-height: 1.08; letter-spacing: -.04em; text-wrap: balance; }
+.acct-title:focus { outline: none; }
+.acct-lede { max-width: 46ch; margin: 12px 0 0; color: var(--acct-soft); font-size: 15px; line-height: 1.6; }
+.acct-body { max-width: 520px; margin-top: 30px; }
+
+/* Route note: one short statement, not a disclaimer list. */
+.acct-aside { min-width: 0; padding: 48px 32px; background: #f8fafd; border-left: 1px solid var(--acct-line); }
+.acct-aside h2 { margin: 0; color: #182a4d; font-size: 13px; font-weight: 750; letter-spacing: .01em; }
+.acct-aside h2::before { content: ''; display: block; width: 22px; height: 2px; margin-bottom: 14px; background: #0069ff; }
+.acct-aside p { margin: 8px 0 0; color: var(--acct-muted); font-size: 13.5px; line-height: 1.6; }
+
+/* --- forms --------------------------------------------------------------------- */
+.acct-form { display: grid; gap: 0; }
+.acct-label-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; }
+.acct-field label { color: #142440; font-size: 14px; font-weight: 700; }
+.acct-hint { color: var(--acct-muted); font-size: 13px; }
+.acct-input { position: relative; margin-top: 8px; }
+.acct-input input { display: block; width: 100%; min-height: 50px; padding: 12px 15px; border: 1px solid #cdd8ea;
+                    border-radius: 10px; background: #fcfdff; color: var(--acct-ink); font-size: 16px; line-height: 1.4;
+                    transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease; }
+.acct-input-password input { padding-right: 86px; }
+.acct-input input:hover { border-color: #a9bcdc; }
+.acct-input input:focus { outline: none; border-color: #0069ff; background: #fff; box-shadow: 0 0 0 3px #0069ff26; }
+.acct-input input[aria-invalid='true'] { border-color: #c4314b; background: #fff; }
+.acct-input input[aria-invalid='true']:focus { box-shadow: 0 0 0 3px #c4314b24; }
+.acct-reveal { position: absolute; top: 3px; right: 3px; bottom: 3px; min-width: 66px; padding: 0 14px; border: 0;
+               border-left: 1px solid #e4ebf6; border-radius: 0 8px 8px 0; background: transparent; color: #0057d5;
+               font-size: 13px; font-weight: 700; cursor: pointer; transition: background-color .15s ease; }
+.acct-reveal:hover { background: #f0f6ff; }
+.acct-reveal:active { background: #e4efff; }
+.site-shell .acct-reveal:focus-visible { outline-offset: -3px; }
+/* A reserved line keeps the form from moving when an error appears. */
+.acct-error { min-height: 20px; margin: 6px 0 12px; color: #b42339; font-size: 13px; font-weight: 600; line-height: 1.45; }
+.acct-error:not(:empty) { animation: acct-error-in .14s ease-out; }
+.acct-error:not(:empty)::before { content: '!'; display: inline-grid; place-items: center; width: 15px; height: 15px;
+                                  margin-right: 7px; border-radius: 50%; background: #b42339; color: #fff;
+                                  font-size: 11px; font-weight: 800; vertical-align: 1px; }
+@keyframes acct-error-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* --- actions --------------------------------------------------------------------- */
+.acct-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; margin-top: 6px; }
+.acct-actions-form { margin-top: 8px; }
+.acct-button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+               min-height: 48px; padding: 12px 22px; border: 1px solid transparent; border-radius: 10px;
+               font-size: 15px; font-weight: 700; line-height: 1.2; text-decoration: none; cursor: pointer;
+               transition: background-color .15s ease, border-color .15s ease, color .15s ease, transform .12s ease; }
+.acct-button:active { transform: translateY(1px); }
+.acct-button-primary { background: var(--k-blue); color: #fff; box-shadow: 0 1px 2px #0b356f24; }
+.acct-button-primary:hover { background: #0054d9; }
+.acct-button-primary:active { background: #0049bd; }
+.acct-button-secondary { background: #fff; border-color: #c9d5e9; color: #123063; }
+.acct-button-secondary:hover { border-color: #8faad6; background: #f5f8ff; }
+.acct-button-secondary:active { background: #edf3ff; }
+.acct-button-compact { min-height: 44px; padding: 10px 16px; font-size: 14px; }
+.acct-button[aria-disabled='true'] { cursor: progress; transform: none; }
+.acct-button-primary[aria-disabled='true'] { background: #2f7cf0; }
+.acct-spinner { width: 14px; height: 14px; flex: none; border: 2px solid currentColor; border-right-color: transparent;
+                border-radius: 50%; opacity: .85; animation: acct-spin .7s linear infinite; }
+@keyframes acct-spin { to { transform: rotate(360deg); } }
+
+.acct-link { display: inline-flex; align-items: center; min-height: 44px; color: #0057d5; font-size: 14px; font-weight: 650;
+             text-decoration: underline; text-decoration-color: #0057d545; text-underline-offset: 4px;
+             transition: text-decoration-color .15s ease; }
+.acct-link:hover { text-decoration-color: currentColor; }
+.acct-notice .acct-link, .acct-alternatives .acct-link { min-height: 0; }
+.acct-text-button { min-height: 44px; padding: 0; border: 0; background: none; color: #0057d5; font: inherit; font-weight: 650;
+                    text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+
+.acct-alternatives { display: grid; gap: 2px; margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--acct-line);
+                     color: var(--acct-soft); font-size: 14px; }
+.acct-alternatives p { margin: 0; line-height: 44px; }
+.acct-link-quiet { color: var(--acct-muted); font-weight: 600; }
+
+/* --- notices and whole-page states ------------------------------------------------- */
+/* The legal pages' ruled callout. Every notice carries a written title. */
+.acct-notice { margin: 0 0 22px; padding: 13px 16px 14px; border: 1px solid #d9e4f6; border-left: 3px solid #0069ff;
+               border-radius: 0 10px 10px 0; background: #f4f8ff; color: #33445f; font-size: 14px; line-height: 1.55; }
+.acct-notice-title { margin: 0; color: #102a5c; font-weight: 750; }
+.acct-notice-body { margin-top: 3px; }
+.acct-notice-error { border-color: #f0ccd3; border-left-color: #c4314b; background: #fff7f8; }
+.acct-notice-error .acct-notice-title { color: #8f1d30; }
+.acct-notice-success { border-color: #c4e6e3; border-left-color: #008c8d; background: #f2fbfa; }
+.acct-notice-success .acct-notice-title { color: #035f60; }
+.acct-section .acct-notice { margin: 16px 0 0; }
+
+.acct-state { max-width: 50ch; color: var(--acct-soft); font-size: 15px; line-height: 1.6; }
+.acct [tabindex='-1']:focus { outline: none; }
+.acct-state p { margin: 0 0 12px; }
+.acct-state .acct-actions { margin-top: 22px; }
+.acct-state-title { display: flex; align-items: baseline; gap: 12px; color: var(--acct-ink) !important;
+                    font-size: 19px; font-weight: 750; letter-spacing: -.015em; }
+/* Marker shapes: success a filled teal dot, information an outlined ring,
+   a problem a short bar. Each sits beside a written title. */
+.acct-state-title::before { content: ''; flex: none; width: 10px; height: 10px; border-radius: 50%; transform: translateY(-1px); }
+.acct-state-success .acct-state-title::before { background: #008c8d; }
+.acct-state-info .acct-state-title::before { border: 2px solid #0069ff; width: 8px; height: 8px; }
+.acct-state-problem .acct-state-title::before { width: 12px; height: 3px; border-radius: 2px; background: #b42339; transform: translateY(-4px); }
+.acct-state-unavailable { padding-top: 2px; }
+.acct-quiet { display: flex; align-items: center; gap: 10px; min-height: 48px; margin: 0; color: var(--acct-muted); font-size: 15px; }
+.acct-quiet .acct-spinner { color: #0069ff; }
+
+/* --- overview ------------------------------------------------------------------------ */
+.acct-overview { display: grid; }
+.acct-identity { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 24px;
+                 padding: 20px 22px; border: 1px solid var(--acct-line); border-radius: 12px; background: #fafcff; }
+.acct-identity-main { min-width: 0; }
+.acct-identity-email { margin: 0; color: var(--acct-ink); font-size: 18px; font-weight: 700; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.acct-identity-meta { margin: 4px 0 0; color: var(--acct-muted); font-size: 13.5px; }
+.acct-plan { display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 7px 12px; border: 1px solid #d3deef;
+             border-radius: 8px; background: #fff; color: #23365a; font-size: 13.5px; font-weight: 700; white-space: nowrap; }
+.acct-plan::before { content: ''; width: 8px; height: 8px; border-radius: 50%; border: 2px solid #8296b8; }
+.acct-identity[data-tier='paid'] .acct-plan { border-color: #0b1737; background: #0b1737; color: #fff; }
+.acct-identity[data-tier='paid'] .acct-plan::before { border-color: #6fe3d3; background: #6fe3d3; }
+.acct-identity:not([data-tier]) .acct-plan::before { display: none; }
+
+.acct-section { padding: 24px 0; border-bottom: 1px solid var(--acct-line); }
+.acct-section:last-child { border-bottom: 0; padding-bottom: 0; }
+.acct-section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; }
+.acct-section-title { margin: 0; color: #101d3c; font-size: 15px; font-weight: 750; letter-spacing: -.01em; }
+.acct-section > .acct-section-title { margin-bottom: 8px; }
+.acct-section-value { color: var(--acct-ink); font-size: 15px; }
+.acct-section-text { max-width: 54ch; margin: 0 0 14px; color: var(--acct-soft); font-size: 14px; line-height: 1.6; }
+.acct-section .acct-actions { margin-top: 4px; }
+.acct-row-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.acct-verified { display: inline-flex; align-items: center; gap: 8px; color: #035f60; font-weight: 700; }
+.acct-verified::before { content: '\2713'; color: #007a7b; font-weight: 800; }
+.acct-unverified { color: var(--acct-soft); }
+.acct-quiet-inline { color: var(--acct-muted); }
+.acct-inline-problem { color: #8f1d30; font-size: 14px; }
+
+/* --- account-route footer (public pages keep theirs) ------------------------------------ */
+.account-shell .site-footer { padding: 14px 0 18px; background: #f6f8fc; border-top: 1px solid #e6edf8; }
+.account-shell .footer-brand .brand-logo { width: 132px; }
+.account-shell .footer-bottom { padding-top: 4px; }
+
+/* --- responsive ------------------------------------------------------------------------- */
+@media (max-width: 1100px) {
+  .acct-frame { width: calc(100% - 56px); }
+  .acct-primary { padding: 40px 40px 44px; }
+}
+@media (max-width: 899px) {
+  .acct-surface { grid-template-columns: minmax(0, 1fr); }
+  .acct-body { max-width: none; }
+  .acct-aside { padding: 22px 40px 26px; border-left: 0; border-top: 1px solid var(--acct-line); }
+  .acct-aside h2::before { display: none; }
+}
+@media (max-width: 720px) {
+  .acct { padding: 18px 0 28px; }
+  .acct-frame { width: calc(100% - 24px); }
+  .acct-surface { border-radius: 14px; }
+  .acct-primary { padding: 26px 20px 28px; }
+  .acct-aside { padding: 18px 20px 20px; }
+  .acct-aside p { font-size: 13px; }
+  .acct-body { margin-top: 24px; }
+  .acct-actions-form .acct-button, .acct-state .acct-button, .acct-section .acct-actions .acct-button { flex: 1 1 auto; }
+  .acct-identity { padding: 16px; }
+  .account-shell .site-footer { padding: 10px 0 14px; }
+  .account-shell .footer-brand p { display: none; }
+  .account-shell .footer-links { display: flex; flex-wrap: wrap; gap: 0 18px; }
+  .account-shell .footer-bottom span { margin-top: 2px; }
+}
+@media (max-width: 350px) {
+  /* All five links on one line; each keeps its 44px target. */
+  .account-shell .footer-links { gap: 0 10px; font-size: 11.5px; }
+  .acct-frame { width: calc(100% - 16px); }
+  .acct-primary { padding: 22px 16px 24px; }
+  .acct-aside { padding: 16px; }
+  .acct-title { font-size: 27px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .acct-input input, .acct-button, .acct-reveal, .acct-link { transition: none; }
+  .acct-button:active { transform: none; }
+  .acct-spinner { animation: none; border-right-color: currentColor; opacity: .5; }
+  .acct-error:not(:empty) { animation: none; }
+}

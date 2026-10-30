@@ -1,9 +1,14 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
 import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
 import { updatePublicMetadata } from '@/public-identity';
+import { isAccountPath, updateAccountMetadata } from '@/account/account-routes';
+
+// Account pages load only on /account routes: the homepage, Privacy and Terms
+// never request their code or styles.
+const AccountPages = lazy(() => import('@/account/account-pages'));
 
 const brandLogoUrl = '/assets/kalillac-ai-logo.png';
 
@@ -374,15 +379,31 @@ function FramedNotice() {
   return <main className="not-found"><p>This page cannot be displayed inside another page.</p></main>;
 }
 
+function AccountShell() {
+  return (
+    <div className="site-shell account-shell">
+      <SiteHeader />
+      <Suspense fallback={<main className="account-loading" aria-busy="true" style={{ minHeight: '60vh' }} />}>
+        <AccountPages />
+      </Suspense>
+      <SiteFooter />
+    </div>
+  );
+}
+
 function Router() {
   const [location] = useLocation();
-  useEffect(() => { updatePublicMetadata(location); }, [location]);
+  const isAccount = isAccountPath(location);
+  useEffect(() => {
+    if (isAccount) updateAccountMetadata(location);
+    else updatePublicMetadata(location);
+  }, [location, isAccount]);
 
   const isHome = location === '/';
 
   return (
     <ErrorBoundary resetKey={location}>
-      {isHome ? <HomePage /> : (
+      {isHome ? <HomePage /> : isAccount ? <AccountShell /> : (
         <Switch>
           <Route path="/privacy" component={PrivacyPage} />
           <Route path="/terms" component={TermsPage} />

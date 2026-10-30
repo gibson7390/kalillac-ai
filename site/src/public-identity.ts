@@ -28,6 +28,8 @@ export function updatePublicMetadata(path: string) {
   document.title = page.title;
   document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.setAttribute('href', page.url);
   for (const [selector, value] of [
+    // Restores indexing after a noindex account page in the same tab.
+    ['meta[name="robots"]', 'index, follow'],
     ['meta[property="og:url"]', page.url],
     ['meta[name="description"]', page.description],
     ['meta[property="og:title"]', page.title],

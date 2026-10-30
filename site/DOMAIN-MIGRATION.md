@@ -59,6 +59,13 @@ public routes:
 These mappings must expose the generated canonical and social crawler metadata in the
 initial HTML response, without relying on client-side JavaScript.
 
+Account pages are not public routes: they are noindex, absent from the sitemap and not
+linked from the homepage. The build emits one flat, noindex /account.html entry for
+them. Only when accounts are activated after a separate review, the server should serve
+/account.html for /account and for every path under /account/, without redirects or
+trailing-slash rewrites. Credentials reach those pages only in the URL fragment, which
+browsers never send to the server.
+
 Preserve every server-owned favicon, icon, web manifest and verification asset listed
 in deployment-preserve-live-assets.txt. Deploy the build-owned robots.txt and sitemap.xml
 from the new build; their formerly preserved server copies must not override the new files.
