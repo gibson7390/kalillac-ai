@@ -35,8 +35,13 @@ def test_metadata_uses_private_schema():
 
 def test_only_approved_account_tables_exist():
     # Account identity, entitlement tier, aggregate daily usage, and Stripe
-    # billing linkage are approved; saved chats and memory are not.
+    # billing linkage are approved. Conversation content and memory are
+    # approved only as default-off Spaces (account-owned Spaces, their
+    # conversations and completed messages); nothing else stores either.
     assert set(Base.metadata.tables) == {
+        "kalillac.spaces",
+        "kalillac.conversations",
+        "kalillac.messages",
         "kalillac.users",
         "kalillac.account_sessions",
         "kalillac.account_recovery_tokens",

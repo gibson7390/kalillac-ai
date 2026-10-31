@@ -122,6 +122,18 @@ class UsageQuota:
             release_slot(session, admission.reservation)
         return self._transaction(operation)
 
+    # In-transaction settlement, for a caller that delivers by committing
+    # (a saved Space exchange): the charge is written in the caller's own
+    # transaction, so it is durable exactly when what it pays for is. The
+    # caller takes the account lock first, before its other row locks.
+    def lock_for_settlement(self, session, admission):
+        lock_account(session, admission.user_id)
+
+    def settle_in_transaction(self, session, admission):
+        now = self._now(session)
+        complete_slot(session, admission.reservation, now, self._limit(session, admission.user_id, now))
+        return record_sent_slot(session, admission.reservation)
+
 
 class QuotaRequest:
     """Only existing account identity, lease, counts and cancellation state.

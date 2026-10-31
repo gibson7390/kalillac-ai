@@ -2,11 +2,15 @@
 
 Account identity, sign-in sessions, per-account entitlement tier, aggregate
 daily usage counters, Stripe billing linkage, and processed-webhook ids
-exist. Saved chats and persistent memory are intentionally deferred until
-their product/privacy designs are approved.
+exist. Spaces (default-off) add account-owned Spaces, their conversations
+and completed messages. Persistent memory is intentionally deferred until
+its product/privacy design is approved.
 """
 
 from .account_billing import AccountBilling
+from .conversation import Conversation
+from .message import Message
+from .space import Space
 from .account_entitlement import AccountEntitlement
 from .account_session import AccountSession
 from .account_email_verification_token import AccountEmailVerificationToken
@@ -31,6 +35,9 @@ __all__ = [
     "AnonymousUsageSlot",
     "ProviderUsagePool",
     "Base",
+    "Conversation",
+    "Message",
+    "Space",
     "StripeWebhookEvent",
     "User",
 ]

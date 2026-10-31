@@ -306,8 +306,12 @@ def test_logout_without_session_is_idempotent(client):
 
 def test_account_schema_holds_identity_only():
     billing_tables = {"kalillac.account_billing", "kalillac.stripe_webhook_events"}
+    # Spaces (default-off) are the one deliberate store of conversation
+    # content: account-owned Spaces, their conversations and completed
+    # messages. Every other table keeps the original identity-only rules below.
+    spaces_tables = {"kalillac.spaces", "kalillac.conversations", "kalillac.messages"}
 
-    assert set(Base.metadata.tables) == {
+    assert set(Base.metadata.tables) - spaces_tables == {
         "kalillac.users",
         "kalillac.account_sessions",
         "kalillac.account_recovery_tokens",
@@ -338,11 +342,14 @@ def test_account_schema_holds_identity_only():
     ):
         assert not any(forbidden in column for column in columns), forbidden
 
-    # Nothing anywhere stores conversation content or memory.
+    assert spaces_tables <= set(Base.metadata.tables)
+
+    # Nothing outside Spaces stores conversation content or memory.
     # (Aggregate counters such as successful_chats are numbers, not content.)
     all_columns = {
         column.name
-        for table in Base.metadata.tables.values()
+        for name, table in Base.metadata.tables.items()
+        if name not in spaces_tables
         for column in table.columns
     }
 
@@ -402,9 +409,17 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "anonymous_usage_slots",
         "account_billing",
         "stripe_webhook_events",
+        # Default-off Spaces tables exist in the schema...
+        "spaces",
+        "conversations",
+        "messages",
     }
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
+    # ...and registering, signing in and reading /me put nothing in them.
+    from kalillac_db.models import Conversation, Message, Space
+    for model in (Space, Conversation, Message):
+        assert _count(db, model) == 0, model.__tablename__
     from kalillac_db.models import AccountUsageSlot, AnonymousUsageDay, AnonymousUsageSlot
     assert _count(db, AccountUsageSlot) == 0
     # Registering and signing in never creates anonymous allowance rows.

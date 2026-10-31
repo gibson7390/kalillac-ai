@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0009_account_email_verification"
+HEAD = "0010_spaces"
 CHAIN = (
+    "0010_spaces",
     "0009_account_email_verification",
     "0008_account_recovery_tokens",
     "0007_anonymous_usage",
