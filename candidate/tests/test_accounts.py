@@ -579,6 +579,7 @@ def test_enabled_accounts_mount_routes_without_connecting():
     # so an unreachable host is fine at import time.
     result = _import_app_with(
         {
+            "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
             "KALILLAC_ACCOUNTS_ENABLED": "true",
             "KALILLAC_DB_ENABLED": "true",
             "KALILLAC_DATABASE_URL": (

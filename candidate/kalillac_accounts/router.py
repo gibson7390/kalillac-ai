@@ -150,10 +150,21 @@ async def _read_credentials(request: Request) -> tuple[str, str] | JSONResponse:
     if not content_type.lower().startswith("application/json"):
         return _error(415, "json_required")
 
-    raw = await request.body()
+    # An honest Content-Length over the limit is refused before any body is
+    # read. A missing or dishonest one is caught while streaming: each chunk
+    # is checked before it is kept, so no more than the limit is buffered.
+    # A malformed Content-Length is ignored here, as it always was.
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isascii() and declared.isdigit():
+        significant = declared.lstrip("0") or "0"
+        if len(significant) > len(str(MAX_BODY_BYTES)) or int(significant) > MAX_BODY_BYTES:
+            return _error(413, "body_too_large")
 
-    if len(raw) > MAX_BODY_BYTES:
-        return _error(413, "body_too_large")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_BODY_BYTES:
+            return _error(413, "body_too_large")
+        raw.extend(chunk)
 
     try:
         body = json.loads(raw)

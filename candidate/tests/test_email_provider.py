@@ -107,6 +107,7 @@ def test_endpoint_is_not_configurable():
 # --- application startup wiring (subprocesses, network forbidden) ------------------------
 
 RECOVERY_ENV = {
+    "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
     "KALILLAC_ACCOUNTS_ENABLED": "true",
     "KALILLAC_DB_ENABLED": "true",
     "KALILLAC_ACCOUNT_RECOVERY_URL": "https://kalillac.ai/reset",

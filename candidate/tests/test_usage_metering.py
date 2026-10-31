@@ -210,6 +210,7 @@ def _import_app_with(env_overrides):
 
 
 DB_ENV = {
+    "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
     "KALILLAC_DB_ENABLED": "true",
     "KALILLAC_DATABASE_URL": (
         "postgresql+psycopg://user:pw@unreachable.invalid/kalillac"

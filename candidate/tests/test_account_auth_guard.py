@@ -87,15 +87,17 @@ def test_expired_revoked_and_inactive_sessions_resolve_to_nobody(world):
 
 @pytest.mark.parametrize("request_headers", [
     {"origin": ORIGIN},
-    {"sec-fetch-site": "same-origin"},
-    {"sec-fetch-site": " Same-Origin "},
+    {"Origin": ORIGIN},
+    {"ORIGIN": ORIGIN},
 ])
 def test_same_origin_requests_pass(request_headers):
     require_same_origin(request_headers, ORIGIN)
 
 
 @pytest.mark.parametrize("request_headers", [
-    {},                                                  # no Origin, no Fetch metadata
+    {},
+    {"sec-fetch-site": "same-origin"},
+    {"sec-fetch-site": " Same-Origin "},
     {"origin": ORIGIN + "/"},
     {"origin": ORIGIN.replace("https", "http")},
     {"origin": ORIGIN + ":444"},

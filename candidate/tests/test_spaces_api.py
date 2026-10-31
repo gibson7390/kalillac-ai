@@ -291,10 +291,10 @@ def test_cross_origin_mutations_are_refused(api, world, extra_headers, status, c
     assert world.count(Space) == 1 and world.count(Conversation) == 0
 
 
-def test_same_origin_fetch_without_origin_header_is_accepted(api):
+def test_fetch_metadata_without_origin_header_is_rejected(api):
     response = api.post("/api/spaces", json={"name": "No Origin"},
                         headers=headers("a", origin=None, **{"Sec-Fetch-Site": "same-origin"}))
-    assert response.status_code == 201
+    assert (response.status_code, response.json()) == (403, {"error": "origin_rejected"})
 
 
 @pytest.mark.parametrize("content_type,raw,status,code", [

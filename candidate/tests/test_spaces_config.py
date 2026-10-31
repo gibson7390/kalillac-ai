@@ -197,10 +197,10 @@ def test_default_startup_has_no_spaces_at_all():
     }
 
 
-def test_flag_off_with_every_prerequisite_on_installs_nothing_and_reads_no_spaces_setting():
-    # Malformed Spaces settings are never read while the flag is off.
+def test_flag_off_with_every_prerequisite_on_ignores_spaces_only_settings():
+    # The allowlist remains Spaces-only; the canonical Origin is now shared.
     facts = started({**FULL, "KALILLAC_SPACES_ENABLED": "false",
-                     "KALILLAC_SPACES_BETA_ACCOUNT_IDS": "person@example.com", "KALILLAC_SITE_ORIGIN": "nonsense"})
+                     "KALILLAC_SPACES_BETA_ACCOUNT_IDS": "person@example.com"})
     assert facts["spaces_paths"] == [] and facts["imported"] == []
     assert facts["chat"] is True and facts["engine"] is False and facts["outbound"] == 0
     assert facts["runtime_mentions_spaces"] is False

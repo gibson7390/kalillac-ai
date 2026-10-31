@@ -388,6 +388,7 @@ def _run_app_with(env_overrides, extra_code=""):
 
 
 ACCOUNT_ENV = {
+    "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
     "KALILLAC_ACCOUNTS_ENABLED": "true",
     "KALILLAC_DB_ENABLED": "true",
     "KALILLAC_DATABASE_URL": (

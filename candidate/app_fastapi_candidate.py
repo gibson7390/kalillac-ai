@@ -15686,3 +15686,16 @@ if os.getenv("KALILLAC_SPACES_ENABLED", "").strip().lower() in {
             ),
         )
     )
+
+
+# Query and raw Origin validation precede authentication and body reads on
+# the explicit unsafe account/billing/Spaces inventory. Accounts remain
+# default-off; when enabled they require a configured canonical Origin.
+# This last-added middleware wraps all installed routers. Free Chat, safe
+# routes and the signed Stripe webhook pass through untouched.
+if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    from kalillac_accounts.request_guard import UnsafeRequestGuard, load_guard_origin
+
+    api.add_middleware(UnsafeRequestGuard, origin=load_guard_origin())

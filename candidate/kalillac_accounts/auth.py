@@ -4,11 +4,9 @@ The account id always comes from the authenticated cookie session
 (get_signed_in_user). Nothing here accepts an account id from a request
 body, query string or path.
 
-Unsafe (state-changing) cookie-authenticated requests must be same-origin:
-an Origin header equal to the configured site origin, or, when a browser
-omits Origin, Sec-Fetch-Site: same-origin. A JSON body is required and read
-incrementally up to a byte cap, so an oversized body is refused without
-buffering it. These checks are pure and do no database work.
+Unsafe requests require exactly one raw Origin field equal to the configured
+site origin. The application guard checks it before authentication; the
+Spaces body helpers use the same predicate. JSON body contracts stay local.
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from kalillac_db.repositories.accounts import get_signed_in_user
 
+from .request_guard import has_canonical_origin
 from .tokens import hash_session_token
 
 
@@ -67,15 +66,13 @@ def resolve_account(session: Session, token_hash: str, now: datetime) -> AuthCon
 
 
 def require_same_origin(headers: Any, allowed_origin: str) -> None:
-    """Raise RequestRejected(403, origin_rejected) unless the request is
-    same-origin. A present Origin must match exactly; without Origin only
-    Sec-Fetch-Site: same-origin is accepted."""
-    origin = headers.get("origin")
-    if origin is not None:
-        if origin != allowed_origin:
-            raise RequestRejected(403, "origin_rejected")
-        return
-    if (headers.get("sec-fetch-site") or "").strip().lower() != "same-origin":
+    """Use the guard's raw, case-insensitive field count and exact value rule."""
+    raw = getattr(headers, "raw", None)
+    if raw is None:
+        # Mapping inputs are useful for callers without an ASGI Request.
+        raw = [(name.encode("latin-1"), value.encode("latin-1"))
+               for name, value in headers.items()]
+    if not has_canonical_origin(raw, allowed_origin.encode("ascii")):
         raise RequestRejected(403, "origin_rejected")
 
 

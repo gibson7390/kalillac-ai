@@ -720,6 +720,7 @@ def test_startup_feature_gate_is_lazy_and_explicit(enabled):
     import os, subprocess, sys
     env = dict(os.environ)
     env.update({
+        "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
         "KALILLAC_USAGE_ENFORCEMENT_ENABLED": "true" if enabled else "false",
         "KALILLAC_ACCOUNTS_ENABLED": "true" if enabled else "false",
         "KALILLAC_DB_ENABLED": "true" if enabled else "false",
