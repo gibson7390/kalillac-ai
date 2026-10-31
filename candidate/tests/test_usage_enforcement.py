@@ -557,25 +557,62 @@ def test_lease_expiring_in_queue_never_starts_provider(foundation, monkeypatch):
         assert finish.wait(3)
         return SimpleNamespace(content=REPLY, incomplete=False, incomplete_reason=None)
     monkeypatch.setattr(app, "invoke_llm", model)
+    # Both requests must share one session the server recognizes, so the
+    # second can only run after the first: it queues behind the first
+    # request's session lock. An unregistered id would be replaced by a fresh
+    # id per request, and the two would run concurrently.
+    sid = app.new_session_id()
+    app.get_session_state_by_id(sid)
+    assert app.resolve_session_id(sid) == sid
+    # The second request takes its session-lock reference only after its
+    # reservation is committed, then waits for the lock with no further
+    # await in between; this event marks that moment deterministically.
+    queued = asyncio.Event()
+    lock_ref = app._session_lock_ref
+    def observe_lock_ref(key):
+        entry = lock_ref(key)
+        if key == sid and entry.refs == 2:
+            queued.set()
+        return entry
+    monkeypatch.setattr(app, "_session_lock_ref", observe_lock_ref)
+    def slots():
+        with foundation["factory"]() as session:
+            return [(row.state, row.completed_date) for row in session.scalars(select(AccountUsageSlot))]
     async def scenario():
-        sid = app.resolve_session_id(None)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.api), base_url="https://testserver") as client:
             first = asyncio.create_task(client.post("/api/chat", json={"message": MESSAGE, "session_id": sid}))
             second = None
             try:
                 assert await asyncio.to_thread(entered.wait, 3)
+                entry = app._session_locks[sid]
+                assert entry.lock.locked() and entry.refs == 1
                 second = asyncio.create_task(client.post("/api/chat", json={"message": MESSAGE, "session_id": sid}, headers={"Cookie": SETTINGS.cookie_name + "=" + TOKEN}))
-                for _ in range(100):
-                    with foundation["factory"]() as session:
-                        if session.scalar(select(AccountUsageSlot.state)) == "pending": break
-                    await asyncio.sleep(0.01)
-                else: pytest.fail("queued reservation not admitted")
-                foundation["now"] += timedelta(seconds=2)
+                await asyncio.wait_for(queued.wait(), 3)
+                # Queued: a pending reservation, waiting behind the first
+                # request's held session lock, and no second provider call.
+                assert slots() == [("pending", None)]
+                assert app._session_locks[sid] is entry and entry.lock.locked() and entry.refs == 2
+                assert app._chat_waiting == 1
+                assert foundation["calls"] == ["legacy"]
+                foundation["now"] += timedelta(seconds=2)       # beyond the second request's 1 s lease
             finally: finish.set()
             assert (await first).status_code == 200
             assert (await second).status_code == 503
     asyncio.run(scenario())
-    assert foundation["calls"] == ["legacy"]
+    assert foundation["calls"] == ["legacy"]                    # the second request never entered the provider
+    assert sid not in app._session_locks and app._chat_waiting == 0
+    # Fail-closed: the expired lease was never charged. Its release is a
+    # background cleanup that may or may not have run yet, so it is either
+    # still pending (expired) or released -- and lazy expiry, as the next
+    # reservation would run it, releases it with nothing charged or held.
+    from kalillac_db.repositories.quota import capacity_breakdown, expire_pending
+    assert slots() in ([("pending", None)], [("released", None)])
+    day = NOW.date()
+    with foundation["factory"]() as session, session.begin():
+        assert capacity_breakdown(session, foundation["user_id"], day)[0] == 0
+        expire_pending(session, foundation["user_id"], day, foundation["now"])
+        assert capacity_breakdown(session, foundation["user_id"], day) == (0, 0)
+    assert slots() == [("released", None)]
 
 
 
