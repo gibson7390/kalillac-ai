@@ -85,6 +85,11 @@ class RecoveryService:
         finally:
             token = link = None
 
+    def prevalidate_reset(self, token):
+        """Non-consuming precheck only; the final locked transaction remains authoritative."""
+        with self.transaction() as session:
+            repository.validate_token(session, hash_recovery_token(token), self._clock())
+
     def confirm_reset(self, token, password_hash):
         with self.transaction() as session:
             email = repository.confirm_token(

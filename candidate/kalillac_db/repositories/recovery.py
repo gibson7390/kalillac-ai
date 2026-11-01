@@ -44,6 +44,23 @@ def issue_token(session, user_id, token_hash, now):
     return row.id
 
 
+def validate_token(session, token_hash, now):
+    """Read-only, non-reserving password-work eligibility check."""
+    eligible = session.scalar(
+        select(AccountRecoveryToken.id)
+        .join(User, User.id == AccountRecoveryToken.user_id)
+        .where(
+            AccountRecoveryToken.token_hash == token_hash,
+            AccountRecoveryToken.purpose == PURPOSE,
+            AccountRecoveryToken.consumed_at.is_(None),
+            AccountRecoveryToken.expires_at > now,
+            User.is_active.is_(True),
+        )
+    )
+    if eligible is None:
+        raise InvalidRecoveryToken()
+
+
 def confirm_token(session, token_hash, password_hash, clock):
     user_id = session.scalar(
         select(AccountRecoveryToken.user_id).where(AccountRecoveryToken.token_hash == token_hash)

@@ -304,6 +304,7 @@ def check_rejection_and_expiry(ctx):
         else:
             raise AssertionError()
     assert ctx.snapshot(user_id) == before
+    check_route_prevalidation(ctx)
 
 
 def race(ctx, different):
@@ -323,10 +324,12 @@ def race(ctx, different):
 
 def check_same_token_race(ctx):
     race(ctx, False)
+    route_race(ctx, False)
 
 
 def check_two_token_race(ctx):
     race(ctx, True)
+    route_race(ctx, True)
 
 
 def check_expiry_after_lock(ctx):
@@ -353,6 +356,8 @@ def check_account_lock_isolation(ctx):
     with held_account(ctx, locked):
         worker = ctx.start(lambda: ctx.service().confirm_reset(token, password_hash))
         assert "error" not in ctx.finish(worker)
+    if ctx.engine.dialect.name == "postgresql":
+        check_singleton_authority(ctx)
 
 
 def check_transaction_timeouts(ctx):
@@ -490,6 +495,386 @@ def check_constraints_and_cascade(ctx):
         session.execute(delete(User).where(User.id == user_id))
     with ctx.factory() as session:
         assert session.scalar(select(func.count()).select_from(AccountRecoveryToken).where(AccountRecoveryToken.user_id == user_id)) == 0
+
+
+
+def route_application(ctx, gate, gateway, clock=lambda: NOW):
+    from fastapi import FastAPI
+    from kalillac_accounts.recovery_router import build_recovery_router
+    from kalillac_accounts.request_guard import UnsafeRequestGuard
+    app = FastAPI()
+    environ = {
+        "KALILLAC_ACCOUNT_RECOVERY_ENABLED": "true", "KALILLAC_ACCOUNTS_ENABLED": "true",
+        "KALILLAC_DB_ENABLED": "true", "KALILLAC_ACCOUNT_RECOVERY_URL": CONFIG.recovery_url,
+        "KALILLAC_EMAIL_FROM": CONFIG.email_from,
+    }
+    app.include_router(build_recovery_router(
+        session_factory=lambda: ctx.factory, gateway=gateway, environ=environ,
+        clock=clock, password_gate=gate,
+    ))
+    app.add_middleware(UnsafeRequestGuard, origin="https://recovery.invalid")
+    return app
+
+
+def check_route_prevalidation(ctx):
+    """Runtime-role HTTP path: rejected credentials cannot reach Argon2."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import event
+    import kalillac_accounts.recovery_router as router
+    from kalillac_accounts.password_work import PasswordWorkGate
+    from kalillac_db.models import AccountEmailVerificationToken
+    import hashlib
+    calls, active = [], set()
+    real_hash = router.hash_password
+    def forbidden(password):
+        calls.append(True)
+        raise AssertionError("unexpected password work")
+    def begin(connection):
+        active.add(id(connection))
+    def end(connection):
+        active.discard(id(connection))
+    class CheckedGate(PasswordWorkGate):
+        async def run(self, *args, **kwargs):
+            assert not active
+            return await super().run(*args, **kwargs)
+    event.listen(ctx.engine, "begin", begin)
+    event.listen(ctx.engine, "commit", end)
+    event.listen(ctx.engine, "rollback", end)
+    router.hash_password = forbidden
+    try:
+        for kind in ("malformed", "unknown", "expired", "consumed", "reissued",
+                     "wrong-purpose", "missing-account", "inactive"):
+            user_id, email = ctx.user(active=kind != "inactive")
+            token = ctx.token(user_id, expires=NOW if kind == "expired" else NOW + timedelta(minutes=30),
+                              consumed=NOW if kind == "consumed" else None)
+            if kind == "malformed":
+                token = "bad"
+            elif kind == "unknown":
+                token = new_recovery_token()
+            elif kind == "reissued":
+                ctx.service().request_reset(email)
+            elif kind == "wrong-purpose":
+                token = new_recovery_token()
+                with ctx.factory() as session, session.begin():
+                    session.add(AccountEmailVerificationToken(
+                        user_id=user_id, email_hash=hashlib.sha256(email.encode()).hexdigest(),
+                        token_hash=hash_recovery_token(token), created_at=NOW,
+                        expires_at=NOW + timedelta(minutes=30),
+                    ))
+            elif kind == "missing-account":
+                with ctx.factory() as session, session.begin():
+                    session.execute(delete(User).where(User.id == user_id))
+            before = ctx.snapshot(user_id)
+            gateway = Gateway()
+            with TestClient(route_application(ctx, CheckedGate(), gateway),
+                            base_url="https://recovery.invalid") as client:
+                response = client.post("/api/account/recovery/confirm",
+                    headers={"Origin": "https://recovery.invalid"},
+                    json={"token": token, "password": NEW_PASSWORD})
+            assert response.status_code == 400
+            assert response.json() == {"error": "invalid_or_expired_token"}
+            assert calls == [] and ctx.snapshot(user_id) == before and gateway.changed == []
+        # Move state at an explicit post-precheck barrier. The final locked
+        # transaction must reject it even though hashing was admitted.
+        for change in ("expiry", "consumed", "reissued", "inactive"):
+            user_id, _ = ctx.user()
+            token = ctx.token(user_id)
+            clock = [NOW]
+            captured = []
+            value = real_hash(NEW_PASSWORD)
+            def counted(password):
+                assert not active
+                calls.append(True)
+                return value
+            router.hash_password = counted
+            class ChangingGate(PasswordWorkGate):
+                async def run(self, *args, **kwargs):
+                    assert not active
+                    with ctx.factory() as session, session.begin():
+                        if change == "expiry":
+                            clock[0] = NOW + timedelta(minutes=30)
+                        elif change == "consumed":
+                            session.execute(update(AccountRecoveryToken).where(
+                                AccountRecoveryToken.user_id == user_id).values(consumed_at=NOW))
+                        elif change == "reissued":
+                            repository.lock_user(session, user_id)
+                            repository.issue_token(session, user_id, hash_recovery_token(new_recovery_token()), NOW)
+                        else:
+                            session.execute(update(User).where(User.id == user_id).values(is_active=False))
+                    captured.append(ctx.snapshot(user_id))
+                    return await super().run(*args, **kwargs)
+            gateway = Gateway()
+            previous = len(calls)
+            with TestClient(route_application(ctx, ChangingGate(), gateway, clock=lambda: clock[0]),
+                            base_url="https://recovery.invalid") as client:
+                response = client.post("/api/account/recovery/confirm",
+                    headers={"Origin": "https://recovery.invalid"},
+                    json={"token": token, "password": NEW_PASSWORD})
+            assert response.status_code == 400 and len(calls) == previous + 1
+            assert ctx.snapshot(user_id) == captured[0] and gateway.changed == []
+        assert not active
+    finally:
+        router.hash_password = real_hash
+        event.remove(ctx.engine, "begin", begin)
+        event.remove(ctx.engine, "commit", end)
+        event.remove(ctx.engine, "rollback", end)
+
+
+def route_race(ctx, different):
+    """Separate HTTP event loops, both prechecked before either hash starts."""
+    from fastapi.testclient import TestClient
+    from starlette.concurrency import run_in_threadpool
+    from kalillac_accounts.password_work import PasswordWorkGate
+    user_id, _ = ctx.user()
+    first = ctx.token(user_id)
+    second = ctx.token(user_id) if different else first
+    barrier = threading.Barrier(2)
+    class BarrierGate(PasswordWorkGate):
+        async def run(self, *args, **kwargs):
+            await run_in_threadpool(barrier.wait, WAIT_SECONDS)
+            return await super().run(*args, **kwargs)
+    gateway = Gateway()
+    app = route_application(ctx, BarrierGate(), gateway)
+    def request(token):
+        with TestClient(app, base_url="https://recovery.invalid") as client:
+            return client.post("/api/account/recovery/confirm",
+                headers={"Origin": "https://recovery.invalid"},
+                json={"token": token, "password": NEW_PASSWORD}).status_code
+    workers = [ctx.start(lambda token=token: request(token)) for token in (first, second)]
+    boxes = [ctx.finish(worker) for worker in workers]
+    assert all("error" not in box for box in boxes)
+    assert sorted(box["value"] for box in boxes) == [200, 400]
+    assert len(gateway.changed) == 1
+
+
+def check_singleton_authority(ctx):
+    from types import SimpleNamespace
+    from kalillac_server import DatabaseSingleton, SingletonHeld, SingletonMonitor
+    identity = "slice2-" + ctx.run_id
+    first = DatabaseSingleton(ctx.engine, identity)
+    duplicate = DatabaseSingleton(ctx.engine, identity)
+    staging = DatabaseSingleton(ctx.engine, identity + "-staging")
+    first.acquire()
+    try:
+        first.check()
+        try:
+            duplicate.acquire()
+        except SingletonHeld:
+            pass
+        else:
+            raise AssertionError()
+        staging.acquire()
+        staging.check()
+        staging.close()
+        with ctx.engine.connect() as connection:
+            assert connection.execute(text("SELECT pg_terminate_backend(:pid)"),
+                                      {"pid": first._pid}).scalar()
+        server = SimpleNamespace(should_exit=False)
+        monitor = SingletonMonitor(first, server)
+        monitor.check_once()
+        assert monitor.lost and server.should_exit
+    finally:
+        first.close()
+        duplicate.close()
+        staging.close()
+    duplicate.acquire()
+    duplicate.check()
+    duplicate.close()
+    check_launcher_crash_rollback(ctx)
+
+LAUNCHER_CHILD = Path(__file__).resolve().parents[1] / "tests/launcher_child_support.py"
+
+
+class LauncherVerificationChild:
+    """Bounded stdlib harness shared by the real PostgreSQL CI check."""
+    def __init__(self, directory, identity, environ):
+        import json
+        import queue
+        import subprocess
+        self.events, self.pending = [], []
+        self.queue = queue.Queue()
+        self.process = subprocess.Popen(
+            [sys.executable, "-B", str(LAUNCHER_CHILD), "rollback", str(directory), identity],
+            cwd=LAUNCHER_CHILD.parents[1], env=environ, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        def read():
+            for line in self.process.stdout:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                self.events.append(event)
+                self.queue.put(event)
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
+
+    def event(self, name):
+        for index, event in enumerate(self.pending):
+            if event.get("event") == name:
+                return self.pending.pop(index)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            event = self.queue.get(timeout=max(0.01, deadline - time.monotonic()))
+            if event.get("event") == name:
+                return event
+            self.pending.append(event)
+        raise TimeoutError("launcher event missing")
+
+    def command(self, value):
+        self.process.stdin.write(value + "\n")
+        self.process.stdin.flush()
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=8)
+        self.reader.join(timeout=8)
+        assert not self.reader.is_alive()
+        self.process.stdin.close()
+        self.process.stdout.close()
+
+
+def check_launcher_crash_rollback(ctx):
+    """Real child crash, separate application transaction, independent proof.
+
+    A parent-owned large object is isolated test state: no application rows,
+    schema changes, grants or migration-role privileges are needed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import tempfile
+    from urllib.request import ProxyHandler, build_opener
+    from kalillac_server import DatabaseSingleton, lock_key
+
+    tag = uuid.uuid4().hex
+    identity = "rollback-" + tag
+    key = lock_key("rollback-transaction-" + tag)
+    assert key != lock_key(identity)
+    env = dict(os.environ)
+    env.update({
+        "KALILLAC_DB_HOST": HOST, "KALILLAC_DB_PORT": str(ctx.engine.url.port),
+        "KALILLAC_DB_NAME": REQUIRED_DATABASE, "KALILLAC_DB_USER": REQUIRED_ROLE,
+        "KALILLAC_DB_PASSWORD": ctx.engine.url.password,
+        "SLICE2_CHILD_REAL_PG": "1", "SLICE2_ROLLBACK_TAG": tag,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    child = replacement = None
+    oid = app_pid = None
+    evidence = {"tag": tag, "lock_key": key}
+    try:
+        with ctx.engine.begin() as connection:
+            oid = connection.execute(text("SELECT lo_create(0)")).scalar_one()
+            assert connection.execute(text("SELECT lo_get(:oid)"), {"oid": oid}).scalar_one() == b""
+        env["SLICE2_ROLLBACK_OID"] = str(oid)
+        with tempfile.TemporaryDirectory(prefix="kalillac-pg-rollback-") as directory:
+            child = LauncherVerificationChild(directory, identity, env)
+            singleton_pid = child.event("held")["pid"]
+            port = child.event("ready")["port"]
+            def request():
+                try:
+                    with build_opener(ProxyHandler({})).open(
+                            f"http://127.0.0.1:{port}/", timeout=15) as response:
+                        return response.status
+                except Exception:
+                    return "disconnected"
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                response = pool.submit(request)
+                try:
+                    active = child.event("transaction")
+                    app_pid = active["pid"]
+                    assert active == {"event": "transaction", "pid": app_pid,
+                        "singleton_pid": singleton_pid, "oid": oid, "tag": tag, "lock_key": key}
+                    assert app_pid != singleton_pid
+                    with ctx.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                        row = connection.execute(text(
+                            "SELECT datname, usename, application_name, state "
+                            "FROM pg_stat_activity WHERE pid=:pid"), {"pid": app_pid}).one()
+                        assert tuple(row) == (REQUIRED_DATABASE, REQUIRED_ROLE,
+                                             "slice2-rollback-" + tag, "idle in transaction")
+                        assert connection.execute(text("SELECT lo_get(:oid)"),
+                                                  {"oid": oid}).scalar_one() == b""
+                        assert connection.execute(text("SELECT pg_try_advisory_xact_lock(:key)"),
+                                                  {"key": key}).scalar_one() is False
+                        assert connection.execute(text(
+                            "SELECT usename, application_name FROM pg_stat_activity WHERE pid=:pid"),
+                            {"pid": singleton_pid}).one() == (REQUIRED_ROLE, "kalillac-recovery-verify")
+                        assert connection.execute(text("SELECT pg_terminate_backend(:pid)"),
+                                                  {"pid": singleton_pid}).scalar_one()
+                    evidence.update(application_pid=app_pid, singleton_pid=singleton_pid,
+                                    oid=oid, separate_application_transaction=True,
+                                    uncommitted_write_observed_by_child=True,
+                                    parent_saw_original_value_before_crash=True,
+                                    parent_lock_attempt_blocked_before_crash=True)
+                    child.command("FAIL")
+                    fatal = child.event("fatal")
+                    child.event("lost")
+                    replacement = DatabaseSingleton(ctx.engine, identity)
+                    replacement.acquire()
+                    replacement.check()
+                    assert child.process.poll() is None
+                    status = child.process.wait(timeout=5)
+                    assert status != 0
+                    assert time.monotonic() - fatal["expires_at"] < 1.0
+                    assert response.result(timeout=5) == "disconnected"
+                    replacement.check()
+                    with ctx.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                        deadline = time.monotonic() + 5
+                        while True:
+                            exists = connection.execute(text(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=:pid)"),
+                                {"pid": app_pid}).scalar_one()
+                            if not exists:
+                                break
+                            if time.monotonic() >= deadline:
+                                raise AssertionError("application backend survived crash")
+                            threading.Event().wait(min(0.05, deadline - time.monotonic()))
+                        assert connection.execute(text("SELECT lo_get(:oid)"),
+                                                  {"oid": oid}).scalar_one() == b""
+                    replacement.check()
+                    with ctx.engine.begin() as connection:
+                        assert connection.execute(text("SELECT pg_try_advisory_xact_lock(:key)"),
+                                                  {"key": key}).scalar_one()
+                        connection.execute(text("SELECT lo_put(:oid, 0, :value)"),
+                                           {"oid": oid, "value": b"post-crash-transaction"})
+                    replacement.check()
+                    with ctx.engine.connect() as connection:
+                        assert connection.execute(text("SELECT lo_get(:oid)"),
+                            {"oid": oid}).scalar_one() == b"post-crash-transaction"
+                    replacement.check()
+                    evidence.update(exit_code=status, application_backend_disappeared=True,
+                        tagged_uncommitted_write_absent=True, transaction_lock_released=True,
+                        new_transaction_committed=True, replacement_healthy_through_checks=True,
+                        fatal_deadline_seconds=2.0, child_events=child.events)
+                finally:
+                    # Close before executor shutdown, including readiness/assertion failures.
+                    child.close()
+    finally:
+        if child is not None:
+            child.close()
+        if replacement is not None:
+            replacement.close()
+        # Clean only our uniquely named application backend and our own LO.
+        # Termination is a failure-cleanup fallback, never rollback proof.
+        with ctx.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            pids = list(connection.execute(text(
+                "SELECT pid FROM pg_stat_activity WHERE usename=current_user "
+                "AND application_name=:name"), {"name": "slice2-rollback-" + tag}).scalars())
+            for pid in pids:
+                connection.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            if oid is not None:
+                assert connection.execute(text(
+                    "SELECT lomowner=current_user::regrole::oid FROM pg_largeobject_metadata WHERE oid=:oid"),
+                    {"oid": oid}).scalar_one()
+                assert connection.execute(text("SELECT lo_unlink(:oid)"), {"oid": oid}).scalar_one() == 1
+                assert not connection.execute(text(
+                    "SELECT EXISTS(SELECT 1 FROM pg_largeobject_metadata WHERE oid=:oid)"),
+                    {"oid": oid}).scalar_one()
+    evidence["isolated_state_cleaned"] = True
+    ctx.launcher_rollback_evidence = evidence
+    print("PASS launcher_crash_application_backend_gone")
+    print("PASS launcher_crash_uncommitted_write_absent")
+    print("PASS launcher_crash_lock_released_and_new_transaction_committed")
+    print("PASS launcher_crash_replacement_ownership_preserved")
 
 
 CHECKS = (

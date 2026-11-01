@@ -12,6 +12,7 @@ from kalillac_db.engine import get_session_factory
 from kalillac_db.repositories.recovery import InvalidRecoveryToken
 
 from .passwords import hash_password, password_length_ok
+from .password_work import PASSWORD_WORK_GATE, PasswordWorkBusy
 from .rate_limit import client_identifier
 from .recovery import RecoveryService, utc_now
 from .recovery_config import load_recovery_config
@@ -62,7 +63,7 @@ async def _read_body(request, fields):
 
 def build_recovery_router(
     *, session_factory=get_session_factory, gateway=None, settings=None,
-    limiter=None, clock=utc_now, environ=None,
+    limiter=None, clock=utc_now, environ=None, password_gate=None,
 ):
     """No routes while off; when on, validate all prerequisites before mounting."""
     config = load_recovery_config(gateway, environ)
@@ -72,6 +73,7 @@ def build_recovery_router(
     settings = settings or load_account_settings()
     limiter = limiter if limiter is not None else RecoveryRateLimiter()
     service = RecoveryService(session_factory, gateway, config, clock)
+    password_gate = password_gate if password_gate is not None else PASSWORD_WORK_GATE
 
     def client(request):
         return client_identifier(
@@ -118,13 +120,16 @@ def build_recovery_router(
                 return _response(422, "invalid_password")
             if not password_length_ok(password):
                 return _response(422, "password_length")
-            # Expensive Argon2 work is outside every database transaction.
-            password_hash = await run_in_threadpool(hash_password, password)
             try:
+                # This read-only transaction ends before gate waiting/hashing.
+                await run_in_threadpool(service.prevalidate_reset, token)
+                password_hash = await password_gate.run(hash_password, password)
                 await run_in_threadpool(service.confirm_reset, token, password_hash)
             except InvalidRecoveryToken:
                 invalid = True
                 return _response(400, "invalid_or_expired_token")
+            except PasswordWorkBusy:
+                return _response(503, "busy")
             response = _response()
             # A reset never signs in, even if the browser presented an invalid cookie.
             response.delete_cookie(

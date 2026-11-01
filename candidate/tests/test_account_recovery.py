@@ -296,6 +296,10 @@ def test_password_hashing_is_outside_database_transaction(db, client, gateway, m
     @event.listens_for(db.kw["bind"], "begin")
     def began(connection):
         active[0] = True
+    @event.listens_for(db.kw["bind"], "commit")
+    @event.listens_for(db.kw["bind"], "rollback")
+    def ended(connection):
+        active[0] = False
     original = router.hash_password
     def checked(password):
         assert not active[0]

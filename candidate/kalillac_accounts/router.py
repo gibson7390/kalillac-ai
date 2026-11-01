@@ -55,6 +55,8 @@ from .rate_limit import (
     trust_cloudflare_client_ip,
 )
 from .tokens import hash_session_token, new_session_token
+from .password_work import PASSWORD_WORK_GATE, PasswordWorkBusy
+from .registration_rate_limit import RegistrationRateLimiter
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -192,6 +194,8 @@ def build_account_router(
     ),
     settings: AccountSettings | None = None,
     limiter: LoginRateLimiter | None = None,
+    registration_limiter: RegistrationRateLimiter | None = None,
+    password_gate=None,
 ) -> APIRouter:
     """Build the /api/account router.
 
@@ -202,6 +206,8 @@ def build_account_router(
 
     settings = settings or load_account_settings()
     limiter = limiter or LoginRateLimiter()
+    registration_limiter = registration_limiter if registration_limiter is not None else RegistrationRateLimiter()
+    password_gate = password_gate if password_gate is not None else PASSWORD_WORK_GATE
     router = APIRouter(prefix="/api/account")
 
     def run_in_transaction(work: Callable[[Session], Any]) -> Any:
@@ -249,8 +255,21 @@ def build_account_router(
         if not password_length_ok(password):
             return _error(422, "password_length")
 
-        # Hash outside the transaction; Argon2 is deliberately slow.
-        password_hash = await run_in_threadpool(hash_password, password)
+        decision, attempt = registration_limiter.begin(client_identifier(
+            request.client.host if request.client else None, request.headers,
+            settings.trust_cloudflare_client_ip,
+        ))
+        if not decision.allowed:
+            response = _error(429, "too_many_attempts")
+            response.headers["Retry-After"] = str(decision.retry_after_seconds)
+            return response
+        try:
+            # No transaction while waiting/hashing. Charge at actual worker start.
+            password_hash = await password_gate.run(hash_password, password, on_start=attempt.charge)
+        except PasswordWorkBusy:
+            return _error(503, "busy")
+        finally:
+            attempt.release()
 
         def work(session: Session) -> dict[str, Any]:
             # One transaction: the user and its free entitlement are created
@@ -341,7 +360,12 @@ def build_account_router(
             return _user_json(user)
 
         try:
-            payload = await run_in_threadpool(run_in_transaction, work)
+            # One admission covers verification and optional rehash, without
+            # recursively acquiring the permit. Wait before opening the transaction.
+            payload = await password_gate.run(run_in_transaction, work)
+        except PasswordWorkBusy:
+            limiter.release(limit_keys)
+            return _error(503, "busy")
         except BaseException:
             # A server-side error is not a failed guess; free the slot.
             limiter.release(limit_keys)
