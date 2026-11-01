@@ -119,6 +119,34 @@ jobs:
               sys.exit("the subscription foundation verification did not run completely")
           PY
 
+      # These explicit modules also cover real launcher subprocesses using
+      # host-file ownership, loopback sockets and SQLite; no PostgreSQL needed.
+      - name: Run the Slice 2 password-work and launcher regressions
+        working-directory: candidate
+        run: >-
+          python -m pytest
+          tests/test_password_work.py
+          tests/test_password_work_routes.py
+          tests/test_registration_rate_limit.py
+          tests/test_kalillac_server.py
+          -v -rA -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/slice-2-security.xml"
+
+      # Actual collect-only result for the four explicit modules: 106 tests.
+      # No skip is expected, including for launcher subprocess coverage.
+      - name: Require every Slice 2 security test to have run
+        run: |
+          python - "$RUNNER_TEMP/slice-2-security.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          if totals != {"tests": 106, "skipped": 0, "failures": 0, "errors": 0}:
+              sys.exit("the Slice 2 security verification did not run completely")
+          PY
+
   billing-postgres:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
