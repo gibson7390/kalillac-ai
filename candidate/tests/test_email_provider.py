@@ -119,6 +119,7 @@ def forbidden(*args, **kwargs):
     raise SystemExit("PROVIDER_CONTACTED")
 httpx.Client.send = forbidden
 httpx.HTTPTransport.handle_request = forbidden
+import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();
 import app_fastapi_candidate as app
 def walk(routes):
     # FastAPI 0.139 keeps included routers as nested _IncludedRouter entries.

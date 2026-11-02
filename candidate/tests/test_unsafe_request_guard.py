@@ -791,6 +791,9 @@ def _run_app(env_overrides: dict, script: str) -> subprocess.CompletedProcess:
         " if host not in (None,'localhost','127.0.0.1','::1'): attempts.append(host); raise OSError('blocked')\n"
         " return _gai(host,*a,**k)\n"
         "socket.getaddrinfo=_g\n"
+        # AR7/AR8 now require a real schema probe even with V2 off. Supply a
+        # synthetic unactivated schema, rather than bypassing that probe.
+        "import os,sys,uuid\nif os.getenv('KALILLAC_ACCOUNTS_ENABLED','').lower() in ('true','1','yes','on'):\n sys.path.insert(0,'tests')\n from account_test_db import make_sqlite_engine,make_session_factory\n from kalillac_db.models import Base,AccountRegistrationActivation\n import kalillac_db.engine as db\n fixture_engine=make_sqlite_engine();Base.metadata.create_all(fixture_engine)\n fixture_factory=make_session_factory(fixture_engine)\n with fixture_factory.begin() as fixture_session:\n  fixture_session.add(AccountRegistrationActivation(singleton_id=1,database_instance_id=uuid.uuid4(),state='unactivated',policy_version=1))\n db.get_session_factory=lambda:fixture_factory\n"
     )
     return subprocess.run([sys.executable, "-c", guard + script], cwd=CANDIDATE_DIR, env=env,
                           capture_output=True, text=True, timeout=120)

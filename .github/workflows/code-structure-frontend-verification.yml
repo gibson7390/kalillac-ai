@@ -152,3 +152,51 @@ jobs:
           if totals["tests"] != 1447 or totals["failures"] or totals["errors"] or unexpected:
               sys.exit("the focused verification did not run completely")
           PY
+
+
+      # Backend authority is exercised against both default and flag-on builds.
+      - name: Verify backend authority with the default frontend build
+        working-directory: candidate
+        env:
+          KALILLAC_REGISTRATION_UI_DIST: ../site/dist/public
+        run: >-
+          python -m pytest tests/test_registration_ui.py
+          -k backend_contract_overrides_frontend_build_mode
+          -q -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/registration-default-contract.xml"
+
+      - name: Require both default-build contract mismatch cases
+        run: |
+          python - "$RUNNER_TEMP/registration-default-contract.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          assert totals == {"tests": 2, "skipped": 0, "failures": 0, "errors": 0}
+          PY
+
+      - name: Build the separate V2 registration browser fixture
+        working-directory: site
+        env:
+          VITE_ACCOUNT_REGISTRATION_V2_ENABLED: "true"
+        run: npm run build -- --outDir "$RUNNER_TEMP/registration-v2-site"
+
+      - name: Run the V2 registration browser contracts
+        working-directory: candidate
+        env:
+          KALILLAC_REGISTRATION_UI_DIST: ${{ runner.temp }}/registration-v2-site
+        run: >-
+          python -m pytest tests/test_registration_ui.py
+          -q -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/registration-browser.xml"
+
+      - name: Require every V2 registration browser test
+        run: |
+          python - "$RUNNER_TEMP/registration-browser.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 46, "skipped": 0, "failures": 0, "errors": 0}
+          PY

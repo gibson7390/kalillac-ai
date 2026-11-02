@@ -85,12 +85,16 @@ INVENTORY: tuple[GuardedRoute, ...] = (
     _route("POST", "/api/spaces/{space_id}/conversations/{conversation_id}/messages", "spaces"),
 )
 
+REGISTRATION_INVENTORY = (
+    _route("POST", "/api/account/register/confirm", "account"),
+)
+
 # Server-to-server and authenticated by Stripe's signature over the raw body.
 EXEMPT: tuple[tuple[str, str], ...] = (("POST", "/api/billing/stripe/webhook"),)
 
 
 def guarded_route(method: str, path: str) -> GuardedRoute | None:
-    for route in INVENTORY:
+    for route in INVENTORY + REGISTRATION_INVENTORY:
         if route.method == method and route.pattern.fullmatch(path):
             return route
     return None

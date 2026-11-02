@@ -100,12 +100,12 @@ function failure(response: Response, json: unknown): ApiError {
     ok: false,
     status: response.status,
     code: errorCode(json),
-    retryAfter: response.status === 429 ? retryAfterSeconds(response) : null,
+    retryAfter: response.status === 429 || response.status === 503 ? retryAfterSeconds(response) : null,
   };
 }
 
 /* A request whose success is only the documented {"ok": true}. */
-async function acknowledge(method: 'POST', path: string, body?: Record<string, unknown>,
+export async function acknowledge(method: 'POST', path: string, body?: Record<string, unknown>,
                            expected = 200): Promise<ApiResult<null>> {
   const result = await request(method, path, body);
   if ('ok' in result) return result;

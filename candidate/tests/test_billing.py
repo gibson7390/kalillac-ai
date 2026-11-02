@@ -369,6 +369,7 @@ def _run_app_with(env_overrides, extra_code=""):
     script = (
         extra_code
         + "import sys;"
+        "import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();"
         "import app_fastapi_candidate as a;"
         "from fastapi.testclient import TestClient;"
         "r = TestClient(a.api, base_url='https://testserver')"

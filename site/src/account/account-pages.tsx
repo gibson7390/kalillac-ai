@@ -16,6 +16,7 @@ import { type FormEvent, type ReactNode, type RefObject, useCallback, useEffect,
 import { Link, useLocation } from 'wouter';
 import NotFound from '@/pages/not-found';
 import * as api from './account-api';
+import * as registrationApi from './registration-api';
 import { ACCOUNT_PATHS } from './account-routes';
 import './account.css';
 
@@ -43,6 +44,8 @@ const PASSWORD_MAX = 256;
 const EMAIL_MAX = 320;
 // The same check the server applies after trimming and lowercasing.
 const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// V2 mirrors the selected delivery gateway; legacy/login keep EMAIL_SHAPE.
+const V2_EMAIL_SHAPE = /^[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 // 32 random bytes in canonical unpadded URL-safe base64: 43 characters whose
 // last character carries only four meaningful bits.
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
@@ -289,15 +292,19 @@ type UnavailableFeature = 'accounts' | 'recovery' | 'verification';
 
 /* The feature is switched off on this server: the page says so in its heading
    and offers the one thing that works, instead of a form that can only fail. */
-function UnavailablePage({ feature = 'accounts', note }: { feature?: UnavailableFeature; note: Note }) {
+function UnavailablePage({ feature = 'accounts', note, retry }: { feature?: UnavailableFeature; note: Note; retry?: () => void }) {
   const title = feature === 'accounts' ? 'Accounts aren’t available here yet'
     : feature === 'recovery' ? 'Password reset isn’t available right now'
       : 'Email verification isn’t available right now';
   return (
     <AccountLayout title={title} note={note}>
-      <div className="acct-state acct-state-unavailable" data-testid="account-unavailable">
+      <div className="acct-state acct-state-unavailable" data-testid="account-unavailable" role={retry ? 'alert' : undefined}>
         <p>Kalillac works without an account. Temporary chat remains available.</p>
         <div className="acct-actions"><a className="acct-button acct-button-primary" href="/#chat">Start a private session</a></div>
+        {retry && <div data-testid="registration-unavailable">
+          <p>Registration availability could not be confirmed.</p>
+          <button type="button" className="acct-button acct-button-secondary" onClick={retry}>Try again</button>
+        </div>}
       </div>
     </AccountLayout>
   );
@@ -421,7 +428,7 @@ function SignInPage() {
 
 /* --- create account ------------------------------------------------------------------------------------- */
 
-function CreateAccountPage() {
+function CreateAccountPage({ verifyContract }: { verifyContract: () => Promise<boolean> }) {
   const [, navigate] = useLocation();
   const { session, reload, setSession } = useSession();
   const [created, setCreated] = useState(false);
@@ -455,6 +462,7 @@ function CreateAccountPage() {
         focusFirstInvalid([[problems.email, emailRef], [problems.password, passwordRef], [problems.confirm, confirmRef]]);
         return;
       }
+      if (!await verifyContract()) return;
       const result = await api.register(email, password);
       if (result.ok) {
         for (const ref of [passwordRef, confirmRef]) if (ref.current) ref.current.value = '';
@@ -1043,11 +1051,198 @@ export default function AccountPages() {
   const [location] = useLocation();
   switch (location) {
     case ACCOUNT_PATHS.signIn: return <SignInPage />;
-    case ACCOUNT_PATHS.create: return <CreateAccountPage />;
+    case ACCOUNT_PATHS.create: return <AuthoritativeRegistrationPage />;
+    case ACCOUNT_PATHS.createConfirm: return <RegistrationConfirmPage />;
     case ACCOUNT_PATHS.overview: return <AccountOverviewPage />;
     case ACCOUNT_PATHS.recovery: return <RecoveryRequestPage />;
     case ACCOUNT_PATHS.recoveryConfirm: return <RecoveryConfirmPage />;
     case ACCOUNT_PATHS.verify: return <VerifyEmailPage />;
     default: return <NotFound />;
   }
+}
+
+/* Approved default-off email-first flow, using the existing account components. */
+function CreateEmailFirstPage({ verifyContract }: { verifyContract: () => Promise<boolean> }) {
+  const [sent, setSent] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [notice, setNotice] = useState<NoticeData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const emailRef = useRef<HTMLInputElement>(null);
+  const submitted = useRef('');
+  const alive = useRef(true);
+  const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
+  const [doneRef, focusDone] = useFocusOn<HTMLDivElement>();
+  const { pending, run } = usePendingGuard();
+  const send = (resend: boolean) => {
+    void run(async () => {
+      const email = resend ? submitted.current : normalizedEmail(emailRef.current?.value ?? '');
+      const problem = !email ? 'Enter your email address.' : Array.from(email).length > EMAIL_MAX || !V2_EMAIL_SHAPE.test(email) ? 'Enter an email address like name@example.com.' : null;
+      setError(problem); setNotice(null);
+      if (problem) { emailRef.current?.focus(); return; }
+      if (!await verifyContract()) return;
+      const result = await registrationApi.requestRegistration(email);
+      if (!alive.current) return;
+      if (result.ok) {
+        submitted.current = email;
+        setSent(true); focusDone(); return;
+      }
+      if (result.status === 404) { setUnavailable(true); return; }
+      if (result.status === 422 && result.code === 'invalid_email') {
+        setError('Enter an email address like name@example.com.'); emailRef.current?.focus(); return;
+      }
+      setNotice(result.status === 429
+        ? { tone: 'error', title: 'Too many requests', body: waitPhrase(result.retryAfter) }
+        : { tone: 'error', title: 'Your request could not be completed', body: 'Wait a moment, then try again.' });
+      focusNotice();
+    });
+  };
+  useEffect(() => { alive.current = true; return () => { alive.current = false; submitted.current = ''; }; }, []);
+  if (unavailable) return <UnavailablePage note={NOTE_CREATE} />;
+  return <AccountLayout title="Create an account" note={NOTE_CREATE}
+      lede="Start with your email. Choose a password after opening your account link.">
+    {notice && <Notice notice={notice} focusRef={noticeRef} />}
+    {sent ? <div className="acct-state" ref={doneRef} tabIndex={-1} data-testid="registration-check-email">
+      <p className="acct-state-title">Check your email</p>
+      <p>If an email arrives, follow its guidance. Delivery can take a few minutes; check your spam folder too.</p>
+      <p>A finish-registration link works once and expires after 24 hours. Opening it does not create an account or sign you in.</p>
+      <div className="acct-actions">
+        <button className="acct-button acct-button-secondary" type="button" disabled={pending} onClick={() => send(true)}>
+          {pending ? 'Sending request…' : 'Send again'}
+        </button>
+        <button className="acct-link" type="button" disabled={pending} onClick={() => { setSent(false); setNotice(null); submitted.current = ''; }}>Use another address</button>
+      </div>
+      <p><Link href={ACCOUNT_PATHS.signIn} className="acct-link">Sign in</Link> or <Link href={ACCOUNT_PATHS.recovery} className="acct-link">use account recovery</Link> when available.</p>
+    </div> : <form className="acct-form" noValidate aria-labelledby="acct-title" onSubmit={event => { event.preventDefault(); send(false); }}>
+      <Field id="email" label="Email" kind="email" autoComplete="email" inputRef={emailRef} error={error} />
+      <div className="acct-actions acct-actions-form"><SubmitButton pending={pending} idle="Continue with email" busy="Sending request…" /></div>
+    </form>}
+  </AccountLayout>;
+}
+
+function RegistrationConfirmPage() {
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const [stage, setStage] = useState<'form' | 'invalid' | 'done' | 'unavailable' | 'conflict'>('form');
+  const [notice, setNotice] = useState<NoticeData | null>(null);
+  const [errors, setErrors] = useState<{ password?: string | null; confirm?: string | null }>({});
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const confirmRef = useRef<HTMLInputElement>(null);
+  const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
+  const [stateRef, focusState] = useFocusOn<HTMLDivElement>();
+  const { pending, run } = usePendingGuard();
+  const { initial, credential, isCurrent } = useCredential(useCallback((next: Credential) => {
+    for (const ref of [passwordRef, confirmRef]) if (ref.current) ref.current.value = '';
+    setErrors({}); setNotice(null); setStage(next.token ? 'form' : 'invalid');
+  }, []));
+  useEffect(() => {
+    if (!initial) setStage('invalid');
+  }, [initial, credential]);
+  const authority = useRegistrationContract(Boolean(credential.current.token), 'email-first-v1');
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    void run(async () => {
+      const password = passwordRef.current?.value ?? '';
+      const confirm = confirmRef.current?.value ?? '';
+      const problems = { password: newPasswordProblem(password),
+        confirm: !confirm ? 'Enter the password again.' : confirm !== password ? 'The passwords do not match.' : null };
+      setErrors(problems); setNotice(null);
+      if (problems.password || problems.confirm) {
+        focusFirstInvalid([[problems.password, passwordRef], [problems.confirm, confirmRef]]); return;
+      }
+      const taken = credential.current;
+      if (!taken.token) { setStage('invalid'); focusState(); return; }
+      if (!await authority.verify()) return;
+      if (!alive.current || !isCurrent(taken)) return;
+      const result = await registrationApi.confirmRegistration(taken.token, password);
+      if (!alive.current || !isCurrent(taken)) return;
+      if (result.ok || result.status === 400 || result.status === 409 || result.status === 404) {
+        credential.current = { token: null, generation: taken.generation };
+        for (const ref of [passwordRef, confirmRef]) if (ref.current) ref.current.value = '';
+        setStage(result.ok ? 'done' : result.status === 409 ? 'conflict' : result.status === 404 ? 'unavailable' : 'invalid');
+        focusState(); return;
+      }
+      if (result.status === 422) { setErrors({ password: 'Use 12–256 characters.' }); passwordRef.current?.focus(); return; }
+      setNotice(result.status === 429
+        ? { tone: 'error', title: 'Too many attempts', body: waitPhrase(result.retryAfter) }
+        : result.code === 'registration_pending'
+          ? { tone: 'info', title: 'Your link is still being prepared', body: 'Wait a moment, then try again with this link.' }
+          : result.code === 'busy'
+            ? { tone: 'info', title: 'Please try again shortly', body: 'Kalillac is busy. Your link is kept here so you can try again.' }
+            : { tone: 'error', title: 'Registration is temporarily unavailable',
+                body: 'Try again with this link. If you may have completed setup, try signing in or use recovery when available.' });
+      focusNotice();
+    });
+  };
+  if (credential.current.token && stage !== 'invalid' && authority.contract !== 'email-first-v1')
+    return <RegistrationAuthorityState loading={authority.loading} retry={authority.reload} />;
+  if (stage === 'unavailable') return <UnavailablePage note={NOTE_CREATE} />;
+  return <AccountLayout title="Finish creating your account" note={NOTE_CREATE}
+      lede="Choose a password for the email address proved by your link.">
+    {stage === 'done' ? <div className="acct-state acct-state-success" ref={stateRef} tabIndex={-1} data-testid="registration-complete">
+      <p className="acct-state-title">Your account is ready.</p><p>You have not been signed in. Continue to sign in with your email and new password.</p>
+      <Link href={ACCOUNT_PATHS.signIn} className="acct-button acct-button-primary">Continue to sign in</Link>
+    </div> : stage === 'conflict' ? <div className="acct-state" ref={stateRef} tabIndex={-1}>
+      <p>This account is already registered. No new account was created by this attempt.</p>
+      <Link href={ACCOUNT_PATHS.signIn} className="acct-link">Sign in</Link>
+    </div> : stage === 'invalid' ? <div className="acct-state" ref={stateRef} tabIndex={-1} data-testid="registration-invalid">
+      <p>This link is invalid, expired, replaced or already used.</p>
+      <Link href={ACCOUNT_PATHS.create} className="acct-button acct-button-primary">Request a new link</Link>
+    </div> : <>
+      {notice && <Notice notice={notice} focusRef={noticeRef} />}
+      <form className="acct-form" noValidate aria-labelledby="acct-title" onSubmit={submit}>
+        <input type="text" name="username" autoComplete="username" hidden readOnly tabIndex={-1} aria-hidden="true" />
+        <Field id="new-password" label="Password" kind="password" autoComplete="new-password" inputRef={passwordRef} error={errors.password} hint="Use 12–256 characters." />
+        <Field id="confirm-password" label="Confirm password" kind="password" autoComplete="new-password" inputRef={confirmRef} error={errors.confirm} />
+        <div className="acct-actions acct-actions-form"><SubmitButton pending={pending} idle="Create account" busy="Creating account…" /></div>
+      </form>
+    </>}
+  </AccountLayout>;
+}
+
+/* Backend contract authority is requested on entry and again before each POST. */
+function useRegistrationContract(enabled = true, required?: registrationApi.RegistrationContract) {
+  const [contract, setContract] = useState<registrationApi.RegistrationContract | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const generation = useRef(0);
+  const alive = useRef(false);
+  const reload = useCallback(async () => {
+    const current = ++generation.current;
+    setContract(null); setLoading(true);
+    const next = await registrationApi.registrationContract();
+    if (!alive.current || current !== generation.current) return;
+    setContract(next && (!required || next === required) ? next : null);
+    setLoading(false);
+  }, [required]);
+  useEffect(() => {
+    alive.current = true;
+    if (enabled) void reload();
+    const restored = (event: PageTransitionEvent) => { if (event.persisted && enabled) void reload(); };
+    window.addEventListener('pageshow', restored);
+    return () => { alive.current = false; ++generation.current; window.removeEventListener('pageshow', restored); };
+  }, [enabled, reload]);
+  const verify = async () => {
+    const current = generation.current;
+    const next = await registrationApi.registrationContract();
+    if (!alive.current || current !== generation.current) return false;
+    if (!contract || next !== contract || (required && next !== required)) {
+      ++generation.current; setContract(null); setLoading(false); return false;
+    }
+    return true;
+  };
+  return { contract, loading, reload: () => void reload(), verify };
+}
+
+function RegistrationAuthorityState({ loading, retry }: { loading: boolean; retry: () => void }) {
+  if (!loading) return <UnavailablePage note={NOTE_CREATE} retry={retry} />;
+  return <AccountLayout title="Create an account" note={NOTE_CREATE}>
+    <Pending label="Checking registration availability..." />
+  </AccountLayout>;
+}
+
+function AuthoritativeRegistrationPage() {
+  const authority = useRegistrationContract();
+  if (!authority.contract) return <RegistrationAuthorityState loading={authority.loading} retry={authority.reload} />;
+  return authority.contract === 'legacy-v1'
+    ? <CreateAccountPage verifyContract={authority.verify} />
+    : <CreateEmailFirstPage verifyContract={authority.verify} />;
 }

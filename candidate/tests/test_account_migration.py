@@ -52,7 +52,8 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0010_spaces"]
+    assert script.get_heads() == ["0011_registration_intents"]
+    assert script.get_revision("0011_registration_intents").down_revision == "0010_spaces"
     assert script.get_revision("0010_spaces").down_revision == "0009_account_email_verification"
     assert script.get_revision("0009_account_email_verification").down_revision == "0008_account_recovery_tokens"
     assert script.get_revision("0008_account_recovery_tokens").down_revision == "0007_anonymous_usage"
@@ -129,7 +130,7 @@ def _expected_grants(role: str) -> list[str]:
     ]
 
 
-def _render_postgresql_upgrade(revision_range: str = "head") -> str:
+def _render_postgresql_upgrade(revision_range: str = "0010_spaces") -> str:
     config = _config()
     config.set_main_option(
         "sqlalchemy.url",

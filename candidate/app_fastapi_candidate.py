@@ -14201,8 +14201,31 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
         load_account_settings,
     )
 
+    from kalillac_accounts.request_guard import load_guard_origin as _early_account_origin
+    _early_account_origin()
     _account_settings = load_account_settings()
-    api.include_router(build_account_router(settings=_account_settings))
+    from kalillac_db.engine import get_session_factory as _registration_factory
+    from kalillac_accounts.registration_startup import bootstrap as _registration_bootstrap, enabled as _registration_v2
+    from kalillac_accounts.registration_startup import schema_probe as _registration_schema_probe
+    _registration_schema_probe(_registration_factory(), _registration_v2())
+    _registration_gateway = None
+    if _registration_v2():
+        from kalillac_accounts.email_provider import build_email_gateway as _registration_gateway_builder
+        _registration_gateway = _registration_gateway_builder()
+    _registration_authority = _registration_bootstrap(_registration_factory(), _registration_gateway)
+    _registration_http = None
+    if _registration_authority is not None:
+        from kalillac_accounts.registration_dispatch import RegistrationDispatcher
+        from kalillac_accounts.registration_http import RegistrationHTTP
+        _registration_dispatcher = RegistrationDispatcher(_registration_authority)
+        _registration_http = RegistrationHTTP(_registration_authority, _registration_dispatcher, _account_settings)
+        api.add_event_handler("startup", _registration_dispatcher.start)
+        async def _close_registration_dispatcher():
+            from starlette.concurrency import run_in_threadpool
+            await run_in_threadpool(_registration_dispatcher.close)
+            _registration_authority._dispose()
+        api.add_event_handler("shutdown", _close_registration_dispatcher)
+    api.include_router(build_account_router(settings=_account_settings, registration_http=_registration_http))
 
 
 # Account recovery and email verification are each default-off. While both are
@@ -14221,7 +14244,7 @@ _email_verification_enabled = os.getenv(
 if _recovery_enabled or _email_verification_enabled:
     from kalillac_accounts.email_provider import build_email_gateway
 
-    _email_gateway = build_email_gateway()
+    _email_gateway = globals().get("_registration_gateway") or build_email_gateway()
 
     if _recovery_enabled:
         from kalillac_accounts.recovery_router import build_recovery_router

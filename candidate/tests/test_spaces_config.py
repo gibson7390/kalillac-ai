@@ -75,6 +75,7 @@ def lookup(*args, **kwargs):
     raise AssertionError("network blocked")
 socket.socket.connect = connect
 socket.socket.connect_ex = socket.getaddrinfo = socket.create_connection = lookup
+import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();
 import app_fastapi_candidate as app
 from kalillac_db import engine
 from fastapi.testclient import TestClient

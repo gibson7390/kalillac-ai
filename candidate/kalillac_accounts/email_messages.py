@@ -103,3 +103,24 @@ def email_verification(link: str) -> EmailMessage:
         f"If you didn&#x27;t ask to verify an email address for {PRODUCT}, you can ignore this email.",
     ])
     return EmailMessage(subject, text, html)
+
+def registration_finish(link: str) -> EmailMessage:
+    subject = f"Finish creating your {PRODUCT} account"
+    text = (
+        f"To finish creating your {PRODUCT} account, open this link and choose a password:\n\n{link}\n\n"
+        "The link expires after 24 hours and works once. Opening it does not create an account or sign you in.\n\n"
+        "If you did not request this, you can ignore this email.\n"
+    )
+    return EmailMessage(subject, text, _html(subject, [
+        "Open this link to choose a password and finish creating your account:", _link(link),
+        "The link expires after 24 hours and works once. Opening it does not create an account or sign you in.",
+        "If you did not request this, you can ignore this email.",
+    ]))
+
+def registration_notice() -> EmailMessage:
+    subject = f"An attempted registration on {PRODUCT}"
+    text = (
+        "Someone attempted to register this email address with Kalillac. No account or credential change was made. "
+        "Visit Kalillac directly to sign in, use recovery when available, or contact support."
+    )
+    return EmailMessage(subject, text, _html(subject, [escape(text)]))

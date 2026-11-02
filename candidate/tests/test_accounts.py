@@ -313,6 +313,8 @@ def test_account_schema_holds_identity_only():
 
     assert set(Base.metadata.tables) - spaces_tables == {
         "kalillac.users",
+        "kalillac.account_registration_intents",
+        "kalillac.account_registration_activation",
         "kalillac.account_sessions",
         "kalillac.account_recovery_tokens",
         "kalillac.account_email_verification_tokens",
@@ -357,7 +359,7 @@ def test_account_schema_holds_identity_only():
         "conversation", "message", "history", "memory", "transcript",
         "prompt", "query", "content", "text", "reply", "chat_session",
     ):
-        assert not any(forbidden in column for column in all_columns), forbidden
+        assert not any(forbidden in column for column in all_columns if column != "email_ciphertext"), forbidden
 
     # The temporary chat session id is never stored. (A Stripe Checkout
     # Session id, stripe_checkout_session_id, is billing data, not chat.)
@@ -382,7 +384,7 @@ def test_account_schema_holds_identity_only():
         "card", "payment", "invoice", "amount", "cents", "currency",
         "payload", "raw", "secret", "bank", "iban", "cvc", "last4",
     ):
-        assert not any(forbidden in column for column in all_columns), forbidden
+        assert not any(forbidden in column for column in all_columns if column != "email_ciphertext"), forbidden
 
 
 def test_account_creation_creates_no_conversation_state(client, db):
@@ -398,6 +400,8 @@ def test_account_creation_creates_no_conversation_state(client, db):
 
     assert tables == {
         "users",
+        "account_registration_intents",
+        "account_registration_activation",
         "account_sessions",
         "account_recovery_tokens",
         "account_email_verification_tokens",
@@ -550,6 +554,7 @@ def _import_app_with(env_overrides, block_module=None):
 
     # /api/account/me without a cookie answers before any DB access.
     script = blocker + (
+        "import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();"
         "import app_fastapi_candidate as a;"
         "from fastapi.testclient import TestClient;"
         "r = TestClient(a.api, base_url='https://testserver')"
@@ -574,9 +579,9 @@ def test_enabled_accounts_require_database():
     assert "KALILLAC_ACCOUNTS_ENABLED requires KALILLAC_DB_ENABLED" in result.stderr
 
 
-def test_enabled_accounts_mount_routes_without_connecting():
-    # The engine is lazy: mounting routes must not open a DB connection,
-    # so an unreachable host is fine at import time.
+def test_enabled_accounts_probe_synthetic_schema_before_mounting_routes():
+    # AR8 requires the schema probe. The subprocess supplies an unactivated
+    # synthetic schema; no configured external database is contacted.
     result = _import_app_with(
         {
             "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",

@@ -179,7 +179,9 @@ def test_application_startup_flag_is_off_and_requires_explicit_email_provider(en
     env.update({"OPENAI_API_KEY": "not-real", "RUN_LIVE_TESTS": "false", "HF_HUB_OFFLINE": "1"})
     if enabled:
         env.update(ENV)
+        env["KALILLAC_SITE_ORIGIN"] = "https://kalillac.ai"
     code = (
+        "import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();"
         "import app_fastapi_candidate as app; "
         "print('VERIFICATION_ROUTES='+str(any('/email-verification/' in r.path for r in app.api.routes)))"
     )

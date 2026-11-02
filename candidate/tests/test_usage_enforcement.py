@@ -735,6 +735,7 @@ def test_startup_feature_gate_is_lazy_and_explicit(enabled):
 attempts=[]
 def block(*args,**kwargs): attempts.append(1);raise AssertionError('network blocked')
 socket.socket.connect=socket.socket.connect_ex=socket.getaddrinfo=block
+import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();
 import app_fastapi_candidate as app
 from kalillac_db import engine
 print(json.dumps({'enabled':app._usage_quota is not None,'limits':None if app._usage_limits is None else [app._usage_limits.free_daily_chats,app._usage_limits.paid_daily_chats],'engine':engine._ENGINE is not None,'outbound':len(attempts),'quota_imported':'kalillac_accounts.quota' in sys.modules,'anonymous':app._anonymous_quota is not None,'anonymous_imported':'kalillac_accounts.anonymous_quota' in sys.modules}))

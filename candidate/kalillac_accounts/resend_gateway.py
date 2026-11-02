@@ -97,6 +97,13 @@ class ResendGateway:
         self._deliver(to, email_messages.email_verification(self._checked_link(link)),
                       _link_key("email-verification", to, link))
 
+    def send_registration_finish(self, to: str, link: str) -> None:
+        self._deliver(to, email_messages.registration_finish(self._checked_link(link)),
+                      _link_key("registration-finish", to, link))
+
+    def send_registration_notice(self, to: str) -> None:
+        self._deliver(to, email_messages.registration_notice(), _unique_key("registration-notice"))
+
     # --- delivery -------------------------------------------------------------
 
     @staticmethod

@@ -196,6 +196,7 @@ def build_account_router(
     limiter: LoginRateLimiter | None = None,
     registration_limiter: RegistrationRateLimiter | None = None,
     password_gate=None,
+    registration_http=None,
 ) -> APIRouter:
     """Build the /api/account router.
 
@@ -243,8 +244,25 @@ def build_account_router(
             samesite="lax",
         )
 
+    @router.get("/registration-contract")
+    async def registration_contract(request: Request):
+        # A fresh, non-secret challenge binds the response to this request.
+        # Authority is the handler actually mounted by this router factory.
+        nonces = [value for name, value in request.scope["headers"]
+                  if name.lower() == b"x-kalillac-registration-nonce"]
+        headers = {"Cache-Control": "no-store", "Pragma": "no-cache",
+                   "Vary": "X-Kalillac-Registration-Nonce"}
+        if (request.scope.get("query_string", b"") or len(nonces) != 1
+                or len(nonces[0]) != 32
+                or any(c not in b"0123456789abcdef" for c in nonces[0])):
+            return JSONResponse({"error": "invalid_request"}, status_code=400, headers=headers)
+        return JSONResponse({"contract": "email-first-v1" if registration_http is not None else "legacy-v1",
+                             "nonce": nonces[0].decode("ascii")}, headers=headers)
+
     @router.post("/register")
     async def register(request: Request):
+        if registration_http is not None:
+            return await registration_http.request(request)
         credentials = await _read_credentials(request)
 
         if isinstance(credentials, JSONResponse):
@@ -334,7 +352,7 @@ def build_account_router(
                 password,
             )
 
-            if user is None or not password_ok or not user.is_active:
+            if user is None or not password_ok or not user.is_active or (registration_http is not None and (user.email_verified_at is None or user.quarantined_at is not None)):
                 return None
 
             # A password reset may commit while Argon2 runs. Recheck under the
@@ -344,7 +362,7 @@ def build_account_router(
             lock_account(session, user.id)
             session.refresh(user)
 
-            if user.password_hash != verified_hash or not user.is_active:
+            if user.password_hash != verified_hash or not user.is_active or (registration_http is not None and (user.email_verified_at is None or user.quarantined_at is not None)):
                 return None
 
             if needs_rehash(user.password_hash):
@@ -476,4 +494,7 @@ def build_account_router(
             headers={"Cache-Control": "no-store"},
         )
 
+    if registration_http is not None:
+        from .registration_http import confirmation_router
+        router.include_router(confirmation_router(registration_http))
     return router

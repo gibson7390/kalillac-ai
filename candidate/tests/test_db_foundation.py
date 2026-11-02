@@ -43,6 +43,8 @@ def test_only_approved_account_tables_exist():
         "kalillac.conversations",
         "kalillac.messages",
         "kalillac.users",
+        "kalillac.account_registration_intents",
+        "kalillac.account_registration_activation",
         "kalillac.account_sessions",
         "kalillac.account_recovery_tokens",
         "kalillac.account_email_verification_tokens",

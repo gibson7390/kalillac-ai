@@ -22,6 +22,7 @@ from .provider_usage_pool import ProviderUsagePool
 from .base import Base
 from .stripe_webhook_event import StripeWebhookEvent
 from .user import User
+from .account_registration import AccountRegistrationIntent, AccountRegistrationActivation
 
 __all__ = [
     "AccountBilling",
@@ -40,4 +41,6 @@ __all__ = [
     "Space",
     "StripeWebhookEvent",
     "User",
+    "AccountRegistrationIntent",
+    "AccountRegistrationActivation",
 ]

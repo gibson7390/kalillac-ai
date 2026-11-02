@@ -8,6 +8,7 @@ export const ACCOUNT_PATHS = {
   overview: '/account',
   signIn: '/account/sign-in',
   create: '/account/create',
+  createConfirm: '/account/create/confirm',
   recovery: '/account/recovery',
   recoveryConfirm: '/account/recovery/confirm',
   verify: '/account/verify',
@@ -27,6 +28,10 @@ export const ACCOUNT_PAGES: Record<string, { title: string; description: string 
   [ACCOUNT_PATHS.create]: {
     title: 'Create an account — Kalillac AI',
     description: 'Create an optional Kalillac AI account for plan access.',
+  },
+  [ACCOUNT_PATHS.createConfirm]: {
+    title: 'Finish creating your account — Kalillac AI',
+    description: 'Choose a password to finish creating your optional Kalillac AI account.',
   },
   [ACCOUNT_PATHS.recovery]: {
     title: 'Reset your password — Kalillac AI',

@@ -724,6 +724,7 @@ def _startup(values):
 attempts=[]
 def block(*args,**kwargs): attempts.append(1);raise AssertionError('network blocked')
 socket.socket.connect=socket.socket.connect_ex=socket.getaddrinfo=block
+import os;os.environ.setdefault('KALILLAC_SITE_ORIGIN','https://kalillac.ai');import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();
 import app_fastapi_candidate as app
 from kalillac_db import engine
 print(json.dumps({'anonymous':app._anonymous_quota is not None,'limit':None if app._anonymous_quota is None else app._anonymous_quota.limit,'engine':engine._ENGINE is not None,'outbound':len(attempts),'service_imported':'kalillac_accounts.anonymous_quota' in sys.modules,'account_quota_imported':'kalillac_accounts.quota' in sys.modules,'argon2_imported':'argon2' in sys.modules}))

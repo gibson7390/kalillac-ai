@@ -147,6 +147,33 @@ jobs:
               sys.exit("the Slice 2 security verification did not run completely")
           PY
 
+      - name: Run the Slice 3 registration security contracts
+        working-directory: candidate
+        run: >-
+          python -m pytest
+          tests/test_registration_v2.py
+          tests/test_registration_security.py
+          tests/test_unsafe_request_guard.py
+          -q -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/slice-3-security.xml"
+
+      - name: Require every Slice 3 security test
+        run: |
+          python - "$RUNNER_TEMP/slice-3-security.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 811, "skipped": 0, "failures": 0, "errors": 0}
+          PY
+
+      - name: Verify Linux protected registration files
+        run: |
+          set -o pipefail
+          sudo "$(command -v python)" -B candidate/tools/verify_registration_protected_files.py | tee "$RUNNER_TEMP/registration-protected-files.log"
+          grep -qx "RESULT: 26/26 protected-file checks passed" "$RUNNER_TEMP/registration-protected-files.log"
+
   billing-postgres:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -171,6 +198,9 @@ jobs:
       PG_ADMIN_PASSWORD: disposable-admin-only
       PG_MIGRATE_PASSWORD: disposable-migrate-only
       PG_APP_PASSWORD: disposable-app-only
+      KALILLAC_MIGRATION_REGISTRATION_ROLE: kalillac_staging_registration
+      KALILLAC_REGISTRATION_TEST_POSTGRES_URL: postgresql+psycopg://postgres:disposable-admin-only@127.0.0.1:5432/postgres
+      KALILLAC_REGISTRATION_REQUIRE_POSTGRES: "true"
       KALILLAC_DB_HOST: 127.0.0.1
       KALILLAC_DB_PORT: "5432"
       KALILLAC_DB_NAME: kalillac_staging
@@ -200,7 +230,7 @@ jobs:
       - name: Provision the disposable database and roles
         run: |
           python - <<'PY'
-          import os
+          import os, base64
           import psycopg
           from psycopg import sql
           ident, literal = sql.Identifier, sql.Literal
@@ -216,6 +246,10 @@ jobs:
                   ident(migrate), literal(os.environ["PG_MIGRATE_PASSWORD"])))
               conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
                   ident(app), literal(os.environ["PG_APP_PASSWORD"])))
+              registration = "kalillac_staging_registration"
+              registration_password = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+              conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {}").format(
+                  ident(registration), literal(registration_password)))
               conn.execute(sql.SQL("GRANT {} TO {}").format(ident(owner), ident(migrate)))
               conn.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(ident(database), ident(owner)))
               conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(ident(database)))
@@ -298,3 +332,36 @@ jobs:
             --expect-db kalillac_staging --expect-user kalillac_staging_app \
             | tee "$RUNNER_TEMP/email-verification-postgres.log"
           test "$(tail -n 1 "$RUNNER_TEMP/email-verification-postgres.log")" = "RESULT: 15/15 checks passed"
+
+
+      # Actual R/A connections and synthetic keys/email; no provider calls.
+      - name: Run the real PostgreSQL registration contracts
+        working-directory: candidate
+        run: >-
+          python -m pytest
+          tests/test_registration_postgres.py
+          tests/test_registration_postgres_boundaries.py
+          -q -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/registration-postgres.xml"
+
+      - name: Require every PostgreSQL registration test
+        run: |
+          python - "$RUNNER_TEMP/registration-postgres.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 49, "skipped": 0, "failures": 0, "errors": 0}
+          PY
+
+      - name: Verify protected production-style bootstrap and rotation
+        run: |
+          set -o pipefail
+          sudo env KALILLAC_REGISTRATION_TEST_POSTGRES_URL="$KALILLAC_REGISTRATION_TEST_POSTGRES_URL" KALILLAC_REGISTRATION_REQUIRE_POSTGRES=true "$(command -v python)" -B candidate/tools/verify_registration_bootstrap.py | tee "$RUNNER_TEMP/registration-bootstrap.log"
+          python - "$RUNNER_TEMP/registration-bootstrap.log" <<'PY'
+          import sys, json
+          from pathlib import Path
+          result = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
+          assert result["tests"] == 27 and result["failures"] == 0 and result["synthetic_only"]
+          PY

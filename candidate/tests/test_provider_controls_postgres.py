@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0010_spaces"
+HEAD = "0011_registration_intents"
 CHAIN = (
+    "0011_registration_intents",
     "0010_spaces",
     "0009_account_email_verification",
     "0008_account_recovery_tokens",
@@ -66,6 +67,7 @@ CHAIN = (
 )
 DATABASE = "ceiling_verify"
 OWNER, MIGRATE, APP = "ceiling_owner", "ceiling_migrate", "ceiling_app"
+REGISTRATION = "ceiling_registration"
 ANONYMOUS_TABLES = ("anonymous_usage_days", "anonymous_usage_slots")
 PROVIDERS = ("openai", "brave", "tavily")
 PERIOD = 2_000_000_000  # One accounting period for the whole job: no rollover.
@@ -248,10 +250,13 @@ def database():
         assert conn.execute("SELECT count(*) FROM pg_database WHERE datname = %s", [DATABASE]).fetchone() == (0,), \
             "expected a fresh disposable server"
         assert conn.execute("SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)",
-                            [[OWNER, MIGRATE, APP]]).fetchone() == (0,), "expected a fresh disposable server"
+                            [[OWNER, MIGRATE, APP, REGISTRATION]]).fetchone() == (0,), "expected a fresh disposable server"
         conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(ident(OWNER)))
         for role in (MIGRATE, APP):
             conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(ident(role), literal(_password(role))))
+        # Separate disposable authority principal required by migration 0011.
+        conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
+            ident(REGISTRATION), literal(secrets.token_urlsafe(32))))
         conn.execute(sql.SQL("GRANT {} TO {}").format(ident(OWNER), ident(MIGRATE)))
         conn.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(ident(DATABASE), ident(OWNER)))
         conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(ident(DATABASE)))
@@ -263,9 +268,10 @@ def database():
         conn.execute(sql.SQL("CREATE SCHEMA kalillac AUTHORIZATION {}").format(ident(OWNER)))
         conn.execute(sql.SQL("GRANT USAGE ON SCHEMA kalillac TO {}").format(ident(APP)))
 
-    saved = {name: os.environ.get(name) for name in (migration_roles.OWNER_ROLE_ENV, migration_roles.APP_ROLE_ENV)}
+    saved = {name: os.environ.get(name) for name in (migration_roles.OWNER_ROLE_ENV, migration_roles.APP_ROLE_ENV, "KALILLAC_MIGRATION_REGISTRATION_ROLE")}
     os.environ[migration_roles.OWNER_ROLE_ENV] = OWNER
     os.environ[migration_roles.APP_ROLE_ENV] = APP
+    os.environ["KALILLAC_MIGRATION_REGISTRATION_ROLE"] = REGISTRATION
     migrator = _engine(MIGRATE, poolclass=pool.NullPool)  # Fresh physical connection, discarded after.
     try:
         with migrator.begin() as conn:
