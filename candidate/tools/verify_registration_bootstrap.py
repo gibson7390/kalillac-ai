@@ -15,6 +15,94 @@ from registration_test_support import postgres_world
 def canonical(value):
     return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
 
+
+_PHASES={"preload","fork","drop_identity","dispose_inherited_pools","prepare_crypto_case",
+         "configure_environment","bootstrap","dispose_authority","check_expected_result","child_exit"}
+_SAFE_CLASSES={t:t.__name__ for t in (BaseException,Exception,ImportError,ModuleNotFoundError,
+    PermissionError,OSError,RuntimeError,ValueError,TypeError,AssertionError,KeyboardInterrupt,SystemExit)}
+
+def _diagnostic_payload(phase,error,exit_status):
+    # No exception repr/str, args, paths, SQL, settings or child output is emitted.
+    kind=next((_SAFE_CLASSES[t] for t in type(error).__mro__ if t in _SAFE_CLASSES),"None")
+    message="exception_details_withheld" if error is not None else "unexpected_child_result"
+    if type(error) is RuntimeError:
+        if error.args==("REGISTRATION_CONFIG_INVALID",):message="registration_configuration_rejected"
+        elif error.args==("REGISTRATION_STATE_UNREADABLE",):message="registration_state_unreadable"
+    payload={"event":"registration_bootstrap_child","phase":phase if phase in _PHASES else "unknown",
+             "exception_class":kind,"message":message,
+             "exit_status":exit_status if type(exit_status) is int and -128<=exit_status<=255 else 2}
+    raw=json.dumps(payload,sort_keys=True,separators=(",",":")).encode()+b"\n"
+    assert len(raw)<=512
+    return raw
+
+def _emit_diagnostic(payload):
+    try:os.write(2,payload)
+    except OSError:pass  # Reporting cannot turn a failed check into a pass.
+
+def _load_child_bootstrap():
+    # The runner's checkout may be inaccessible to nobody. Resolve code while
+    # privileged; all protected-file, crypto and DB validation stays in the child.
+    from kalillac_accounts.registration_startup import bootstrap
+    from kalillac_accounts import request_guard,registration_schema
+    return bootstrap
+
+def _check_child(bootstrap,w,env,expected,overrides=None,crypto_failure=None):
+    phase="drop_identity"
+    try:
+        os.setgroups([]);os.setgid(65534);os.setuid(65534)
+        phase="dispose_inherited_pools"
+        # Never reuse a DBAPI socket inherited across fork.
+        for engine in (w.engine,w.runtime_engine,w.migration):engine.dispose(close=False)
+        phase="prepare_crypto_case"
+        if crypto_failure:
+            import builtins
+            import cryptography.hazmat.primitives.ciphers.aead as aead
+            if crypto_failure=="missing":
+                original=builtins.__import__
+                def importing(name,*args,**kwargs):
+                    if name=="cryptography.hazmat.primitives.ciphers.aead":
+                        raise ImportError("synthetic missing primitive")
+                    return original(name,*args,**kwargs)
+                builtins.__import__=importing
+            else:
+                def broken(key):raise RuntimeError("synthetic broken primitive")
+                aead.AESGCM=broken
+        phase="configure_environment"
+        settings=dict(env);settings.update(overrides or {})
+        os.environ.update(settings)
+        output=io.StringIO();failure=None
+        with contextlib.redirect_stdout(output):
+            try:
+                phase="bootstrap"
+                authority=bootstrap(w.runtime_factory,w.gateway,settings)
+                if authority is not None:
+                    phase="dispose_authority";authority._dispose()
+                good=expected and authority is not None
+            except RuntimeError as error:
+                failure=error
+                good=not expected and str(error) in ("REGISTRATION_CONFIG_INVALID","REGISTRATION_STATE_UNREADABLE")
+        good=good and (("REGISTRATION_V2_READY" in output.getvalue())==expected)
+        if not good:return 1,_diagnostic_payload(phase if failure else "check_expected_result",failure,1)
+        return 0,None
+    except BaseException as error:
+        return 2,_diagnostic_payload(phase,error,2)
+
+def _run_case(w,env,expected=True,overrides=None,crypto_failure=None):
+    try:
+        bootstrap=_load_child_bootstrap()
+        phase="fork";pid=os.fork()
+    except BaseException as error:
+        _emit_diagnostic(_diagnostic_payload(locals().get("phase","preload"),error,2))
+        return 2
+    if pid==0:
+        code,diagnostic=_check_child(bootstrap,w,env,expected,overrides,crypto_failure)
+        if diagnostic is not None:_emit_diagnostic(diagnostic)
+        os._exit(code)
+    _,status=os.waitpid(pid,0)
+    code=os.waitstatus_to_exitcode(status)
+    if code:_emit_diagnostic(_diagnostic_payload("child_exit",None,code))
+    return code
+
 def main():
     assert sys.platform=="linux" and os.geteuid()==0,"isolated root fixture required"
     base=pathlib.Path("/run")/("kalillac-registration-bootstrap-test-"+uuid.uuid4().hex)
@@ -69,41 +157,8 @@ def main():
                 "KALILLAC_MIGRATION_APP_ROLE":w.names["app"],"KALILLAC_MIGRATION_OWNER_ROLE":w.names["owner"],
                 "KALILLAC_MIGRATION_REGISTRATION_ROLE":w.names["registration"]}
             def child(label,expected=True,overrides=None,crypto_failure=None):
-                pid=os.fork()
-                if pid==0:
-                    try:
-                        os.setgroups([]);os.setgid(65534);os.setuid(65534)
-                        # Never reuse a DBAPI socket inherited across fork.
-                        for engine in (w.engine,w.runtime_engine,w.migration):engine.dispose(close=False)
-                        from kalillac_accounts.registration_startup import bootstrap
-                        if crypto_failure:
-                            import builtins
-                            import cryptography.hazmat.primitives.ciphers.aead as aead
-                            if crypto_failure=="missing":
-                                original=builtins.__import__
-                                def importing(name,*args,**kwargs):
-                                    if name=="cryptography.hazmat.primitives.ciphers.aead":
-                                        raise ImportError("synthetic missing primitive")
-                                    return original(name,*args,**kwargs)
-                                builtins.__import__=importing
-                            else:
-                                def broken(key):raise RuntimeError("synthetic broken primitive")
-                                aead.AESGCM=broken
-                        settings=dict(env);settings.update(overrides or {})
-                        os.environ.update(settings)
-                        output=io.StringIO()
-                        with contextlib.redirect_stdout(output):
-                            try:
-                                authority=bootstrap(w.runtime_factory,w.gateway,settings)
-                                if authority is not None:authority._dispose()
-                                good=expected and authority is not None
-                            except RuntimeError as error:
-                                good=not expected and str(error) in ("REGISTRATION_CONFIG_INVALID","REGISTRATION_STATE_UNREADABLE")
-                        good=good and (("REGISTRATION_V2_READY" in output.getvalue())==expected)
-                        os._exit(0 if good else 1)
-                    except BaseException:os._exit(2)
-                _,status=os.waitpid(pid,0)
-                results.append({"case":label,"passed":os.waitstatus_to_exitcode(status)==0})
+                code=_run_case(w,env,expected,overrides,crypto_failure)
+                results.append({"case":label,"passed":code==0,"child_exit_status":code})
             with w.migration.connect() as connection:
                 assert connection.execute(text("SELECT count(*) FROM kalillac.account_registration_intents")).scalar_one()==0
             child("empty database validates usable AES-GCM")

@@ -618,3 +618,85 @@ def test_fatal_intake_while_waiting_for_password_gate_refunds_unstarted_work(wor
     asyncio.run(scenario())
     assert not next(iter(w.limits._buckets.values())).events["work"]
     assert not any(bucket.reservations for bucket in w.limits._buckets.values())
+
+
+def _bootstrap_verifier_module():
+    import importlib.util
+    from pathlib import Path
+    path=Path(__file__).resolve().parents[1]/"tools/verify_registration_bootstrap.py"
+    spec=importlib.util.spec_from_file_location("bootstrap_verifier_regression",path)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
+def _verifier_identity(monkeypatch,module):
+    from types import SimpleNamespace
+    events=[];identity={"dropped":False}
+    monkeypatch.setattr(module.os,"setgroups",lambda value:events.append(("groups",value)),raising=False)
+    monkeypatch.setattr(module.os,"setgid",lambda value:events.append(("gid",value)),raising=False)
+    def drop(value):
+        assert value==65534;events.append(("uid",value));identity["dropped"]=True
+    monkeypatch.setattr(module.os,"setuid",drop,raising=False)
+    def engine(name):
+        return SimpleNamespace(dispose=lambda **kw:events.append((name,kw)))
+    world=SimpleNamespace(engine=engine("authority"),runtime_engine=engine("runtime"),migration=engine("migration"),
+                          runtime_factory=object(),gateway=object())
+    return world,events,identity
+
+def test_bootstrap_verifier_resolves_code_before_identity_drop(monkeypatch):
+    import builtins
+    import kalillac_accounts.registration_startup as startup
+    from types import SimpleNamespace
+    module=_bootstrap_verifier_module()
+    world,events,identity=_verifier_identity(monkeypatch,module)
+    original=builtins.__import__
+    def importing(name,*args,**kwargs):
+        if name=="kalillac_accounts.registration_startup":
+            if identity["dropped"]:raise ModuleNotFoundError("unprivileged checkout cannot be searched")
+            events.append(("preload",name))
+        return original(name,*args,**kwargs)
+    monkeypatch.setattr(builtins,"__import__",importing)
+    def bootstrap(factory,gateway,settings):
+        assert identity["dropped"] and factory is world.runtime_factory
+        assert [x[0] for x in events][-3:]==["authority","runtime","migration"]
+        assert all(x[1]=={"close":False} for x in events[-3:])
+        print("REGISTRATION_V2_READY")
+        return SimpleNamespace(_dispose=lambda:events.append(("disposed",True)))
+    monkeypatch.setattr(startup,"bootstrap",bootstrap)
+    def fork():
+        assert events==[("preload","kalillac_accounts.registration_startup")]
+        events.append(("fork",True));return 0
+    monkeypatch.setattr(module.os,"fork",fork,raising=False)
+    def exiting(code):raise SystemExit(code)
+    monkeypatch.setattr(module.os,"_exit",exiting)
+    with pytest.raises(SystemExit) as stopped:module._run_case(world,{})
+    assert stopped.value.code==0 and events[-1]==("disposed",True)
+    assert ("groups",[]) in events and ("gid",65534) in events and ("uid",65534) in events
+
+@pytest.mark.parametrize("kind",["runtime","permission","unlisted_class"])
+def test_bootstrap_verifier_diagnostics_are_bounded_and_sanitized(kind):
+    module=_bootstrap_verifier_module()
+    secret="password database-url key-material ciphertext token protected-content address@example.test"
+    error={"runtime":RuntimeError(secret),"permission":PermissionError(13,secret,secret),
+           "unlisted_class":type("credential_DO_NOT_EMIT",(Exception,),{})(secret)}[kind]
+    raw=module._diagnostic_payload(secret,error,2)
+    data=json.loads(raw)
+    assert len(raw)<=512 and raw.endswith(b"\n") and secret.encode() not in raw
+    assert b"DO_NOT_EMIT" not in raw and data["phase"]=="unknown" and data["exit_status"]==2
+    assert data["message"]=="exception_details_withheld"
+    assert data["exception_class"]=={"runtime":"RuntimeError","permission":"PermissionError","unlisted_class":"Exception"}[kind]
+
+@pytest.mark.parametrize("error,code",[(RuntimeError("DO_NOT_EMIT"),1),(ImportError("DO_NOT_EMIT"),2)],
+                         ids=["unexpected-runtime","unexpected-import"])
+def test_bootstrap_verifier_reports_actual_failure_phase_and_exit(monkeypatch,error,code):
+    module=_bootstrap_verifier_module();world,events,identity=_verifier_identity(monkeypatch,module)
+    def failed(*args):raise error
+    status,raw=module._check_child(failed,world,{},True)
+    assert status==code and identity["dropped"]
+    data=json.loads(raw)
+    assert data["phase"]=="bootstrap" and data["exit_status"]==code and b"DO_NOT_EMIT" not in raw
+
+def test_bootstrap_verifier_expected_refusal_stays_a_real_pass(monkeypatch):
+    module=_bootstrap_verifier_module();world,events,identity=_verifier_identity(monkeypatch,module)
+    def refused(*args):raise RuntimeError("REGISTRATION_CONFIG_INVALID")
+    status,raw=module._check_child(refused,world,{},False)
+    assert status==0 and raw is None and identity["dropped"]
