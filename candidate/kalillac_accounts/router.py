@@ -197,6 +197,7 @@ def build_account_router(
     registration_limiter: RegistrationRateLimiter | None = None,
     password_gate=None,
     registration_http=None,
+    v1_security=None,
 ) -> APIRouter:
     """Build the /api/account router.
 
@@ -206,6 +207,8 @@ def build_account_router(
     """
 
     settings = settings or load_account_settings()
+    from .v1_security import load_v1_security
+    v1_security = v1_security if v1_security is not None else load_v1_security(session_factory)
     limiter = limiter or LoginRateLimiter()
     registration_limiter = registration_limiter if registration_limiter is not None else RegistrationRateLimiter()
     password_gate = password_gate if password_gate is not None else PASSWORD_WORK_GATE
@@ -427,8 +430,35 @@ def build_account_router(
         clear_session_cookie(response)
         return response
 
+    async def v1_read(request: Request, entitlement=False):
+        from .auth import RequestRejected, session_token_hash
+        from .v1_security import V1SecurityUnavailable
+        token_hash = session_token_hash(request.cookies, settings.cookie_name)
+        if token_hash is None:
+            return _error(401, "not_authenticated")
+
+        def payload(session, account):
+            if entitlement:
+                return effective_entitlement(
+                    get_entitlement(session, account.id), account.authorized_at,
+                ).as_json()
+            result = _user_json(account)
+            if settings.email_verification_enabled:
+                result["user"]["email_verified"] = True
+            return result
+
+        try:
+            result = await v1_security.read_async(token_hash, payload)
+        except RequestRejected as rejected:
+            return _error(rejected.status, rejected.code)
+        except V1SecurityUnavailable:
+            return _error(503, "account_unavailable")
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
     @router.get("/me")
     async def me(request: Request):
+        if v1_security is not None:
+            return await v1_read(request)
         token = request.cookies.get(settings.cookie_name)
 
         if not token:
@@ -465,6 +495,8 @@ def build_account_router(
     # come only from internal, verified callers (later, billing).
     @router.get("/entitlements")
     async def entitlements(request: Request):
+        if v1_security is not None:
+            return await v1_read(request, entitlement=True)
         token = request.cookies.get(settings.cookie_name)
 
         if not token:

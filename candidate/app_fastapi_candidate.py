@@ -14169,6 +14169,11 @@ api.add_event_handler("shutdown", _close_openai_transport)
 api.add_event_handler("shutdown", _close_tavily_transport)
 
 
+# The V1 read-only foundation validates its prerequisites even if accounts
+# were accidentally left off. Off mode does not inspect a database/schema.
+from kalillac_accounts.v1_security import load_v1_security as _load_v1_security
+_v1_account_security = _load_v1_security()
+
 # Optional account endpoints (/api/account/*). Off unless explicitly enabled;
 # when off, nothing account-related is imported. Accounts are identity only:
 # no conversation is persisted. /api/chat reads the account cookie only when
@@ -14225,7 +14230,8 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
             await run_in_threadpool(_registration_dispatcher.close)
             _registration_authority._dispose()
         api.add_event_handler("shutdown", _close_registration_dispatcher)
-    api.include_router(build_account_router(settings=_account_settings, registration_http=_registration_http))
+    api.include_router(build_account_router(settings=_account_settings, registration_http=_registration_http,
+                                            v1_security=_v1_account_security))
 
 
 # Account recovery and email verification are each default-off. While both are

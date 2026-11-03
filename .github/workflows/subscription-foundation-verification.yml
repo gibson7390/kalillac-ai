@@ -365,3 +365,25 @@ jobs:
           result = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
           assert result["tests"] == 27 and result["failures"] == 0 and result["synthetic_only"]
           PY
+
+      # Actual collect-only result for the two explicit modules: 96 tests.
+      # The existing disposable PostgreSQL requirement makes missing PG fail.
+      - name: Run V1-01 original-session authorization contracts
+        working-directory: candidate
+        run: >-
+          python -m pytest
+          tests/test_account_session_security.py
+          tests/test_account_session_security_postgres.py
+          -q -ra -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/v1-01-security.xml"
+
+      - name: Require every V1-01 authorization test
+        run: |
+          python - "$RUNNER_TEMP/v1-01-security.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 96, "skipped": 0, "failures": 0, "errors": 0}
+          PY

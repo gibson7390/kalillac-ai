@@ -19,7 +19,9 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from kalillac_db.repositories.accounts import get_signed_in_user
+from kalillac_db.repositories.accounts import (
+    get_signed_in_user, original_session_binding, locked_original_account,
+)
 
 from .request_guard import has_canonical_origin
 from .tokens import hash_session_token
@@ -102,3 +104,45 @@ async def read_json_object(request: Any, max_bytes: int) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise RequestRejected(422, "invalid_request")
     return body
+
+
+@dataclass(frozen=True, repr=False)
+class AccountIdentity:
+    """Original session binding, never a raw cookie or a cached decision."""
+
+    user_id: uuid.UUID
+    session_id: uuid.UUID
+    token_hash: str
+
+    def __repr__(self) -> str:
+        return "AccountIdentity()"
+
+
+@dataclass(frozen=True)
+class AuthorizedAccount:
+    id: uuid.UUID
+    email: str
+    created_at: datetime
+    email_verified_at: datetime
+    authorized_at: datetime
+
+
+def resolve_original_identity(session: Session, token_hash: str) -> AccountIdentity | None:
+    row = original_session_binding(session, token_hash)
+    return None if row is None else AccountIdentity(row.user_id, row.id, row.token_hash)
+
+
+def authorize_original_identity(session: Session, identity: AccountIdentity) -> AuthorizedAccount:
+    row, checked_at = locked_original_account(
+        session, identity.user_id, identity.session_id, identity.token_hash,
+    )
+    if (row is None or row.revoked_at is not None or row.expires_at <= checked_at
+            or not row.is_active
+            or (row.sessions_valid_after is not None
+                and row.session_created_at <= row.sessions_valid_after)):
+        raise RequestRejected(401, "not_authenticated")
+    if row.quarantined_at is not None:
+        raise RequestRejected(403, "account_unavailable")
+    if row.email_verified_at is None:
+        raise RequestRejected(403, "email_verification_required")
+    return AuthorizedAccount(row.id, row.email, row.created_at, row.email_verified_at, checked_at)
