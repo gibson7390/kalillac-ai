@@ -131,28 +131,49 @@ IMPOSTOR = (b"<!doctype html><title>Kalillac AI</title><p>Not the chat</p><scrip
 
 # --- the homepage recorder ---------------------------------------------------------------------
 
+CARD_TITLES = ["Research the current web", "Write and revise", "Code and debug", "Learn anything"]
+
 # Installed before any page script. Audits the slot on every animation frame
-# and at every change to it (a MutationObserver, so each state transition is
-# seen at the moment it happens): a frame that is not ready is never painted
+# (a filmstrip of the whole load, including its first two seconds) and at
+# every change to it (a MutationObserver, so each state transition is seen at
+# the moment it happens). The slot shows either the COMPLETE native twin of the
+# empty chat -- heading, the four example cards, the composer -- or the proven
+# real chat, painted and on top; a frame that is not proven is never painted
 # and is inert, aria-hidden and untabbable; a ready frame's CURRENT document is
-# the real chat; the slot is never blank.
+# the real chat; the slot never goes blank, never shows the old link-only
+# panel, never changes size, and the hero around it never moves.
 RECORDER = r"""
 if (window.top === window) {
-  const r = window.__fl = { samples: 0, states: [], transitions: [], violations: [] };
+  const TITLES = %s;
+  const r = window.__fl = { samples: 0, early: 0, states: [], transitions: [], violations: [], film: [] };
   const box = () => document.querySelector('[data-testid="embedded-chat"]');
+  const shown = el => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility === 'visible';
+  const twinComplete = t => {
+    if (!t || t.inert || t.getAttribute('aria-hidden') === 'true') return false;
+    const cards = [...t.querySelectorAll('[data-testid="chat-twin-card"]')].filter(shown);
+    const titles = cards.map(c => c.querySelector('.ct-hint-title').textContent);
+    const composer = t.querySelector('[data-testid="chat-twin-composer"]');
+    return JSON.stringify(titles) === JSON.stringify(TITLES) && cards.every(c => c.getAttribute('href') === '/app/')
+      && shown(t.querySelector('.ct-title')) && t.querySelector('.ct-title').textContent === 'What are you working on?'
+      && shown(composer) && composer.getAttribute('href') === '/app/'
+      && shown(t.querySelector('.ct-placeholder')) && t.querySelector('.ct-placeholder').textContent === 'Message Kalillac AI…'
+      && shown(t.querySelector('.ct-erase')) && shown(t.querySelector('.ct-send'));
+  };
+  const place = el => { const b = el.getBoundingClientRect(); return [b.left + scrollX, b.top + scrollY, b.width, b.height]; };
+  let hero = null, slotSize = null;
   const audit = where => {
     const b = box();
     if (!b) return;
-    const state = b.dataset.chatState, frame = b.querySelector('iframe');
-    const panel = b.querySelector('[data-testid="chat-panel"]');
+    const state = b.dataset.chatState, frame = b.querySelector('iframe'), twin = b.querySelector('[data-testid="chat-twin"]');
     const painted = !!frame && getComputedStyle(frame).visibility === 'visible';
+    const complete = twinComplete(twin);
     const bad = what => r.violations.push(what + ' while ' + state + ' (' + where + ')');
     if (r.states[r.states.length - 1] !== state) r.states.push(state);
     if (painted && state !== 'ready') bad('frame painted');
-    if (!painted && !panel) bad('blank slot');
-    if (painted && panel) bad('frame and panel together');
     if (frame && state !== 'ready' && !(frame.inert && frame.getAttribute('aria-hidden') === 'true' && frame.tabIndex === -1))
       bad('frame interactive');
+    if (state !== 'ready' && !complete) bad('twin incomplete');
+    if (document.querySelector('[data-testid="chat-panel"], [data-testid="link-chat-panel"]')) bad('link-only panel');
     if (state === 'ready') {
       let chat = false;
       try {
@@ -161,6 +182,26 @@ if (window.top === window) {
           && d.body.classList.contains('is-embedded') && !!d.getElementById('composer-input');
       } catch (e) { chat = false; }
       if (!chat) bad('ready on a document that is not the chat');
+      if (!painted) bad('ready but not painted');
+      if (twin && !(twin.inert && twin.getAttribute('aria-hidden') === 'true')) bad('twin live beneath the chat');
+    }
+    // Hit testing: the visible part of the slot belongs to the chat when ready, to the twin otherwise.
+    const s = b.getBoundingClientRect(), header = document.querySelector('.site-header').getBoundingClientRect();
+    const top = Math.max(s.top, header.bottom) + 4, bottom = Math.min(s.bottom, innerHeight) - 4;
+    if (bottom - top > 8) {
+      const hit = document.elementFromPoint(s.left + s.width / 2, (top + bottom) / 2);
+      if (state === 'ready' ? hit !== frame : !(twin && twin.contains(hit))) bad('slot shows ' + (hit ? hit.tagName : 'nothing'));
+    }
+    const slot = b.parentElement.getBoundingClientRect(), size = [Math.round(slot.width), Math.round(slot.height)];
+    if (!slotSize) slotSize = size; else if (size[0] !== slotSize[0] || size[1] !== slotSize[1]) bad('slot resized');
+    const now = [place(document.getElementById('hero-title')), place(document.querySelector('[data-testid="button-start-session"]'))];
+    if (!hero) hero = now;
+    else if (now.some((rect, i) => rect.some((v, j) => Math.abs(v - hero[i][j]) > 1))) bad('hero layout shifted');
+    if (where === 'frame') {
+      const t = Math.round(performance.now());
+      if (t < 2000) r.early++;
+      const last = r.film[r.film.length - 1];
+      if (!last || t - last.t >= 100) r.film.push({ t, state, twin: complete, painted });
     }
   };
   let observed = false;
@@ -179,27 +220,68 @@ if (window.top === window) {
   };
   requestAnimationFrame(tick);
 }
-"""
+""" % json.dumps(CARD_TITLES)
 
 SNAPSHOT = r"""
 const box = document.querySelector('[data-testid="embedded-chat"]');
-const frame = box && box.querySelector('iframe'), panel = box && box.querySelector('[data-testid="chat-panel"]');
+const frame = box && box.querySelector('iframe'), twin = box && box.querySelector('[data-testid="chat-twin"]');
 const slot = document.querySelector('.embedded-chat-slot').getBoundingClientRect();
 const rect = el => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+const shown = el => !!el && el.getClientRects().length > 0;
 let composer = null;
 try { composer = frame && frame.contentDocument && frame.contentDocument.getElementById('composer-input') ? 'present' : null; } catch (e) {}
 return {
   state: box ? box.dataset.chatState : null, href: location.href, path: location.pathname, historyLength: history.length,
   frame: !!frame, frameInert: frame ? frame.inert : null, frameHidden: frame ? frame.getAttribute('aria-hidden') : null,
   framePainted: !!frame && getComputedStyle(frame).visibility === 'visible', composer,
-  panel: !!panel, panelText: panel ? panel.innerText.replace(/\s+/g, ' ').trim() : null,
-  panelRect: panel ? rect(panel) : null, slotRect: [Math.round(slot.left), Math.round(slot.top), Math.round(slot.width), Math.round(slot.height)],
+  twin: !!twin, twinInert: twin ? twin.inert : null,
+  twinCards: twin ? [...twin.querySelectorAll('[data-testid="chat-twin-card"]')].filter(shown)
+                      .map(c => c.querySelector('.ct-hint-title').textContent) : [],
+  twinRect: twin ? rect(twin) : null, slotRect: [Math.round(slot.left), Math.round(slot.top), Math.round(slot.width), Math.round(slot.height)],
   boxClient: box ? [box.clientWidth, box.clientHeight] : null,
-  panelLink: panel ? panel.querySelector('a').getAttribute('href') : null,
-  recorder: window.__fl ? { samples: window.__fl.samples, states: window.__fl.states,
+  oldPanel: !!document.querySelector('[data-testid="chat-panel"], [data-testid="link-chat-panel"]'),
+  recorder: window.__fl ? { samples: window.__fl.samples, early: window.__fl.early, states: window.__fl.states, film: window.__fl.film,
                             transitions: window.__fl.transitions, violations: window.__fl.violations } : null,
   docScrollWidth: document.documentElement.scrollWidth, innerWidth,
 };
+"""
+
+# The important boxes and visible labels, relative to the chat slot's inner box,
+# of the native twin (TWIN) and of the proven real chat inside the frame (CHAT).
+TWIN_BOXES = r"""
+const box = document.querySelector('[data-testid="embedded-chat"]'), origin = box.getBoundingClientRect();
+const t = box.querySelector('[data-testid="chat-twin"]');
+const shown = el => !!el && el.getClientRects().length > 0;
+const at = el => { const b = el.getBoundingClientRect();
+  return [b.left - origin.left - box.clientLeft, b.top - origin.top - box.clientTop, b.width, b.height]; };
+const cards = [...t.querySelectorAll('.ct-hint')].filter(shown);
+const label = [...t.querySelectorAll('.ct-starter-label')].find(shown);
+return { title: [at(t.querySelector('.ct-title')), t.querySelector('.ct-title').textContent],
+  line: [at(t.querySelector('.ct-line')), t.querySelector('.ct-line').textContent.trim()],
+  label: label ? [at(label), label.textContent] : null,
+  cards: cards.map(c => [at(c), c.querySelector('.ct-hint-title').textContent,
+                         shown(c.querySelector('.ct-hint-description')) ? c.querySelector('.ct-hint-description').textContent : null,
+                         at(c.querySelector('.ct-hint-icon')), at(c.querySelector('.ct-hint-arrow'))]),
+  shell: at(t.querySelector('.ct-shell')), erase: [at(t.querySelector('.ct-erase')), t.querySelector('.ct-erase').textContent],
+  input: [at(t.querySelector('.ct-placeholder')), t.querySelector('.ct-placeholder').textContent],
+  send: at(t.querySelector('.ct-send')) };
+"""
+
+CHAT_BOXES = r"""
+const d = document.querySelector('[data-testid="embedded-chat"] iframe').contentDocument;
+const shown = el => !!el && el.getClientRects().length > 0;
+const at = el => { const b = el.getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; };
+const cards = [...d.querySelectorAll('.hint')].filter(shown);
+const label = [...d.querySelectorAll('.starter-label')].find(shown);
+return { title: [at(d.querySelector('.empty-title')), d.querySelector('.empty-title').textContent],
+  line: [at(d.querySelector('.empty-line')), d.querySelector('.empty-line').textContent.trim().replace(/\s+/g, ' ')],
+  label: label ? [at(label), label.textContent] : null,
+  cards: cards.map(c => [at(c), c.querySelector('.hint-title').textContent,
+                         shown(c.querySelector('.hint-description')) ? c.querySelector('.hint-description').textContent : null,
+                         at(c.querySelector('.hint-icon')), at(c.querySelector('.hint-arrow'))]),
+  shell: at(d.getElementById('composer-shell')), erase: [at(d.getElementById('erase-btn')), d.getElementById('erase-btn').textContent.trim()],
+  input: [at(d.getElementById('composer-input')), d.getElementById('composer-input').placeholder],
+  send: at(d.getElementById('send-btn')) };
 """
 
 
@@ -220,9 +302,11 @@ AT_TOP_LEVEL_CHAT = ("location.pathname === '/app/' && window.top === window"
 
 
 def center(page: Page, selector: str) -> tuple[float, float]:
-    page.eval(f"document.querySelector({json.dumps(selector)}).scrollIntoView({{ block: 'center', behavior: 'instant' }});"
+    """The centre of an element, scrolled into view: a CSS selector, or a JS expression starting with '['."""
+    element = selector if selector.startswith("[...") else f"document.querySelector({json.dumps(selector)})"
+    page.eval(f"({element}).scrollIntoView({{ block: 'center', behavior: 'instant' }});"
               "await new Promise(r => setTimeout(r, 150)); return true;")
-    box = page.eval(f"const b = document.querySelector({json.dumps(selector)}).getBoundingClientRect();"
+    box = page.eval(f"const b = ({element}).getBoundingClientRect();"
                     "return [b.left + b.width / 2, b.top + b.height / 2];")
     return box[0], box[1]
 
@@ -309,6 +393,8 @@ def _run_case(tmp_path_factory, name: str, viewport: str) -> dict:
         with browser_page(browser, profile, size, mobile) as (devtools, session):
             page = open_home(devtools, session, start)
             result["early"] = page.eval(SNAPSHOT)
+            if name == "slow":
+                result["twinBoxes"] = page.eval(TWIN_BOXES)
             if name == "hang":
                 # Forged readiness: another origin, this window, and a synthetic
                 # event naming the frame itself. None may reveal anything.
@@ -331,6 +417,8 @@ def _run_case(tmp_path_factory, name: str, viewport: str) -> dict:
             settled = wait_until(page, SETTLED, READY_TIMEOUT_S + 8)
             result["settled_s"] = settled
             time.sleep(0.4)
+            # The filmstrip always covers at least the first two seconds of the load.
+            assert wait_until(page, "performance.now() > 2200", 5)
             result["final"] = page.eval(SNAPSHOT)
             result["a_paths"] = list(a.paths)
 
@@ -390,29 +478,73 @@ def _run_case(tmp_path_factory, name: str, viewport: str) -> dict:
                              tabIndex: f.tabIndex, painted: getComputedStyle(f).visibility === 'visible' }};""",
                     "unavailable")
                 result["replaced"] = replaced
+            if name == "slow":
+                # Once the twin has left, the proven chat's own boxes and labels.
+                assert wait_until(page, "!document.querySelector('[data-testid=\"chat-twin\"]')", 5)
+                result["chatBoxes"] = page.eval(CHAT_BOXES)
+                # Before readiness: the CTA, an example card and the composer each open /app/.
+                result["early_use"] = use_before_ready(devtools, session, page, a.url + "/")
             if name == "deny":
-                # The CTA and the panel link both reach the working chat at /app/.
+                # The CTA, an example card and the composer all reach the working chat at /app/.
                 page.click(*center(page, '[data-testid="button-start-session"]'))
                 assert wait_until(page, "location.pathname === '/app/' && document.getElementById('composer-input')", 20)
                 result["ctaArrival"] = page.eval("""const input = document.getElementById('composer-input');
                   return { path: location.pathname, framed: window.top !== window,
                            composer: !!input, usable: !!input && !input.disabled && !input.readOnly };""")
-                devtools.call("Page.navigate", {"url": a.url + "/"}, session)
-                time.sleep(0.3)
-                assert wait_until(page, SETTLED, READY_TIMEOUT_S + 8)
-                page.click(*center(page, '[data-testid="link-chat-panel"]'))
-                assert wait_until(page, "location.pathname === '/app/' && document.getElementById('composer-input')", 20)
-                result["panelArrival"] = page.eval("return { path: location.pathname, composer: "
-                                                   "!!document.getElementById('composer-input') };")
+                for control, key in ((VISIBLE_CARD, "cardArrival"), ('[data-testid="chat-twin-composer"]', "composerArrival")):
+                    devtools.call("Page.navigate", {"url": a.url + "/"}, session)
+                    time.sleep(0.3)
+                    assert wait_until(page, SETTLED, READY_TIMEOUT_S + 8)
+                    page.click(*center(page, control))
+                    arrived = wait_until(page, AT_TOP_LEVEL_CHAT, 20)
+                    result[key] = {"arrived": arrived, "path": page.eval("return location.pathname;")}
+                if mobile:
+                    # The phone also loads a two-second-late chat and one that never becomes ready.
+                    a.route = site_route(chat(delay=2.5))
+                    devtools.call("Page.navigate", {"url": a.url + "/"}, session)
+                    time.sleep(0.3)
+                    slow = {"early": page.eval(SNAPSHOT), "twinBoxes": page.eval(TWIN_BOXES)}
+                    slow["settled"] = wait_until(page, STATE_IS.format("'ready'"), READY_TIMEOUT_S + 8)
+                    assert wait_until(page, "!document.querySelector('[data-testid=\"chat-twin\"]')", 5)
+                    slow["final"], slow["chatBoxes"] = page.eval(SNAPSHOT), page.eval(CHAT_BOXES)
+                    slow["early_use"] = use_before_ready(devtools, session, page, a.url + "/")
+                    a.route = site_route(chat(delay=120))
+                    devtools.call("Page.navigate", {"url": a.url + "/"}, session)
+                    time.sleep(0.3)
+                    hang = {"settled": wait_until(page, STATE_IS.format("'unavailable'"), READY_TIMEOUT_S + 8)}
+                    time.sleep(0.4)
+                    hang["final"] = page.eval(SNAPSHOT)
+                    result["phone"] = {"slow": slow, "hang": hang}
             result["all_paths"] = list(a.paths)
     return result
+
+
+VISIBLE_CARD = "[...document.querySelectorAll('[data-testid=\"chat-twin-card\"]')].find(c => c.getClientRects().length)"
+
+
+def use_before_ready(devtools, session, page: Page, home: str) -> dict:
+    """With a chat that is still loading, use the CTA, an example card and the twin's
+    composer: each must open the full chat at top level."""
+    out = {}
+    for control in ("cta", "card", "composer"):
+        devtools.call("Page.navigate", {"url": home}, session)
+        assert wait_until(page, "document.querySelector('[data-testid=\"chat-twin-composer\"]')", 10)
+        selector = {"cta": "document.querySelector('[data-testid=\"button-start-session\"]')", "card": VISIBLE_CARD,
+                    "composer": "document.querySelector('[data-testid=\"chat-twin-composer\"]')"}[control]
+        # Located and clicked in one task, while the frame is still unproven.
+        before = page.eval(f"""const el = {selector};
+          el.scrollIntoView({{ block: 'center', behavior: 'instant' }});
+          const state = document.querySelector('[data-testid="embedded-chat"]').dataset.chatState;
+          el.click(); return state;""")
+        arrived = wait_until(page, AT_TOP_LEVEL_CHAT, 20)
+        out[control] = {"stateAtUse": before, "arrived": arrived, "path": page.eval("return location.pathname;"),
+                        "framed": page.eval("return window.top !== window;")}
+    return out
 
 
 CASES = ["ready", "slow", "deny", "hang", "impostor", "recursive", "redirect", "redirect-open",
          "alias-redirect", "alias-direct"]
 UNAVAILABLE = {"deny", "hang", "impostor", "recursive", "redirect", "redirect-open", "alias-direct"}
-PANEL_TEXT = ("What are you working on? Bring a difficult question, a rough draft, broken code, or something "
-              "current. Start a private session")
 
 
 @pytest.fixture(scope="module", params=CASES)
@@ -425,6 +557,36 @@ def mobile_case(request, tmp_path_factory):
     return run_case(tmp_path_factory, request.param, "mobile")
 
 
+def assert_complete_twin(snapshot: dict, label=""):
+    assert snapshot["twin"] and snapshot["twinInert"] is False and snapshot["twinCards"] == CARD_TITLES, (label, snapshot)
+    assert snapshot["oldPanel"] is False and snapshot["twinRect"][2:] == snapshot["boxClient"], label
+
+
+def assert_twin_matches_chat(twin: dict, chat: dict, label: str):
+    """Every important box of the native twin sits where the proven chat's does (within 1.5 px), with the same labels."""
+    def close(a, b):
+        return len(a) == len(b) and all(abs(x - y) <= 1.5 for x, y in zip(a, b))
+    for part in ("title", "line", "erase", "input"):
+        assert twin[part][1] == chat[part][1], (label, part, twin[part][1], chat[part][1])
+        assert close(twin[part][0], chat[part][0]), (label, part, twin[part][0], chat[part][0])
+    assert (twin["label"] is None) == (chat["label"] is None), label
+    if twin["label"]:
+        assert twin["label"][1] == chat["label"][1] and close(twin["label"][0], chat["label"][0]), (label, twin["label"], chat["label"])
+    assert [c[1] for c in twin["cards"]] == [c[1] for c in chat["cards"]] == CARD_TITLES, label
+    for mine, real in zip(twin["cards"], chat["cards"]):
+        assert mine[2] == real[2], (label, mine[1], "description")
+        for i, part in ((0, "card"), (3, "icon"), (4, "arrow")):
+            assert close(mine[i], real[i]), (label, mine[1], part, mine[i], real[i])
+    for part in ("shell", "send"):
+        assert close(twin[part], chat[part]), (label, part, twin[part], chat[part])
+
+
+def assert_used_before_ready(early_use: dict, label: str):
+    for control in ("cta", "card", "composer"):
+        assert early_use[control] == {"stateAtUse": "loading", "arrived": True, "path": "/app/", "framed": False}, (
+            label, control, early_use[control])
+
+
 def test_no_browser_page_is_ever_painted_and_the_slot_is_never_blank(case):
     for label in ("early", "forged", "final", "afterReload"):
         snapshot = case.get(label)
@@ -433,31 +595,37 @@ def test_no_browser_page_is_ever_painted_and_the_slot_is_never_blank(case):
         recorder = snapshot["recorder"]
         assert recorder["samples"] >= 1, (case["name"], label, recorder)
         assert recorder["violations"] == [], (case["name"], label, recorder)
-    # The recorder really watched the whole load, frame by frame.
-    assert case["final"]["recorder"]["samples"] > 20, (case["name"], case["final"]["recorder"])
+    # The recorder really watched the whole load frame by frame, including a
+    # dense filmstrip of its first two seconds, so a half-second flash cannot escape.
+    final = case["final"]["recorder"]
+    assert final["samples"] > 20 and final["early"] >= 30, (case["name"], final["samples"], final["early"])
+    assert final["film"] and final["film"][0]["state"] == "loading" and final["film"][0]["twin"], case["name"]
 
 
-def test_first_paint_is_the_native_panel_until_the_chat_is_proven_ready(case):
+def test_first_paint_is_the_native_twin_until_the_chat_is_proven_ready(case):
     early = case["early"]
     assert early["recorder"]["states"][0] == "loading", case["name"]
     if early["state"] != "ready":
-        assert early["panel"] and early["panelText"] == PANEL_TEXT and early["panelLink"] == "/app/"
+        assert_complete_twin(early, case["name"])
         assert early["framePainted"] is False
         if early["frame"]:
             assert early["frameInert"] is True and early["frameHidden"] == "true"
-        assert early["panelRect"][2:] == early["boxClient"]
+    if case["name"] == "slow":
+        # Two and a half seconds of the twin, then the proven chat in exactly its place.
+        assert_twin_matches_chat(case["twinBoxes"], case["chatBoxes"], "desktop")
+        assert_used_before_ready(case["early_use"], "desktop")
 
 
-def test_each_load_settles_to_the_ready_chat_or_the_native_panel(case):
+def test_each_load_settles_to_the_ready_chat_or_the_native_twin(case):
     final = case["final"]
     assert case["settled_s"], case["name"]
     if case["name"] in UNAVAILABLE:
         assert final["state"] == "unavailable" and final["frame"] is False, case["name"]
-        assert final["panel"] and final["panelText"] == PANEL_TEXT
+        assert_complete_twin(final, case["name"])
         assert final["recorder"]["transitions"] == ["loading", "unavailable"], (case["name"], final["recorder"])
     else:
         assert final["state"] == "ready" and final["framePainted"] and final["composer"] == "present", case["name"]
-        assert final["panel"] is False and final["frameInert"] is False and final["frameHidden"] is None
+        assert final["twin"] is False and final["frameInert"] is False and final["frameHidden"] is None
         assert final["recorder"]["states"] == ["loading", "ready"]
         assert final["recorder"]["transitions"] == ["loading", "ready"]
 
@@ -495,7 +663,8 @@ def test_forged_ready_messages_reveal_nothing(hang_case):
     forged = hang_case["forged"]
     # The other-origin page really loaded and posted its messages.
     assert "/forge" in hang_case["forge_paths"]
-    assert forged["state"] == "loading" and forged["framePainted"] is False and forged["panel"]
+    assert forged["state"] == "loading" and forged["framePainted"] is False
+    assert_complete_twin(forged, "forged")
     assert forged["recorder"]["violations"] == []
     assert hang_case["final"]["state"] == "unavailable" and hang_case["final"]["frame"] is False
 
@@ -515,7 +684,8 @@ def assert_every_replacement_is_revalidated(result: dict):
         assert run["settled"], kind
         assert run["after"]["recorder"]["transitions"] == ["loading", "ready", "loading", "unavailable"], (
             kind, run["after"]["recorder"])
-        assert run["after"]["frame"] is False and run["after"]["panel"] and run["after"]["panelText"] == PANEL_TEXT
+        assert run["after"]["frame"] is False
+        assert_complete_twin(run["after"], kind)
         # The CTA then opens the full chat at top level; it never focuses the replaced frame.
         assert run["cta"] == {"arrived": True, "path": "/app/", "framed": False}, kind
     recheck = replaced["cta-recheck"]
@@ -542,21 +712,33 @@ def test_a_valid_chat_keeps_its_draft_and_every_replacement_document_is_revalida
     assert not any(p.startswith("POST ") or p.startswith("/api/") for p in result["all_paths"])
 
 
-def test_when_unavailable_the_cta_and_the_panel_open_the_working_chat(deny_case):
+def test_when_unavailable_the_cta_cards_and_composer_open_the_working_chat(deny_case):
     result = deny_case
     assert result["ctaArrival"] == {"path": "/app/", "framed": False, "composer": True, "usable": True}
-    assert result["panelArrival"] == {"path": "/app/", "composer": True}
+    assert result["cardArrival"] == result["composerArrival"] == {"arrived": True, "path": "/app/"}
     assert not any(p.startswith("POST ") or p.startswith("/api/") for p in result["all_paths"])
 
 
-def test_mobile_viewport_shows_the_panel_or_the_ready_chat_without_overflow(mobile_case):
+def test_mobile_viewport_shows_the_twin_or_the_ready_chat_without_overflow(mobile_case):
     final = mobile_case["final"]
     assert final["recorder"]["violations"] == [] and final["innerWidth"] == VIEWPORTS["mobile"][0]
     assert final["docScrollWidth"] <= final["innerWidth"]
     if mobile_case["name"] == "deny":
-        assert final["state"] == "unavailable" and final["panel"] and final["panelText"] == PANEL_TEXT
-        assert final["panelRect"][2:] == final["boxClient"]
-        assert mobile_case["ctaArrival"]["path"] == "/app/" and mobile_case["panelArrival"]["path"] == "/app/"
+        assert final["state"] == "unavailable"
+        assert_complete_twin(final, "mobile deny")
+        assert mobile_case["ctaArrival"]["path"] == "/app/"
+        assert mobile_case["cardArrival"] == mobile_case["composerArrival"] == {"arrived": True, "path": "/app/"}
+        slow, hang = mobile_case["phone"]["slow"], mobile_case["phone"]["hang"]
+        assert_complete_twin(slow["early"], "mobile slow")
+        assert slow["settled"] and slow["final"]["state"] == "ready" and slow["final"]["twin"] is False
+        assert slow["final"]["recorder"]["violations"] == [] and slow["final"]["recorder"]["early"] >= 30
+        assert slow["final"]["recorder"]["transitions"] == ["loading", "ready"]
+        assert_twin_matches_chat(slow["twinBoxes"], slow["chatBoxes"], "mobile")
+        assert_used_before_ready(slow["early_use"], "mobile")
+        assert hang["settled"] and hang["final"]["state"] == "unavailable" and hang["final"]["frame"] is False
+        assert_complete_twin(hang["final"], "mobile never ready")
+        assert hang["final"]["recorder"]["violations"] == [] and hang["final"]["recorder"]["transitions"] == ["loading", "unavailable"]
+        assert not any(p.startswith("POST ") or p.startswith("/api/") for p in mobile_case["all_paths"])
     else:
         assert final["state"] == "ready" and final["framePainted"]
         assert mobile_case["afterCta"]["draft"] == "my unsent draft" and mobile_case["afterCta"]["path"] == "/"

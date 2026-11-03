@@ -1590,9 +1590,10 @@ def test_conversation_stays_on_the_homepage_in_source():
             assert forbidden not in source, forbidden
     assert "location.assign" not in chat
     # The homepage embeds the one chat implementation. Only while that chat is
-    # not proven ready does it open /app/ itself: the CTA and the native panel.
+    # not proven ready does it open /app/ itself: the CTA, and the native twin's
+    # example cards (one template) and composer.
     assert app.count("location.assign") == 1 and "window.location.assign(CHAT_PATH);" in app
-    assert app.count("href={CHAT_PATH}") == 1
+    assert app.count("href={CHAT_PATH}") == 2
     assert app.count("'/app/'") == 1 and "const CHAT_PATH = '/app/';" in app
     assert 'href="/app' not in app and "navigate('/app" not in app
 

@@ -300,30 +300,96 @@ function useChatWorkspace() {
     focusWhenReady.current = true;
   }, [bringIntoView, focusChat, provenNow]);
 
-  return { slotRef, frameRef, chatState, startSession, showChat };
+  /* The twin lies beneath a newly proven chat until the chat has been
+     painted (two animation frames), then leaves; any withdrawal shows it again. */
+  const [twinGoneAt, setTwinGoneAt] = useState(-1);
+  useEffect(() => {
+    if (chatState !== 'ready') return;
+    const mine = generation;
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => { if (generationRef.current === mine) setTwinGoneAt(mine); });
+    });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [chatState, generation]);
+  const showTwin = !(chatState === 'ready' && twinGoneAt === generation);
+
+  return { slotRef, frameRef, chatState, showTwin, startSession, showChat };
 }
 
-/* Native, always-available content for the chat slot while the chat is
-   loading or if it never becomes ready. Its link opens the full chat. */
-function ChatPanel() {
+/* The chat's own empty-state examples and icons (../frontend/index.html). */
+const chatStarters = [
+  { kind: 'research', title: 'Research the current web', description: 'Get up-to-date information with sources.',
+    icon: <><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></> },
+  { kind: 'writing', title: 'Write and revise', description: 'Improve your writing, brainstorm, and get feedback.',
+    icon: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></> },
+  { kind: 'code', title: 'Code and debug', description: 'Build, fix, and explain code in plain language.',
+    icon: <path d="m8 5-7 7 7 7m8-14 7 7-7 7"/> },
+  { kind: 'learning', title: 'Learn anything', description: 'Get clear explanations on complex topics.',
+    icon: <path d="M9 18h6M9 22h6M9 14c-1-1-3-3-3-6a6 6 0 0 1 12 0c0 3-2 5-3 6v1H9Z"/> },
+];
+
+function ChatIcon({ className, children }: { className?: string; children: ReactNode }) {
+  return <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"
+    strokeLinejoin="round" aria-hidden="true" focusable="false">{children}</svg>;
+}
+
+function ChatTwinStarters() {
   return (
-    <div className="chat-panel" data-testid="chat-panel">
-      <h2 className="chat-panel-title">What are you working on?</h2>
-      <p className="chat-panel-line">Bring a difficult question, a rough draft, broken code, or something current.</p>
-      <a href={CHAT_PATH} className="text-link chat-panel-link" data-testid="link-chat-panel">Start a private session <ArrowRight size={16} aria-hidden="true" /></a>
+    <div className="ct-starter">
+      <p className="ct-starter-label">Or start with an example</p>
+      <div className="ct-hints">{chatStarters.map(({ kind, title, description, icon }) => (
+        <a key={kind} href={CHAT_PATH} className={`ct-hint ct-hint-${kind}`} data-testid="chat-twin-card">
+          <span className="ct-hint-icon"><ChatIcon>{icon}</ChatIcon></span>
+          <span className="ct-hint-copy"><span className="ct-hint-title">{title}</span><span className="ct-hint-description">{description}</span></span>
+          <ChatIcon className="ct-hint-arrow"><path d="M5 12h14m-6-6 6 6-6 6"/></ChatIcon>
+        </a>))}
+      </div>
+    </div>
+  );
+}
+
+/* A native twin of the embedded chat's empty state -- the same heading, line,
+   example cards, composer and End & erase, in the chat's own type, spacing and
+   breakpoints -- so the slot looks like Kalillac's chat from the first frame.
+   It never pretends to be the chat: the cards and the composer are links that
+   open the full chat at /app/, End & erase is shown inactive exactly as an
+   empty chat shows it, and nothing here sends, stores or erases anything. It
+   stays (and is the only content) while the real chat is unproven; once the
+   chat is proven it lies beneath it, inert, until the chat has been painted. */
+function ChatTwin({ covered }: { covered: boolean }) {
+  return (
+    <div className="chat-twin" data-testid="chat-twin" inert={covered} aria-hidden={covered ? true : undefined}>
+      <div className="ct-app">
+        <div className="ct-conversation"><div className="ct-thread"><div className="ct-empty">
+          <h2 className="ct-title">What are you working on?</h2>
+          <p className="ct-line">Bring a difficult question, a rough draft, broken code, or something current.</p>
+          <ChatTwinStarters />
+        </div></div></div>
+        <div className="ct-dock">
+          <div className="ct-composer">
+            <a href={CHAT_PATH} className="ct-shell" data-testid="chat-twin-composer" aria-label="Message Kalillac AI (opens the chat)">
+              <span className="ct-erase" aria-hidden="true"><ChatIcon><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></ChatIcon><span>End &amp; erase</span></span>
+              <span className="ct-placeholder" aria-hidden="true">Message Kalillac AI…</span>
+              <span className="ct-send" aria-hidden="true"><ChatIcon><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></ChatIcon></span>
+            </a>
+          </div>
+          <div className="ct-starter-dock"><ChatTwinStarters /></div>
+        </div>
+      </div>
     </div>
   );
 }
 
 function EmbeddedChat({ workspace }: { workspace: ReturnType<typeof useChatWorkspace> }) {
-  const { slotRef, frameRef, chatState } = workspace;
+  const { slotRef, frameRef, chatState, showTwin } = workspace;
   const ready = chatState === 'ready';
   return (
     <div id="chat" className="embedded-chat-slot" ref={slotRef}>
       <div className="embedded-chat" data-testid="embedded-chat" data-chat-state={chatState}>
         {chatState !== 'unavailable' && <iframe ref={frameRef} src={CHAT_PATH} title="Chat with Kalillac AI" loading="eager"
           inert={!ready} aria-hidden={ready ? undefined : true} tabIndex={ready ? undefined : -1} />}
-        {!ready && <ChatPanel />}
+        {showTwin && <ChatTwin covered={ready} />}
       </div>
     </div>
   );
