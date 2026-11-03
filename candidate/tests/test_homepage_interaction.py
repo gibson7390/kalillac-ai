@@ -1576,8 +1576,8 @@ def test_cta_code_uses_reduced_motion_and_prevent_scroll():
     assert "frame?.focus({ preventScroll: true })" in app
     assert "scrollIntoView({ block: 'center' })" not in app
     # One CTA, one handler; the header has no second call to action.
-    assert 'onClick={focusChat} data-testid="button-start-session"' in app
-    assert app.count("onClick={focusChat}") == 1
+    assert 'onClick={startSession} data-testid="button-start-session"' in app
+    assert app.count("onClick={startSession}") == 1
     assert "tryKalillac" not in app and "nav-cta" not in app and "Try Kalillac" not in app
 
 
@@ -1586,10 +1586,13 @@ def test_conversation_stays_on_the_homepage_in_source():
     chat = (REPO / "frontend" / "app.js").read_text(encoding="utf-8")
 
     for source in (app, chat):
-        for forbidden in ("pushState", "replaceState", "location.assign", "location.href =",
-                          "location.replace", "window.open("):
+        for forbidden in ("pushState", "replaceState", "location.href =", "location.replace", "window.open("):
             assert forbidden not in source, forbidden
-    # The homepage embeds the one chat implementation; it never links into /app/.
+    assert "location.assign" not in chat
+    # The homepage embeds the one chat implementation. Only while that chat is
+    # not proven ready does it open /app/ itself: the CTA and the native panel.
+    assert app.count("location.assign") == 1 and "window.location.assign(CHAT_PATH);" in app
+    assert app.count("href={CHAT_PATH}") == 1
     assert app.count("'/app/'") == 1 and "const CHAT_PATH = '/app/';" in app
     assert 'href="/app' not in app and "navigate('/app" not in app
 

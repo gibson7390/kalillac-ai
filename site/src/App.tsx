@@ -1,4 +1,5 @@
 import { type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { ArrowRight, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
 import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
@@ -93,14 +94,139 @@ function prefersReducedMotion(): boolean {
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
+/* The framed chat is shown only while this page can read the frame's CURRENT
+   document and see the canonical chat running in it: a same-origin document
+   at exactly CHAT_PATH whose own script has finished setting up and added
+   `is-embedded` to its body (the last step of ../frontend/app.js when
+   framed). A browser refusal or error page, a redirect to another origin, a
+   recursive homepage, an unfinished load or a document that has already
+   begun to leave is never ready, and no message from any window is read.
+   'pending' means keep waiting; 'invalid' means this frame will not become
+   the chat. */
+type ChatFrameStatus = 'ready' | 'pending' | 'invalid';
+
+function chatFrameStatus(frame: HTMLIFrameElement | null, retired: WeakSet<Document>): ChatFrameStatus {
+  if (!frame) return 'pending';
+  try {
+    const view = frame.contentWindow;
+    const doc = frame.contentDocument;
+    // Another origin or a browser error page: the document is unreadable.
+    if (!view || !doc) return 'invalid';
+    // A document that has begun to leave is never proven again.
+    if (retired.has(doc)) return 'pending';
+    // The initial empty document before the chat's navigation commits.
+    if (doc.URL === 'about:blank') return 'pending';
+    if (view.location.origin !== window.location.origin || view.location.pathname !== CHAT_PATH) return 'invalid';
+    if (doc.body?.classList.contains('is-embedded') && doc.getElementById('composer-input')) return 'ready';
+    return doc.readyState === 'complete' ? 'invalid' : 'pending';
+  } catch {
+    return 'invalid';
+  }
+}
+
+// How often to look for the chat, and how long to wait before giving up on
+// the inline chat and keeping the native panel (whose link opens /app/).
+const CHAT_READY_POLL_MS = 50;
+const CHAT_READY_TIMEOUT_MS = 10000;
+
+type ChatState = 'loading' | 'ready' | 'unavailable';
+
 /* The homepage chat workspace: the canonical /app/ client in a same-origin
-   iframe, at one stable height from the first render onward. It is a full
-   conversation workspace before, during and after a conversation; nothing
-   resizes, expands or navigates when a prompt is sent, and the homepage and
-   the chat exchange no messages. */
+   iframe, at one stable height from the first render onward. Until the chat
+   is proven ready the slot shows a native panel and the frame stays hidden
+   and inert, so a browser-generated page can never appear; if it never
+   becomes ready the frame is removed and the panel remains. Once shown, it is
+   a full conversation workspace before, during and after a conversation;
+   nothing resizes, expands or navigates when a prompt is sent, and the
+   homepage and the chat exchange no messages.
+
+   Readiness belongs to one document. The moment the proven document begins
+   to leave (any navigation, reload or replacement of the frame), readiness is
+   withdrawn synchronously -- the frame is hidden, inert, aria-hidden and
+   untabbable before anything can replace it -- and whatever document comes
+   next must pass the whole proof again. Every attempt has a generation:
+   withdrawing starts a new one at once, so a check, timer or listener from an
+   earlier attempt can never mark a newer document ready or fail it. */
 function useChatWorkspace() {
   const slotRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const [chatState, setChatState] = useState<ChatState>('loading');
+  const [generation, setGeneration] = useState(0);
+  const generationRef = useRef(0);
+  // The one document proven ready, and every document that has since left.
+  const provenDoc = useRef<Document | null>(null);
+  const retired = useRef(new WeakSet<Document>());
+  // A focus requested before the chat was ready (the #chat link), applied once it is.
+  const focusWhenReady = useRef(false);
+  // The current state for the stable handlers below.
+  const stateRef = useRef<ChatState>(chatState);
+  stateRef.current = chatState;
+
+  /* Withdraw readiness and start a new attempt. When the frame is showing,
+     the re-render is synchronous, so it is hidden and inert before the
+     browser can paint whatever replaces the proven document. */
+  const invalidate = useCallback((next: 'loading' | 'unavailable') => {
+    if (provenDoc.current) retired.current.add(provenDoc.current);
+    provenDoc.current = null;
+    const nextGeneration = ++generationRef.current;
+    const update = () => { setGeneration(nextGeneration); setChatState(next); };
+    if (stateRef.current === 'ready') flushSync(update);
+    else update();
+  }, []);
+
+  // True only while the frame's current document is the proven one and still passes the whole proof.
+  const provenNow = useCallback(() => {
+    const frame = frameRef.current;
+    return provenDoc.current !== null && frame?.contentDocument === provenDoc.current
+      && chatFrameStatus(frame, retired.current) === 'ready';
+  }, []);
+
+  useEffect(() => {
+    if (chatState !== 'loading') return;
+    const mine = generation;
+    const frame = frameRef.current;
+    const check = () => {
+      if (generationRef.current !== mine) return;
+      const status = chatFrameStatus(frameRef.current, retired.current);
+      if (status === 'invalid') { invalidate('unavailable'); return; }
+      if (status !== 'ready') return;
+      provenDoc.current = frameRef.current?.contentDocument ?? null;
+      setChatState('ready');
+    };
+    frame?.addEventListener('load', check);
+    const poll = window.setInterval(check, CHAT_READY_POLL_MS);
+    const deadline = window.setTimeout(() => { if (generationRef.current === mine) invalidate('unavailable'); },
+      CHAT_READY_TIMEOUT_MS);
+    check();
+    return () => {
+      frame?.removeEventListener('load', check);
+      window.clearInterval(poll);
+      window.clearTimeout(deadline);
+    };
+  }, [chatState, generation, invalidate]);
+
+  useEffect(() => {
+    if (chatState !== 'ready') return;
+    const mine = generation;
+    const frame = frameRef.current;
+    const view = frame?.contentWindow ?? null;
+    // The proven document starting to leave: beforeunload comes before the
+    // next request, pagehide before the next document is shown.
+    const leave = () => { if (generationRef.current === mine) invalidate('loading'); };
+    // Backstop: the current document must still be the proven one and pass the proof.
+    const watch = () => { if (generationRef.current === mine && !provenNow()) invalidate('loading'); };
+    view?.addEventListener('beforeunload', leave);
+    view?.addEventListener('pagehide', leave);
+    frame?.addEventListener('load', watch);
+    const poll = window.setInterval(watch, CHAT_READY_POLL_MS);
+    queueMicrotask(watch);
+    return () => {
+      view?.removeEventListener('beforeunload', leave);
+      view?.removeEventListener('pagehide', leave);
+      frame?.removeEventListener('load', watch);
+      window.clearInterval(poll);
+    };
+  }, [chatState, generation, invalidate, provenNow]);
 
   /* Move the workspace to just below the sticky site header when it is not
      already fully visible there -- smoothly, or instantly when reduced
@@ -129,9 +255,9 @@ function useChatWorkspace() {
     }
   }, []);
 
-  /* "Start a private session" lands here: the workspace is brought into
-     view, then the real message input inside the same-origin chat is focused
-     with preventScroll, so focusing never causes a second, browser-generated
+  /* Focusing the ready chat: the workspace is brought into view, then the
+     real message input inside the same-origin chat is focused with
+     preventScroll, so focusing never causes a second, browser-generated
      jump. */
   const focusChat = useCallback(() => {
     bringIntoView();
@@ -144,15 +270,60 @@ function useChatWorkspace() {
     else frame?.focus({ preventScroll: true });
   }, [bringIntoView]);
 
-  return { slotRef, frameRef, focusChat };
+  useEffect(() => {
+    if (chatState !== 'ready' || !focusWhenReady.current) return;
+    focusWhenReady.current = false;
+    if (provenNow()) focusChat();
+  }, [chatState, focusChat, provenNow]);
+
+  /* "Start a private session": the inline chat only if its current document
+     passes the whole proof at this moment, otherwise the full chat at /app/
+     -- the frame is withdrawn first, so the button never focuses a stale or
+     replaced document and always reaches a working chat. */
+  const startSession = useCallback(() => {
+    if (stateRef.current === 'ready' && provenNow()) { focusChat(); return; }
+    if (stateRef.current === 'loading' && chatFrameStatus(frameRef.current, retired.current) === 'ready') {
+      provenDoc.current = frameRef.current?.contentDocument ?? null;
+      focusWhenReady.current = true;
+      setChatState('ready');
+      return;
+    }
+    invalidate('unavailable');
+    window.location.assign(CHAT_PATH);
+  }, [focusChat, invalidate, provenNow]);
+
+  /* The #chat link: bring the workspace into view now and focus the chat
+     once it is ready. It never navigates away from the homepage. */
+  const showChat = useCallback(() => {
+    if (stateRef.current === 'ready' && provenNow()) { focusChat(); return; }
+    bringIntoView();
+    focusWhenReady.current = true;
+  }, [bringIntoView, focusChat, provenNow]);
+
+  return { slotRef, frameRef, chatState, startSession, showChat };
+}
+
+/* Native, always-available content for the chat slot while the chat is
+   loading or if it never becomes ready. Its link opens the full chat. */
+function ChatPanel() {
+  return (
+    <div className="chat-panel" data-testid="chat-panel">
+      <h2 className="chat-panel-title">What are you working on?</h2>
+      <p className="chat-panel-line">Bring a difficult question, a rough draft, broken code, or something current.</p>
+      <a href={CHAT_PATH} className="text-link chat-panel-link" data-testid="link-chat-panel">Start a private session <ArrowRight size={16} aria-hidden="true" /></a>
+    </div>
+  );
 }
 
 function EmbeddedChat({ workspace }: { workspace: ReturnType<typeof useChatWorkspace> }) {
-  const { slotRef, frameRef } = workspace;
+  const { slotRef, frameRef, chatState } = workspace;
+  const ready = chatState === 'ready';
   return (
     <div id="chat" className="embedded-chat-slot" ref={slotRef}>
-      <div className="embedded-chat" data-testid="embedded-chat">
-        <iframe ref={frameRef} src={CHAT_PATH} title="Chat with Kalillac AI" loading="eager" />
+      <div className="embedded-chat" data-testid="embedded-chat" data-chat-state={chatState}>
+        {chatState !== 'unavailable' && <iframe ref={frameRef} src={CHAT_PATH} title="Chat with Kalillac AI" loading="eager"
+          inert={!ready} aria-hidden={ready ? undefined : true} tabIndex={ready ? undefined : -1} />}
+        {!ready && <ChatPanel />}
       </div>
     </div>
   );
@@ -282,17 +453,17 @@ function MobileAppSection() {
 
 function HomePage() {
   const workspace = useChatWorkspace();
-  const { focusChat } = workspace;
+  const { startSession, showChat } = workspace;
   useEffect(() => {
     const id = window.location.hash.slice(1);
     if (!id) return;
-    if (id === 'chat') { focusChat(); return; }
+    if (id === 'chat') { showChat(); return; }
     document.getElementById(id)?.scrollIntoView();
-  }, [focusChat]);
+  }, [showChat]);
   return <div className="site-shell"><SiteHeader/><main>
     <section className="hero" aria-labelledby="hero-title" data-testid="section-hero"><div className="hero-signal-line" aria-hidden="true"/><div className="container-wide hero-stage">
       <div className="hero-copy"><span className="eyebrow">PRIVATE BY DESIGN</span><h1 id="hero-title"><span className="h1-phrase">Think clearly.</span>{' '}<span className="h1-phrase">Write well.</span>{' '}<span className="h1-phrase">Build and debug.</span>{' '}<span className="h1-phrase h1-accent"><span>Search the</span>{' '}<span>current web.</span></span></h1><p className="hero-description">Work through difficult questions, draft and revise writing, explain and repair code, or research current information with sources—without creating an account or building a permanent chat history.</p>
-        <button type="button" className="primary-link hero-action" onClick={focusChat} data-testid="button-start-session">Start a private session <ArrowRight size={18} aria-hidden="true"/></button>
+        <button type="button" className="primary-link hero-action" onClick={startSession} data-testid="button-start-session">Start a private session <ArrowRight size={18} aria-hidden="true"/></button>
         <p className="hero-under-note"><span className="trust-item"><Clock size={16} aria-hidden="true"/> Temporary sessions</span><span className="trust-item"><CircleSlash size={16} aria-hidden="true"/> No account required</span><Link href="/privacy" className="note-link trust-item"><ShieldCheck size={16} aria-hidden="true"/> Clear provider disclosure</Link></p>
       </div><div className="hero-workspace"><OrbitalAssistant/><EmbeddedChat workspace={workspace}/></div>
     </div></section>
