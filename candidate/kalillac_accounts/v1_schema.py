@@ -13,17 +13,25 @@ Read-only. Three states are distinguished on PostgreSQL:
 
 Anything partial, altered or more privileged is refused, never repaired.
 
-Two prepared catalogs are accepted: 0012 alone, and 0012 with 0013's
-private session-revocation authority (V1-02B): the exact function owned by
-the NOLOGIN executor role E and executable only by the NOLOGIN service role
-S, E's exact grants, schema USAGE for both, and the operator's single
-owner->E SET edge. S and E are named by mandatory settings; before 0013
+Three prepared catalogs are accepted, each exactly:
+
+- 0012 alone, with 0011's identity guard (v1);
+- 0012 with 0013's private session-revocation authority (V1-02B): revocation
+  v1 owned by the NOLOGIN executor role E and executable only by the NOLOGIN
+  service role S, E's 0013 grants, schema USAGE for both, the operator's
+  single owner->E SET edge and identity guard v1;
+- that with 0014 (V1-02C): private session issuance, revocation v2 (revoke-all
+  advances the epoch), E's 0014 grants and identity guard v2 (the forward
+  epoch transition).
+
+Revocation, issuance, grants and guard versions are paired; anything mixed
+or partial is refused. S and E are named by mandatory settings; before 0013
 they may be absent, or present with nothing but that edge.
 
 Qualifying an active latch also requires the complete private-authority
-catalog (issuance, epoch, recovery and the guard version), which later
-reviewed slices define, so application startup with V1 enabled refuses in
-every state. Nothing here grants, migrates, writes or activates.
+catalog (recovery and the application's exposure), which later reviewed
+slices define, so application startup with V1 enabled refuses in every
+state. Nothing here grants, migrates, writes or activates.
 """
 from __future__ import annotations
 
@@ -164,6 +172,28 @@ EXECUTOR_COLUMN_GRANTS = {("users", "SELECT"): ("id", "is_active", "quarantined_
                                                            "revoked_at"),
                           ("account_sessions", "UPDATE"): ("revoked_at",)}
 
+# 0014: private session issuance and the session epoch (V1-02C).
+ISSUANCE_FUNCTION = "v1_issue_session"
+ISSUANCE_SIGNATURE = "kalillac.v1_issue_session(uuid,text,uuid,text,integer)"
+ISSUANCE_DEFINITION = ("p_session_id uuid, p_token_hash text, p_user_id uuid, p_verified_password_hash text,"
+                       " p_lifetime_days integer",
+                       "TABLE(outcome text, issued_at timestamp with time zone, valid_until timestamp with time zone,"
+                       " replayed boolean)", "plpgsql", "v", True, False, False, "u", "f",
+                       ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+# SHA-256 of the exact bodies 0014 installs: issuance, and revocation v2.
+ISSUANCE_SOURCE_SHA256 = "cca6306a02017d127e70f04d00950a4b2183ebc39c5d18a391ce8c3f94068422"
+REVOCATION_SOURCE_SHA256_V2 = "ab212c400fc29b5a5236d4535ce1afee2aa0281db1e3d9891eb75e75309121e8"
+# E's column grants after 0014; its table grants are unchanged.
+EXECUTOR_COLUMN_GRANTS_V2 = {("users", "SELECT"): ("id", "password_hash", "is_active", "email_verified_at",
+                                                   "quarantined_at", "deletion_requested_at", "password_reset_required",
+                                                   "sessions_valid_after"),
+                             ("users", "UPDATE"): ("updated_at", "sessions_valid_after"),
+                             ("account_sessions", "SELECT"): ("id", "user_id", "token_hash", "created_at",
+                                                              "expires_at", "revoked_at"),
+                             ("account_sessions", "INSERT"): ("id", "user_id", "token_hash", "created_at",
+                                                              "expires_at"),
+                             ("account_sessions", "UPDATE"): ("revoked_at",)}
+
 
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
@@ -209,11 +239,19 @@ def classify(session) -> str:
         return LEGACY
     _require(tables == set(TABLES) and added == USER_COLUMNS)
     roles = _security_roles()
-    revocation = bool(_rows(session, """SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-        WHERE n.nspname='kalillac' AND p.proname=:f""", f=REVOCATION_FUNCTION))
-    owner = _catalog(session, roles, revocation)
+    installed = {r[0] for r in _rows(session, """SELECT p.proname FROM pg_proc p JOIN pg_namespace n
+        ON n.oid=p.pronamespace WHERE n.nspname='kalillac' AND p.proname=ANY(:f)""",
+        f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION])}
+    revocation, issuance = REVOCATION_FUNCTION in installed, ISSUANCE_FUNCTION in installed
+    _require(revocation or not issuance)
+    owner = _catalog(session, roles, revocation, issuance)
     principals = _authority(session, owner)
-    _security_principals(session, owner, roles, principals, revocation)
+    _security_principals(session, owner, roles, principals, revocation, issuance)
+    # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
+    from .registration_schema import EPOCH_ADVANCE
+    guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='kalillac' AND p.proname='registration_user_identity_guard'""")
+    _require(len(guard) == 1 and (EPOCH_ADVANCE in guard[0][0]) == issuance)
     if not _rows(session, "SELECT has_table_privilege('kalillac.account_security_activation','SELECT')")[0][0]:
         raise V1SchemaRefused("authority_state_unreadable")
     latch = _rows(session, "SELECT state FROM kalillac.account_security_activation")
@@ -231,7 +269,7 @@ def _security_roles():
         raise V1SchemaRefused("authority_roles_unconfigured") from None
 
 
-def _catalog(session, roles, revocation) -> str:
+def _catalog(session, roles, revocation, issuance) -> str:
     """Exact definitions of every 0012 object, not names; returns their owner."""
     executor = roles[1]
     # Permanent ordinary tables (never UNLOGGED, temporary, partitioned, typed or
@@ -262,8 +300,10 @@ def _catalog(session, roles, revocation) -> str:
         a.attacl IS NOT NULL FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
         WHERE a.attrelid='kalillac.users'::regclass AND a.attnum>0 AND NOT a.attisdropped AND a.attname=ANY(:c)""",
         c=list(USER_COLUMNS))}
-    # 0013 grants E SELECT on deletion_requested_at (compared exactly later).
-    _require(users == {name: (*spec, "", "", False, revocation and name == "deletion_requested_at")
+    # 0013 grants E SELECT on deletion_requested_at, 0014 also on
+    # password_reset_required (compared exactly later).
+    _require(users == {name: (*spec, "", "", False, revocation and name == "deletion_requested_at"
+                              or issuance and name == "password_reset_required")
                        for name, spec in USER_COLUMNS.items()})
     # Every primary, unique, foreign and check constraint on, or referencing, a
     # V1 table: exact definition, validated, immediate, and its backing index.
@@ -303,7 +343,7 @@ def _catalog(session, roles, revocation) -> str:
         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='kalillac' AND r.rulename<>'_RETURN'""")
     events = _rows(session, "SELECT evtname FROM pg_event_trigger WHERE evtenabled<>'D'")
     _require(triggers == TRIGGERS and functions == FUNCTIONS | ({REVOCATION_FUNCTION} if revocation else set())
-             and not rules and not events)
+             | ({ISSUANCE_FUNCTION} if issuance else set()) and not rules and not events)
     # No bridge, in any schema. A view runs with its owner's rights and a rule
     # action with its table owner's, so a view or rule over protected state
     # can hand it to R, A or PUBLIC whatever the tables' own grants say. None is
@@ -337,8 +377,8 @@ def _catalog(session, roles, revocation) -> str:
     #   owner is unaffected because it owns no such function;
     # - an effective (direct, PUBLIC or inherited) write right on a V1 table,
     #   or on a new users column.
-    # The four reviewed guards, and 0013's revocation function, are excluded
-    # by exact signature; their definitions are compared separately
+    # The four reviewed guards, and the revocation and issuance functions, are
+    # excluded by exact signature; their definitions are compared separately
     # (validate_security_definitions, _security_principals).
     definers = _rows(session, """SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         JOIN pg_roles o ON o.oid=p.proowner
@@ -352,7 +392,8 @@ def _catalog(session, roles, revocation) -> str:
                      OR (r IN ('INSERT','UPDATE') AND has_any_column_privilege(o.oid,'kalillac.'||t,r)))
           OR EXISTS (SELECT 1 FROM unnest(CAST(:c AS text[])) c CROSS JOIN unnest(ARRAY['INSERT','UPDATE']) r
                      WHERE has_column_privilege(o.oid,'kalillac.users',c,r)))""",
-        g=[*REVIEWED_GUARDS, *([REVOCATION_SIGNATURE] if revocation else [])], t=list(TABLES),
+        g=[*REVIEWED_GUARDS, *([REVOCATION_SIGNATURE] if revocation else []),
+           *([ISSUANCE_SIGNATURE] if issuance else [])], t=list(TABLES),
         w=list(WRITE_RIGHTS), c=list(USER_COLUMNS))
     _require(not bridges and not definers)
     # Owner-only: no grantee but the owner (and, after 0013, E's exact grants)
@@ -424,9 +465,10 @@ def _authority(session, owner) -> None:
     return runtime, registration
 
 
-def _security_principals(session, owner, roles, principals, revocation) -> None:
+def _security_principals(session, owner, roles, principals, revocation, issuance) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
-    edge, and no ownership, grant or default privilege but 0013's exact set.
+    edge, and no ownership, grant or default privilege but 0013's, or 0014's,
+    exact set.
 
     Before 0013 they may be absent, or present holding nothing but the edge.
     R and A hold no membership at all (_authority), so neither they nor S can
@@ -458,26 +500,35 @@ def _security_principals(session, owner, roles, principals, revocation) -> None:
     if not revocation:
         _require(not dependencies)
         return
-    # The exact function: definition, body digest, owner E, ACL E and S only.
-    definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),pg_get_function_result(p.oid),
-        l.lanname,p.provolatile::text,p.prosecdef,p.proleakproof,p.proisstrict,p.proparallel::text,p.prokind::text,
-        p.proconfig,p.procost::float8,p.prorows::float8,p.prosrc,pg_get_userbyid(p.proowner),
-        ARRAY(SELECT ARRAY[pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable::text,pg_get_userbyid(a.grantor)]
-              FROM aclexplode(p.proacl) a ORDER BY 1)
-        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
-        WHERE n.nspname='kalillac' AND p.proname=:f""", f=REVOCATION_FUNCTION)
-    _require(len(definition) == 1)
-    function, *attributes, source, function_owner, acl = definition[0]
-    _require(tuple(attributes) == REVOCATION_DEFINITION and function_owner == executor
-             and hashlib.sha256(source.encode()).hexdigest() == REVOCATION_SOURCE_SHA256
-             and sorted(acl) == sorted([[executor, "EXECUTE", "false", executor],
-                                        [service, "EXECUTE", "false", executor]]))
+    # The exact functions: definition, body digest, owner E, ACL E and S only.
+    expected = {REVOCATION_FUNCTION: (REVOCATION_DEFINITION,
+                                      REVOCATION_SOURCE_SHA256_V2 if issuance else REVOCATION_SOURCE_SHA256)}
+    if issuance:
+        expected[ISSUANCE_FUNCTION] = (ISSUANCE_DEFINITION, ISSUANCE_SOURCE_SHA256)
+    functions = []
+    for name, (declared, digest) in expected.items():
+        definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),
+            pg_get_function_result(p.oid),l.lanname,p.provolatile::text,p.prosecdef,p.proleakproof,p.proisstrict,
+            p.proparallel::text,p.prokind::text,p.proconfig,p.procost::float8,p.prorows::float8,p.prosrc,
+            pg_get_userbyid(p.proowner),
+            ARRAY(SELECT ARRAY[pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable::text,
+                               pg_get_userbyid(a.grantor)] FROM aclexplode(p.proacl) a ORDER BY 1)
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
+            WHERE n.nspname='kalillac' AND p.proname=:f""", f=name)
+        _require(len(definition) == 1)
+        function, *attributes, source, function_owner, acl = definition[0]
+        _require(tuple(attributes) == declared and function_owner == executor
+                 and hashlib.sha256(source.encode()).hexdigest() == digest
+                 and sorted(acl) == sorted([[executor, "EXECUTE", "false", executor],
+                                            [service, "EXECUTE", "false", executor]]))
+        functions.append(function)
     relations = {r[0]: r[1] for r in _rows(session, """SELECT c.relname,c.oid FROM pg_class c
         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='kalillac' AND c.relname=ANY(:t)""",
         t=["users", "account_sessions", *EXECUTOR_TABLE_GRANTS])}
     schema = _rows(session, "SELECT oid FROM pg_namespace WHERE nspname='kalillac'")[0][0]
-    _require(dependencies == {(executor, "pg_proc", function, "o"), (executor, "pg_namespace", schema, "a"),
-                              (service, "pg_namespace", schema, "a"), (service, "pg_proc", function, "a"),
+    _require(dependencies == {(executor, "pg_namespace", schema, "a"), (service, "pg_namespace", schema, "a"),
+                              *((executor, "pg_proc", function, "o") for function in functions),
+                              *((service, "pg_proc", function, "a") for function in functions),
                               *((executor, "pg_class", oid, "a") for oid in relations.values())})
     # Exact grants on those objects: schema USAGE (never CREATE) for both,
     # E's table and column privileges, nothing for S.
@@ -491,11 +542,12 @@ def _security_principals(session, owner, roles, principals, revocation) -> None:
         pg_get_userbyid(a.grantor) FROM pg_attribute t JOIN pg_class c ON c.oid=t.attrelid
         CROSS JOIN LATERAL aclexplode(t.attacl) a WHERE c.oid=ANY(CAST(:o AS oid[])) AND pg_get_userbyid(a.grantee)=ANY(:r)""",
         r=[service, executor], o=list(relations.values()))}
+    columns_granted = EXECUTOR_COLUMN_GRANTS_V2 if issuance else EXECUTOR_COLUMN_GRANTS
     _require(granted == {("schema", None, executor, "USAGE", False, owner), ("schema", None, service, "USAGE", False, owner),
                          *((table, None, executor, right, False, owner)
                            for table, rights in EXECUTOR_TABLE_GRANTS.items() for right in rights),
                          *((table, column, executor, right, False, owner)
-                           for (table, right), columns in EXECUTOR_COLUMN_GRANTS.items() for column in columns)})
+                           for (table, right), columns in columns_granted.items() for column in columns)})
 
 
 def require_qualified_authority(session_factory) -> None:
@@ -521,6 +573,6 @@ def require_qualified_authority(session_factory) -> None:
     if state == PREPARED:
         raise V1SchemaRefused("prepared_inactive")
     # An active latch without a catalog this release can qualify is refused,
-    # never trusted: the S/E inventory is incomplete until issuance, the epoch
-    # and recovery are ported in their reviewed slices.
+    # never trusted: the S/E inventory is incomplete until recovery and the
+    # application's exposure are ported in their reviewed slices.
     raise V1SchemaRefused("authority_catalog_unqualified")

@@ -52,7 +52,8 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0013_v1_session_revocation"]
+    assert script.get_heads() == ["0014_v1_session_issuance"]
+    assert script.get_revision("0014_v1_session_issuance").down_revision == "0013_v1_session_revocation"
     assert script.get_revision("0013_v1_session_revocation").down_revision == "0012_v1_account_security"
     assert script.get_revision("0012_v1_account_security").down_revision == "0011_registration_intents"
     assert script.get_revision("0011_registration_intents").down_revision == "0010_spaces"

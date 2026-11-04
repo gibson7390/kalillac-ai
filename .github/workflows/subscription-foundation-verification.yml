@@ -442,3 +442,25 @@ jobs:
           print(totals)
           assert totals == {"tests": 117, "skipped": 0, "failures": 0, "errors": 0}
           PY
+
+      # Actual collect-only result for the two explicit modules: 154 tests
+      # (18 unit/graph/DDL + 136 real PostgreSQL). Missing PG fails as above.
+      - name: Run V1-02C private session issuance and epoch contracts
+        working-directory: candidate
+        run: >-
+          python -m pytest
+          tests/test_v1_issuance.py
+          tests/test_v1_issuance_postgres.py
+          -q -ra -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/v1-02c-issuance.xml"
+
+      - name: Require every V1-02C issuance and epoch test
+        run: |
+          python - "$RUNNER_TEMP/v1-02c-issuance.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 154, "skipped": 0, "failures": 0, "errors": 0}
+          PY

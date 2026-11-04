@@ -40,6 +40,9 @@ ANCHOR = datetime(2031, 1, 1, tzinfo=timezone.utc)
 def _world(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
     with postgres_world(monkeypatch, active=False) as w:
+        # These contracts concern the exact 0013 catalog; 0014 (above it) is
+        # pristine here, so its online downgrade applies.
+        migrate(w, REVISION, down=True)
         url = make_url(os.environ["KALILLAC_REGISTRATION_TEST_POSTGRES_URL"]).set(database=w.migration.url.database)
         w.admin_engine = create_engine(url, hide_parameters=True, pool_size=12, max_overflow=0)
         w.owner_engine = create_engine(w.migration.url, hide_parameters=True,

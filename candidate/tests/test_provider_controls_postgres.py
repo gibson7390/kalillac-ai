@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0013_v1_session_revocation"
+HEAD = "0014_v1_session_issuance"
 CHAIN = (
+    "0014_v1_session_issuance",
     "0013_v1_session_revocation",
     "0012_v1_account_security",
     "0011_registration_intents",

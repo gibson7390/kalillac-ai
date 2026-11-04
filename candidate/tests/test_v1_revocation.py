@@ -51,9 +51,11 @@ def _render(revisions, downgrade=False):
 
 # --- graph -----------------------------------------------------------------------------------
 
-def test_0013_is_the_sole_head_directly_after_0012():
+def test_0013_sits_directly_after_0012_and_below_0014():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [REVISION]
+    # 0014 (V1-02C) is the head, directly above this revision.
+    assert script.get_heads() == ["0014_v1_session_issuance"]
+    assert script.get_revision("0014_v1_session_issuance").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()
     assert (module.revision, module.down_revision, module.branch_labels, module.depends_on) == (
