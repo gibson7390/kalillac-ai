@@ -52,7 +52,8 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0011_registration_intents"]
+    assert script.get_heads() == ["0012_v1_account_security"]
+    assert script.get_revision("0012_v1_account_security").down_revision == "0011_registration_intents"
     assert script.get_revision("0011_registration_intents").down_revision == "0010_spaces"
     assert script.get_revision("0010_spaces").down_revision == "0009_account_email_verification"
     assert script.get_revision("0009_account_email_verification").down_revision == "0008_account_recovery_tokens"

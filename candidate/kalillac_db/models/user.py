@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, FetchedValue, Index, String, Uuid, func, true
+from sqlalchemy import Boolean, DateTime, ForeignKey, FetchedValue, Index, String, Uuid, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -30,6 +30,10 @@ class User(Base):
     )
     quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), deferred=True, server_default=FetchedValue())
     sessions_valid_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), deferred=True, server_default=FetchedValue())
+    # V1 preparation (0012). Deferred and server-supplied: ORM inserts never name
+    # them, so R/A column-level INSERT grants and pre-0012 databases are unaffected.
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), deferred=True, server_default=FetchedValue())
+    password_reset_required: Mapped[bool] = mapped_column(Boolean, nullable=False, deferred=True, server_default=false())
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid,

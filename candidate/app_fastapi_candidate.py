@@ -14171,8 +14171,10 @@ api.add_event_handler("shutdown", _close_tavily_transport)
 
 # The V1 read-only foundation validates its prerequisites even if accounts
 # were accidentally left off. Off mode does not inspect a database/schema.
-from kalillac_accounts.v1_security import load_v1_security as _load_v1_security
-_v1_account_security = _load_v1_security()
+# On mode also requires a qualified private-authority catalog, which this
+# release does not install, so legacy and prepared (0012) schemas refuse.
+from kalillac_accounts.v1_security import load_v1_startup as _load_v1_startup
+_v1_account_security = _load_v1_startup()
 
 # Optional account endpoints (/api/account/*). Off unless explicitly enabled;
 # when off, nothing account-related is imported. Accounts are identity only:
