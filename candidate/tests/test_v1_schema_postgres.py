@@ -55,6 +55,9 @@ def _hex(seed):
 def _world(monkeypatch, active):
     monkeypatch.delenv(FLAG, raising=False)
     with postgres_world(monkeypatch, active=active) as w:
+        # These contracts concern the 0012-only catalog; 0013 (above it) is
+        # pristine here, so its online downgrade applies.
+        migrate(w, HEAD, down=True)
         # Sessions that start as the NOLOGIN owner, the only reader of the latch.
         w.owner_engine = create_engine(w.migration.url, hide_parameters=True,
                                        connect_args={"options": "-c role=" + w.names["owner"]})

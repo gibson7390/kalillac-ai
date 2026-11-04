@@ -40,7 +40,9 @@ from kalillac_db.models import User
 CANDIDATE = Path(__file__).resolve().parents[1]
 MIGRATION = CANDIDATE / "migrations" / "versions" / "0012_v1_account_security.py"
 HEAD = "0012_v1_account_security"
-CHAIN = (HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
+# 0013 (V1-02B) sits directly above this revision.
+REVOCATION = "0013_v1_session_revocation"
+CHAIN = (REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
          "0008_account_recovery_tokens", "0007_anonymous_usage", "0006_provider_usage_pools",
          "0005_account_usage_slots", "0004_account_billing", "0003_account_usage_daily",
          "0002_account_entitlements", "0001_account_tables")
@@ -61,9 +63,10 @@ def forbidden():
 
 # --- migration graph and DDL -------------------------------------------------------------
 
-def test_0012_is_the_sole_head_directly_after_the_exact_0011_chain():
+def test_0012_follows_the_exact_0011_chain_directly_below_0013():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [HEAD]
+    assert script.get_heads() == [REVOCATION]
+    assert script.get_revision(REVOCATION).down_revision == HEAD
     assert script.get_revision(HEAD).down_revision == "0011_registration_intents"
     assert tuple(r.revision for r in script.walk_revisions("base", "heads")) == CHAIN
 

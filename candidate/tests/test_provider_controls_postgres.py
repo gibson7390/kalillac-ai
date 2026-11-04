@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0012_v1_account_security"
+HEAD = "0013_v1_session_revocation"
 CHAIN = (
+    "0013_v1_session_revocation",
     "0012_v1_account_security",
     "0011_registration_intents",
     "0010_spaces",
@@ -69,6 +70,8 @@ CHAIN = (
 DATABASE = "ceiling_verify"
 OWNER, MIGRATE, APP = "ceiling_owner", "ceiling_migrate", "ceiling_app"
 REGISTRATION = "ceiling_registration"
+# NOLOGIN V1 security service/executor roles required by migration 0013.
+SERVICE, EXECUTOR = "ceiling_v1_security_service", "ceiling_v1_security_executor"
 ANONYMOUS_TABLES = ("anonymous_usage_days", "anonymous_usage_slots")
 PROVIDERS = ("openai", "brave", "tavily")
 PERIOD = 2_000_000_000  # One accounting period for the whole job: no rollover.
@@ -251,8 +254,14 @@ def database():
         assert conn.execute("SELECT count(*) FROM pg_database WHERE datname = %s", [DATABASE]).fetchone() == (0,), \
             "expected a fresh disposable server"
         assert conn.execute("SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)",
-                            [[OWNER, MIGRATE, APP, REGISTRATION]]).fetchone() == (0,), "expected a fresh disposable server"
+                            [[OWNER, MIGRATE, APP, REGISTRATION, SERVICE, EXECUTOR]]).fetchone() == (0,), \
+            "expected a fresh disposable server"
         conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(ident(OWNER)))
+        for role in (SERVICE, EXECUTOR):
+            conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
+                                 " NOBYPASSRLS").format(ident(role)))
+        # The operator's prerequisite for 0013: owner->executor, SET only.
+        conn.execute(sql.SQL("GRANT {} TO {} WITH INHERIT FALSE, SET TRUE").format(ident(EXECUTOR), ident(OWNER)))
         for role in (MIGRATE, APP):
             conn.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(ident(role), literal(_password(role))))
         # Separate disposable authority principal required by migration 0011.
@@ -269,10 +278,14 @@ def database():
         conn.execute(sql.SQL("CREATE SCHEMA kalillac AUTHORIZATION {}").format(ident(OWNER)))
         conn.execute(sql.SQL("GRANT USAGE ON SCHEMA kalillac TO {}").format(ident(APP)))
 
-    saved = {name: os.environ.get(name) for name in (migration_roles.OWNER_ROLE_ENV, migration_roles.APP_ROLE_ENV, "KALILLAC_MIGRATION_REGISTRATION_ROLE")}
+    saved = {name: os.environ.get(name) for name in (
+        migration_roles.OWNER_ROLE_ENV, migration_roles.APP_ROLE_ENV, "KALILLAC_MIGRATION_REGISTRATION_ROLE",
+        migration_roles.V1_SECURITY_SERVICE_ROLE_ENV, migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV)}
     os.environ[migration_roles.OWNER_ROLE_ENV] = OWNER
     os.environ[migration_roles.APP_ROLE_ENV] = APP
     os.environ["KALILLAC_MIGRATION_REGISTRATION_ROLE"] = REGISTRATION
+    os.environ[migration_roles.V1_SECURITY_SERVICE_ROLE_ENV] = SERVICE
+    os.environ[migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV] = EXECUTOR
     migrator = _engine(MIGRATE, poolclass=pool.NullPool)  # Fresh physical connection, discarded after.
     try:
         with migrator.begin() as conn:
@@ -689,7 +702,9 @@ def test_roles_have_expected_identities_and_limited_privileges(database):
             "SELECT g.rolname, m.rolname, a.admin_option, a.inherit_option, a.set_option FROM pg_auth_members a "
             "JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member "
             "WHERE g.rolname = ANY(%s) OR m.rolname = ANY(%s)", [[OWNER, MIGRATE, APP]] * 2).fetchall())
-        assert members == {(OWNER, MIGRATE, False, False, True)}
+        # The migration login's owner membership, and the operator's approved
+        # owner->executor edge for 0013: SET only, never INHERIT or ADMIN.
+        assert members == {(OWNER, MIGRATE, False, False, True), (EXECUTOR, OWNER, False, False, True)}
         owners = {r[0] for r in conn.execute(
             "SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = 'kalillac'").fetchall()}

@@ -56,16 +56,19 @@ def postgres_world(monkeypatch,*,active=True,preexisting_access=()):
         raise RuntimeError("NONLOCAL_POSTGRES_TEST_REFUSED")
     admin=create_engine(url,isolation_level="AUTOCOMMIT",hide_parameters=True)
     tag=uuid.uuid4().hex[:12]
-    names={n:"kalillac_test_s3_"+n+"_"+tag for n in ("owner","migrate","app","registration")}
+    names={n:"kalillac_test_s3_"+n+"_"+tag for n in ("owner","migrate","app","registration","service","executor")}
     passwords={n:base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=") for n in ("migrate","app","registration")}
     database="kalillac_test_s3_"+tag;w=World();engines=[]
     with admin.connect() as c:
         for n,name in names.items():
             # All identifiers are fixed-prefix hex names, and generated URL-safe
             # synthetic passwords cannot contain SQL delimiters. Never print SQL.
-            attrs="NOLOGIN" if n=="owner" else "LOGIN PASSWORD '"+passwords[n]+"'"
+            # The V1 service and executor roles are NOLOGIN while prepared.
+            attrs="NOLOGIN" if n in ("owner","service","executor") else "LOGIN PASSWORD '"+passwords[n]+"'"
             c.exec_driver_sql(f"CREATE ROLE {name} {attrs} NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
         c.exec_driver_sql(f"GRANT {names['owner']} TO {names['migrate']}")
+        # The operator's prerequisite for 0013: owner->executor, SET only.
+        c.exec_driver_sql(f"GRANT {names['executor']} TO {names['owner']} WITH INHERIT FALSE, SET TRUE")
         c.exec_driver_sql(f"CREATE DATABASE {database} OWNER {names['owner']}")
         c.exec_driver_sql(f"REVOKE CONNECT ON DATABASE {database} FROM PUBLIC")
         c.exec_driver_sql(f"GRANT CONNECT ON DATABASE {database} TO {names['migrate']},{names['app']}")
@@ -86,6 +89,8 @@ def postgres_world(monkeypatch,*,active=True,preexisting_access=()):
     monkeypatch.setenv("KALILLAC_MIGRATION_OWNER_ROLE",names["owner"])
     monkeypatch.setenv("KALILLAC_MIGRATION_APP_ROLE",names["app"])
     monkeypatch.setenv("KALILLAC_MIGRATION_REGISTRATION_ROLE",names["registration"])
+    monkeypatch.setenv("KALILLAC_V1_SECURITY_SERVICE_ROLE",names["service"])
+    monkeypatch.setenv("KALILLAC_V1_SECURITY_EXECUTOR_ROLE",names["executor"])
     try:
         with migration.begin() as c:command.upgrade(_config(connection=c),"head")
         if active:
@@ -107,5 +112,5 @@ def postgres_world(monkeypatch,*,active=True,preexisting_access=()):
         with admin.connect() as c:
             c.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=:d AND pid<>pg_backend_pid()"),{"d":database})
             c.exec_driver_sql(f"DROP DATABASE {database}")
-            for n in ("migrate","registration","app","owner"):c.exec_driver_sql("DROP ROLE "+names[n])
+            for n in ("migrate","registration","app","service","executor","owner"):c.exec_driver_sql("DROP ROLE "+names[n])
         admin.dispose()
