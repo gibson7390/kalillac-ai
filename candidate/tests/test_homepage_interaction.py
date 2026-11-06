@@ -1,27 +1,27 @@
-"""Homepage chat workspace: one stable full-height workspace from the first
-render, the starting state and its example prompts, CTA scrolling and focus,
-the editorial eyebrow, pointer/caret, the chat composer's whole typing area,
-and multi-turn conversations -- both inside the homepage iframe and on a
-direct /app/ visit. Also the page structure below the hero (privacy diagram,
-temporary-memory demonstration, the two-block explanation, the mobile-app section) at every
-required viewport and at 200% zoom.
+"""Homepage composer and the /app/ workspace: interaction, layout and structure.
+
+The homepage hero holds one real message box (site/src/App.tsx): clicking,
+typing, editing, clearing, the "Start a private session" CTA and the four
+examples all stay on "/" and send nothing; only Send hands the draft to /app/
+(test_homepage_handoff.py). These tests drive that composer with trusted mouse,
+touch and keyboard input, the page structure below the hero at every required
+viewport and at the browser's own 200% zoom, the /app/ header, empty state and
+composer, and End & erase in /app/.
 
 Browser tests drive the BUILT site (site/dist/public) with the canonical
-frontend/ chat at /app/, served from loopback only by the same harness as
-test_homepage_handoff.py. Headless Edge (or another Chromium-family browser)
-is controlled over the DevTools protocol: exact 1440 x 900 desktop and
-390 x 844 touch-phone viewports, emulated prefers-reduced-motion, and real
-(trusted) mouse clicks. Nothing leaves the machine.
+frontend/ chat at /app/, served from loopback only by the harness in
+test_homepage_handoff.py. Headless Edge (or another Chromium-family browser) is
+controlled over the DevTools protocol: exact 1440 x 900 desktop and 390 x 844
+touch-phone viewports, emulated prefers-reduced-motion, and real (trusted)
+input. Nothing leaves the machine.
 
 Without a browser or a site build the browser tests skip (on Windows a
 missing Edge fails, as in the other frontend tests). The static checks
 always run.
 """
-
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -37,44 +37,17 @@ from test_homepage_handoff import (
     SITE,
     SITE_CSS,
     VIEWPORTS,
-    WORKSPACE_HEIGHT,
     Site,
     browser_page,
     require_browser_and_build,
 )
 
 
-# The commit this slice started from. /app/ and the site's build and
-# dependency files must be unchanged relative to it (update deliberately if
-# /app/ later changes). The backend is out of this slice's scope.
+# The commit this slice's dependency guard compares against. /app/ may differ
+# only in its own files; the site's build and dependency files only by the
+# reviewed edits below.
 SLICE_BASE = "92a4984792ac0bfb4c1952555e08300d094ab3a0"
 GAP_BELOW_HEADER = 16
-
-# Installed once per page; every scenario step reads state through it.
-HELPERS = r"""
-window.__ix = {
-  wait: ms => new Promise(r => setTimeout(r, ms)),
-  frame: () => document.querySelector('[data-testid="embedded-chat"] iframe'),
-  doc: () => window.__ix.frame().contentDocument,
-  input: () => window.__ix.doc().getElementById('composer-input'),
-  rect: el => { const b = el.getBoundingClientRect();
-    return {left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height}; },
-  // Rectangle of an element inside the chat, in top-level viewport coordinates.
-  childRect: el => { const f = window.__ix.frame().getBoundingClientRect(), b = el.getBoundingClientRect();
-    return {left: f.left + b.left, top: f.top + b.top, right: f.left + b.right, bottom: f.top + b.bottom,
-            width: b.width, height: b.height}; },
-  blurAll: () => { const d = window.__ix.doc(); if (d.activeElement) d.activeElement.blur();
-    if (document.activeElement) document.activeElement.blur(); },
-  focusState: () => ({ parentActive: document.activeElement === window.__ix.frame(),
-    childActive: window.__ix.doc().activeElement === window.__ix.input() }),
-  header: () => document.querySelector('.site-header'),
-  card: () => document.querySelector('.embedded-chat-slot'),
-  sample: async (ms, every) => { const out = [];
-    for (let t = 0; t <= ms; t += every) { out.push(Math.round(window.scrollY)); await window.__ix.wait(every); }
-    return out; },
-};
-true
-"""
 
 
 class Page:
@@ -96,155 +69,13 @@ class Page:
                 "buttons": 1 if kind == "mousePressed" else 0, "clickCount": 1}, self.session)
 
 
-def run_scenario(page: Page, reduced: bool) -> dict:
-    r: dict = {}
-    page.eval(HELPERS.replace("\ntrue\n", "") + "return true;")
-    page.eval("""
-      for (let i = 0; i < 400; i++) {
-        const f = window.__ix.frame();
-        if (f && f.contentDocument && f.contentDocument.getElementById('composer-input')) break;
-        await window.__ix.wait(25);
-      }
-      await window.__ix.wait(500); return true;""")
-
-    # ---- landing ------------------------------------------------------------------
-    r["landing"] = page.eval("""
-      const ix = window.__ix, d = ix.doc(), conv = d.getElementById('conversation');
-      const shown = sel => { const el = d.querySelector(sel); return !!el && getComputedStyle(el).display !== 'none'; };
-      return {
-        scrollY: window.scrollY, innerWidth, innerHeight,
-        docScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
-        header: ix.rect(ix.header()), card: ix.rect(ix.card()),
-        cta: ix.rect(document.querySelector('[data-testid="button-start-session"]')),
-        trust: ix.rect(document.querySelector('.hero-under-note')),
-        trustItems: [...document.querySelectorAll('.hero-under-note .trust-item')].map(e => ix.rect(e)),
-        convScroll: [conv.scrollHeight, conv.clientHeight], convOverflowY: getComputedStyle(conv).overflowY,
-        childDocScroll: [d.scrollingElement.scrollHeight, d.scrollingElement.clientHeight],
-        titleShown: shown('.empty-title'), lineShown: shown('.empty-line'), hintsShown: shown('.empty-hints'),
-        titleText: d.querySelector('.empty-title').textContent.trim(),
-        lineText: d.querySelector('.empty-line').textContent.trim().replace(/\\s+/g, ' '),
-        hints: [...d.querySelectorAll('.hint')].map(h => [h.getAttribute('aria-label'), h.getAttribute('data-prompt')]),
-        hintTitles: [...d.querySelectorAll('.hint-title')].map(h => h.textContent.trim()),
-        composer: ix.childRect(d.getElementById('composer-shell')),
-        messages: d.querySelectorAll('#thread .msg').length,
-        input: ix.childRect(ix.input()), send: ix.childRect(d.getElementById('send-btn')),
-        frame: ix.rect(ix.frame()),
-        eyebrow: (() => { const e = document.querySelector('.hero .eyebrow'), s = getComputedStyle(e),
-                                 b = getComputedStyle(e, '::before');
-          return { text: e.textContent, tag: e.tagName, role: e.getAttribute('role'), rect: ix.rect(e),
-                   children: e.children.length,
-                   background: s.backgroundColor, backgroundImage: s.backgroundImage, radius: s.borderRadius,
-                   padding: s.padding, borderTopWidth: s.borderTopWidth, letterSpacing: s.letterSpacing,
-                   fontSize: s.fontSize, ruleContent: b.content, ruleWidth: b.width, ruleHeight: b.height,
-                   ruleColor: b.backgroundColor }; })(),
-        headline: ix.rect(document.querySelector('.hero h1')),
-        eyebrowDots: document.querySelectorAll('.eyebrow-dot').length,
-      };""")
-
-    # ---- pointer, caret, decorative layers -------------------------------------------
-    r["styles"] = page.eval("""
-      const ix = window.__ix, d = ix.doc(), cs = el => getComputedStyle(el);
-      const decorative = ['.orbital-wrap', '.hero-signal-line', '.phone-stage'];
-      return {
-        inputCursor: cs(ix.input()).cursor, caretColor: cs(ix.input()).caretColor, inputColor: cs(ix.input()).color,
-        shellBackground: cs(d.getElementById('composer-shell')).backgroundColor,
-        // Send is disabled while the composer is empty (arrow cursor); with a
-        // draft it is enabled and shows the pointer. The draft is then cleared.
-        sendCursorEmpty: cs(d.getElementById('send-btn')).cursor,
-        sendDisabledEmpty: d.getElementById('send-btn').disabled,
-        sendCursor: (() => { const i = ix.input(); i.value = 'draft';
-          i.dispatchEvent(new Event('input', {bubbles: true}));
-          const c = [cs(d.getElementById('send-btn')).cursor, d.getElementById('send-btn').disabled];
-          i.value = ''; i.dispatchEvent(new Event('input', {bubbles: true})); return c; })(),
-        hintCursors: [...d.querySelectorAll('.hint')].map(h => cs(h).cursor),
-        ctaCursor: cs(document.querySelector('[data-testid="button-start-session"]')).cursor,
-        navCursors: [...document.querySelectorAll('.site-nav a, .site-nav button')]
-          .filter(e => cs(e).display !== 'none').map(e => [e.textContent.trim(), cs(e).cursor]),
-        noteLinkCursor: cs(document.querySelector('.note-link')).cursor,
-        decorative: decorative.map(s => [s, [...document.querySelectorAll(s)].map(e => cs(e).pointerEvents)]),
-        focusVisibleRule: [...document.styleSheets].some(sh => { try { return [...sh.cssRules].some(
-          rule => (rule.cssText || '').includes(':focus-visible')); } catch (e) { return false; } }),
-      };""")
-
-    # ---- the visible typing area focuses the real input (trusted clicks) -----------------
-    hits = []
-    # The full workspace extends below the first screen; bring it into view.
-    page.eval("""const ix = window.__ix, c = ix.card().getBoundingClientRect(), h = ix.header().getBoundingClientRect();
-      window.scrollTo({top: window.scrollY + c.top - h.bottom - 16, behavior: 'instant'});
-      await ix.wait(150); return true;""")
-    box = page.eval("return window.__ix.childRect(window.__ix.input());")
-    points = [(box["left"] + box["width"] * fx, box["top"] + box["height"] * fy)
-              for fx in (0.04, 0.5, 0.96) for fy in (0.2, 0.5, 0.8)]
-    for x, y in points:
-        page.eval("window.__ix.blurAll(); return true;")
-        hit = page.eval(f"""
-          const ix = window.__ix, f = ix.frame().getBoundingClientRect();
-          const top = document.elementFromPoint({x}, {y});
-          const inner = ix.doc().elementFromPoint({x} - f.left, {y} - f.top);
-          return {{ top: top === ix.frame() ? 'iframe' : (top ? top.className || top.tagName : null),
-                   inner: inner === ix.input() ? 'composer-input' : (inner ? inner.id || inner.className : null) }};""")
-        page.click(x, y)
-        time.sleep(0.15)
-        hit.update(page.eval("return window.__ix.focusState();"))
-        hits.append(hit)
-    r["typingAreaClicks"] = hits
-
-    # ---- each example prompt fills the composer with exactly its text; nothing is sent -------
-    clear = """const i = window.__ix.input(); i.value = '';
-      i.dispatchEvent(new Event('input', {bubbles: true})); window.__ix.blurAll(); return true;"""
-    r["hintClicks"] = []
-    for index in range(4):
-        page.eval(clear)
-        box = page.eval(f"return window.__ix.childRect(window.__ix.doc().querySelectorAll('.hint')[{index}]);")
-        page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
-        time.sleep(0.2)
-        r["hintClicks"].append(page.eval("""const ix = window.__ix, d = ix.doc();
-          return { ...ix.focusState(), value: ix.input().value, messages: d.querySelectorAll('#thread .msg').length,
-                   requests: (ix.frame().contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length,
-                   emptyPresent: !!d.getElementById('empty') && d.getElementById('empty').isConnected,
-                   sendDisabled: d.getElementById('send-btn').disabled, path: location.pathname,
-                   historyLength: history.length };"""))
-    page.eval(clear)
-
-    # ---- CTA 1: "Start a private session" from the landing position ------------------------
-    page.eval("window.__ix.blurAll(); window.scrollTo({top: 0, behavior: 'instant'}); return true;")
-    cta = r["landing"]["cta"]
-    page.click(cta["left"] + cta["width"] / 2, cta["top"] + cta["height"] / 2)
-    r["ctaFromTop"] = page.eval("""
-      const ix = window.__ix, samples = await ix.sample(1800, 60);
-      return { samples, header: ix.rect(ix.header()), card: ix.rect(ix.card()), ...ix.focusState() };""")
-
-    # ---- the same CTA, off-screen, from the bottom of the page ------------------------------
-    start = page.eval("""window.__ix.blurAll();
-      window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'instant'});
-      await window.__ix.wait(150);
-      return { scrollY: window.scrollY, header: window.__ix.rect(window.__ix.header()),
-               historyLength: history.length };""")
-    page.eval("document.querySelector('[data-testid=\"button-start-session\"]').click(); return true;")
-    r["startFromBottom"] = page.eval("""
-      const ix = window.__ix, samples = await ix.sample(1800, 30);
-      return { samples, header: ix.rect(ix.header()), card: ix.rect(ix.card()), ...ix.focusState(),
-               url: location.href, path: location.pathname, historyLength: history.length,
-               composer: ix.childRect(ix.doc().getElementById('composer-shell')), innerHeight };""")
-    r["startFromBottom"]["start"] = start
-
-    r["reduced"] = reduced
-    r["final"] = page.eval("""return { docScrollWidth: document.documentElement.scrollWidth, innerWidth,
-      messages: window.__ix.doc().querySelectorAll('#thread .msg').length,
-      requests: (window.__ix.frame().contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length };""")
-    return r
-
-
-# The chat composer, addressed the same way whether it is framed by the
-# homepage or is the top-level /app/ page. All coordinates are top-level.
+# The /app/ chat composer, on its own top-level page. All coordinates are top-level.
 COMPOSER_HELPERS = r"""
-const frameOf = () => document.querySelector('[data-testid="embedded-chat"] iframe');
 window.__cx = {
   wait: ms => new Promise(r => setTimeout(r, ms)),
-  doc: () => { const f = frameOf(); return f ? f.contentDocument : document; },
-  win: () => { const f = frameOf(); return f ? f.contentWindow : window; },
-  off: () => { const f = frameOf(); if (!f) return {left: 0, top: 0};
-    const b = f.getBoundingClientRect(); return {left: b.left, top: b.top}; },
+  doc: () => document,
+  win: () => window,
+  off: () => ({left: 0, top: 0}),
   el: id => window.__cx.doc().getElementById(id),
   abs: el => { const o = window.__cx.off(), b = el.getBoundingClientRect();
     return {left: o.left + b.left, top: o.top + b.top, right: o.left + b.right, bottom: o.top + b.bottom,
@@ -257,9 +88,9 @@ window.__cx = {
     const el = d.elementFromPoint(x - o.left, y - o.top);
     return { id: el ? (el.id || el.tagName.toLowerCase()) : null,
              cursor: el ? window.__cx.win().getComputedStyle(el).cursor : null }; },
-  state: () => { const i = window.__cx.el('composer-input'), f = frameOf();
+  state: () => { const i = window.__cx.el('composer-input');
     const child = window.__cx.win().__HANDOFF_CHILD__ || {requests: []};
-    return { focused: window.__cx.doc().activeElement === i && (!f || document.activeElement === f),
+    return { focused: window.__cx.doc().activeElement === i,
              value: i.value, selectionStart: i.selectionStart, selectionEnd: i.selectionEnd,
              requests: child.requests.map(r => r.body) }; },
 };
@@ -345,29 +176,6 @@ def run_composer_scenario(page: Page) -> dict:
     return r
 
 
-@pytest.fixture(scope="module", params=[
-    ("desktop", False), ("desktop", True), ("mobile", False), ("mobile", True),
-], ids=["desktop", "desktop-reduced-motion", "mobile", "mobile-reduced-motion"])
-def interaction(request, tmp_path_factory):
-    browser = require_browser_and_build()
-    viewport, reduced = request.param
-    profile = tmp_path_factory.mktemp(f"edge-interaction-{viewport}-{int(reduced)}")
-    site = Site()
-
-    with site.http:
-        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile",
-                          reduced_motion=reduced) as (devtools, session):
-            page = Page(devtools, session)
-            devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
-            time.sleep(0.5)
-            result = run_scenario(page, reduced)
-            result["composer"] = run_composer_scenario(page)
-
-    shutil.rmtree(profile, ignore_errors=True)
-    result["viewport"], result["size"] = viewport, VIEWPORTS[viewport]
-    return result
-
-
 @pytest.fixture(scope="module", params=["desktop", "mobile"])
 def direct_app(request, tmp_path_factory):
     """The composer scenario on a direct, top-level visit to /app/."""
@@ -382,16 +190,14 @@ def direct_app(request, tmp_path_factory):
             page = Page(devtools, session)
             devtools.call("Page.navigate", {"url": site.http.origin + "/app/"}, session)
             time.sleep(0.5)
+            chrome = page.eval(APP_CHROME)
             result = run_composer_scenario(page)
+            result["chrome"] = chrome
             result["path"] = page.eval("return location.pathname + location.search + location.hash;")
 
     shutil.rmtree(profile, ignore_errors=True)
     result["viewport"], result["size"] = viewport, VIEWPORTS[viewport]
     return result
-
-
-def expected_card_top(run) -> float:
-    return run["startFromBottom"]["header"]["bottom"] + GAP_BELOW_HEADER
 
 
 EXAMPLE_PROMPTS = ('Find this week’s biggest technology stories', 'Draft a professional email', 'Build a simple Python password generator', 'Explain how encryption works')
@@ -443,207 +249,14 @@ def test_makes_claim_distinguishes_claims_from_negations(text, expected):
 # --- landing layout -------------------------------------------------------------------------------
 
 
-def test_lands_at_the_top_with_the_header_visible_and_no_horizontal_overflow(interaction):
-    landing = interaction["landing"]
-    width, height = interaction["size"]
-
-    assert (landing["innerWidth"], landing["innerHeight"]) == (width, height)
-    assert landing["scrollY"] == 0
-    assert landing["header"]["top"] == 0
-    assert landing["docScrollWidth"] <= width and landing["bodyScrollWidth"] <= width
-    assert interaction["final"]["docScrollWidth"] <= width
-
-
-def test_initial_workspace_is_full_height_without_a_transcript_scrollbar(interaction):
-    landing = interaction["landing"]
-
-    assert landing["messages"] == 0
-    # One stable full workspace from the first render: no compact state.
-    assert abs(landing["card"]["height"] - WORKSPACE_HEIGHT[interaction["viewport"]]) <= 1, landing["card"]
-    assert landing["card"]["height"] >= (460 if interaction["viewport"] == "desktop" else 660)
-    # The intentional starting state sits in the workspace...
-    assert landing["titleShown"] and landing["lineShown"] and landing["hintsShown"]
-    assert landing["titleText"] == "What are you working on?"
-    assert landing["lineText"] == "Bring a difficult question, a rough draft, broken code, or something current."
-    assert landing["hints"] == [list(pair) for pair in zip(TASK_LABELS, EXAMPLE_PROMPTS)]
-    # ...without overflowing it, so no empty-history scrollbar can appear.
-    scroll_height, client_height = landing["convScroll"]
-    assert scroll_height <= client_height, landing["convScroll"]
-    assert landing["childDocScroll"][0] <= landing["childDocScroll"][1]
-
-
-def test_eyebrow_is_editorial_text_with_a_short_blue_rule(interaction):
-    eyebrow = interaction["landing"]["eyebrow"]
-
-    assert eyebrow["text"] == "PRIVATE BY DESIGN" and eyebrow["children"] == 0
-    # An eyebrow, not a heading.
-    assert eyebrow["tag"] == "SPAN" and eyebrow["role"] is None
-    assert interaction["landing"]["eyebrowDots"] == 0
-    # No capsule: no background, border, rounding or padding.
-    assert eyebrow["background"] == "rgba(0, 0, 0, 0)" and eyebrow["backgroundImage"] == "none"
-    assert eyebrow["radius"] == "0px" and eyebrow["padding"] == "0px" and eyebrow["borderTopWidth"] == "0px"
-    # One short blue rule beside the text.
-    assert eyebrow["ruleContent"] == '""' and eyebrow["ruleHeight"] == "2px"
-    assert eyebrow["ruleWidth"] in ("28px", "22px") and eyebrow["ruleColor"] == "rgb(0, 105, 255)"
-    assert float(eyebrow["fontSize"].rstrip("px")) >= 10 and float(eyebrow["letterSpacing"].rstrip("px")) > 0
-    # Aligned with the headline's left edge.
-    assert abs(eyebrow["rect"]["left"] - interaction["landing"]["headline"]["left"]) <= 1
-
-
-def test_example_prompts_fill_the_composer_and_never_send(interaction):
-    clicks = interaction["hintClicks"]
-
-    assert interaction["landing"]["hintTitles"] == list(TASK_LABELS)
-    assert [c["value"] for c in clicks] == list(EXAMPLE_PROMPTS)
-    for click in clicks:
-        assert click["parentActive"] and click["childActive"], click
-        assert click["messages"] == 0 and click["requests"] == 0, click
-        assert click["emptyPresent"] is True and click["sendDisabled"] is False, click
-        assert click["path"] == "/" and click["historyLength"] == clicks[0]["historyLength"], click
-
-
-def test_complete_composer_is_visible_on_the_first_desktop_screen(interaction):
-    if interaction["viewport"] != "desktop":
-        pytest.skip("phones reach the workspace through the CTA")
-    landing = interaction["landing"]
-
-    assert landing["scrollY"] == 0
-    assert landing["card"]["top"] >= landing["header"]["bottom"]
-    assert landing["composer"]["bottom"] <= landing["card"]["bottom"] <= landing["innerHeight"], landing["composer"]
-
-
-def test_composer_controls_are_fully_visible_and_tappable(interaction):
-    landing = interaction["landing"]
-    frame, field, send = landing["frame"], landing["input"], landing["send"]
-
-    for box in (field, send):
-        assert frame["left"] <= box["left"] and box["right"] <= frame["right"]
-        assert frame["top"] <= box["top"] and box["bottom"] <= frame["bottom"]
-    assert field["height"] >= 36 and send["width"] >= 36 and send["height"] >= 36
-    if interaction["viewport"] == "mobile":
-        assert landing["cta"]["height"] >= 44                      # comfortable tap target
-        assert landing["cta"]["width"] < interaction["size"][0] * 0.75   # not full-width
-
-
-def test_trust_line_statements_stay_whole_on_every_viewport(interaction):
-    landing = interaction["landing"]
-    items = landing["trustItems"]
-    single_line = max(i["height"] for i in items)
-
-    assert len(items) == 3
-    for item in items:
-        # Each statement is one line (never a narrow multi-line column) and
-        # inside the viewport.
-        assert item["height"] <= single_line + 1 and item["height"] < 24
-        assert item["left"] >= 0 and item["right"] <= interaction["size"][0]
-
-
-# --- pointer and caret ---------------------------------------------------------------------------
-
-
 def luminance(rgb: str) -> float:
     r, g, b = (int(v) / 255 for v in re.findall(r"\d+", rgb)[:3])
     lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b)]
     return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
 
 
-def test_pointer_and_caret_styles(interaction):
-    styles = interaction["styles"]
-
-    assert styles["inputCursor"] == "text"
-    caret = styles["caretColor"]
-    assert caret.startswith("rgb") and "rgba(0, 0, 0, 0)" not in caret
-    # The caret stands out clearly against the white composer background.
-    light, dark = sorted((luminance(caret), luminance(styles["shellBackground"])))
-    assert (dark + 0.05) / (light + 0.05) >= 7, (caret, styles["shellBackground"])
-    assert styles["sendCursor"] == ["pointer", False]               # enabled Send
-    assert styles["sendDisabledEmpty"] is True and styles["sendCursorEmpty"] == "default"
-    assert styles["hintCursors"] and set(styles["hintCursors"]) == {"pointer"}
-    assert styles["ctaCursor"] == "pointer" and styles["noteLinkCursor"] == "pointer"
-    for label, cursor in styles["navCursors"]:
-        assert cursor == "pointer", label
-    for selector, values in styles["decorative"]:
-        assert values and set(values) == {"none"}, selector
-    assert styles["focusVisibleRule"]
-
-
-def test_clicking_anywhere_in_the_visible_input_focuses_the_real_field(interaction):
-    clicks = interaction["typingAreaClicks"]
-
-    assert len(clicks) == 9
-    for hit in clicks:
-        # Nothing on the homepage covers the chat, and inside the chat the
-        # point is the textarea itself, not an overlay.
-        assert hit["top"] == "iframe" and hit["inner"] == "composer-input", hit
-        assert hit["parentActive"] and hit["childActive"], hit
-
-
-# --- CTAs ----------------------------------------------------------------------------------------
-
-
-def test_cta_from_the_landing_position_focuses_the_composer(interaction):
-    run, landing = interaction["ctaFromTop"], interaction["landing"]
-    fully_visible = (landing["card"]["top"] >= landing["header"]["bottom"]
-                     and landing["card"]["bottom"] <= landing["innerHeight"])
-
-    if fully_visible:
-        # Desktop: the workspace is already completely in view beside the
-        # headline, so the CTA only focuses the real input; the page stays put.
-        assert interaction["viewport"] == "desktop"
-        assert set(run["samples"]) == {0}, run["samples"][:10]
-        assert abs(run["card"]["top"] - landing["card"]["top"]) <= 1
-    else:
-        # Phones: the workspace sits below the hero copy, so the CTA moves it
-        # just below the sticky header.
-        assert interaction["viewport"] == "mobile"
-        assert run["samples"][-1] > 0                               # the page moved
-        assert run["samples"][-6:] == [run["samples"][-1]] * 6       # and settled
-        assert abs(run["card"]["top"] - expected_card_top(interaction)) <= 1, run["card"]
-    assert run["header"]["top"] == 0
-    assert run["parentActive"] and run["childActive"]
-
-
-def test_cta_from_the_bottom_brings_the_composer_just_below_the_header_and_focuses_it(interaction):
-    run = interaction["startFromBottom"]
-    samples = run["samples"]
-    final = samples[-1]
-
-    assert run["header"]["top"] == 0                               # sticky header stays visible
-    assert abs(run["card"]["top"] - expected_card_top(interaction)) <= 1, run["card"]
-    assert run["composer"]["bottom"] <= run["innerHeight"]          # the whole composer is in view
-    assert run["parentActive"] and run["childActive"]
-    # Settled, with no second browser-generated jump after focusing.
-    assert samples[-12:] == [final] * 12
-    # The conversation stays on the homepage: no hash, no /app/, no new history entry.
-    assert "#" not in run["url"] and run["path"] == "/"
-    assert run["historyLength"] == run["start"]["historyLength"]
-
-
-def test_scroll_is_smooth_or_immediate_according_to_motion_preference(interaction):
-    samples = interaction["startFromBottom"]["samples"]
-    start, final = interaction["startFromBottom"]["start"]["scrollY"], samples[-1]
-    assert start - final > 200                                      # a real distance was travelled
-
-    if interaction["reduced"]:
-        # Immediate: already at the destination at the first sample.
-        assert samples[0] == final, samples[:5]
-    else:
-        # Smooth: intermediate positions strictly between start and end.
-        intermediate = [s for s in samples if final < s < start]
-        assert len(intermediate) >= 2, samples[:20]
-
-
-def test_nothing_was_sent_by_the_interactions(interaction):
-    assert interaction["final"]["messages"] == 0
-    assert interaction["final"]["requests"] == 0
-
-
-# --- page structure: hero, privacy diagram, demonstrations, explanation, mobile app ---------------
-
 STRUCTURE = r"""
-for (let i = 0; i < 400; i++) {
-  const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-  if (f && f.contentDocument && f.contentDocument.getElementById('composer-input')) break;
+for (let i = 0; i < 400 && !document.getElementById('home-composer-input'); i++) {
   await new Promise(r => setTimeout(r, 25));
 }
 await new Promise(r => setTimeout(r, 400));
@@ -653,8 +266,7 @@ const rect = el => { const b = el.getBoundingClientRect();
           height: b.height}; };
 const visible = el => { const s = getComputedStyle(el), b = el.getBoundingClientRect();
   return s.display !== 'none' && s.visibility !== 'hidden' && b.width > 0 && b.height > 0; };
-const f = q('[data-testid="embedded-chat"] iframe'), d = f.contentDocument;
-const slot = q('.embedded-chat-slot').getBoundingClientRect(), shell = d.getElementById('composer-shell').getBoundingClientRect();
+const panel = q('[data-testid="home-composer"]').getBoundingClientRect(), shell = q('.hc-shell').getBoundingClientRect();
 const svgs = qa('.flow-svg').filter(visible);
 const svg = svgs[0];
 const alpha = c => { const m = c.match(/rgba?\(([^)]+)\)/); if (!m) return 0; const p = m[1].split(',');
@@ -666,12 +278,14 @@ return {
   docScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
   h1s: qa('h1').map(h => h.textContent.replace(/\s+/g, ' ').trim()),
   heroEyebrow: (() => { const e = q('.hero .eyebrow'); return [e.tagName, e.textContent]; })(),
-  filled: qa('a, button').filter(visible).filter(e => alpha(getComputedStyle(e).backgroundColor) > 0.5
+  // Filled calls to action outside the composer (its own Send is a control, not a CTA).
+  filled: qa('a, button').filter(visible).filter(e => !e.closest('.home-composer'))
+    .filter(e => alpha(getComputedStyle(e).backgroundColor) > 0.5
       && getComputedStyle(e).backgroundColor !== 'rgb(255, 255, 255)')
     .map(e => e.textContent.trim()),
   navLinks: qa('.site-nav a').filter(visible).map(a => [a.textContent.trim(), a.getAttribute('href')]),
-  composerTopInViewport: Math.round(slot.top + shell.top), composerBottomInViewport: Math.round(slot.top + shell.bottom),
-  slotHeight: Math.round(slot.height),
+  composerTopInViewport: Math.round(shell.top), composerBottomInViewport: Math.round(shell.bottom),
+  panelBottomInViewport: Math.round(panel.bottom), iframes: qa('iframe').length,
   sectionsInOrder: order.every((el, i) => el && (i === 0 ||
     (order[i - 1].compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))),
   footerLast: !!q('.site-footer') && !!(order[6].compareDocumentPosition(q('.site-footer')) & Node.DOCUMENT_POSITION_FOLLOWING),
@@ -753,8 +367,8 @@ def structure(request, tmp_path_factory):
             devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
             time.sleep(0.5)
             result = page.eval(STRUCTURE)
-            result["requests"] = page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-              return (f.contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length;""")
+            result["requests"] = len([path for path in site.http.paths
+                                      if path.startswith("/app/") or path.startswith("/api/") or "POST" in path])
 
     shutil.rmtree(profile, ignore_errors=True)
     result.update(name=request.param, size=size, mobile=mobile, reduced=reduced, zoom=zoom)
@@ -790,7 +404,8 @@ def test_structure_desktop_first_screen_shows_the_complete_composer(structure):
     if structure["innerWidth"] < 1440:
         pytest.skip("the side-by-side first screen applies at 1440 x 900 and wider")
     assert structure["composerBottomInViewport"] <= structure["innerHeight"], structure
-    assert structure["slotHeight"] == 460                           # approved desktop workspace height
+    assert structure["panelBottomInViewport"] <= structure["innerHeight"], structure
+    assert structure["iframes"] == 0
 
 
 def test_privacy_diagram_has_four_stages_and_an_accessible_name(structure):
@@ -916,12 +531,6 @@ def test_reduced_motion_leaves_nothing_animating(structure):
     assert structure["animations"] == 0
 
 
-# --- real 200% browser zoom ------------------------------------------------------------------------
-#
-# The browser's own page zoom (the profile zoom level that Ctrl+Plus and
-# Settings > Page zoom set), in a 1440 x 900 window, with no viewport or
-# device-pixel emulation. Driven with real key presses.
-
 ZOOM_CLIPPING = r"""
 // Visible elements outside the viewport horizontally, ignoring content inside
 // a deliberate horizontal scroller (the code demos), visually hidden text and
@@ -950,154 +559,6 @@ def press(page: Page, key: str, code: str, vk: int, text: str | None = None):
     page.dt.call("Input.dispatchKeyEvent", down, page.session)
     page.dt.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": key, "code": code,
                                             "windowsVirtualKeyCode": vk}, page.session)
-
-
-@pytest.fixture(scope="module")
-def real_zoom(tmp_path_factory):
-    browser = require_browser_and_build()
-    profile = tmp_path_factory.mktemp("edge-real-zoom-200")
-    site = Site()
-    r: dict = {}
-
-    with site.http:
-        with browser_page(browser, profile, (1440, 900), False, zoom_percent=200) as (devtools, session):
-            page = Page(devtools, session)
-            devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
-            time.sleep(0.5)
-            page.eval(HELPERS.replace("\ntrue\n", "") + "return true;")
-            page.eval("""for (let i = 0; i < 400; i++) { const f = window.__ix.frame();
-                if (f && f.contentDocument && f.contentDocument.getElementById('composer-input')) break;
-                await window.__ix.wait(25); }
-              await window.__ix.wait(500); return true;""")
-            r["viewport"] = page.eval("""return { innerWidth, innerHeight, dpr: devicePixelRatio,
-              outer: [outerWidth, outerHeight], pinch: visualViewport.scale,
-              docScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth };""")
-            # Sideways scrolling is impossible: a horizontal scroll request has no effect.
-            r["scrollX"] = page.eval("window.scrollTo(400, 0); await window.__ix.wait(100); "
-                                     "const x = window.scrollX; window.scrollTo(0, 0); return x;")
-            r["clipped"] = {}
-            height = page.eval("return document.documentElement.scrollHeight;")
-            for y in range(0, height, 300):
-                page.eval(f"window.scrollTo(0, {y}); await window.__ix.wait(30); return true;")
-                for item in page.eval(ZOOM_CLIPPING):
-                    r["clipped"].setdefault(item, y)
-            page.eval("window.scrollTo(0, 0); window.__ix.blurAll(); return true;")
-
-            # Keyboard only: Tab to the primary action; every focus ring must show.
-            r["tabStops"] = []
-            for _ in range(25):
-                press(page, "Tab", "Tab", 9)
-                time.sleep(0.1)
-                stop = page.eval("""const e = document.activeElement, s = getComputedStyle(e);
-                  return { text: (e.textContent || '').trim().slice(0, 40), testid: e.getAttribute('data-testid'),
-                           outlineStyle: s.outlineStyle, outlineWidth: parseFloat(s.outlineWidth),
-                           rect: window.__ix.rect(e), innerHeight, innerWidth };""")
-                r["tabStops"].append(stop)
-                if stop["testid"] == "button-start-session":
-                    break
-            press(page, "Enter", "Enter", 13, text="\r")
-            time.sleep(1.6)
-            r["afterCta"] = page.eval("""const ix = window.__ix;
-              return { ...ix.focusState(), composer: ix.childRect(ix.doc().getElementById('composer-shell')),
-                       header: ix.rect(ix.header()), innerHeight, innerWidth, path: location.pathname,
-                       url: location.href };""")
-
-            # The composer is usable: type and send with the keyboard (local stub reply).
-            devtools.call("Input.insertText", {"text": "Zoom check"}, session)
-            press(page, "Enter", "Enter", 13, text="\r")
-            time.sleep(1.2)
-            r["afterSend"] = page.eval("""const ix = window.__ix, d = ix.doc();
-              return { users: [...d.querySelectorAll('#thread .msg-user .bubble')].map(b => b.textContent),
-                       assistants: d.querySelectorAll('#thread .msg-assistant').length,
-                       requests: (ix.frame().contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests
-                         .map(q => q.body.message),
-                       value: ix.input().value, childActive: d.activeElement === ix.input(),
-                       composer: ix.childRect(d.getElementById('composer-shell')), frame: ix.rect(ix.frame()),
-                       innerHeight, innerWidth, path: location.pathname,
-                       docScrollWidth: document.documentElement.scrollWidth };""")
-
-            # The diagram at 200%.
-            r["diagram"] = page.eval("""const flow = document.querySelector('.flow-stages');
-              const panel = document.querySelector('.flow-panel').getBoundingClientRect(), b = flow.getBoundingClientRect();
-              const note = document.querySelector('[data-testid="flow-memory-note"]'), n = note.getBoundingClientRect();
-              return { testid: 'flow-html-stages', left: b.left, right: b.right,
-                       columns: getComputedStyle(flow).gridTemplateColumns.split(' ').length,
-                       panel: [panel.left, panel.right], innerWidth,
-                       texts: [...flow.querySelectorAll('h3, p')].map(x => { const t = x.getBoundingClientRect();
-                         return [x.textContent, t.left, t.right, t.height]; }),
-                       note: note.textContent.trim(), noteRight: n.right };""")
-
-    shutil.rmtree(profile, ignore_errors=True)
-    return r
-
-
-def test_real_zoom_is_the_browsers_own_200_percent_page_zoom(real_zoom):
-    v = real_zoom["viewport"]
-    # The window stays 1440 x 900; the browser's zoom halves the CSS viewport
-    # and doubles device pixels per CSS pixel. It is not pinch zoom.
-    assert v["outer"] == [1440, 900] and v["dpr"] == 2 and v["pinch"] == 1, v
-    assert 600 <= v["innerWidth"] <= 720, v
-
-
-def test_real_zoom_has_no_horizontal_clipping_or_sideways_scrolling(real_zoom):
-    v = real_zoom["viewport"]
-    assert v["docScrollWidth"] <= v["innerWidth"] and v["bodyScrollWidth"] <= v["innerWidth"], v
-    assert real_zoom["scrollX"] == 0
-    assert real_zoom["clipped"] == {}, real_zoom["clipped"]
-    assert real_zoom["afterSend"]["docScrollWidth"] <= real_zoom["afterSend"]["innerWidth"]
-
-
-def test_real_zoom_primary_action_is_keyboard_reachable_with_visible_focus(real_zoom):
-    stops = real_zoom["tabStops"]
-    assert stops[-1]["testid"] == "button-start-session", [s["text"] for s in stops]
-    for stop in stops:
-        # Every focused control shows a visible ring and is on screen.
-        assert stop["outlineStyle"] != "none" and stop["outlineWidth"] >= 2, stop
-        box = stop["rect"]
-        assert box["top"] >= 0 and box["bottom"] <= stop["innerHeight"] and box["right"] <= stop["innerWidth"] + 1, stop
-
-
-def test_real_zoom_cta_focuses_a_visible_composer_and_stays_on_the_homepage(real_zoom):
-    after = real_zoom["afterCta"]
-    assert after["parentActive"] and after["childActive"]
-    composer = after["composer"]
-    assert composer["top"] >= after["header"]["bottom"] - 1 and composer["bottom"] <= after["innerHeight"] + 1, after
-    assert composer["left"] >= 0 and composer["right"] <= after["innerWidth"] + 1
-    assert after["path"] == "/" and "#" not in after["url"]
-
-
-def test_real_zoom_composer_sends_and_stays_usable(real_zoom):
-    after = real_zoom["afterSend"]
-    assert after["requests"] == ["Zoom check"] and after["users"] == ["Zoom check"]
-    assert after["assistants"] == 1 and after["value"] == "" and after["childActive"]
-    composer, frame = after["composer"], after["frame"]
-    assert frame["top"] <= composer["top"] and composer["bottom"] <= frame["bottom"] + 1
-    assert composer["right"] <= after["innerWidth"] + 1 and after["path"] == "/"
-
-
-def test_real_zoom_privacy_diagram_stays_readable(real_zoom):
-    d = real_zoom["diagram"]
-    assert d["testid"] == "flow-html-stages" and d["columns"] == 1                       # the vertical layout
-    assert d["panel"][0] - 1 <= d["left"] and d["right"] <= d["panel"][1] + 1 <= d["innerWidth"] + 2
-    for text, left, right, height in d["texts"]:
-        assert d["panel"][0] - 1 <= left and right <= d["panel"][1] + 1, text
-        assert height >= 11, (text, height)                      # CSS pixels; shown at 2x
-    assert d["note"].startswith(MEMORY_SENTENCE)
-    assert d["noteRight"] <= d["innerWidth"] + 1
-
-
-# --- the whole composer typing area (homepage iframe and direct /app/) -----------------------------
-
-
-@pytest.fixture
-def homepage_composer(interaction):
-    return {**interaction["composer"], "size": interaction["size"]}
-
-
-@pytest.fixture
-def app_composer(direct_app):
-    assert direct_app["path"] == "/app/"
-    return direct_app
 
 
 def check_composer_padding_shows_text_cursor_and_focuses_the_field(composer):
@@ -1159,60 +620,207 @@ def check_composer_pages_have_no_horizontal_overflow(composer):
         assert snapshot["docScrollWidth"] <= snapshot["innerWidth"] == composer["size"][0]
 
 
-def test_composer_padding_shows_text_cursor_and_focuses_the_field_in_homepage_iframe(homepage_composer):
-    check_composer_padding_shows_text_cursor_and_focuses_the_field(homepage_composer)
+# --- a real conversation on a direct /app/ visit -----------------------------------------------------
+
+LAYOUT = r"""
+const c = window.__cx, d = document, conv = d.getElementById('conversation');
+const cs = el => getComputedStyle(el);
+const rect = el => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+return {
+  path: location.pathname, href: location.href, historyLength: history.length,
+  scrollY: Math.round(window.scrollY), innerWidth, innerHeight,
+  docScrollWidth: d.documentElement.scrollWidth,
+  appHeight: Math.round(d.querySelector('.app').getBoundingClientRect().height),
+  users: [...d.querySelectorAll('#thread .msg-user .bubble')].map(b => b.textContent),
+  assistantRows: d.querySelectorAll('#thread .msg-assistant').length,
+  notes: [...d.querySelectorAll('#thread .error-note, #thread .notice-note')].map(n => n.textContent),
+  actions: [...d.querySelectorAll('#thread .msg-action span')].map(s => s.textContent),
+  conv: { overflowY: cs(conv).overflowY, scrollHeight: conv.scrollHeight, clientHeight: conv.clientHeight,
+          scrollTop: Math.round(conv.scrollTop), rect: rect(conv) },
+  docScroll: [d.scrollingElement.scrollHeight, d.scrollingElement.clientHeight],
+  composer: c.abs(d.getElementById('composer-shell')), send: c.abs(d.getElementById('send-btn')),
+  sendIsStop: d.getElementById('send-btn').classList.contains('is-stop'),
+  emptyPresent: !!d.getElementById('empty') && d.getElementById('empty').isConnected,
+  sendCursor: cs(d.getElementById('send-btn')).cursor,
+  requests: (window.__HANDOFF_CHILD__ || {requests: []}).requests.map(r => r.body.message),
+};
+"""
+
+LABELS = ("idle", "afterInvalid", "firstImmediate", "firstReplied", "longReplied", "afterError",
+          "inFlight", "afterStop", "readingEarlier")
+
+# Waits until the chat is (or is no longer) busy and the transcript has held
+# still -- position and size -- for 300 ms: the transcript scrolls smoothly,
+# so a snapshot at a fixed time can land mid-scroll. Returns the milliseconds
+# it took, or -1 after 5 seconds.
+SETTLE = r"""
+const conv = document.getElementById('conversation'), send = document.getElementById('send-btn');
+const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+const start = performance.now();
+let last = '', since = start;
+while (performance.now() - start < 5000) {
+  await frame();
+  const busy = send.classList.contains('is-stop'), now = performance.now();
+  const state = [busy, conv.scrollTop, conv.scrollHeight, conv.clientHeight].join();
+  if (state !== last) { last = state; since = now; }
+  else if (busy === BUSY && now - since >= 300) return Math.round(now - start);
+}
+return -1;"""
 
 
-def test_composer_padding_shows_text_cursor_and_focuses_the_field_on_direct_app(app_composer):
-    check_composer_padding_shows_text_cursor_and_focuses_the_field(app_composer)
+def send_prompt(page: Page, text: str):
+    page.eval(f"window.__cx.setValue({json.dumps(text)}); return true;")
+    box = page.eval("return window.__cx.abs(window.__cx.el('send-btn'));")
+    page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
 
 
-def test_padding_press_keeps_a_draft_unchanged_in_homepage_iframe(homepage_composer):
-    check_padding_press_keeps_a_draft_unchanged(homepage_composer)
+def run_conversation_scenario(page: Page) -> dict:
+    """Invalid submissions, then a real multi-turn conversation -- a reply, a
+    long reply, a service error, a request stopped with Stop -- and reading
+    earlier messages, with the workspace measured after each step."""
+    r: dict = {}
+    page.eval(COMPOSER_HELPERS)
+    page.eval("""for (let i = 0; i < 400 && !(window.__cx.doc() && window.__cx.el('composer-input')); i++)
+        await window.__cx.wait(25);
+      await window.__cx.wait(400); return true;""")
+    layout = lambda: page.eval(LAYOUT)
+    r["settled"] = {}
+
+    def settled(label: str, busy: bool = False) -> dict:
+        r["settled"][label] = page.eval(SETTLE.replace("BUSY", "true" if busy else "false"))
+        return layout()
+
+    r["initial"] = layout()
+    r["idle"] = settled("idle")
+
+    # ---- invalid submissions send nothing ------------------------------------------------------
+    send_prompt(page, "")                                     # disabled Send, empty composer
+    time.sleep(0.2)
+    page.eval("window.__cx.setValue('   '); window.__cx.el('composer-input').focus(); return true;")
+    for kind in ("keyDown", "keyUp"):
+        page.dt.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
+                                                "windowsVirtualKeyCode": 13}, page.session)
+    page.eval("window.__cx.el('send-btn').click(); return true;")  # whitespace-only via the button
+    r["afterInvalid"] = settled("afterInvalid")
+
+    # ---- a real multi-turn conversation in the same workspace -----------------------------------
+    send_prompt(page, "First question")
+    time.sleep(0.06)
+    r["firstImmediate"] = layout()                            # the scripted reply takes 300 ms
+    r["firstReplied"] = settled("firstReplied")
+
+    send_prompt(page, "LONG: please write a long answer")
+    r["longReplied"] = settled("longReplied")
+
+    send_prompt(page, "ERROR: this one fails")
+    r["afterError"] = settled("afterError")
+
+    send_prompt(page, "HANG: wait for Stop")
+    r["inFlight"] = settled("inFlight", busy=True)
+    stop = r["inFlight"]["send"]
+    page.click(stop["left"] + stop["width"] / 2, stop["top"] + stop["height"] / 2)
+    r["afterStop"] = settled("afterStop")
+
+    # Reading earlier messages is not interrupted: no new message, no yank.
+    page.eval("document.getElementById('conversation').scrollTop = 0; return true;")
+    r["readingEarlier"] = settled("readingEarlier")
+    return r
 
 
-def test_padding_press_keeps_a_draft_unchanged_on_direct_app(app_composer):
-    check_padding_press_keeps_a_draft_unchanged(app_composer)
+@pytest.fixture(scope="module", params=["desktop", "mobile"])
+def app_conversation(request, tmp_path_factory):
+    browser = require_browser_and_build()
+    viewport = request.param
+    profile = tmp_path_factory.mktemp(f"edge-app-conversation-{viewport}")
+    site = Site()
+    site.child_passive = True
+
+    with site.http:
+        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile") as (devtools, session):
+            page = Page(devtools, session)
+            devtools.call("Page.navigate", {"url": site.http.origin + "/app/"}, session)
+            time.sleep(0.5)
+            result = run_conversation_scenario(page)
+
+    shutil.rmtree(profile, ignore_errors=True)
+    result["viewport"], result["size"] = viewport, VIEWPORTS[viewport]
+    return result
 
 
-def test_clicking_the_field_keeps_native_caret_placement_in_homepage_iframe(homepage_composer):
-    check_clicking_the_field_keeps_native_caret_placement(homepage_composer)
+def assert_usable_workspace(snap):
+    # The chat fills the window; the transcript is the only vertical scroller
+    # and the composer sits fully visible at the bottom.
+    assert abs(snap["appHeight"] - snap["innerHeight"]) <= 1
+    assert snap["conv"]["overflowY"] == "auto"
+    assert snap["docScroll"][0] <= snap["docScroll"][1] and snap["scrollY"] == 0
+    composer = snap["composer"]
+    assert 0 <= composer["top"] and composer["bottom"] <= snap["innerHeight"] + 1
+    # The transcript ends above the composer.
+    conv_bottom = snap["conv"]["rect"][1] + snap["conv"]["rect"][3]
+    assert conv_bottom <= composer["top"] + 1, (conv_bottom, composer)
+    assert snap["docScrollWidth"] <= snap["innerWidth"]
 
 
-def test_clicking_the_field_keeps_native_caret_placement_on_direct_app(app_composer):
-    check_clicking_the_field_keeps_native_caret_placement(app_composer)
+def test_direct_app_is_a_full_height_conversation(app_conversation):
+    run = app_conversation
+    width, height = run["size"]
+    snap = run["afterStop"]
+
+    assert run["initial"]["appHeight"] == height and run["initial"]["innerWidth"] == width
+    assert snap["appHeight"] == height and snap["innerHeight"] == height
+    # Every step, including reading earlier messages, keeps the composer in
+    # view and the scrolling inside the transcript.
+    for label in LABELS:
+        assert_usable_workspace(run[label])
+    # Every step settled -- the reply in, the transcript still -- well within 5 seconds.
+    assert all(ms >= 0 for ms in run["settled"].values()), run["settled"]
+    # A long reply overflows the transcript, which follows it to the end, as it
+    # does every completed reply, error and stop...
+    long = run["longReplied"]
+    assert long["conv"]["scrollHeight"] > long["conv"]["clientHeight"]
+    for label in ("firstReplied", "longReplied", "afterError", "afterStop"):
+        conv = run[label]["conv"]
+        assert conv["scrollTop"] + conv["clientHeight"] >= conv["scrollHeight"] - 2, (label, conv)
+    # ...and earlier messages stay readable: scrolled back to the top, nothing moves it.
+    assert run["readingEarlier"]["conv"]["scrollTop"] == 0
+    assert run["readingEarlier"]["users"] == snap["users"] and run["readingEarlier"]["requests"] == snap["requests"]
+    # From the first exchange on, the composer stays pinned at the same place.
+    base = run["firstReplied"]["composer"]
+    for label in ("firstReplied", "longReplied", "afterError", "afterStop", "readingEarlier"):
+        composer = run[label]["composer"]
+        assert abs(composer["bottom"] - base["bottom"]) <= 1 and abs(composer["top"] - base["top"]) <= 1, label
+    assert run["inFlight"]["sendIsStop"] is True and run["inFlight"]["sendCursor"] == "pointer"
+    assert run["afterInvalid"]["requests"] == []
+    assert run["idle"]["emptyPresent"] and not run["firstReplied"]["emptyPresent"]
+    # Nothing navigates or adds history.
+    for label in LABELS:
+        assert run[label]["path"] == "/app/" and run[label]["historyLength"] == run["idle"]["historyLength"], label
 
 
-def test_send_click_is_not_intercepted_in_homepage_iframe(homepage_composer):
-    check_send_click_is_not_intercepted(homepage_composer)
-
-
-def test_send_click_is_not_intercepted_on_direct_app(app_composer):
-    check_send_click_is_not_intercepted(app_composer)
-
-
-def test_composer_cursor_and_caret_are_explicit_and_visible_in_homepage_iframe(homepage_composer):
-    check_composer_cursor_and_caret_are_explicit_and_visible(homepage_composer)
-
-
-def test_composer_cursor_and_caret_are_explicit_and_visible_on_direct_app(app_composer):
-    check_composer_cursor_and_caret_are_explicit_and_visible(app_composer)
-
-
-def test_composer_pages_have_no_horizontal_overflow_in_homepage_iframe(homepage_composer):
-    check_composer_pages_have_no_horizontal_overflow(homepage_composer)
-
-
-def test_composer_pages_have_no_horizontal_overflow_on_direct_app(app_composer):
-    check_composer_pages_have_no_horizontal_overflow(app_composer)
-
-
-def test_composer_box_has_a_hover_cue_in_homepage_iframe(homepage_composer):
-    check_composer_box_has_a_hover_cue(homepage_composer)
-
-
-def test_composer_box_has_a_hover_cue_on_direct_app(app_composer):
-    check_composer_box_has_a_hover_cue(app_composer)
+def test_direct_app_conversation_turns_errors_stop_and_invalid_submissions(app_conversation):
+    run = app_conversation
+    # Invalid and empty submissions send nothing and leave the starting state.
+    invalid = run["afterInvalid"]
+    assert invalid["requests"] == [] and invalid["users"] == [] and invalid["assistantRows"] == 0
+    assert invalid["emptyPresent"] is True
+    # The first prompt is sent once and answered in place.
+    assert run["firstImmediate"]["requests"] == ["First question"]
+    assert run["firstImmediate"]["users"] == ["First question"] and run["firstImmediate"]["assistantRows"] == 1
+    assert run["firstReplied"]["actions"][:2] == ["Copy", "Retry"]
+    # Errors and Stop keep the conversation; a new send replaces a failed exchange on screen.
+    assert run["afterError"]["notes"][-1] == "Kalillac is temporarily unavailable. Please try again shortly."
+    assert run["afterError"]["users"] == ["First question", "LONG: please write a long answer",
+                                          "ERROR: this one fails"]
+    assert run["afterStop"]["notes"][-1] == "Stopped."
+    assert run["afterStop"]["users"] == ["First question", "LONG: please write a long answer", "HANG: wait for Stop"]
+    assert run["afterStop"]["assistantRows"] == 3
+    assert run["afterStop"]["actions"].count("Copy") == 2 and "Retry" in run["afterStop"]["actions"]
+    assert run["afterStop"]["requests"] == ["First question", "LONG: please write a long answer",
+                                            "ERROR: this one fails", "HANG: wait for Stop"]
+    assert run["afterStop"]["sendIsStop"] is False
+    # The starting state is gone from the first message on.
+    for label in LABELS[2:]:
+        assert run[label]["emptyPresent"] is False, label
 
 
 def test_padding_handler_is_scoped_and_never_intercepts_controls():
@@ -1234,368 +842,6 @@ def test_padding_handler_is_scoped_and_never_intercepts_controls():
     field_rule = css[css.index(".composer textarea {"):]
     field_rule = field_rule[: field_rule.index("}")]
     assert "caret-color: var(--ink);" in field_rule and "cursor: text;" in field_rule
-
-
-# --- the conversation workspace (stable size, no handoff) ------------------------------------------
-
-# Records, in the homepage window, every message the chat iframe posts (there
-# must be none: the workspace never resizes or hands off).
-PARENT_LOG = r"""
-window.__parentLog = [];
-window.addEventListener('message', e => window.__parentLog.push({
-  type: e.data && typeof e.data === 'object' ? e.data.type : String(e.data), origin: e.origin }));
-return true;
-"""
-
-LAYOUT = r"""
-const c = window.__cx, d = c.doc(), w = c.win(), f = document.querySelector('[data-testid="embedded-chat"] iframe');
-const conv = d.getElementById('conversation'), slot = document.querySelector('.embedded-chat-slot');
-const cs = el => w.getComputedStyle(el);
-const rect = el => { const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
-const header = document.querySelector('.site-header'), trust = document.querySelector('.hero-under-note');
-return {
-  path: location.pathname, href: location.href, historyLength: history.length,
-  scrollY: Math.round(window.scrollY), innerWidth, innerHeight,
-  docScrollWidth: document.documentElement.scrollWidth,
-  slot: slot ? rect(slot) : null, frame: f ? rect(f) : null,
-  slotClass: slot ? slot.className : null,
-  frameHeight: f ? Math.round(f.getBoundingClientRect().height) : innerHeight,
-  header: header ? rect(header) : null, trust: trust ? rect(trust) : null,
-  appHeight: Math.round(d.querySelector('.app').getBoundingClientRect().height), childInnerHeight: w.innerHeight,
-  users: [...d.querySelectorAll('#thread .msg-user .bubble')].map(b => b.textContent),
-  assistantRows: d.querySelectorAll('#thread .msg-assistant').length,
-  notes: [...d.querySelectorAll('#thread .error-note, #thread .notice-note')].map(n => n.textContent),
-  actions: [...d.querySelectorAll('#thread .msg-action span')].map(s => s.textContent),
-  conv: { overflowY: cs(conv).overflowY, scrollHeight: conv.scrollHeight, clientHeight: conv.clientHeight,
-          scrollTop: Math.round(conv.scrollTop), rect: rect(conv) },
-  childDocScroll: [d.scrollingElement.scrollHeight, d.scrollingElement.clientHeight],
-  composer: c.abs(d.getElementById('composer-shell')), send: c.abs(d.getElementById('send-btn')),
-  sendIsStop: d.getElementById('send-btn').classList.contains('is-stop'),
-  emptyPresent: !!d.getElementById('empty') && d.getElementById('empty').isConnected,
-  sendCursor: cs(d.getElementById('send-btn')).cursor,
-  requests: (w.__HANDOFF_CHILD__ || {requests: []}).requests.map(r => r.body.message),
-  parentLog: (window.__parentLog || []).slice(),
-};
-"""
-
-LABELS = ("idle", "afterInvalid", "firstImmediate", "firstReplied", "longReplied", "afterError",
-          "inFlight", "afterStop", "readingEarlier")
-
-
-def send_prompt(page: "Page", text: str):
-    page.eval(f"window.__cx.setValue({json.dumps(text)}); return true;")
-    box = page.eval("return window.__cx.abs(window.__cx.el('send-btn'));")
-    page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
-
-
-def run_conversation_scenario(page: "Page", homepage: bool) -> dict:
-    r: dict = {}
-    page.eval(COMPOSER_HELPERS)
-    if homepage:
-        page.eval(PARENT_LOG)
-    page.eval("""for (let i = 0; i < 400 && !(window.__cx.doc() && window.__cx.el('composer-input')); i++)
-        await window.__cx.wait(25);
-      await window.__cx.wait(400); return true;""")
-    layout = lambda: page.eval(LAYOUT)
-    r["initial"] = layout()                                   # first render, page at the top
-
-    if homepage:
-        # Put the whole workspace in view (as the CTAs do) so the composer can
-        # be clicked like a user would.
-        page.eval("""const s = document.querySelector('.embedded-chat-slot').getBoundingClientRect();
-          const h = document.querySelector('.site-header').getBoundingClientRect();
-          window.scrollTo({top: window.scrollY + s.top - h.bottom - 16, behavior: 'instant'});
-          await window.__cx.wait(200); return true;""")
-    r["idle"] = layout()
-
-    # ---- invalid submissions send nothing ------------------------------------------------------
-    send_prompt(page, "")                                     # disabled Send, empty composer
-    time.sleep(0.2)
-    page.eval("window.__cx.setValue('   '); window.__cx.el('composer-input').focus(); return true;")
-    for kind in ("keyDown", "keyUp"):
-        page.dt.call("Input.dispatchKeyEvent", {"type": kind, "key": "Enter", "code": "Enter",
-                                                "windowsVirtualKeyCode": 13}, page.session)
-    page.eval("window.__cx.el('send-btn').click(); return true;")  # whitespace-only via the button
-    time.sleep(0.3)
-    r["afterInvalid"] = layout()
-
-    # ---- a real multi-turn conversation in the same workspace -----------------------------------
-    send_prompt(page, "First question")
-    time.sleep(0.06)
-    r["firstImmediate"] = layout()                            # the scripted reply takes 300 ms
-    time.sleep(0.7)
-    r["firstReplied"] = layout()
-
-    send_prompt(page, "LONG: please write a long answer")
-    time.sleep(0.9)
-    r["longReplied"] = layout()
-
-    send_prompt(page, "ERROR: this one fails")
-    time.sleep(0.9)
-    r["afterError"] = layout()
-
-    send_prompt(page, "HANG: wait for Stop")
-    time.sleep(0.3)
-    r["inFlight"] = layout()
-    stop = r["inFlight"]["send"]
-    page.click(stop["left"] + stop["width"] / 2, stop["top"] + stop["height"] / 2)
-    time.sleep(0.4)
-    r["afterStop"] = layout()
-
-    # Reading earlier messages is not interrupted: no new message, no yank.
-    page.eval("window.__cx.doc().getElementById('conversation').scrollTop = 0; return true;")
-    time.sleep(0.5)
-    r["readingEarlier"] = layout()
-    return r
-
-
-@pytest.fixture(scope="module", params=[
-    ("desktop", False), ("desktop", True), ("mobile", False), ("mobile", True),
-], ids=["desktop", "desktop-reduced-motion", "mobile", "mobile-reduced-motion"])
-def homepage_conversation(request, tmp_path_factory):
-    browser = require_browser_and_build()
-    viewport, reduced = request.param
-    profile = tmp_path_factory.mktemp(f"edge-conversation-{viewport}-{int(reduced)}")
-    site = Site()
-
-    with site.http:
-        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile",
-                          reduced_motion=reduced) as (devtools, session):
-            page = Page(devtools, session)
-            devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
-            time.sleep(0.5)
-            result = run_conversation_scenario(page, homepage=True)
-
-    shutil.rmtree(profile, ignore_errors=True)
-    result["viewport"], result["size"], result["reduced"] = viewport, VIEWPORTS[viewport], reduced
-    return result
-
-
-@pytest.fixture(scope="module", params=["desktop", "mobile"])
-def app_conversation(request, tmp_path_factory):
-    browser = require_browser_and_build()
-    viewport = request.param
-    profile = tmp_path_factory.mktemp(f"edge-app-conversation-{viewport}")
-    site = Site()
-    site.child_passive = True
-
-    with site.http:
-        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile") as (devtools, session):
-            page = Page(devtools, session)
-            devtools.call("Page.navigate", {"url": site.http.origin + "/app/"}, session)
-            time.sleep(0.5)
-            result = run_conversation_scenario(page, homepage=False)
-
-    shutil.rmtree(profile, ignore_errors=True)
-    result["viewport"], result["size"] = viewport, VIEWPORTS[viewport]
-    return result
-
-
-def min_height(viewport: str) -> int:
-    return 460 if viewport == "desktop" else 660
-
-
-def assert_usable_workspace(snap):
-    # The chat fills its frame; the transcript is the only vertical scroller
-    # and the composer sits fully visible at the bottom.
-    assert abs(snap["appHeight"] - snap["childInnerHeight"]) <= 1
-    assert snap["conv"]["overflowY"] == "auto"
-    assert snap["childDocScroll"][0] <= snap["childDocScroll"][1]
-    frame_top, frame_height = (snap["frame"][1], snap["frame"][3]) if snap["frame"] else (0, snap["innerHeight"])
-    composer = snap["composer"]                                     # top-level coordinates
-    assert frame_top <= composer["top"] and composer["bottom"] <= frame_top + frame_height + 1
-    assert composer["bottom"] <= snap["innerHeight"] + 1
-    # The transcript ends above the composer (both in the chat's coordinates).
-    conv_bottom = snap["conv"]["rect"][1] + snap["conv"]["rect"][3]
-    assert conv_bottom <= composer["top"] - frame_top + 1, (conv_bottom, composer, frame_top)
-    assert snap["docScrollWidth"] <= snap["innerWidth"]
-
-
-def test_workspace_is_full_height_from_the_first_render(homepage_conversation):
-    run = homepage_conversation
-    first = run["initial"]
-    target = WORKSPACE_HEIGHT[run["viewport"]]
-
-    assert first["scrollY"] == 0 and first["requests"] == [] and first["users"] == []
-    assert abs(first["slot"][3] - target) <= 1 and first["slot"][3] >= min_height(run["viewport"])
-    assert abs(first["frameHeight"] - (first["slot"][3] - 2)) <= 1          # the frame fills the card
-    assert first["slotClass"] == "embedded-chat-slot"
-    # No empty-history scrollbar before the first message.
-    assert first["conv"]["scrollHeight"] <= first["conv"]["clientHeight"]
-
-
-def test_workspace_height_is_stable_before_and_after_submission(homepage_conversation):
-    run = homepage_conversation
-    height, frame_height = run["initial"]["slot"][3], run["initial"]["frameHeight"]
-
-    for label in LABELS:
-        snap = run[label]
-        assert snap["slot"][3] == height and snap["frameHeight"] == frame_height, (label, snap["slot"])
-        assert snap["slotClass"] == "embedded-chat-slot", label
-        assert snap["slot"][2] == run["initial"]["slot"][2], label               # width too
-
-
-def test_sending_never_moves_navigates_or_signals(homepage_conversation):
-    run = homepage_conversation
-    base = run["idle"]
-
-    for label in LABELS[1:]:
-        snap = run[label]
-        assert snap["path"] == "/" and snap["href"] == base["href"], label       # no URL change
-        assert snap["historyLength"] == base["historyLength"], label             # no history entry
-        assert snap["scrollY"] == base["scrollY"], label                         # no page jump or hijack
-        assert snap["slot"][1] == base["slot"][1], label                         # no layout shift
-        assert snap["parentLog"] == [], label                                    # no message at all
-
-
-def test_invalid_or_empty_submissions_send_nothing(homepage_conversation):
-    snap = homepage_conversation["afterInvalid"]
-    assert snap["requests"] == [] and snap["users"] == [] and snap["assistantRows"] == 0
-
-
-def test_first_prompt_is_sent_once_and_answered_in_place(homepage_conversation):
-    run = homepage_conversation
-    assert run["firstImmediate"]["requests"] == ["First question"]
-    assert run["firstImmediate"]["users"] == ["First question"] and run["firstImmediate"]["assistantRows"] == 1
-    assert run["firstReplied"]["requests"] == ["First question"]
-    assert run["firstReplied"]["actions"][:2] == ["Copy", "Retry"]
-
-
-def test_multi_turn_conversation_with_copy_retry_stop_and_errors(homepage_conversation):
-    run = homepage_conversation
-    assert run["afterError"]["notes"][-1] == "Kalillac is temporarily unavailable. Please try again shortly."
-    assert run["afterError"]["users"] == ["First question", "LONG: please write a long answer",
-                                          "ERROR: this one fails"]
-    assert run["afterError"]["assistantRows"] == 3
-    # A new send replaces a failed exchange on screen (existing chat behavior);
-    # the stopped exchange then stays with its notice and Retry.
-    assert run["afterStop"]["notes"][-1] == "Stopped."
-    assert run["afterStop"]["users"] == ["First question", "LONG: please write a long answer",
-                                         "HANG: wait for Stop"]
-    assert run["afterStop"]["assistantRows"] == 3
-    assert run["afterStop"]["actions"].count("Copy") == 2 and "Retry" in run["afterStop"]["actions"]
-    assert run["afterStop"]["requests"] == ["First question", "LONG: please write a long answer",
-                                            "ERROR: this one fails", "HANG: wait for Stop"]
-
-
-def test_only_message_history_scrolls_and_the_composer_stays_visible(homepage_conversation):
-    run = homepage_conversation
-    for label in ("idle", "firstReplied", "longReplied", "afterError", "afterStop", "readingEarlier"):
-        assert_usable_workspace(run[label])
-    long = run["longReplied"]
-    assert long["conv"]["scrollHeight"] > long["conv"]["clientHeight"]           # it overflows...
-    assert long["conv"]["scrollTop"] + long["conv"]["clientHeight"] >= long["conv"]["scrollHeight"] - 2
-    # ...and the trust line never overlaps the workspace (it sits beside it on
-    # desktop and above it on phones).
-    snap = run["afterStop"]
-    (tl, tt, tw, th), (sl, st, sw, sh) = snap["trust"], snap["slot"]
-    assert tl + tw <= sl or sl + sw <= tl or tt + th <= st or st + sh <= tt, (snap["trust"], snap["slot"])
-
-
-def test_starting_state_is_removed_after_the_first_message(homepage_conversation):
-    run = homepage_conversation
-    assert run["idle"]["emptyPresent"] and run["afterInvalid"]["emptyPresent"]
-    for label in LABELS[2:]:
-        assert run[label]["emptyPresent"] is False, label
-
-
-def test_composer_stays_pinned_at_the_bottom_of_the_workspace(homepage_conversation):
-    run = homepage_conversation
-    # Desktop: the same composer position from the empty state to a long,
-    # overflowing transcript. Phones: the empty state stacks the heading, the
-    # composer and the examples (test_phone_empty_state_reads_heading_composer_then_examples);
-    # from the first exchange on, the composer is pinned at the bottom.
-    phone = run["viewport"] == "mobile"
-    base = run["firstReplied" if phone else "idle"]["composer"]
-    if phone:
-        slot = run["firstReplied"]["slot"]
-        assert slot[1] + slot[3] - base["bottom"] <= 40, (base, slot)     # at the bottom of the card
-        assert run["idle"]["composer"]["bottom"] < base["top"], run["idle"]["composer"]   # empty: higher up
-    for label in ("firstReplied", "longReplied", "afterError", "afterStop", "readingEarlier"):
-        composer = run[label]["composer"]
-        assert abs(composer["bottom"] - base["bottom"]) <= 1 and abs(composer["top"] - base["top"]) <= 1, label
-
-
-def test_reading_earlier_messages_is_not_interrupted(homepage_conversation):
-    assert homepage_conversation["readingEarlier"]["conv"]["scrollTop"] == 0
-
-
-def test_stop_keeps_the_pointer_cursor(homepage_conversation):
-    in_flight = homepage_conversation["inFlight"]
-    assert in_flight["sendIsStop"] is True and in_flight["sendCursor"] == "pointer"
-
-
-def test_direct_app_is_a_full_height_conversation(app_conversation):
-    run = app_conversation
-    width, height = run["size"]
-    snap = run["afterStop"]
-
-    assert run["initial"]["frame"] is None and run["initial"]["appHeight"] == height
-    assert snap["appHeight"] == height and snap["childInnerHeight"] == height
-    for label in ("idle", "longReplied", "afterStop"):
-        assert_usable_workspace(run[label])
-    assert snap["assistantRows"] == 3 and snap["requests"][0] == "First question"
-    assert run["longReplied"]["conv"]["scrollHeight"] > run["longReplied"]["conv"]["clientHeight"]
-    assert run["readingEarlier"]["conv"]["scrollTop"] == 0
-    assert run["inFlight"]["sendIsStop"] is True and run["inFlight"]["sendCursor"] == "pointer"
-    assert run["afterInvalid"]["requests"] == []
-    assert run["idle"]["emptyPresent"] and not run["firstReplied"]["emptyPresent"]
-
-
-def test_workspace_css_is_one_stable_size():
-    css = SITE_CSS.read_text(encoding="utf-8")
-    assert ".embedded-chat-slot { position: relative; z-index: 2; width: 100%; height: 460px;" in css
-    for boundary, height in ((1100, 440), (899, 500)):
-        block = css[css.index(f"@media (max-width: {boundary}px)"):]
-        block = block[:block.find("@media", 1)]
-        assert f".embedded-chat-slot {{ height: {height}px; }}" in block
-    # Both fallback and small-viewport units cap short phones; behavior is
-    # covered by trusted CTA/card clicks below, rather than this source check.
-    assert "min(660px,max(280px,calc(100vh - 96px)))" in css
-    assert "min(660px,max(280px,calc(100svh - 96px)))" in css
-    assert "@media (max-height: 560px)" in css and "max(280px,calc(100svh - 96px))" in css
-    assert len(re.findall(r"\.embedded-chat-slot[^{]*\{[^}]*\bheight:", css)) == 5
-    for gone in ("is-expanded", "is-active", "chat-expanded", "chat-expand"):
-        assert gone not in css, gone
-
-
-# --- static contract (always runs) -----------------------------------------------------------------
-
-
-def test_cta_code_uses_reduced_motion_and_prevent_scroll():
-    app = APP_TSX.read_text(encoding="utf-8")
-
-    assert "window.matchMedia('(prefers-reduced-motion: reduce)')" in app
-    assert "behavior: prefersReducedMotion() ? 'auto' : 'smooth'" in app
-    assert "'instant'" not in app.replace("newer 'instant'", "")
-    # 'auto' is immediate under reduced motion only because the CSS forces it.
-    css = SITE_CSS.read_text(encoding="utf-8")
-    assert re.search(r"@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{ "
-                     r"scroll-behavior: auto !important;", css)
-    assert "input.focus({ preventScroll: true })" in app
-    assert "frame?.focus({ preventScroll: true })" in app
-    assert "scrollIntoView({ block: 'center' })" not in app
-    # One CTA, one handler; the header has no second call to action.
-    assert 'onClick={startSession} data-testid="button-start-session"' in app
-    assert app.count("onClick={startSession}") == 1
-    assert "tryKalillac" not in app and "nav-cta" not in app and "Try Kalillac" not in app
-
-
-def test_conversation_stays_on_the_homepage_in_source():
-    app = APP_TSX.read_text(encoding="utf-8")
-    chat = (REPO / "frontend" / "app.js").read_text(encoding="utf-8")
-
-    for source in (app, chat):
-        for forbidden in ("pushState", "replaceState", "location.href =", "location.replace", "window.open("):
-            assert forbidden not in source, forbidden
-    assert "location.assign" not in chat
-    # The homepage embeds the one chat implementation. Only while that chat is
-    # not proven ready does it open /app/ itself: the CTA, and the native twin's
-    # example cards (one template) and composer.
-    assert app.count("location.assign") == 1 and "window.location.assign(CHAT_PATH);" in app
-    assert app.count("href={CHAT_PATH}") == 2
-    assert app.count("'/app/'") == 1 and "const CHAT_PATH = '/app/';" in app
-    assert 'href="/app' not in app and "navigate('/app" not in app
 
 
 def test_example_prompts_only_fill_the_composer_in_source():
@@ -1692,6 +938,9 @@ def test_app_frontend_and_site_dependencies_are_untouched():
             ).replace(
                 "plugins: [react(), tailwindcss()],",
                 "plugins: [react(), tailwindcss(), publicMetadata()],",
+            ).replace(
+                "// at /app/ and embedded here as a same-origin iframe.",
+                "// at /app/. The homepage never loads it; its Send opens it.",
             )
         elif name.endswith("index.html"):
             expected = baseline.replace(
@@ -1715,145 +964,6 @@ def test_app_frontend_and_site_dependencies_are_untouched():
     assert set(package["dependencies"]) == {"lucide-react", "react", "react-dom", "wouter"}
 
 
-# --- Android: a swipe that starts on the example cards scrolls the homepage -----------------------
-
-# Where a vertical swipe may begin on a card: its background, its text, its
-# icon and its arrow.
-CARD_SWIPE_STARTS = {
-    "card background": ".hint",
-    "card text": ".hint .hint-title",
-    "card icon": ".hint .hint-icon",
-    "card arrow": ".hint .hint-arrow",
-}
-
-
-def touch_swipe(page: Page, x: float, y: float, distance: float = 260, steps: int = 20):
-    """A real touch sequence (press, move up in small steps, release) under
-    Chromium touch emulation -- the input path Android Chrome uses."""
-    dt, session = page.dt, page.session
-    dt.call("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]}, session)
-    for step_number in range(1, steps + 1):
-        dt.call("Input.dispatchTouchEvent", {"type": "touchMove",
-                "touchPoints": [{"x": x, "y": y - distance * step_number / steps}]}, session)
-        time.sleep(0.016)
-    dt.call("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []}, session)
-    time.sleep(0.6)
-
-
-# Every vertical scroll container above the first card in the embedded chat,
-# with the values that decide whether a touch swipe latches to it.
-SCROLL_ANCESTORS_JS = """const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-  const d = f.contentDocument, out = [];
-  for (let el = d.querySelector('.hint'); el; el = el.parentElement) {
-    const c = getComputedStyle(el);
-    if (el.scrollHeight > el.clientHeight + 1 || /auto|scroll/.test(c.overflowY))
-      out.push({ element: el.id ? '#' + el.id : el.tagName.toLowerCase() + '.' + [...el.classList].join('.'),
-                 overflowY: c.overflowY, overscrollBehaviorY: c.overscrollBehaviorY,
-                 scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, scrollTop: el.scrollTop });
-  }
-  const conv = d.getElementById('conversation');
-  return { frame: [f.contentWindow.innerWidth, f.contentWindow.innerHeight],
-           embedded: d.body.classList.contains('is-embedded'), empty: conv.classList.contains('is-empty'),
-           conversationScrollRange: conv.scrollHeight - conv.clientHeight, ancestors: out };"""
-
-
-@pytest.mark.parametrize("size", [VIEWPORTS["mobile"], (375, 667), (360, 640)],
-                         ids=["390x844", "375x667", "360x640"])
-def test_touch_swipe_on_the_example_cards_scrolls_the_homepage(size, tmp_path_factory):
-    """Android Chrome: a vertical swipe that begins anywhere on a card scrolls
-    the document, without a nested scroll, and a tap still runs the card."""
-    browser = require_browser_and_build()
-    profile = tmp_path_factory.mktemp(f"edge-android-swipe-{size[0]}x{size[1]}")
-    site = Site()
-    with site.http:
-        with browser_page(browser, profile, size, True) as (dt, session):
-            page = Page(dt, session)
-            dt.call("Page.navigate", {"url": site.http.origin + "/"}, session)
-            deadline = time.monotonic() + 10
-            while not page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-                return !!f?.contentDocument?.querySelector('.hint');"""):
-                assert time.monotonic() < deadline, "the example cards did not load"
-                time.sleep(0.05)
-            time.sleep(0.4)
-
-            def place_cards():
-                # The first card a third of the way down the screen, with page
-                # left to scroll below it.
-                page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-                  const card = f.contentDocument.querySelector('.hint').getBoundingClientRect();
-                  window.scrollTo(0, window.scrollY + f.getBoundingClientRect().top + card.top - innerHeight / 3);
-                  return true;""")
-                time.sleep(0.3)
-
-            def point(selector: str):
-                return page.eval(f"""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-                  const el = f.contentDocument.querySelector({json.dumps(selector)});
-                  const a = f.getBoundingClientRect(), b = el.getBoundingClientRect();
-                  return [a.left + b.left + b.width / 2, a.top + b.top + b.height / 2];""")
-
-            def positions():
-                return page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-                  return { page: window.scrollY,
-                           inner: f.contentDocument.getElementById('conversation').scrollTop,
-                           max: document.documentElement.scrollHeight - innerHeight };""")
-
-            # The embedded starting state fits its frame: nothing inside the
-            # chat has a vertical scroll range a swipe could latch to.
-            hierarchy = page.eval(SCROLL_ANCESTORS_JS)
-            assert hierarchy["embedded"] and hierarchy["empty"], hierarchy
-            assert hierarchy["conversationScrollRange"] <= 0, hierarchy
-            assert all(a["scrollHeight"] <= a["clientHeight"] for a in hierarchy["ancestors"]), hierarchy
-
-            for name, selector in CARD_SWIPE_STARTS.items():
-                place_cards()
-                before = positions()
-                assert before["max"] - before["page"] > 200, (name, before)
-                touch_swipe(page, *point(selector))
-                after = positions()
-                # On failure, report which element in the chat owns the scroll.
-                assert after["page"] - before["page"] > 100, (name, before, after, page.eval(SCROLL_ANCESTORS_JS))
-                assert after["inner"] == before["inner"], (name, before, after, page.eval(SCROLL_ANCESTORS_JS))
-
-            # Control: the same swipe outside the embedded chat scrolls the page too.
-            place_cards()
-            before = positions()
-            touch_swipe(page, size[0] / 2, 20)
-            assert positions()["page"] - before["page"] > 100
-
-            # A tap on the same card still fills the composer and sends nothing.
-            place_cards()
-            x, y = point(".hint")
-            prompt = page.eval("""return document.querySelector('[data-testid="embedded-chat"] iframe')
-              .contentDocument.querySelector('.hint').dataset.prompt;""")
-            dt.call("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]}, session)
-            dt.call("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []}, session)
-            time.sleep(0.5)
-            tapped = page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-              return { composer: f.contentDocument.getElementById('composer-input').value,
-                       requests: (f.contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length };""")
-            assert tapped == {"composer": prompt, "requests": 0}, tapped
-
-
-def test_only_the_embedded_starting_state_lets_touch_scroll_reach_the_homepage():
-    css = (REPO / "frontend" / "app.css").read_text(encoding="utf-8")
-    # Short narrow embedded frames get the compact starting state, so it fits
-    # without a scroll range; the rule is scoped to the embedded chat.
-    compact = css[css.index("@media (max-height: 600px) and (max-width: 400px) {"):]
-    compact = compact[: compact.index("\n")]
-    assert ".is-embedded .hint { min-height: 0; padding: 9px 12px; }" in compact
-    assert all(rule.strip().startswith(".is-embedded") for rule in
-               compact[compact.index("{") + 1: compact.rindex("}")].split("}") if rule.strip())
-    # The chat scroller keeps its containment everywhere else.
-    conversation = css[css.index(".conversation {"):]
-    assert "overscroll-behavior: contain;" in conversation[: conversation.index("}")]
-    assert css.count(".is-embedded .conversation.is-empty { overscroll-behavior-y: auto; }") == 1
-    declarations = re.findall(r"overscroll-behavior[-\w]*\s*:\s*[\w-]+;", css)
-    assert declarations == ["overscroll-behavior: contain;", "overscroll-behavior-y: auto;"], declarations
-    # No touch-action, nested scroller or script gesture handling was added.
-    for forbidden in ("touch-action", "touchstart", "touchmove", "pointermove", "setPointerCapture"):
-        assert forbidden not in css + (REPO / "frontend" / "app.js").read_text(encoding="utf-8"), forbidden
-
-
 def test_tools_and_privacy_promise_match_pre_subscription_scope(structure):
     assert structure["tools"] == list(TASK_LABELS)
     promise = structure["promise"]
@@ -1866,83 +976,10 @@ def test_tools_and_privacy_promise_match_pre_subscription_scope(structure):
         assert label not in structure["pageText"]
 
 
-
-@pytest.mark.parametrize("size", [(375, 667), (360, 640)], ids=["375x667", "360x640"])
-@pytest.mark.parametrize("reduced", [False, True], ids=["motion", "reduced-motion"])
-def test_short_portrait_cta_shows_focused_composer_and_reachable_cards(size, reduced, tmp_path_factory):
-    """Trusted CTA/card clicks on the previously uncovered portrait heights."""
-    browser = require_browser_and_build()
-    label = f"{size[0]}x{size[1]}" + ("-reduced-motion" if reduced else "")
-    profile = tmp_path_factory.mktemp("edge-short-portrait-" + label)
-    site = Site()
-    with site.http:
-        with browser_page(browser, profile, size, True, reduced_motion=reduced) as (dt, session):
-            page = Page(dt, session)
-            dt.call("Page.navigate", {"url": site.http.origin + "/"}, session)
-            # Navigation can return before React creates the iframe. Poll the
-            # current document without installing helpers in the outgoing one.
-            deadline = time.monotonic() + 10
-            while not page.eval("""const frame = document.querySelector('[data-testid="embedded-chat"] iframe');
-                return !!frame?.contentDocument?.getElementById('composer-input');"""):
-                assert time.monotonic() < deadline, "the real chat composer did not load"
-                time.sleep(0.05)
-            page.eval(HELPERS.replace("\ntrue\n", "") + "return true;")
-            time.sleep(0.3)
-            state_js = """const ix = window.__ix, d = ix.doc();
-              return { ...ix.focusState(), innerWidth, innerHeight, scrollY,
-                composer: ix.childRect(d.getElementById('composer-shell')),
-                form: ix.childRect(d.getElementById('composer')),
-                input: ix.childRect(ix.input()), send: ix.childRect(d.getElementById('send-btn')),
-                frame: ix.rect(ix.frame()), header: ix.rect(ix.header()),
-                conversation: ix.childRect(d.getElementById('conversation')),
-                title: ix.childRect(d.querySelector('.empty-title')),
-                docScrollWidth: document.documentElement.scrollWidth,
-                childScrollWidth: d.documentElement.scrollWidth, childInnerWidth: ix.frame().contentWindow.innerWidth,
-                value: ix.input().value, messages: d.querySelectorAll('#thread .msg').length,
-                requests: (ix.frame().contentWindow.__HANDOFF_CHILD__ || {requests: []}).requests.length };"""
-            cta = page.eval("return window.__ix.rect(document.querySelector('[data-testid=\"button-start-session\"]'));")
-            page.click(cta["left"] + cta["width"] / 2, cta["top"] + cta["height"] / 2)
-            samples = page.eval("return await window.__ix.sample(1800, 40);")
-            after = page.eval(state_js)
-            assert [after["innerWidth"], after["innerHeight"]] == list(size)
-            assert after["parentActive"] and after["childActive"], after
-            for key in ("composer", "form", "input", "send"):
-                box = after[key]
-                assert after["header"]["bottom"] <= box["top"] < box["bottom"] <= after["innerHeight"], (key, after)
-                assert 0 <= box["left"] < box["right"] <= after["innerWidth"], (key, after)
-            assert after["docScrollWidth"] <= after["innerWidth"]
-            assert after["childScrollWidth"] <= after["childInnerWidth"]
-            assert after["title"]["top"] >= after["conversation"]["top"], after
-            assert after["requests"] == after["messages"] == 0
-            assert samples[-6:] == [samples[-1]] * 6
-            if reduced:
-                assert samples[0] == samples[-1], samples
-            # Every card remains reachable inside the workspace, below the composer.
-            for index, (title, prompt) in enumerate(zip(TASK_LABELS, EXAMPLE_PROMPTS)):
-                box = page.eval(f"""const ix = window.__ix, card = ix.doc().querySelectorAll('.hint')[{index}];
-                  card.scrollIntoView({{block: 'nearest', behavior: 'instant'}});
-                  await ix.wait(100); return ix.childRect(card);""")
-                # Phones list the examples after the composer, inside the frame.
-                assert after["frame"]["top"] <= box["top"] and box["bottom"] <= after["frame"]["bottom"], box
-                assert box["top"] >= after["composer"]["bottom"], (box, after["composer"])
-                assert box["width"] >= 44 and box["height"] >= 44
-                page.click(box["left"] + box["width"] / 2, box["top"] + box["height"] / 2)
-                card_state = page.eval(state_js)
-                visible_title = page.eval(f"return window.__ix.doc().querySelectorAll('.hint-title')[{index}].textContent.trim();")
-                assert visible_title == title and card_state["value"] == prompt
-                assert card_state["parentActive"] and card_state["childActive"], card_state
-                assert card_state["requests"] == card_state["messages"] == 0
-                assert card_state["frame"] == after["frame"]  # no workspace resize or parent jump
-                assert card_state["docScrollWidth"] <= card_state["innerWidth"]
-                assert card_state["childScrollWidth"] <= card_state["childInnerWidth"]
-            assert not any("/api/" in path for path in site.http.paths)
-
-
-
 # ---- End & erase: discoverable and operable everywhere the chat appears --------------------------
 # The control's label is visible text (never only a tooltip or a screen-reader
-# label), in the homepage's embedded chat and on a direct /app/ visit, down to
-# a 360 x 640 phone, by keyboard and by touch, with and without reduced motion.
+# label) in the /app/ workspace, down to a 360 x 640 phone, by keyboard and by
+# touch, with and without reduced motion.
 # Nothing is erased here: every path ends at Cancel or Escape, and nothing is
 # sent.
 
@@ -1965,9 +1002,8 @@ ERASE_STATE = r"""const c = window.__cx, b = c.el('erase-btn'), label = b.queryS
 
 ERASE_VIEWPORTS = {
     # name: (page, size, phone, reduced motion)
-    "embedded-desktop": ("/", VIEWPORTS["desktop"], False, False),
-    "embedded-mobile-reduced-motion": ("/", VIEWPORTS["mobile"], True, True),
-    "embedded-360x640": ("/", (360, 640), True, False),
+    "direct-desktop": ("/app/", VIEWPORTS["desktop"], False, False),
+    "direct-mobile-reduced-motion": ("/app/", VIEWPORTS["mobile"], True, True),
     "direct-360x640": ("/app/", (360, 640), True, False),
     "direct-desktop-reduced-motion": ("/app/", VIEWPORTS["desktop"], False, True),
 }
@@ -2050,7 +1086,7 @@ def inside(inner: dict, outer: dict, slack: float = 0.5) -> bool:
 
 def test_erase_label_is_visible_text_that_fits_beside_the_composer(erase_control):
     s = erase_control["draft"]
-    assert s["embedded"] is (erase_control["path"] == "/")
+    assert s["embedded"] is False and erase_control["path"] == "/app/"
     assert s["labelText"] == "End & erase"
     assert s["labelDisplay"] != "none" and s["labelVisibility"] == "visible"
     assert float(s["labelOpacity"]) == 1 and s["labelClip"] in ("auto", "") and s["labelClipPath"] == "none"
@@ -2106,88 +1142,6 @@ def test_erase_control_follows_the_motion_preference(erase_control):
         assert any(part != "0s" for part in parts), duration
 
 
-# ---- Phones: the CTA, the chat's starting order and the opaque header ---------------------------
-# The CTA lands the workspace below the sticky header with the chat's whole
-# heading in view and focuses the composer -- only then, never on load, and
-# without a second scroll. The empty state reads heading, composer, then the
-# compact examples, in the DOM as on screen. The header is opaque.
-
-PHONE_CTA_STATE = r"""const ix = window.__ix, d = ix.doc(), h = document.querySelector('.site-header');
-  const title = d.querySelector('.empty-title'), shell = d.getElementById('composer-shell');
-  const label = d.querySelector('.starter-label'), hints = [...d.querySelectorAll('.hint')];
-  const after = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-  const focusables = [...d.querySelectorAll('textarea, button:not([disabled]), a[href]')]
-    .filter(e => e.getClientRects().length);
-  const hs = getComputedStyle(h);
-  return { ...ix.focusState(), scrollY: Math.round(scrollY), innerWidth, innerHeight,
-    header: ix.rect(h), title: ix.childRect(title), composer: ix.childRect(shell),
-    hints: hints.map(e => ix.childRect(e)), frame: ix.rect(ix.frame()), card: ix.rect(ix.card()),
-    labelText: label ? label.textContent.trim() : null, labelShown: !!label && label.getClientRects().length > 0,
-    domOrder: after(title, shell) && hints.every(e => after(shell, e)),
-    tabOrder: focusables.indexOf(d.getElementById('composer-input')) < focusables.indexOf(hints[0]),
-    headerBackground: hs.backgroundColor, headerBackdrop: hs.backdropFilter,
-    docScrollWidth: document.documentElement.scrollWidth,
-    childScrollWidth: d.documentElement.scrollWidth, childInnerWidth: ix.frame().contentWindow.innerWidth };"""
-
-
-@pytest.mark.parametrize("size", [(320, 640), (390, 844)], ids=["320x640", "390x844"])
-@pytest.mark.parametrize("variant", ["motion", "reduced-motion", "safe-area"])
-def test_phone_cta_shows_the_whole_chat_heading_below_the_header(size, variant, tmp_path_factory):
-    browser = require_browser_and_build()
-    profile = tmp_path_factory.mktemp(f"edge-phone-cta-{size[0]}-{variant}")
-    site = Site()
-    with site.http:
-        with browser_page(browser, profile, size, True, reduced_motion=variant == "reduced-motion") as (dt, session):
-            page = Page(dt, session)
-            dt.call("Page.navigate", {"url": site.http.origin + "/"}, session)
-            deadline = time.monotonic() + 10
-            while not page.eval("""const f = document.querySelector('[data-testid="embedded-chat"] iframe');
-                return !!f?.contentDocument?.getElementById('composer-input');"""):
-                assert time.monotonic() < deadline, "the real chat composer did not load"
-                time.sleep(0.05)
-            page.eval(HELPERS.replace("\ntrue\n", "") + "return true;")
-            if variant == "safe-area":
-                # A notched phone in standalone mode: the header grows by the top
-                # inset (here 47px) and every offset follows the same token.
-                page.eval("document.querySelector('.site-shell').style.setProperty('--k-header-h', "
-                          "'calc(64px + 47px)'); return true;")
-            time.sleep(0.4)
-            loaded = page.eval(PHONE_CTA_STATE)
-            cta = page.eval("return window.__ix.rect(document.querySelector('[data-testid=\"button-start-session\"]'));")
-            page.click(cta["left"] + cta["width"] / 2, cta["top"] + cta["height"] / 2)
-            samples = page.eval("return await window.__ix.sample(1800, 40);")
-            landed = page.eval(PHONE_CTA_STATE)
-            time.sleep(0.6)
-            settled = page.eval(PHONE_CTA_STATE)
-
-    # Nothing is focused or scrolled merely because the page loaded.
-    assert loaded["scrollY"] == 0 and not (loaded["parentActive"] and loaded["childActive"]), loaded
-    # The opaque header: nothing behind it can show through, blur or not.
-    assert loaded["headerBackground"] == "rgb(255, 255, 255)", loaded["headerBackground"]
-    if variant == "safe-area":
-        assert loaded["header"]["height"] == 64 + 47
-    # Heading, composer, then the compact examples -- in the DOM, the tab order and on screen.
-    assert loaded["domOrder"] and loaded["tabOrder"], loaded
-    assert loaded["labelShown"] and loaded["labelText"] == "Or start with an example"
-    assert loaded["title"]["bottom"] <= loaded["composer"]["top"]
-    assert all(h["top"] >= loaded["composer"]["bottom"] for h in loaded["hints"]), loaded["hints"]
-    assert len(loaded["hints"]) == 4 and all(h["height"] >= 44 for h in loaded["hints"])
-    # The CTA: settled, the whole heading below the header, composer in view and focused.
-    assert samples[-6:] == [samples[-1]] * 6, samples
-    if variant == "reduced-motion":
-        assert samples[0] == samples[-1], samples[:5]
-    for state in (landed, settled):
-        assert state["parentActive"] and state["childActive"], state
-        assert state["title"]["top"] >= state["header"]["bottom"] + 8, (state["title"], state["header"])
-        assert state["composer"]["bottom"] <= state["innerHeight"], state["composer"]
-        assert abs(state["card"]["top"] - (state["header"]["bottom"] + GAP_BELOW_HEADER)) <= 1, state["card"]
-        assert state["docScrollWidth"] <= state["innerWidth"]
-        assert state["childScrollWidth"] <= state["childInnerWidth"]
-    # Focusing the composer caused no second scroll.
-    assert settled["scrollY"] == landed["scrollY"] == samples[-1]
-    assert not any("/api/" in path for path in site.http.paths)
-
-
 def test_header_offset_and_cta_landing_share_one_css_token():
     css = SITE_CSS.read_text(encoding="utf-8")
     app = APP_TSX.read_text(encoding="utf-8")
@@ -2199,3 +1153,646 @@ def test_header_offset_and_cta_landing_share_one_css_token():
     header = header[: header.index("}")]
     assert "background: #fff;" in header and "backdrop-filter" not in header
     assert "parseFloat(getComputedStyle(slot).scrollMarginTop)" in app
+
+
+# --- the homepage composer (native, trusted input) --------------------------------------------------
+
+HOME_HELPERS = r"""
+window.__hx = {
+  wait: ms => new Promise(r => setTimeout(r, ms)),
+  input: () => document.getElementById('home-composer-input'),
+  shell: () => document.querySelector('.hc-shell'),
+  send: () => document.querySelector('[data-testid="button-home-send"]'),
+  clear: () => document.querySelector('[data-testid="button-home-clear"]'),
+  cards: () => [...document.querySelectorAll('[data-testid="home-card"]')],
+  header: () => document.querySelector('.site-header'),
+  rect: el => { const b = el.getBoundingClientRect();
+    return {left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height}; },
+  setValue: v => { const i = window.__hx.input();
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(i, v);
+    i.dispatchEvent(new Event('input', {bubbles: true})); },
+  blurAll: () => { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); },
+  state: () => { const i = window.__hx.input(), t = s => document.querySelector(s).textContent;
+    return { value: i.value, placeholder: i.placeholder, focused: document.activeElement === i, readOnly: i.readOnly,
+             invalid: i.getAttribute('aria-invalid'), sendDisabled: window.__hx.send().disabled,
+             clearDisabled: window.__hx.clear().disabled, status: t('[data-testid="home-composer-status"]'),
+             alert: t('[data-testid="home-composer-alert"]'),
+             count: (document.querySelector('[data-testid="home-composer-count"]') || {}).textContent || null,
+             path: location.pathname, href: location.href, historyLength: history.length,
+             session: Object.keys(sessionStorage), local: localStorage.length, cookie: document.cookie }; },
+  sample: async (ms, every) => { const out = [];
+    for (let t = 0; t <= ms; t += every) { out.push(Math.round(window.scrollY)); await window.__hx.wait(every); }
+    return out; },
+};
+return true;
+"""
+
+
+def key_press(page: Page, key: str, code: str, vk: int, text: str | None = None, modifiers: int = 0):
+    down = {"type": "keyDown", "key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers}
+    if text is not None:
+        down["text"] = text
+    page.dt.call("Input.dispatchKeyEvent", down, page.session)
+    page.dt.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": vk,
+                                            "modifiers": modifiers}, page.session)
+
+
+def center(box: dict) -> tuple[float, float]:
+    return box["left"] + box["width"] / 2, box["top"] + box["height"] / 2
+
+
+def run_home_scenario(page: Page, reduced: bool) -> dict:
+    r: dict = {"reduced": reduced}
+    page.eval(HOME_HELPERS)
+    page.eval("for (let i = 0; i < 400 && !window.__hx.input(); i++) await window.__hx.wait(25);"
+              "await window.__hx.wait(400); return true;")
+    st = lambda: page.eval("return window.__hx.state();")  # noqa: E731
+
+    # ---- landing ----------------------------------------------------------------------------------
+    r["landing"] = page.eval("""const hx = window.__hx, i = hx.input();
+      const name = el => el.getAttribute('aria-label') || (el.labels && el.labels.length ? el.labels[0].textContent
+        : el.textContent.replace(/\\s+/g, ' ').trim());
+      return { scrollY, innerWidth, innerHeight,
+        docScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
+        header: hx.rect(hx.header()), panel: hx.rect(document.querySelector('[data-testid="home-composer"]')),
+        shell: hx.rect(hx.shell()), input: hx.rect(i), send: hx.rect(hx.send()), clear: hx.rect(hx.clear()),
+        cta: hx.rect(document.querySelector('[data-testid="button-start-session"]')),
+        trustItems: [...document.querySelectorAll('.hero-under-note .trust-item')].map(e =>
+          ({...hx.rect(e), fontSize: parseFloat(getComputedStyle(e).fontSize)})),
+        cards: hx.cards().map(c => ({ ...hx.rect(c), tag: c.tagName, type: c.type, name: name(c),
+          description: document.getElementById(c.getAttribute('aria-describedby')).textContent,
+          href: c.getAttribute('href') })),
+        labels: [...i.labels].map(l => l.textContent), inputTag: i.tagName, rows: i.rows,
+        describedBy: document.getElementById(i.getAttribute('aria-describedby')).textContent,
+        sendName: name(hx.send()), sendType: hx.send().type, clearName: name(hx.clear()),
+        statusRole: document.querySelector('[data-testid="home-composer-status"]').getAttribute('role'),
+        alertRole: document.querySelector('[data-testid="home-composer-alert"]').getAttribute('role'),
+        links: [...document.querySelectorAll('[data-testid="home-composer"] a')].length,
+        controls: [...document.querySelectorAll('[data-testid="home-composer"] button, [data-testid="home-composer"] input, ' +
+                                                '[data-testid="home-composer"] textarea, [data-testid="home-composer"] select')]
+          .map(e => e.tagName + ':' + (e.type || '') + ':' + name(e)),
+        eyebrow: (() => { const e = document.querySelector('.hero .eyebrow'), s = getComputedStyle(e),
+                                 b = getComputedStyle(e, '::before');
+          return { text: e.textContent, tag: e.tagName, background: s.backgroundColor, radius: s.borderRadius,
+                   ruleContent: b.content, ruleWidth: parseFloat(b.width), ruleHeight: parseFloat(b.height),
+                   ruleColor: b.backgroundColor }; })(),
+        ...hx.state() };""")
+
+    # ---- pointer, caret and decoration ------------------------------------------------------------
+    r["styles"] = page.eval("""const hx = window.__hx, cs = el => getComputedStyle(el);
+      const out = { inputCursor: cs(hx.input()).cursor, shellCursor: cs(hx.shell()).cursor,
+        caretColor: cs(hx.input()).caretColor, inputColor: cs(hx.input()).color,
+        shellBackground: cs(hx.shell()).backgroundColor, sendCursorEmpty: cs(hx.send()).cursor,
+        cardCursors: hx.cards().map(c => cs(c).cursor),
+        ctaCursor: cs(document.querySelector('[data-testid="button-start-session"]')).cursor,
+        decorative: ['.orbital-wrap', '.hero-signal-line', '.phone-stage'].map(s =>
+          [s, [...document.querySelectorAll(s)].map(e => cs(e).pointerEvents)]),
+        plate: getComputedStyle(document.querySelector('.hero-workspace'), '::before').pointerEvents };
+      hx.setValue('draft'); await hx.wait(50);
+      out.sendWithDraft = [cs(hx.send()).cursor, hx.send().disabled, cs(hx.clear()).cursor, hx.clear().disabled];
+      hx.setValue(''); await hx.wait(50); return out;""")
+
+    # ---- the visible typing area focuses the real field (trusted clicks) ------------------------
+    page.eval("""const hx = window.__hx, s = hx.shell().getBoundingClientRect(), h = hx.header().getBoundingClientRect();
+      if (s.top < h.bottom || s.bottom > innerHeight) window.scrollTo({top: scrollY + s.top - h.bottom - 24, behavior: 'instant'});
+      await hx.wait(150); return true;""")
+    box = page.eval("return window.__hx.rect(window.__hx.input());")
+    r["typingAreaClicks"] = []
+    for fx in (0.05, 0.5, 0.95):
+        for fy in (0.25, 0.75):
+            page.eval("window.__hx.blurAll(); return true;")
+            page.click(box["left"] + box["width"] * fx, box["top"] + box["height"] * fy)
+            time.sleep(0.12)
+            r["typingAreaClicks"].append(st())
+
+    # ---- typing, a new line, Unicode, editing and Clear draft -------------------------------------
+    page.eval("window.__hx.blurAll(); window.__hx.input().focus(); return true;")
+    page.dt.call("Input.insertText", {"text": "first line"}, page.session)
+    key_press(page, "Enter", "Enter", 13, text="\r", modifiers=8)        # Shift+Enter
+    page.dt.call("Input.insertText", {"text": "second \u2713 \U0001F642 \u65e5\u672c\u8a9e"}, page.session)
+    time.sleep(0.2)
+    r["typed"] = st()
+    page.eval("window.__hx.input().select(); return true;")
+    page.dt.call("Input.insertText", {"text": "replaced"}, page.session)
+    time.sleep(0.2)
+    r["edited"] = st()
+    page.click(*center(page.eval("return window.__hx.rect(window.__hx.clear());")))
+    time.sleep(0.25)
+    r["cleared"] = st()
+
+    # ---- nothing empty, blank or too long can be sent --------------------------------------------
+    page.eval("window.__hx.setValue('   \\n\\t  '); window.__hx.input().focus(); return true;")
+    time.sleep(0.1)
+    r["whitespace"] = st()
+    key_press(page, "Enter", "Enter", 13, text="\r")
+    page.click(*center(page.eval("return window.__hx.rect(window.__hx.send());")))
+    time.sleep(0.4)
+    r["whitespaceAfterSend"] = st()
+    page.eval("window.__hx.setValue('x'.repeat(4001)); return true;")
+    time.sleep(0.1)
+    r["overLimit"] = st()
+    page.eval("window.__hx.setValue('\\u{1F600}'.repeat(4000)); return true;")
+    time.sleep(0.1)
+    r["atLimitCodePoints"] = st()
+    page.eval("window.__hx.setValue(''); return true;")
+
+    # ---- an IME still composing never sends ------------------------------------------------------
+    r["ime"] = page.eval("""const hx = window.__hx, i = hx.input();
+      hx.setValue('\\u6f22\\u5b57'); i.focus();
+      i.dispatchEvent(new CompositionEvent('compositionstart', {bubbles: true}));
+      i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', keyCode: 13, bubbles: true, cancelable: true}));
+      await hx.wait(150); const during = hx.state();
+      i.dispatchEvent(new CompositionEvent('compositionend', {bubbles: true, data: '\\u6f22\\u5b57'}));
+      i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', isComposing: true, bubbles: true, cancelable: true}));
+      i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', keyCode: 229, bubbles: true, cancelable: true}));
+      await hx.wait(150); const after = hx.state(); hx.setValue(''); return { during, after };""")
+
+    # ---- the examples: focus and suggest, never navigate or overwrite ---------------------------
+    r["cards"] = []
+    for index in range(4):
+        page.eval("window.__hx.setValue(''); window.__hx.blurAll(); return true;")
+        page.eval(f"window.__hx.cards()[{index}].scrollIntoView({{block: 'center', behavior: 'instant'}}); "
+                  "await window.__hx.wait(80); return true;")
+        page.click(*center(page.eval(f"return window.__hx.rect(window.__hx.cards()[{index}]);")))
+        time.sleep(0.15)
+        empty = st()
+        page.eval("window.__hx.setValue('keep my draft'); window.__hx.blurAll(); return true;")
+        page.click(*center(page.eval(f"return window.__hx.rect(window.__hx.cards()[{index}]);")))
+        time.sleep(0.15)
+        r["cards"].append({"empty": empty, "draft": st()})
+    page.eval("window.__hx.setValue(''); window.__hx.blurAll(); return true;")
+
+    # ---- "Start a private session" from the top, then from the bottom of the page ---------------
+    page.eval("window.scrollTo({top: 0, behavior: 'instant'}); await window.__hx.wait(150); return true;")
+    page.click(*center(r["landing"]["cta"]))
+    r["ctaFromTop"] = page.eval("""const hx = window.__hx, samples = await hx.sample(1500, 50);
+      return { samples, header: hx.rect(hx.header()), shell: hx.rect(hx.shell()), innerHeight, ...hx.state() };""")
+    r["ctaFromBottom"] = page.eval("""const hx = window.__hx; hx.blurAll();
+      window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'instant'}); await hx.wait(150);
+      const start = Math.round(scrollY);
+      document.querySelector('[data-testid="button-start-session"]').click();
+      const samples = await hx.sample(1800, 30);
+      return { start, samples, header: hx.rect(hx.header()), shell: hx.rect(hx.shell()), innerHeight, ...hx.state() };""")
+
+    # ---- keyboard: the composer, then the examples, every stop with a visible ring --------------
+    # A press on the header's empty edge starts keyboard navigation from the top of the page.
+    page.eval("window.__hx.blurAll(); window.scrollTo({top: 0, behavior: 'instant'}); await window.__hx.wait(100); "
+              "return true;")
+    page.click(2, 2)
+    r["tabStops"] = []
+    for _ in range(30):
+        key_press(page, "Tab", "Tab", 9)
+        time.sleep(0.06)
+        stop = page.eval("""const e = document.activeElement, s = getComputedStyle(e), b = e.getBoundingClientRect();
+          const shell = e.closest('.hc-shell');
+          // The box's border settles after its 160 ms transition.
+          if (shell) await new Promise(r => setTimeout(r, 300));
+          const ss = shell && getComputedStyle(shell);
+          return { id: e.id, testid: e.getAttribute('data-testid'), tag: e.tagName,
+                   outlineStyle: s.outlineStyle, outlineWidth: parseFloat(s.outlineWidth),
+                   shellBorder: ss ? ss.borderTopColor : null, shellRing: ss ? ss.boxShadow : null,
+                   onScreen: b.top >= 0 && b.bottom <= innerHeight + 1 };""")
+        r["tabStops"].append(stop)
+        if stop["testid"] == "home-card" and sum(1 for s in r["tabStops"] if s["testid"] == "home-card") == 4:
+            break
+
+    r["final"] = page.eval("return { docScrollWidth: document.documentElement.scrollWidth, innerWidth, "
+                           "...window.__hx.state() };")
+    return r
+
+
+@pytest.fixture(scope="module", params=[
+    ("desktop", False), ("desktop", True), ("mobile", False), ("mobile", True),
+], ids=["desktop", "desktop-reduced-motion", "mobile", "mobile-reduced-motion"])
+def homepage(request, tmp_path_factory):
+    browser = require_browser_and_build()
+    viewport, reduced = request.param
+    profile = tmp_path_factory.mktemp(f"edge-home-{viewport}-{int(reduced)}")
+    site = Site()
+    site.child_passive = True
+
+    with site.http:
+        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile",
+                          reduced_motion=reduced) as (devtools, session):
+            page = Page(devtools, session)
+            devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
+            time.sleep(0.5)
+            result = run_home_scenario(page, reduced)
+        result["serverPaths"] = list(site.http.paths)
+
+    shutil.rmtree(profile, ignore_errors=True)
+    result["viewport"], result["size"] = viewport, VIEWPORTS[viewport]
+    return result
+
+
+def test_lands_at_the_top_with_the_header_visible_and_no_horizontal_overflow(homepage):
+    landing = homepage["landing"]
+    assert landing["scrollY"] == 0 and landing["header"]["top"] == 0
+    assert landing["docScrollWidth"] <= landing["innerWidth"] and landing["bodyScrollWidth"] <= landing["innerWidth"]
+    assert landing["focused"] is False and landing["value"] == "" and landing["path"] == "/"
+
+
+def test_eyebrow_is_editorial_text_with_a_short_blue_rule(homepage):
+    eyebrow = homepage["landing"]["eyebrow"]
+    assert eyebrow["tag"] == "SPAN" and eyebrow["text"] == "PRIVATE BY DESIGN"
+    assert eyebrow["background"] == "rgba(0, 0, 0, 0)" and eyebrow["radius"] == "0px"
+    assert eyebrow["ruleContent"] == '""' and eyebrow["ruleWidth"] == 28 and eyebrow["ruleHeight"] == 2
+    assert eyebrow["ruleColor"] == "rgb(0, 105, 255)"
+
+
+def test_complete_composer_is_visible_on_the_first_desktop_screen(homepage):
+    landing = homepage["landing"]
+    if homepage["viewport"] != "desktop":
+        pytest.skip("the side-by-side first screen applies at 1440 x 900 and wider")
+    panel = landing["panel"]
+    assert panel["top"] >= landing["header"]["bottom"] and panel["bottom"] <= landing["innerHeight"], panel
+    for card in landing["cards"]:
+        assert card["bottom"] <= landing["innerHeight"]
+
+
+def test_composer_is_a_real_accessible_message_box_with_truthful_controls(homepage):
+    landing = homepage["landing"]
+    assert landing["inputTag"] == "TEXTAREA" and landing["labels"] == ["Message Kalillac AI"] and landing["rows"] >= 2
+    assert landing["describedBy"] == "Nothing is sent until you press Send. Sending opens the chat."
+    assert landing["sendName"] == "Send message" and landing["sendType"] == "submit"
+    assert landing["clearName"] == "Clear draft" and "End & erase" not in landing["clearName"]
+    assert landing["statusRole"] == "status" and landing["alertRole"] == "alert"
+    # Nothing to send or clear yet: both are disabled until there is a draft.
+    assert landing["sendDisabled"] is True and landing["clearDisabled"] is True
+    # The composer contains no link: nothing in it can navigate.
+    assert landing["links"] == 0
+    for card in landing["cards"]:
+        assert card["tag"] == "BUTTON" and card["type"] == "button" and card["href"] is None
+    assert [c["name"] for c in landing["cards"]] == list(TASK_LABELS)
+    for control in (landing["send"], landing["clear"], *landing["cards"]):
+        assert control["height"] >= 36 and control["width"] >= 36
+
+
+def test_no_unsupported_control_is_exposed_on_the_homepage(homepage):
+    controls = homepage["landing"]["controls"]
+    assert controls == ["TEXTAREA:textarea:Message Kalillac AI", "BUTTON:button:Clear draft",
+                        "BUTTON:submit:Send message",
+                        *[f"BUTTON:button:{label}" for label in TASK_LABELS]], controls
+    for control in controls:
+        for unsupported in ("file", "attach", "upload", "image", "photo", "voice", "microphone", "plan", "upgrade"):
+            assert unsupported not in control.lower(), control
+
+
+def test_trust_line_statements_stay_whole_on_every_viewport(homepage):
+    for item in homepage["landing"]["trustItems"]:
+        assert item["height"] <= item["fontSize"] * 1.8, item       # one line each
+        assert item["right"] <= homepage["landing"]["innerWidth"]
+
+
+def test_pointer_and_caret_styles(homepage):
+    styles = homepage["styles"]
+    assert styles["inputCursor"] == "text" and styles["shellCursor"] == "text"
+    assert styles["caretColor"] == styles["inputColor"]
+    light, dark = sorted((luminance(styles["caretColor"]), luminance(styles["shellBackground"])))
+    assert (dark + 0.05) / (light + 0.05) >= 7
+    assert styles["sendCursorEmpty"] == "default"
+    assert styles["sendWithDraft"] == ["pointer", False, "pointer", False]
+    assert styles["cardCursors"] == ["pointer"] * 4 and styles["ctaCursor"] == "pointer"
+    for _, values in styles["decorative"]:
+        assert all(v == "none" for v in values)
+    assert styles["plate"] == "none"
+
+
+def test_clicking_anywhere_in_the_visible_input_focuses_it_and_stays_on_the_homepage(homepage):
+    for state in homepage["typingAreaClicks"]:
+        assert state["focused"] is True and state["path"] == "/" and state["session"] == [], state
+
+
+def test_typing_new_lines_unicode_editing_and_clearing_stay_on_the_homepage(homepage):
+    typed = homepage["typed"]
+    assert typed["value"] == "first line\nsecond \u2713 \U0001F642 \u65e5\u672c\u8a9e" and typed["path"] == "/"
+    assert typed["sendDisabled"] is False and typed["clearDisabled"] is False and typed["session"] == []
+    assert homepage["edited"]["value"] == "replaced" and homepage["edited"]["path"] == "/"
+    cleared = homepage["cleared"]
+    assert cleared["value"] == "" and cleared["focused"] is True and cleared["path"] == "/"
+    assert cleared["status"] == "Draft cleared." and cleared["sendDisabled"] is True and cleared["session"] == []
+
+
+def test_empty_whitespace_and_over_limit_drafts_cannot_send(homepage):
+    assert homepage["whitespace"]["sendDisabled"] is True
+    after = homepage["whitespaceAfterSend"]
+    assert after["path"] == "/" and after["session"] == [] and after["readOnly"] is False
+    over = homepage["overLimit"]
+    assert over["sendDisabled"] is True and over["invalid"] == "true"
+    assert "too long" in over["status"] and over["count"] == "4,001 / 4,000"
+    # The limit counts code points, as the chat service does: 4,000 emoji may be sent.
+    at_limit = homepage["atLimitCodePoints"]
+    assert at_limit["sendDisabled"] is False and at_limit["invalid"] is None and at_limit["count"] == "4,000 / 4,000"
+
+
+def test_ime_composition_never_sends(homepage):
+    for phase in ("during", "after"):
+        state = homepage["ime"][phase]
+        assert state["path"] == "/" and state["session"] == [] and state["value"] == "\u6f22\u5b57", (phase, state)
+
+
+def test_examples_focus_the_composer_suggest_only_when_empty_and_never_navigate(homepage):
+    for index, card in enumerate(homepage["cards"]):
+        empty, draft = card["empty"], card["draft"]
+        assert empty["focused"] is True and empty["value"] == "" and empty["path"] == "/"
+        assert empty["placeholder"] == f"Try: {EXAMPLE_PROMPTS[index]}"
+        assert draft["focused"] is True and draft["value"] == "keep my draft" and draft["path"] == "/"
+        assert empty["session"] == draft["session"] == []
+        assert empty["historyLength"] == draft["historyLength"] == homepage["landing"]["historyLength"]
+
+
+def test_cta_focuses_the_composer_without_navigation(homepage):
+    for name in ("ctaFromTop", "ctaFromBottom"):
+        run = homepage[name]
+        assert run["focused"] is True and run["path"] == "/" and "#" not in run["href"], name
+        assert run["historyLength"] == homepage["landing"]["historyLength"] and run["session"] == [], name
+        # The composer box lands fully visible below the sticky header.
+        assert run["shell"]["top"] >= run["header"]["bottom"] - 1, (name, run["shell"], run["header"])
+        assert run["shell"]["bottom"] <= run["innerHeight"] + 1, (name, run["shell"])
+
+
+def test_scroll_is_smooth_or_immediate_according_to_motion_preference(homepage):
+    samples = homepage["ctaFromBottom"]["samples"]
+    assert samples[-1] < homepage["ctaFromBottom"]["start"]
+    moving = [s for s in samples if s not in (samples[0], samples[-1])]
+    if homepage["reduced"]:
+        assert moving == [], samples                    # one immediate jump
+    else:
+        assert len(moving) >= 2, samples               # a visible, smooth movement
+
+
+def test_keyboard_reaches_the_cta_the_composer_then_the_examples_with_visible_focus(homepage):
+    stops = homepage["tabStops"]
+    ids = [s["testid"] or s["id"] for s in stops]
+    assert "button-start-session" in ids and "input-home-composer" in ids
+    composer = ids.index("input-home-composer")
+    assert ids.index("button-start-session") < composer
+    # The disabled Clear draft and Send are skipped; the four examples follow at once.
+    assert ids[composer + 1:composer + 5] == ["home-card"] * 4, ids
+    for stop in stops:
+        if stop["testid"] == "input-home-composer":
+            # The message box shows the field's focus: a Kalillac-blue border and a 3px ring.
+            assert stop["shellBorder"] == "rgb(0, 105, 255)" and "0px 0px 0px 3px" in stop["shellRing"], stop
+        else:
+            assert stop["outlineStyle"] != "none" and stop["outlineWidth"] >= 2, stop
+
+
+def test_nothing_was_sent_stored_or_navigated(homepage):
+    final = homepage["final"]
+    assert final["path"] == "/" and final["historyLength"] == homepage["landing"]["historyLength"]
+    assert final["session"] == [] and final["local"] == 0 and final["cookie"] == ""
+    assert final["docScrollWidth"] <= final["innerWidth"]
+    assert not any(p.startswith("/app/") or p.startswith("/api/") or "POST" in p for p in homepage["serverPaths"])
+
+
+# --- real 200% browser zoom ------------------------------------------------------------------------
+#
+# The browser's own page zoom (the profile zoom level that Ctrl+Plus and
+# Settings > Page zoom set), in a 1440 x 900 window, with no viewport or
+# device-pixel emulation. Driven with real key presses: Tab to the CTA, Enter,
+# type, Enter -- which hands the draft to /app/.
+
+
+@pytest.fixture(scope="module")
+def real_zoom(tmp_path_factory):
+    browser = require_browser_and_build()
+    profile = tmp_path_factory.mktemp("edge-real-zoom-200")
+    site = Site()
+    site.child_passive = True
+    r: dict = {}
+
+    with site.http:
+        with browser_page(browser, profile, (1440, 900), False, zoom_percent=200) as (devtools, session):
+            page = Page(devtools, session)
+            devtools.call("Page.navigate", {"url": site.http.origin + "/"}, session)
+            time.sleep(0.5)
+            page.eval(HOME_HELPERS)
+            page.eval("for (let i = 0; i < 400 && !window.__hx.input(); i++) await window.__hx.wait(25);"
+                      "await window.__hx.wait(400); return true;")
+            r["viewport"] = page.eval("""return { innerWidth, innerHeight, dpr: devicePixelRatio,
+              outer: [outerWidth, outerHeight], pinch: visualViewport.scale,
+              docScrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth };""")
+            r["scrollX"] = page.eval("window.scrollTo(400, 0); await window.__hx.wait(100); "
+                                     "const x = window.scrollX; window.scrollTo(0, 0); return x;")
+            r["clipped"] = {}
+            height = page.eval("return document.documentElement.scrollHeight;")
+            for y in range(0, height, 300):
+                page.eval(f"window.scrollTo(0, {y}); await window.__hx.wait(30); return true;")
+                for item in page.eval(ZOOM_CLIPPING):
+                    r["clipped"].setdefault(item, y)
+            r["diagram"] = page.eval("""const flow = document.querySelector('.flow-stages');
+              const panel = document.querySelector('.flow-panel').getBoundingClientRect(), b = flow.getBoundingClientRect();
+              const note = document.querySelector('[data-testid="flow-memory-note"]'), n = note.getBoundingClientRect();
+              return { testid: 'flow-html-stages', left: b.left, right: b.right,
+                       columns: getComputedStyle(flow).gridTemplateColumns.split(' ').length,
+                       panel: [panel.left, panel.right], innerWidth,
+                       texts: [...flow.querySelectorAll('h3, p')].map(x => { const t = x.getBoundingClientRect();
+                         return [x.textContent, t.left, t.right, t.height]; }),
+                       note: note.textContent.trim(), noteRight: n.right };""")
+            page.eval("window.scrollTo(0, 0); window.__hx.blurAll(); return true;")
+
+            # Keyboard only: Tab to the primary action; every focus ring must show.
+            r["tabStops"] = []
+            for _ in range(25):
+                press(page, "Tab", "Tab", 9)
+                time.sleep(0.1)
+                stop = page.eval("""const e = document.activeElement, s = getComputedStyle(e);
+                  return { text: (e.textContent || '').trim().slice(0, 40), testid: e.getAttribute('data-testid'),
+                           outlineStyle: s.outlineStyle, outlineWidth: parseFloat(s.outlineWidth),
+                           rect: window.__hx.rect(e), innerHeight, innerWidth };""")
+                r["tabStops"].append(stop)
+                if stop["testid"] == "button-start-session":
+                    break
+            press(page, "Enter", "Enter", 13, text="\r")
+            time.sleep(1.6)
+            r["afterCta"] = page.eval("""const hx = window.__hx;
+              return { ...hx.state(), shell: hx.rect(hx.shell()), header: hx.rect(hx.header()),
+                       innerHeight, innerWidth };""")
+
+            # The composer works at 200%: type and send with the keyboard; the chat opens with it.
+            devtools.call("Input.insertText", {"text": "Zoom check"}, session)
+            press(page, "Enter", "Enter", 13, text="\r")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    if page.eval("return location.pathname === '/app/' && !!window.__HANDOFF_CHILD__ && "
+                                 "document.querySelectorAll('#thread .msg-assistant').length >= 1;"):
+                        break
+                except AssertionError:
+                    pass
+                time.sleep(0.1)
+            time.sleep(0.5)
+            r["afterSend"] = page.eval("""const c = window.__HANDOFF_CHILD__;
+              return { users: [...document.querySelectorAll('#thread .msg-user .bubble')].map(b => b.textContent),
+                       assistants: document.querySelectorAll('#thread .msg-assistant').length,
+                       requests: c.requests.map(q => q.body.message),
+                       value: document.getElementById('composer-input').value,
+                       shell: (b => ({top: b.top, bottom: b.bottom, right: b.right}))(
+                         document.getElementById('composer-shell').getBoundingClientRect()),
+                       innerHeight, innerWidth, path: location.pathname, search: location.search,
+                       docScrollWidth: document.documentElement.scrollWidth };""")
+
+    shutil.rmtree(profile, ignore_errors=True)
+    return r
+
+
+def test_real_zoom_is_the_browsers_own_200_percent_page_zoom(real_zoom):
+    v = real_zoom["viewport"]
+    # The window stays 1440 x 900; the browser's zoom halves the CSS viewport
+    # and doubles device pixels per CSS pixel. It is not pinch zoom.
+    assert v["outer"] == [1440, 900] and v["dpr"] == 2 and v["pinch"] == 1, v
+    assert 600 <= v["innerWidth"] <= 720, v
+
+
+def test_real_zoom_has_no_horizontal_clipping_or_sideways_scrolling(real_zoom):
+    v = real_zoom["viewport"]
+    assert v["docScrollWidth"] <= v["innerWidth"] and v["bodyScrollWidth"] <= v["innerWidth"], v
+    assert real_zoom["scrollX"] == 0
+    assert real_zoom["clipped"] == {}, real_zoom["clipped"]
+    assert real_zoom["afterSend"]["docScrollWidth"] <= real_zoom["afterSend"]["innerWidth"]
+
+
+def test_real_zoom_primary_action_is_keyboard_reachable_with_visible_focus(real_zoom):
+    stops = real_zoom["tabStops"]
+    assert stops[-1]["testid"] == "button-start-session", [s["text"] for s in stops]
+    for stop in stops:
+        assert stop["outlineStyle"] != "none" and stop["outlineWidth"] >= 2, stop
+        box = stop["rect"]
+        assert box["top"] >= 0 and box["bottom"] <= stop["innerHeight"] and box["right"] <= stop["innerWidth"] + 1, stop
+
+
+def test_real_zoom_cta_focuses_a_visible_composer_and_stays_on_the_homepage(real_zoom):
+    after = real_zoom["afterCta"]
+    assert after["focused"] is True
+    shell = after["shell"]
+    assert shell["top"] >= after["header"]["bottom"] - 1 and shell["bottom"] <= after["innerHeight"] + 1, after
+    assert shell["left"] >= 0 and shell["right"] <= after["innerWidth"] + 1
+    assert after["path"] == "/" and "#" not in after["href"]
+
+
+def test_real_zoom_composer_hands_off_and_the_chat_stays_usable(real_zoom):
+    after = real_zoom["afterSend"]
+    assert after["path"] == "/app/" and after["search"] == ""
+    assert after["requests"] == ["Zoom check"] and after["users"] == ["Zoom check"]
+    assert after["assistants"] == 1 and after["value"] == ""
+    assert after["shell"]["bottom"] <= after["innerHeight"] + 1 and after["shell"]["right"] <= after["innerWidth"] + 1
+
+
+def test_real_zoom_privacy_diagram_stays_readable(real_zoom):
+    d = real_zoom["diagram"]
+    assert d["testid"] == "flow-html-stages" and d["columns"] == 1                       # the vertical layout
+    assert d["panel"][0] - 1 <= d["left"] and d["right"] <= d["panel"][1] + 1 <= d["innerWidth"] + 2
+    for text, left, right, height in d["texts"]:
+        assert d["panel"][0] - 1 <= left and right <= d["panel"][1] + 1, text
+        assert height >= 11, (text, height)
+    assert d["note"].startswith(MEMORY_SENTENCE)
+    assert d["noteRight"] <= d["innerWidth"] + 1
+
+
+# --- the /app/ workspace: header, empty state and composer (direct visit) --------------------------
+
+APP_CHROME = r"""
+for (let i = 0; i < 400 && !document.getElementById('composer-input'); i++) await new Promise(r => setTimeout(r, 25));
+await new Promise(r => setTimeout(r, 300));
+const q = s => document.querySelector(s);
+const rect = el => { const b = el.getBoundingClientRect();
+  return {left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height}; };
+const header = q('.app-header'), logo = q('#brand-logo'), status = q('.session-status');
+const visibleText = el => [...el.querySelectorAll('span')].filter(s => !s.children.length && !s.closest('.sr-only')
+  && !s.matches('[aria-hidden="true"]') && s.getClientRects().length).map(s => s.textContent.trim()).join(' | ');
+const named = el => ((el.getAttribute('aria-label') || '') + ' ' + el.textContent).toLowerCase();
+return {
+  innerWidth, innerHeight, docScrollWidth: document.documentElement.scrollWidth,
+  headerBackground: getComputedStyle(header).backgroundColor, header: rect(header),
+  logo: rect(logo), logoShown: !logo.hidden && getComputedStyle(logo).display !== 'none' && logo.naturalWidth > 0,
+  logoAlt: logo.alt, wordmarkShown: getComputedStyle(q('#brand-name')).display !== 'none',
+  status: visibleText(status), statusTitle: status.title, pill: !!q('.session-pill'),
+  headerControls: [...header.querySelectorAll('a, button, input, select')].length,
+  unsupported: document.querySelectorAll('input[type="file"], [accept], [capture]').length
+    + [...document.querySelectorAll('button, a')].filter(e => /attach|upload|image|photo|voice|microphone|upgrade|\bplan\b|free plan/
+        .test(named(e))).length,
+  title: rect(q('.empty-title')), shell: rect(q('#composer-shell')), footer: rect(q('.app-footer')),
+  cards: [...document.querySelectorAll('.hint')].map(rect),
+  order: (() => { const t = q('.empty-title'), s = q('#composer-shell'), h = [...document.querySelectorAll('.hint')];
+    const after = (a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return after(t, s) && h.every(e => after(s, e)); })(),
+  focused: document.activeElement === q('#composer-input'),
+};
+"""
+
+
+def test_app_header_is_white_with_the_full_logo_and_a_truthful_status(app_composer):
+    chrome = app_composer["chrome"]
+    assert chrome["headerBackground"] == "rgb(255, 255, 255)"
+    assert chrome["header"]["height"] >= 64 and chrome["header"]["top"] == 0
+    assert chrome["logoShown"] is True and chrome["wordmarkShown"] is False and chrome["logoAlt"] == "Kalillac AI"
+    assert chrome["logo"]["width"] == (172 if app_composer["viewport"] == "desktop" else 128)
+    # No generic pill, no plan badge: one plain status that is true for every visitor now.
+    assert chrome["pill"] is False and chrome["headerControls"] == 0
+    # The separating dot is decorative (aria-hidden); the words are what is announced.
+    assert chrome["status"] == "Temporary session | Not saved", chrome["status"]
+    assert "not saved to an account or a chat history" in chrome["statusTitle"]
+
+
+def test_app_empty_state_groups_heading_composer_and_examples(app_composer):
+    chrome = app_composer["chrome"]
+    title, shell, footer = chrome["title"], chrome["shell"], chrome["footer"]
+    assert chrome["order"] is True and chrome["focused"] is True
+    # Heading, composer and examples read as one group, not a heading in the
+    # middle and a composer stranded at the bottom of the screen.
+    assert 0 < shell["top"] - title["bottom"] <= 120, (title, shell)
+    assert all(card["top"] >= shell["bottom"] for card in chrome["cards"])
+    assert footer["top"] >= max(card["bottom"] for card in chrome["cards"])
+    assert title["top"] - chrome["header"]["bottom"] >= 24 and chrome["innerHeight"] - footer["bottom"] >= 24
+    assert chrome["docScrollWidth"] <= chrome["innerWidth"]
+
+
+def test_app_exposes_no_unsupported_control(app_composer):
+    assert app_composer["chrome"]["unsupported"] == 0
+
+
+def test_composer_padding_shows_text_cursor_and_focuses_the_field_on_direct_app(app_composer):
+    check_composer_padding_shows_text_cursor_and_focuses_the_field(app_composer)
+
+
+def test_padding_press_keeps_a_draft_unchanged_on_direct_app(app_composer):
+    check_padding_press_keeps_a_draft_unchanged(app_composer)
+
+
+def test_clicking_the_field_keeps_native_caret_placement_on_direct_app(app_composer):
+    check_clicking_the_field_keeps_native_caret_placement(app_composer)
+
+
+def test_send_click_is_not_intercepted_on_direct_app(app_composer):
+    check_send_click_is_not_intercepted(app_composer)
+
+
+def test_composer_cursor_and_caret_are_explicit_and_visible_on_direct_app(app_composer):
+    check_composer_cursor_and_caret_are_explicit_and_visible(app_composer)
+
+
+def test_composer_pages_have_no_horizontal_overflow_on_direct_app(app_composer):
+    check_composer_pages_have_no_horizontal_overflow(app_composer)
+
+
+def test_composer_box_has_a_hover_cue_on_direct_app(app_composer):
+    check_composer_box_has_a_hover_cue(app_composer)
+
+
+@pytest.fixture
+def app_composer(direct_app):
+    assert direct_app["path"] == "/app/"
+    return direct_app
+
+
+def test_cta_code_uses_reduced_motion_and_prevent_scroll():
+    app = APP_TSX.read_text(encoding="utf-8")
+    focus = app[app.index("function focusComposer("):app.index("/* Meaningful flow content")]
+    assert "behavior: prefersReducedMotion() ? 'auto' : 'smooth'," in focus
+    assert "input.focus({ preventScroll: true });" in focus
+    assert "location" not in focus and "navigate" not in focus
+    home = app[app.index("function HomePage()"):app.index("type DocSectionProps")]
+    assert "onClick={startSession}" in home
+    # The composer itself holds no link: nothing in it can navigate.
+    composer = app[app.index("function HomeComposer("):app.index("function focusComposer(")]
+    assert "href" not in composer and "<Link" not in composer and "<a " not in composer

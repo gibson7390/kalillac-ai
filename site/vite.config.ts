@@ -6,7 +6,7 @@ import { publicMetadata } from './public-metadata';
 
 // The marketing site is served at the domain root. /app/ is NOT part of this
 // build: it is the canonical chat workspace in ../frontend, served separately
-// at /app/ and embedded here as a same-origin iframe.
+// at /app/. The homepage never loads it; its Send opens it.
 export default defineConfig({
   base: '/',
   plugins: [react(), tailwindcss(), publicMetadata()],

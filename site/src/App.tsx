@@ -1,6 +1,6 @@
-import { type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, type RefObject, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { ArrowRight, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
+import { ArrowRight, ArrowUp, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
 import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
@@ -13,8 +13,8 @@ const AccountPages = lazy(() => import('@/account/account-pages'));
 
 const brandLogoUrl = '/assets/kalillac-ai-logo.png';
 
-// The canonical chat workspace (../frontend), served at /app/ and embedded
-// here as a same-origin iframe.
+// The canonical chat workspace (../frontend), served at /app/. The homepage
+// never loads or frames it: only Send opens it, with the draft.
 const CHAT_PATH = '/app/';
 
 // A real load of /app/ is the canonical chat in ../frontend; this site must
@@ -94,239 +94,219 @@ function prefersReducedMotion(): boolean {
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-/* The framed chat is shown only while this page can read the frame's CURRENT
-   document and see the canonical chat running in it: a same-origin document
-   at exactly CHAT_PATH whose own script has finished setting up and added
-   `is-embedded` to its body (the last step of ../frontend/app.js when
-   framed). A browser refusal or error page, a redirect to another origin, a
-   recursive homepage, an unfinished load or a document that has already
-   begun to leave is never ready, and no message from any window is read.
-   'pending' means keep waiting; 'invalid' means this frame will not become
-   the chat. */
-type ChatFrameStatus = 'ready' | 'pending' | 'invalid';
+/* The homepage and the chat at /app/ are separate documents, and only Send
+   moves a draft between them: one versioned envelope in this tab's
+   sessionStorage holding the trimmed draft, a random single-use nonce and its
+   creation time. ../frontend/app.js removes it before sending the message,
+   and only a valid, fresh, unused envelope is ever sent. This page never
+   contacts the chat service, and stores nothing else -- except, when it
+   cannot remove an envelope it takes back, a withdrawn marker in its place
+   that holds the nonce and this document's random identity, and no message.
+   It only reads app.js's ledger of the
+   nonces the chat has taken. The keys, shapes and limits must match app.js. */
+const HANDOFF_KEY = 'kalillac.handoff';
+const HANDOFF_LEDGER_KEY = 'kalillac.handoff.ledger';
+const HANDOFF_LEDGER_MAX = 32;
+const HANDOFF_VERSION = 1;
+// After this the chat never takes an envelope (app.js's HANDOFF_MAX_AGE_MS).
+const HANDOFF_MAX_AGE_MS = 60_000;
+/* How long app.js keeps a taken nonce in its ledger: an entry expires at the
+   envelope's createdAt plus this (app.js's HANDOFF_RETAIN_MS). */
+const HANDOFF_RETAIN_MS = HANDOFF_MAX_AGE_MS + 5_000;
+/* After Send, how long this page waits for the chat to open before giving the
+   draft back. app.js never sends an envelope 8 seconds old or older
+   (HANDOFF_SEND_MS), so by then the chat cannot send it any more. */
+const HANDOFF_STALL_MS = 10_000;
+// The chat service's own limit (MAX_INPUT_CHARS), in code points of the trimmed message.
+const MESSAGE_MAX_CHARS = 4000;
+const NONCE = /^[0-9a-f]{32}$/;
 
-function chatFrameStatus(frame: HTMLIFrameElement | null, retired: WeakSet<Document>): ChatFrameStatus {
-  if (!frame) return 'pending';
+type HandoffEnvelope = { v: number; draft: string; nonce: string; createdAt: number };
+/* A handoff this page answers for: the exact draft, its envelope's nonce and
+   time -- and whether a withdrawal this page could not confirm may have
+   removed the envelope, so that its absence no longer shows the chat took it. */
+type Handoff = Pick<HandoffEnvelope, 'draft' | 'nonce' | 'createdAt'> & { mayBeGone?: boolean };
+
+function codePoints(text: string): number { return Array.from(text).length; }
+
+function newNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/* This document's own random identity, in page memory only: a new one for
+   every load or reload of the homepage, the same one when the browser restores
+   this very page from its back/forward cache. A withdrawn marker carries the
+   identity of the document that wrote it, so only that document can give its
+   draft back -- never another homepage holding the same handoff. */
+const DOCUMENT_ID = newNonce();
+
+/* What this tab's envelope key holds, read without changing it: nothing, an
+   unreadable store, a well-formed envelope (of any age), the marker of an
+   envelope a homepage document withdrew (and which one), or something else. */
+type Seen = { kind: 'absent' | 'unreadable' | 'other' } | { kind: 'withdrawn'; nonce: string; by: string }
+  | { kind: 'envelope'; envelope: HandoffEnvelope };
+
+function readEnvelope(): Seen {
+  let raw: string | null;
+  try { raw = window.sessionStorage.getItem(HANDOFF_KEY); } catch { return { kind: 'unreadable' }; }
+  if (raw === null) return { kind: 'absent' };
   try {
-    const view = frame.contentWindow;
-    const doc = frame.contentDocument;
-    // Another origin or a browser error page: the document is unreadable.
-    if (!view || !doc) return 'invalid';
-    // A document that has begun to leave is never proven again.
-    if (retired.has(doc)) return 'pending';
-    // The initial empty document before the chat's navigation commits.
-    if (doc.URL === 'about:blank') return 'pending';
-    if (view.location.origin !== window.location.origin || view.location.pathname !== CHAT_PATH) return 'invalid';
-    if (doc.body?.classList.contains('is-embedded') && doc.getElementById('composer-input')) return 'ready';
-    return doc.readyState === 'complete' ? 'invalid' : 'pending';
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { kind: 'other' };
+    const marker = value as { v?: unknown; withdrawn?: unknown; by?: unknown };
+    if (Object.keys(marker).sort().join() === 'by,v,withdrawn' && marker.v === HANDOFF_VERSION
+        && typeof marker.withdrawn === 'string' && NONCE.test(marker.withdrawn)
+        && typeof marker.by === 'string' && NONCE.test(marker.by)) {
+      return { kind: 'withdrawn', nonce: marker.withdrawn, by: marker.by };
+    }
+    const envelope = value as HandoffEnvelope;
+    if (Object.keys(envelope).sort().join() !== 'createdAt,draft,nonce,v' || envelope.v !== HANDOFF_VERSION
+        || typeof envelope.draft !== 'string' || typeof envelope.nonce !== 'string' || !NONCE.test(envelope.nonce)
+        || !Number.isSafeInteger(envelope.createdAt) || !envelope.draft.trim()
+        || codePoints(envelope.draft) > MESSAGE_MAX_CHARS) return { kind: 'other' };
+    return { kind: 'envelope', envelope };
   } catch {
-    return 'invalid';
+    return { kind: 'other' };
   }
 }
 
-// How often to look for the chat, and how long to wait before giving up on
-// the inline chat and keeping the native panel (whose link opens /app/).
-const CHAT_READY_POLL_MS = 50;
-const CHAT_READY_TIMEOUT_MS = 10000;
+/* Withdraws the envelope with this nonce: it is removed or, when removal
+   fails or has no effect, overwritten with a withdrawn marker naming this
+   document -- no message, which app.js discards like any invalid value -- and
+   either is confirmed by reading storage back. 'kept' when neither took
+   effect; 'unchecked' when the confirming read failed. */
+function withdrawEnvelope(nonce: string): 'withdrawn' | 'kept' | 'unchecked' {
+  let removed = false;
+  try { window.sessionStorage.removeItem(HANDOFF_KEY); removed = true; } catch { /* overwrite it instead */ }
+  if (removed) {
+    try { if (window.sessionStorage.getItem(HANDOFF_KEY) === null) return 'withdrawn'; } catch { return 'unchecked'; }
+  }
+  const marker = JSON.stringify({ v: HANDOFF_VERSION, withdrawn: nonce, by: DOCUMENT_ID });
+  try { window.sessionStorage.setItem(HANDOFF_KEY, marker); } catch { return 'kept'; }
+  try { return window.sessionStorage.getItem(HANDOFF_KEY) === marker ? 'withdrawn' : 'kept'; } catch { return 'unchecked'; }
+}
 
-type ChatState = 'loading' | 'ready' | 'unavailable';
+// Removes what holds no message (a withdrawn marker, or a value that is no valid envelope); failure is harmless.
+function discardEnvelope() {
+  try { window.sessionStorage.removeItem(HANDOFF_KEY); } catch { /* the chat discards it too */ }
+}
 
-/* The homepage chat workspace: the canonical /app/ client in a same-origin
-   iframe, at one stable height from the first render onward. Until the chat
-   is proven ready the slot shows a native panel and the frame stays hidden
-   and inert, so a browser-generated page can never appear; if it never
-   becomes ready the frame is removed and the panel remains. Once shown, it is
-   a full conversation workspace before, during and after a conversation;
-   nothing resizes, expands or navigates when a prompt is sent, and the
-   homepage and the chat exchange no messages.
-
-   Readiness belongs to one document. The moment the proven document begins
-   to leave (any navigation, reload or replacement of the frame), readiness is
-   withdrawn synchronously -- the frame is hidden, inert, aria-hidden and
-   untabbable before anything can replace it -- and whatever document comes
-   next must pass the whole proof again. Every attempt has a generation:
-   withdrawing starts a new one at once, so a check, timer or listener from an
-   earlier attempt can never mark a newer document ready or fail it. */
-function useChatWorkspace() {
-  const slotRef = useRef<HTMLDivElement>(null);
-  const frameRef = useRef<HTMLIFrameElement>(null);
-  const [chatState, setChatState] = useState<ChatState>('loading');
-  const [generation, setGeneration] = useState(0);
-  const generationRef = useRef(0);
-  // The one document proven ready, and every document that has since left.
-  const provenDoc = useRef<Document | null>(null);
-  const retired = useRef(new WeakSet<Document>());
-  // A focus requested before the chat was ready (the #chat link), applied once it is.
-  const focusWhenReady = useRef(false);
-  // The current state for the stable handlers below.
-  const stateRef = useRef<ChatState>(chatState);
-  stateRef.current = chatState;
-
-  /* Withdraw readiness and start a new attempt. When the frame is showing,
-     the re-render is synchronous, so it is hidden and inert before the
-     browser can paint whatever replaces the proven document. */
-  const invalidate = useCallback((next: 'loading' | 'unavailable') => {
-    if (provenDoc.current) retired.current.add(provenDoc.current);
-    provenDoc.current = null;
-    const nextGeneration = ++generationRef.current;
-    const update = () => { setGeneration(nextGeneration); setChatState(next); };
-    if (stateRef.current === 'ready') flushSync(update);
-    else update();
-  }, []);
-
-  // True only while the frame's current document is the proven one and still passes the whole proof.
-  const provenNow = useCallback(() => {
-    const frame = frameRef.current;
-    return provenDoc.current !== null && frame?.contentDocument === provenDoc.current
-      && chatFrameStatus(frame, retired.current) === 'ready';
-  }, []);
-
-  useEffect(() => {
-    if (chatState !== 'loading') return;
-    const mine = generation;
-    const frame = frameRef.current;
-    const check = () => {
-      if (generationRef.current !== mine) return;
-      const status = chatFrameStatus(frameRef.current, retired.current);
-      if (status === 'invalid') { invalidate('unavailable'); return; }
-      if (status !== 'ready') return;
-      provenDoc.current = frameRef.current?.contentDocument ?? null;
-      setChatState('ready');
-    };
-    frame?.addEventListener('load', check);
-    const poll = window.setInterval(check, CHAT_READY_POLL_MS);
-    const deadline = window.setTimeout(() => { if (generationRef.current === mine) invalidate('unavailable'); },
-      CHAT_READY_TIMEOUT_MS);
-    check();
-    return () => {
-      frame?.removeEventListener('load', check);
-      window.clearInterval(poll);
-      window.clearTimeout(deadline);
-    };
-  }, [chatState, generation, invalidate]);
-
-  useEffect(() => {
-    if (chatState !== 'ready') return;
-    const mine = generation;
-    const frame = frameRef.current;
-    const view = frame?.contentWindow ?? null;
-    // The proven document starting to leave: beforeunload comes before the
-    // next request, pagehide before the next document is shown.
-    const leave = () => { if (generationRef.current === mine) invalidate('loading'); };
-    // Backstop: the current document must still be the proven one and pass the proof.
-    const watch = () => { if (generationRef.current === mine && !provenNow()) invalidate('loading'); };
-    view?.addEventListener('beforeunload', leave);
-    view?.addEventListener('pagehide', leave);
-    frame?.addEventListener('load', watch);
-    const poll = window.setInterval(watch, CHAT_READY_POLL_MS);
-    queueMicrotask(watch);
-    return () => {
-      view?.removeEventListener('beforeunload', leave);
-      view?.removeEventListener('pagehide', leave);
-      frame?.removeEventListener('load', watch);
-      window.clearInterval(poll);
-    };
-  }, [chatState, generation, invalidate, provenNow]);
-
-  /* Move the workspace to just below the sticky site header when it is not
-     already fully visible there -- smoothly, or instantly when reduced
-     motion is requested. Never moves the page when it is already in view.
-     The landing offset is the slot's own CSS scroll-margin-top: the header's
-     height (including the top safe-area inset) plus breathing room, so the
-     chat's heading is never under the header. */
-  const bringIntoView = useCallback(() => {
-    const slot = slotRef.current;
-    if (!slot) return;
-
-    const header = document.querySelector('.site-header');
-    const headerBottom = header ? header.getBoundingClientRect().bottom : 0;
-    const offset = parseFloat(getComputedStyle(slot).scrollMarginTop) || headerBottom;
-    const card = slot.getBoundingClientRect();
-    const fullyVisible = card.top >= headerBottom && card.bottom <= window.innerHeight;
-
-    if (!fullyVisible) {
-      window.scrollTo({
-        top: Math.max(0, window.scrollY + card.top - offset),
-        // 'auto' (not the newer 'instant', which older browsers reject with
-        // a TypeError) is immediate here: under reduced motion the site CSS
-        // forces scroll-behavior: auto.
-        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
-      });
+/* The nonces the chat has taken, each with its expiry -- app.js's ledger,
+   read without changing it and validated exactly as app.js validates it -- or
+   null when it cannot be read or is not exactly that shape: then who has a
+   handoff cannot be told. */
+function takenNonces(): Map<string, number> | null {
+  let raw: string | null;
+  try { raw = window.sessionStorage.getItem(HANDOFF_LEDGER_KEY); } catch { return null; }
+  if (raw === null) return new Map();
+  try {
+    const ledger: unknown = JSON.parse(raw);
+    if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return null;
+    const { v, entries } = ledger as { v?: unknown; entries?: unknown };
+    if (Object.keys(ledger).sort().join() !== 'entries,v' || v !== 1 || !Array.isArray(entries)
+        || entries.length > HANDOFF_LEDGER_MAX) return null;
+    const nonces = new Map<string, number>();
+    for (const entry of entries as unknown[]) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+      const { n, x } = entry as { n?: unknown; x?: unknown };
+      if (Object.keys(entry).sort().join() !== 'n,x' || typeof n !== 'string' || !NONCE.test(n)
+          || !Number.isSafeInteger(x) || (x as number) <= 0 || nonces.has(n)) return null;
+      nonces.set(n, x as number);
     }
-  }, []);
+    return nonces;
+  } catch {
+    return null;
+  }
+}
 
-  /* Focusing the ready chat: the workspace is brought into view, then the
-     real message input inside the same-origin chat is focused with
-     preventScroll, so focusing never causes a second, browser-generated
-     jump. */
-  const focusChat = useCallback(() => {
-    bringIntoView();
+/* Whether a nonce missing from the ledger may have been listed and pruned
+   since. app.js prunes an entry only when it records a later handoff at or
+   after the entry's expiry (createdAt + HANDOFF_RETAIN_MS), and that later
+   entry expires after it. So before that expiry nothing can have been pruned,
+   and after it only a ledger holding an entry that expires later may have
+   lost this one. */
+function mayHaveBeenPruned(taken: Map<string, number>, handoff: Handoff): boolean {
+  const expiry = handoff.createdAt + HANDOFF_RETAIN_MS;
+  if (Date.now() < expiry) return false;
+  for (const x of taken.values()) if (x > expiry) return true;
+  return false;
+}
 
-    const frame = frameRef.current;
-    let input: HTMLElement | null = null;
-    try { input = frame?.contentDocument?.getElementById('composer-input') ?? null; } catch { input = null; }
+/* Who has this handoff now. The chat's ledger decides first, and for good: a
+   nonce in it is the chat's even while its envelope is still here (app.js
+   records the nonce before it shows or sends the draft, even when it could
+   not remove the envelope). The chat records every envelope it takes unless
+   it removed it, so an envelope of this nonce still here, or this page's
+   withdrawn marker, is the page's -- and an envelope gone within the time the
+   chat takes envelopes, when this page did not remove it, is the chat's. A
+   nonce missing from the ledger shows the chat never took it only while it
+   cannot have been pruned ('too-old' otherwise; a withdrawn marker still
+   shows this page withdrew it). Anything else -- an unreadable or malformed
+   ledger or store, a replaced envelope, a removal this page may have made
+   itself, an envelope gone after the chat's acceptance window -- cannot be
+   told. A withdrawn marker is this page's only when it names this document;
+   one written by another homepage document ('elsewhere') shows that document
+   took the draft back, so this page must not offer it too. */
+type Owner = 'chat' | 'untaken' | 'withdrawn' | 'elsewhere' | 'unknown' | 'too-old';
 
-    if (input) input.focus({ preventScroll: true });
-    else frame?.focus({ preventScroll: true });
-  }, [bringIntoView]);
+function ownerOf(handoff: Handoff): Owner {
+  const taken = takenNonces();
+  if (taken === null) return 'unknown';
+  if (taken.has(handoff.nonce)) return 'chat';
+  const seen = readEnvelope();
+  if (seen.kind === 'withdrawn' && seen.nonce === handoff.nonce) {
+    return seen.by === DOCUMENT_ID ? 'withdrawn' : 'elsewhere';
+  }
+  if (mayHaveBeenPruned(taken, handoff)) return 'too-old';
+  if (seen.kind === 'envelope' && seen.envelope.nonce === handoff.nonce) return 'untaken';
+  if (seen.kind === 'absent' && !handoff.mayBeGone && Date.now() - handoff.createdAt < HANDOFF_MAX_AGE_MS) {
+    return 'chat';
+  }
+  return 'unknown';
+}
 
-  useEffect(() => {
-    if (chatState !== 'ready' || !focusWhenReady.current) return;
-    focusWhenReady.current = false;
-    if (provenNow()) focusChat();
-  }, [chatState, focusChat, provenNow]);
-
-  /* "Start a private session": the inline chat only if its current document
-     passes the whole proof at this moment, otherwise the full chat at /app/
-     -- the frame is withdrawn first, so the button never focuses a stale or
-     replaced document and always reaches a working chat. */
-  const startSession = useCallback(() => {
-    if (stateRef.current === 'ready' && provenNow()) { focusChat(); return; }
-    if (stateRef.current === 'loading' && chatFrameStatus(frameRef.current, retired.current) === 'ready') {
-      provenDoc.current = frameRef.current?.contentDocument ?? null;
-      focusWhenReady.current = true;
-      setChatState('ready');
-      return;
-    }
-    invalidate('unavailable');
-    window.location.assign(CHAT_PATH);
-  }, [focusChat, invalidate, provenNow]);
-
-  /* The #chat link: bring the workspace into view now and focus the chat
-     once it is ready. It never navigates away from the homepage. */
-  const showChat = useCallback(() => {
-    if (stateRef.current === 'ready' && provenNow()) { focusChat(); return; }
-    bringIntoView();
-    focusWhenReady.current = true;
-  }, [bringIntoView, focusChat, provenNow]);
-
-  /* The twin lies beneath a newly proven chat until the chat has been
-     painted (two animation frames), then leaves; any withdrawal shows it again. */
-  const [twinGoneAt, setTwinGoneAt] = useState(-1);
-  useEffect(() => {
-    if (chatState !== 'ready') return;
-    const mine = generation;
-    let second = 0;
-    const first = requestAnimationFrame(() => {
-      second = requestAnimationFrame(() => { if (generationRef.current === mine) setTwinGoneAt(mine); });
-    });
-    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
-  }, [chatState, generation]);
-  const showTwin = !(chatState === 'ready' && twinGoneAt === generation);
-
-  return { slotRef, frameRef, chatState, showTwin, startSession, showChat };
+const DEFAULT_PLACEHOLDER = 'Message Kalillac AI…';
+const COPY_TOO_LONG = 'That message is too long. Please shorten it and try again.';
+const COPY_STORAGE_FAILED = 'Your message wasn’t sent: this browser didn’t let the page pass it to the chat. '
+  + 'It is still here. Try again, or open the chat and paste it there.';
+const COPY_RETURNED = 'Your message wasn’t sent. It is back in the message box.';
+const COPY_STALLED = 'The chat didn’t open, so your message wasn’t sent. It is back in the message box.';
+/* Read-only notices, for a draft this page keeps but cannot give back: until
+   a later showing can withdraw it, or can tell who has it. */
+const COPY_HELD = 'Your message hasn’t been sent, but this browser didn’t let the page withdraw it from the chat. '
+  + 'So that it can’t be sent twice, it stays here read-only. You can still select and copy it.';
+const COPY_STALLED_HELD = 'The chat didn’t open, so your message wasn’t sent, but this browser didn’t let the page '
+  + 'withdraw it. So that it can’t be sent twice, it stays here read-only. You can still select and copy it.';
+const COPY_HELD_UNKNOWN = 'This browser didn’t let the page check whether the chat took your message. So that it '
+  + 'can’t be sent twice, it stays here read-only. You can still select and copy it.';
+const COPY_HELD_TOO_OLD = 'This page can no longer check whether the chat took your message, because the chat has '
+  + 'taken a newer one since. So that it can’t be sent twice, it stays here read-only. You can still select and '
+  + 'copy it.';
+const COPY_HELD_ELSEWHERE = 'Another Kalillac page in this tab took this message back. So that it can’t be sent '
+  + 'twice, it stays here read-only. You can still select and copy it.';
+type HoldKind = 'unsent' | 'stalled' | 'unknown' | 'too-old' | 'elsewhere';
+const COPY_HOLD: Record<HoldKind, string> = {
+  unsent: COPY_HELD, stalled: COPY_STALLED_HELD, unknown: COPY_HELD_UNKNOWN, 'too-old': COPY_HELD_TOO_OLD,
+  elsewhere: COPY_HELD_ELSEWHERE,
+};
+// The read-only hold for an owner this page cannot give the draft back to.
+function holdFor(owner: Owner): HoldKind {
+  return owner === 'too-old' || owner === 'elsewhere' ? owner : 'unknown';
 }
 
 /* The chat's own empty-state examples and icons (../frontend/index.html). */
-const chatStarters = [
+const starters = [
   { kind: 'research', title: 'Research the current web', description: 'Get up-to-date information with sources.',
-    icon: <><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></> },
+    example: 'Find this week’s biggest technology stories', icon: <><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></> },
   { kind: 'writing', title: 'Write and revise', description: 'Improve your writing, brainstorm, and get feedback.',
+    example: 'Draft a professional email',
     icon: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></> },
   { kind: 'code', title: 'Code and debug', description: 'Build, fix, and explain code in plain language.',
-    icon: <path d="m8 5-7 7 7 7m8-14 7 7-7 7"/> },
+    example: 'Build a simple Python password generator', icon: <path d="m8 5-7 7 7 7m8-14 7 7-7 7"/> },
   { kind: 'learning', title: 'Learn anything', description: 'Get clear explanations on complex topics.',
-    icon: <path d="M9 18h6M9 22h6M9 14c-1-1-3-3-3-6a6 6 0 0 1 12 0c0 3-2 5-3 6v1H9Z"/> },
+    example: 'Explain how encryption works', icon: <path d="M9 18h6M9 22h6M9 14c-1-1-3-3-3-6a6 6 0 0 1 12 0c0 3-2 5-3 6v1H9Z"/> },
 ];
 
 function ChatIcon({ className, children }: { className?: string; children: ReactNode }) {
@@ -334,67 +314,298 @@ function ChatIcon({ className, children }: { className?: string; children: React
     strokeLinejoin="round" aria-hidden="true" focusable="false">{children}</svg>;
 }
 
-function ChatTwinStarters() {
-  return (
-    <div className="ct-starter">
-      <p className="ct-starter-label">Or start with an example</p>
-      <div className="ct-hints">{chatStarters.map(({ kind, title, description, icon }) => (
-        <a key={kind} href={CHAT_PATH} className={`ct-hint ct-hint-${kind}`} data-testid="chat-twin-card">
-          <span className="ct-hint-icon"><ChatIcon>{icon}</ChatIcon></span>
-          <span className="ct-hint-copy"><span className="ct-hint-title">{title}</span><span className="ct-hint-description">{description}</span></span>
-          <ChatIcon className="ct-hint-arrow"><path d="M5 12h14m-6-6 6 6-6 6"/></ChatIcon>
-        </a>))}
-      </div>
-    </div>
-  );
-}
+type ComposerNotice = { kind: 'status' | 'alert'; text: string } | null;
 
-/* A native twin of the embedded chat's empty state -- the same heading, line,
-   example cards, composer and End & erase, in the chat's own type, spacing and
-   breakpoints -- so the slot looks like Kalillac's chat from the first frame.
-   It never pretends to be the chat: the cards and the composer are links that
-   open the full chat at /app/, End & erase is shown inactive exactly as an
-   empty chat shows it, and nothing here sends, stores or erases anything. It
-   stays (and is the only content) while the real chat is unproven; once the
-   chat is proven it lies beneath it, inert, until the chat has been painted. */
-function ChatTwin({ covered }: { covered: boolean }) {
+/* The homepage composer: a real message box on this page. Typing, editing,
+   clearing and the examples never navigate, store or send anything; Send
+   alone hands the trimmed draft to /app/, once. The sent draft leaves the box
+   before the page can be cached, so Back never shows it again as unsent, and
+   a draft the chat never took comes back with a notice. */
+function HomeComposer({ slotRef, inputRef }: { slotRef: RefObject<HTMLDivElement | null>;
+  inputRef: RefObject<HTMLTextAreaElement | null> }) {
+  const [draft, setDraft] = useState('');
+  const [placeholder, setPlaceholder] = useState(DEFAULT_PLACEHOLDER);
+  const [notice, setNotice] = useState<ComposerNotice>(null);
+  const [handingOff, setHandingOff] = useState(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const handingOffRef = useRef(false);
+  /* The handoff this page answers for, from Send until the chat has taken it
+     or this page has confirmed its withdrawal: a chat that never opens, and a
+     Back before the chat took it, give back exactly this draft. Leaving the
+     page keeps it; only timers stop. */
+  const pending = useRef<Handoff | null>(null);
+  const stallTimer = useRef<number | null>(null);
+  const composing = useRef(false);
+
+  const message = draft.trim();
+  const length = codePoints(message);
+  const tooLong = length > MESSAGE_MAX_CHARS;
+  const canSend = message.length > 0 && !tooLong && !handingOff;
+
+  const stopTimers = useCallback(() => {
+    if (stallTimer.current !== null) window.clearTimeout(stallTimer.current);
+    stallTimer.current = null;
+  }, []);
+
+  const unlock = useCallback(() => {
+    stopTimers();
+    handingOffRef.current = false;
+    setHandingOff(false);
+  }, [stopTimers]);
+
+  // The box is the draft's only home again, with this notice.
+  const giveBack = useCallback((text: string, next: ComposerNotice) => {
+    pending.current = null;
+    unlock();
+    setDraft(text);
+    setNotice(next);
+  }, [unlock]);
+
+  /* A handoff this page cannot give back stays here, read-only: one the chat
+     has not taken but this page could not confirm it withdrew ('unsent', or
+     'stalled' after the chat failed to open), one whose owner cannot be told
+     ('unknown'), or one too old to check ('too-old'). None is released by
+     time: even once the chat can no longer take it, an envelope this page
+     could not withdraw may still be here for another page to give back. Only
+     a later showing of this page that withdraws it, or can tell who has it,
+     decides. */
+  const hold = useCallback((handoff: Handoff, kind: HoldKind) => {
+    stopTimers();
+    pending.current = handoff;
+    handingOffRef.current = true;
+    setHandingOff(true);
+    setDraft(handoff.draft);
+    setNotice({ kind: 'alert', text: COPY_HOLD[kind] });
+  }, [stopTimers]);
+
+  /* Withdraws a handoff the chat has not taken: a confirmed withdrawal gives
+     the draft back as unsent; otherwise the draft is held. */
+  const takeBack = useCallback((handoff: Handoff, stalled: boolean) => {
+    const withdrawal = withdrawEnvelope(handoff.nonce);
+    if (withdrawal === 'withdrawn') {
+      giveBack(handoff.draft, { kind: 'status', text: stalled ? COPY_STALLED : COPY_RETURNED });
+    } else {
+      hold({ ...handoff, mayBeGone: handoff.mayBeGone || withdrawal === 'unchecked' }, stalled ? 'stalled' : 'unsent');
+    }
+  }, [giveBack, hold]);
+
+  /* On every showing of this page -- a load, a reload, or a Back that
+     restores it from the cache -- decide who has the draft. */
+  const reclaim = useCallback(() => {
+    stopTimers();
+    const mine = pending.current;
+    if (mine) {
+      const owner = ownerOf(mine);
+      if (owner === 'chat') {
+        // The chat took ownership: the page is clean, and the chat's envelope is left alone.
+        giveBack('', null);
+      } else if (owner === 'withdrawn') {
+        discardEnvelope();
+        giveBack(mine.draft, { kind: 'status', text: COPY_RETURNED });
+      } else if (owner === 'untaken') {
+        takeBack(mine, false);
+      } else {
+        // Nothing is removed unread, and the draft is not offered as a second copy.
+        hold(mine, holdFor(owner));
+      }
+      return;
+    }
+    /* Not this page's own handoff: a valid envelope, of any age, is never
+       discarded. One the chat took is left to it; one it has not taken is
+       withdrawn and given back -- or, until that can be confirmed, or while who
+       has it cannot be told, kept here read-only. */
+    const seen = readEnvelope();
+    if (seen.kind === 'envelope' && draftRef.current === '') {
+      const { draft: found, nonce, createdAt } = seen.envelope;
+      const handoff: Handoff = { draft: found, nonce, createdAt };
+      const owner = ownerOf(handoff);
+      if (owner === 'chat') {
+        unlock();
+        setNotice(null);
+      } else if (owner === 'untaken') {
+        takeBack(handoff, false);
+      } else {
+        hold(handoff, holdFor(owner));
+      }
+      return;
+    }
+    // Only what holds no message is removed: a withdrawn marker, or a value that is no valid envelope.
+    if (seen.kind === 'withdrawn' || seen.kind === 'other') discardEnvelope();
+    unlock();
+    setNotice(null);
+  }, [giveBack, hold, stopTimers, takeBack, unlock]);
+
+  /* The chat did not open in time. This page has been showing since Send,
+     so no chat has taken the draft: it comes back from page memory and the
+     envelope is withdrawn, whether or not storage can still be read -- or,
+     when the withdrawal cannot be confirmed, the draft stays here read-only.
+     The navigation still on its way is
+     stopped, so this page and the draft stay even where the browser would
+     not keep the page for Back. */
+  const recover = useCallback(() => {
+    const mine = pending.current;
+    if (!mine) return;
+    window.stop();
+    takeBack(mine, true);
+  }, [takeBack]);
+
+  useEffect(() => {
+    const onShow = () => reclaim();
+    // Leaving the page stops the timers; the pending handoff stays until the next showing decides.
+    const onHide = () => stopTimers();
+    window.addEventListener('pageshow', onShow);
+    window.addEventListener('pagehide', onHide);
+    reclaim();
+    return () => {
+      window.removeEventListener('pageshow', onShow);
+      window.removeEventListener('pagehide', onHide);
+      stopTimers();
+    };
+  }, [reclaim, stopTimers]);
+
+  // The box grows with its text up to its CSS maximum, then scrolls.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 220)}px`;
+  }, [draft, inputRef]);
+
+  const send = () => {
+    if (handingOffRef.current) return;
+    const text = draftRef.current.trim();
+    if (!text) return;
+    if (codePoints(text) > MESSAGE_MAX_CHARS) { setNotice({ kind: 'alert', text: COPY_TOO_LONG }); return; }
+    handingOffRef.current = true;
+    const envelope: HandoffEnvelope = { v: HANDOFF_VERSION, draft: text, nonce: newNonce(), createdAt: Date.now() };
+    const serialized = JSON.stringify(envelope);
+    let stored = false;
+    try {
+      window.sessionStorage.setItem(HANDOFF_KEY, serialized);
+      stored = window.sessionStorage.getItem(HANDOFF_KEY) === serialized;
+    } catch {
+      stored = false;
+    }
+    if (!stored) {
+      try { window.sessionStorage.removeItem(HANDOFF_KEY); } catch { /* nothing was stored */ }
+      handingOffRef.current = false;
+      setNotice({ kind: 'alert', text: COPY_STORAGE_FAILED });
+      return;
+    }
+    pending.current = { draft: text, nonce: envelope.nonce, createdAt: envelope.createdAt };
+    // Synchronously, so the page the browser may cache already has an empty box.
+    flushSync(() => {
+      setDraft('');
+      setPlaceholder(DEFAULT_PLACEHOLDER);
+      setHandingOff(true);
+      setNotice({ kind: 'status', text: 'Opening the chat…' });
+    });
+    stallTimer.current = window.setTimeout(recover, HANDOFF_STALL_MS);
+    window.location.assign(CHAT_PATH);
+  };
+
+  const clearDraft = () => {
+    setDraft('');
+    setPlaceholder(DEFAULT_PLACEHOLDER);
+    setNotice({ kind: 'status', text: 'Draft cleared.' });
+    inputRef.current?.focus({ preventScroll: true });
+  };
+
+  /* An example focuses the box. An empty box shows it as a suggestion; a
+     draft is never replaced. */
+  const suggest = (example: string) => {
+    if (draftRef.current === '') setPlaceholder(`Try: ${example}`);
+    inputRef.current?.focus({ preventScroll: true });
+  };
+
   return (
-    <div className="chat-twin" data-testid="chat-twin" inert={covered} aria-hidden={covered ? true : undefined}>
-      <div className="ct-app">
-        <div className="ct-conversation"><div className="ct-thread"><div className="ct-empty">
-          <h2 className="ct-title">What are you working on?</h2>
-          <p className="ct-line">Bring a difficult question, a rough draft, broken code, or something current.</p>
-          <ChatTwinStarters />
-        </div></div></div>
-        <div className="ct-dock">
-          <div className="ct-composer">
-            <a href={CHAT_PATH} className="ct-shell" data-testid="chat-twin-composer" aria-label="Message Kalillac AI (opens the chat)">
-              <span className="ct-erase" aria-hidden="true"><ChatIcon><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></ChatIcon><span>End &amp; erase</span></span>
-              <span className="ct-placeholder" aria-hidden="true">Message Kalillac AI…</span>
-              <span className="ct-send" aria-hidden="true"><ChatIcon><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></ChatIcon></span>
-            </a>
-          </div>
-          <div className="ct-starter-dock"><ChatTwinStarters /></div>
+    <div id="chat" className="home-composer-slot" ref={slotRef}>
+      <section className="home-composer" aria-labelledby="home-composer-title" data-testid="home-composer">
+        <div className="hc-head">
+          <h2 id="home-composer-title" className="hc-title">What are you working on?</h2>
+          <p className="hc-line">Bring a difficult question, a rough draft, broken code, or something current.</p>
         </div>
-      </div>
+        <form className="hc-form" autoComplete="off" noValidate onSubmit={event => { event.preventDefault(); send(); }}>
+          <div className="hc-shell" data-busy={handingOff || undefined}
+            onMouseDown={event => {
+              // The box's own padding is part of the typing area.
+              if (event.button !== 0 || (event.target as HTMLElement).closest('button, textarea, a')) return;
+              event.preventDefault();
+              inputRef.current?.focus({ preventScroll: true });
+            }}>
+            <label htmlFor="home-composer-input" className="sr-only">Message Kalillac AI</label>
+            <textarea id="home-composer-input" ref={inputRef} className="hc-input" rows={2} value={draft}
+              placeholder={placeholder} autoComplete="off" spellCheck enterKeyHint="send" readOnly={handingOff}
+              aria-describedby="home-composer-hint" aria-invalid={tooLong || undefined} data-testid="input-home-composer"
+              onChange={event => { setDraft(event.target.value); setNotice(null); }}
+              onCompositionStart={() => { composing.current = true; }}
+              onCompositionEnd={() => { composing.current = false; }}
+              onKeyDown={event => {
+                if (event.key !== 'Enter' || event.shiftKey) return;
+                // An IME is still composing: Enter confirms its text, never sends.
+                if (event.nativeEvent.isComposing || composing.current || event.keyCode === 229) return;
+                // On touch keyboards Enter is a new line; the Send button sends.
+                if (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches) return;
+                event.preventDefault();
+                send();
+              }} />
+            <div className="hc-actions">
+              <button type="button" className="hc-clear" disabled={draft === '' || handingOff} onClick={clearDraft}
+                data-testid="button-home-clear">
+                <ChatIcon><path d="M18 6 6 18M6 6l12 12"/></ChatIcon><span>Clear draft</span>
+              </button>
+              {length > MESSAGE_MAX_CHARS - 400 &&
+                <span className={`hc-count${tooLong ? ' is-over' : ''}`} data-testid="home-composer-count">
+                  {length.toLocaleString('en-US')} / {MESSAGE_MAX_CHARS.toLocaleString('en-US')}</span>}
+              <button type="submit" className="hc-send" aria-label="Send message" title="Send" disabled={!canSend}
+                data-testid="button-home-send"><ArrowUp size={19} strokeWidth={2.2} aria-hidden="true"/></button>
+            </div>
+          </div>
+          <p id="home-composer-hint" className="hc-hint">Nothing is sent until you press Send. Sending opens the chat.</p>
+          <p className="hc-notice" role="status" aria-live="polite" data-testid="home-composer-status">
+            {notice?.kind === 'status' ? notice.text : tooLong ? COPY_TOO_LONG : ''}</p>
+          <p className="hc-notice hc-notice-alert" role="alert" data-testid="home-composer-alert">
+            {notice?.kind === 'alert' ? notice.text : ''}</p>
+        </form>
+        <div className="hc-starter">
+          <p className="hc-starter-label" id="home-examples-label">Or start with an example</p>
+          <div className="hc-cards" role="group" aria-labelledby="home-examples-label">
+            {starters.map(({ kind, title, description, example, icon }) => (
+              <button key={kind} type="button" className={`hc-card hc-card-${kind}`} data-testid="home-card" data-kind={kind}
+                aria-label={title} aria-describedby={`hc-card-${kind}-description`} onClick={() => suggest(example)}>
+                <span className="hc-card-icon"><ChatIcon>{icon}</ChatIcon></span>
+                <span className="hc-card-copy"><span className="hc-card-title">{title}</span>
+                  <span className="hc-card-description" id={`hc-card-${kind}-description`}>{description}</span></span>
+              </button>))}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
 
-function EmbeddedChat({ workspace }: { workspace: ReturnType<typeof useChatWorkspace> }) {
-  const { slotRef, frameRef, chatState, showTwin } = workspace;
-  const ready = chatState === 'ready';
-  return (
-    <div id="chat" className="embedded-chat-slot" ref={slotRef}>
-      <div className="embedded-chat" data-testid="embedded-chat" data-chat-state={chatState}>
-        {chatState !== 'unavailable' && <iframe ref={frameRef} src={CHAT_PATH} title="Chat with Kalillac AI" loading="eager"
-          inert={!ready} aria-hidden={ready ? undefined : true} tabIndex={ready ? undefined : -1} />}
-        {showTwin && <ChatTwin covered={ready} />}
-      </div>
-    </div>
-  );
+/* Bring the composer to just below the sticky header when it is not already
+   fully visible there -- smoothly, or at once under reduced motion -- then
+   focus it without a second, browser-generated jump. Never navigates. */
+function focusComposer(slot: HTMLElement | null, input: HTMLTextAreaElement | null) {
+  if (!slot || !input) return;
+  const header = document.querySelector('.site-header');
+  const headerBottom = header ? header.getBoundingClientRect().bottom : 0;
+  const offset = parseFloat(getComputedStyle(slot).scrollMarginTop) || headerBottom;
+  const box = input.closest('.hc-shell') ?? input;
+  const rect = box.getBoundingClientRect();
+  const fullyVisible = rect.top >= headerBottom && rect.bottom <= window.innerHeight;
+  if (!fullyVisible) {
+    window.scrollTo({
+      top: Math.max(0, window.scrollY + slot.getBoundingClientRect().top - offset),
+      // 'auto' (not the newer 'instant', which older browsers reject) is immediate:
+      // under reduced motion the site CSS forces scroll-behavior: auto.
+      behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+    });
+  }
+  input.focus({ preventScroll: true });
 }
-
 
 /* Meaningful flow content is HTML; arrows are decorative. */
 function FlowMarkers() { return <ArrowRight className="flow-arrow" size={22} aria-hidden="true"/>; }
@@ -518,20 +729,21 @@ function MobileAppSection() {
 }
 
 function HomePage() {
-  const workspace = useChatWorkspace();
-  const { startSession, showChat } = workspace;
+  const slotRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const startSession = useCallback(() => focusComposer(slotRef.current, inputRef.current), []);
   useEffect(() => {
     const id = window.location.hash.slice(1);
     if (!id) return;
-    if (id === 'chat') { showChat(); return; }
+    if (id === 'chat') { startSession(); return; }
     document.getElementById(id)?.scrollIntoView();
-  }, [showChat]);
+  }, [startSession]);
   return <div className="site-shell"><SiteHeader/><main>
     <section className="hero" aria-labelledby="hero-title" data-testid="section-hero"><div className="hero-signal-line" aria-hidden="true"/><div className="container-wide hero-stage">
       <div className="hero-copy"><span className="eyebrow">PRIVATE BY DESIGN</span><h1 id="hero-title"><span className="h1-phrase">Think clearly.</span>{' '}<span className="h1-phrase">Write well.</span>{' '}<span className="h1-phrase">Build and debug.</span>{' '}<span className="h1-phrase h1-accent"><span>Search the</span>{' '}<span>current web.</span></span></h1><p className="hero-description">Work through difficult questions, draft and revise writing, explain and repair code, or research current information with sources—without creating an account or building a permanent chat history.</p>
         <button type="button" className="primary-link hero-action" onClick={startSession} data-testid="button-start-session">Start a private session <ArrowRight size={18} aria-hidden="true"/></button>
         <p className="hero-under-note"><span className="trust-item"><Clock size={16} aria-hidden="true"/> Temporary sessions</span><span className="trust-item"><CircleSlash size={16} aria-hidden="true"/> No account required</span><Link href="/privacy" className="note-link trust-item"><ShieldCheck size={16} aria-hidden="true"/> Clear provider disclosure</Link></p>
-      </div><div className="hero-workspace"><OrbitalAssistant/><EmbeddedChat workspace={workspace}/></div>
+      </div><div className="hero-workspace"><OrbitalAssistant/><HomeComposer slotRef={slotRef} inputRef={inputRef}/></div>
     </div></section>
     <PowerfulTools/><PrivacyPromise/><PrivacyFlow/><MemoryDemonstration/><SessionExplanation/><MobileAppSection/>
   </main><SiteFooter/></div>;
@@ -596,12 +808,12 @@ const privacyToc: [string, string][] = [
 ];
 
 function PrivacyPage() {
-  return <DocLayout title="Privacy" toc={privacyToc} updated="Last updated: October 28, 2026" lede={<><p className="doc-lede">This page describes how information is handled when you use Kalillac AI at <span className="mono">kalillac.ai</span>, including the chat application.</p><p className="doc-lede">Kalillac is an AI assistant for questions, research, writing, coding, learning, and answers that may use the current web. No account or paid subscription is currently offered. This page describes the service as it is designed now. It is not a promise that the service is anonymous, that data is never stored at any layer, or that the service will never change.</p></>}>
+  return <DocLayout title="Privacy" toc={privacyToc} updated="Last updated: November 6, 2026" lede={<><p className="doc-lede">This page describes how information is handled when you use Kalillac AI at <span className="mono">kalillac.ai</span>, including the chat application.</p><p className="doc-lede">Kalillac is an AI assistant for questions, research, writing, coding, learning, and answers that may use the current web. No account or paid subscription is currently offered. This page describes the service as it is designed now. It is not a promise that the service is anonymous, that data is never stored at any layer, or that the service will never change.</p></>}>
     <DocSection id="overview" title="Information Kalillac processes"><p>To answer a message, the application handles:</p><ul><li><strong>The message you type.</strong> Currently limited to 4,000 characters.</li><li><strong>Recent turns of the open conversation.</strong> The chat interface holds the current thread in page memory and sends recent turns with each request so the assistant has context.</li><li><strong>A session identifier.</strong> The server generates an opaque identifier and uses it as the key for a temporary session entry. The chat interface keeps that identifier in page memory. It is not an account.</li><li><strong>Facts you explicitly ask Kalillac to remember during the session.</strong> Those facts are stored as short entries in that temporary session entry.</li><li><strong>Timestamps of recent web searches in the session.</strong> Used only to enforce the current limit of five searches per ten minutes.</li><li><strong>A daily allowance cookie, when the anonymous daily allowance is active.</strong> A random visitor value used only to apply the free daily limit, as described in <a href="#visitor-cookie">Daily allowance cookie</a>.</li></ul><p>Kalillac does not ask for your name, email address, phone number, or account details. The current service has no file upload and does not read documents from your device.</p><p>The systems that deliver the site, including the web server, the operating system, the hosting provider, and Cloudflare, also process ordinary request data such as IP address, date and time, and user agent.</p></DocSection>
     <DocSection id="not-persisted" title="What Kalillac does not save"><p>Kalillac does not save chat transcripts as persistent conversations in its own application database. In its own application, Kalillac does not:</p><ul><li>store chat history across visits</li><li>keep a user profile tied to you</li><li>keep search results in a Kalillac database after using them to write an answer</li></ul><p>Those statements describe Kalillac’s own application. They do not mean that no copy, log, or metadata can exist anywhere else. OpenAI, Brave, Tavily, Cloudflare, and DigitalOcean handle what they receive under their own policies.</p></DocSection>
     <DocSection id="session-state" title="Temporary session state"><p>Kalillac’s session state is an entry in the memory of the running application process. It is not written to a database.</p><p>The entry holds two things:</p><ol><li>memory facts from that session</li><li>timestamps of recent searches in that session</li></ol><p>The application keeps at most 200 session entries at once and at most 50 memory entries per session. When a new session arrives and the store is full, the oldest entry is removed.</p><h3>How this state ends</h3><ul><li>Refreshing or closing the page removes the browser’s access to that session. The chat interface does not keep the thread in saved browser storage, and a new page starts a new, empty session that cannot read the previous entry.</li><li>That does not promise immediate deletion of the server-memory entry. Active-session context may remain in server memory until eviction or service restart.</li><li>The chat’s <strong>End &amp; erase</strong> control ends a conversation on demand. It clears the conversation, the session identifier and any unsent draft from the page, and asks Kalillac to remove that session’s temporary server-memory entry. When that request reaches Kalillac, it removes the entry it holds for that session and asks any response still being prepared for it to stop. If the page cannot confirm this, it says so and offers to retry. Stopping is best effort: an AI or search provider may keep processing what it already received.</li><li>End &amp; erase does not retract information already sent to OpenAI, Brave or Tavily. It does not erase daily allowance records, account or billing records, or operational and security logs kept by Kalillac, Cloudflare or DigitalOcean, and it is not a secure wipe of server memory.</li><li>When the application process restarts, the in-memory store is gone, because it existed only in that process.</li></ul></DocSection>
     <DocSection id="isolation" title="Session isolation"><p>Each session is stored under its own identifier. A request looks up only the matching entry. There is no shared conversation buffer and no cross-session lookup, so one visitor’s memory entries are not read into another visitor’s context.</p><p>Capacity is shared. With a limit of 200 sessions, heavy traffic can evict older sessions sooner. That affects when state disappears, not who can read it.</p></DocSection>
-    <DocSection id="browser" title="Browser storage"><p>The chat interface keeps the session identifier and the completed turns of the open conversation in page memory only. It does not write them to localStorage, sessionStorage, IndexedDB, cookies, or the page address.</p><p>When the anonymous daily allowance is active, Kalillac’s chat service also sets the <a href="#visitor-cookie">daily allowance cookie</a> described below. That cookie holds a random visitor value and none of your conversation.</p><p>The homepage embeds the same chat application that is served at <span className="mono">/app/</span>. Your messages and Kalillac’s responses are not passed through the page address, browser storage, or messages between browser windows. The embedded chat application sends each chat request itself, under the same temporary session behavior described above.</p><p>Kalillac’s own frontend uses your device’s fonts and does not include advertising code, browser analytics code, remote fonts, or third-party asset dependencies. Cloudflare may separately add the <a href="#cloudflare-security">security code described below</a> at its edge.</p></DocSection>
+    <DocSection id="browser" title="Browser storage"><p>The chat interface keeps the session identifier and the completed turns of the open conversation in page memory only. It does not write them to localStorage, sessionStorage, IndexedDB, cookies, or the page address.</p><p>When the anonymous daily allowance is active, Kalillac’s chat service also sets the <a href="#visitor-cookie">daily allowance cookie</a> described below. That cookie holds a random visitor value and none of your conversation.</p><p>The homepage has its own message box and does not load the chat application. Typing there sends nothing. When you press Send, the homepage places that one message in an envelope in this browser tab’s sessionStorage and opens the chat application at <span className="mono">/app/</span>, which normally removes the envelope when it reads it and then sends the message as the first message of a new temporary session, under the same temporary session behavior described above. A message the chat application does not pick up within a few seconds is not sent automatically. In rare cases, when this browser’s storage fails or it cannot be confirmed which page has the message, the envelope may remain in that tab’s sessionStorage for the life of the tab, so that the message is neither lost nor sent twice. It is not saved to an account or sent anywhere because of this. So that the same message is not sent twice, the chat application also keeps a bounded list of recently used random identifiers in that tab’s sessionStorage. The list contains no prompt or message content and may remain in the tab after the message is sent. Your messages and Kalillac’s responses are not passed through the page address, cookies, localStorage, or messages between browser windows.</p><p>Kalillac’s own frontend uses your device’s fonts and does not include advertising code, browser analytics code, remote fonts, or third-party asset dependencies. Cloudflare may separately add the <a href="#cloudflare-security">security code described below</a> at its edge.</p></DocSection>
     <DocSection id="visitor-cookie" title="Daily allowance cookie"><p>The anonymous daily allowance is active in the current service.</p><p>When the anonymous daily allowance is active, Kalillac uses one strictly necessary first-party cookie, named <span className="mono">__Host-kalillac_visitor</span>, to apply the free allowance of 10 successful responses per browser per UTC day. It contains a random, opaque visitor value. It does not contain your messages, Kalillac’s responses, or the session identifier.</p><p>The chat service sets this cookie with HttpOnly, Secure, SameSite=Lax, Path=/ and no Domain attribute. It is sent only to the Kalillac host that set it and cannot be read by page scripts. Each anonymous chat response refreshes its 48-hour lifetime.</p><p>Kalillac does not store the raw visitor value in its PostgreSQL database. For each UTC day, the server derives a SHA-256 digest from the visitor value and date. The stored digest changes each UTC day and does not itself provide a stable identifier across days. The database also stores the reservation state and timestamps needed to enforce or refund the allowance.</p><p>The service is designed to retain the current and previous UTC day’s records and lazily prune older records during later anonymous traffic. Because pruning is lazy and best-effort, older records may remain longer when there is no anonymous traffic or cleanup cannot complete.</p><p>The allowance does not use an IP address, browser fingerprinting or account identity. Kalillac does not use this cookie for advertising, analytics or cross-site tracking.</p><p>Clearing or refusing this cookie causes the browser to receive a new visitor value and can reset its per-browser allowance.</p></DocSection>
     <DocSection id="logging" title="Logging"><p>The application writes operational output used to run and diagnose the service. Kalillac does not use that output as a conversation archive. This page does not claim that message content can never appear in server logs.</p><p>The web server, the operating system, Cloudflare, and the hosting provider can create their own request, operational, and security records, which can include data such as IP address, time, and user agent. Those records are governed by the policies of the systems and providers that create them.</p></DocSection>
     <DocSection id="model-inference" title="Model inference: OpenAI"><p>OpenAI may process requests sent for model inference. Kalillac does not run its model on the Kalillac server. The current production model setting is GPT-6 Luna. OpenAI is Kalillac’s only model provider, and there is no automatic fallback to another model or provider: if OpenAI cannot return a usable answer, the request ends with an error instead of being sent elsewhere.</p><p>Some requests never go to OpenAI. For example, deterministic arithmetic and some temporary session-memory requests are handled by Kalillac’s own code.</p><p>A request sent to OpenAI can include, as applicable:</p><ul><li>your current message</li><li>relevant recent turns</li><li>relevant temporary session-memory entries</li><li>the instructions Kalillac assembles for the request</li><li>retrieved web-search text, when the answer uses a search</li></ul><p>Cloudflare Workers AI and Groq are not part of the current active model-provider path.</p><p>OpenAI handles what it receives under its own terms and policies, which Kalillac does not control: <a href="https://openai.com/policies/" target="_blank" rel="noopener noreferrer">OpenAI policies</a>.</p></DocSection>

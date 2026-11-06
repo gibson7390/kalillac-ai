@@ -9,23 +9,31 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261030-secure-luxury2">
+  <link rel="stylesheet" href="app.css?v=20261104-handoff1">
 </head>
 <body>
-  <!-- Direct full-page use at /app/ and same-origin iframe embed on the
-       homepage both render this same shell. No framework branding. -->
+  <!-- The chat workspace at /app/: reached directly, or from the homepage's
+       Send with that one draft. No framework branding. -->
   <div class="app" role="application" aria-label="Kalillac AI chat">
 
+    <!-- The same white bar and full logo as the public site. Not a link: leaving
+         the page would end this browser's access to the conversation. The end
+         of the bar holds only what is true for every visitor now. -->
     <header class="app-header">
-      <div class="brand">
-        <!-- Uses the production logo; falls back to a wordmark if it 404s. -->
-        <img src="/assets/kalillac-ai-logo.png?v=20260820-logo1" alt="" class="brand-logo" id="brand-logo" hidden>
-        <span class="brand-name" id="brand-name">Kalillac AI</span>
+      <div class="app-header-inner">
+        <div class="brand has-logo">
+          <!-- The production logo from the first frame, at its own aspect ratio;
+               the wordmark replaces it only if it fails to load. -->
+          <img src="/assets/kalillac-ai-logo.png?v=20260820-logo1" alt="Kalillac AI" class="brand-logo" id="brand-logo" width="172" height="64">
+          <span class="brand-name" id="brand-name">Kalillac AI</span>
+        </div>
+        <div class="app-header-end">
+          <span class="session-status" title="This conversation uses temporary session memory. It is not saved to an account or a chat history, and reloading starts a new session.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            <span>Temporary session</span><span class="session-status-extra"><span class="sr-only">,</span><span aria-hidden="true">·</span><span>Not saved</span></span>
+          </span>
+        </div>
       </div>
-      <span class="session-pill" title="Session memory is temporary. Reloading this page starts a new session.">
-        <span class="session-dot" aria-hidden="true"></span>
-        <span>Session</span>
-      </span>
     </header>
 
     <main class="conversation" id="conversation">
@@ -40,9 +48,9 @@
             Bring a difficult question, a rough draft, broken code, or something current.
           </p>
           <!-- Each example only fills the composer; nothing is sent until the
-               visitor sends it. In a phone-width frame app.js moves this
-               block below the composer (#starter-dock), so the reading and
-               keyboard order is heading, composer, then examples. -->
+               visitor sends it. While the conversation is empty app.js keeps
+               this block below the composer (#starter-dock), so the reading
+               and keyboard order is heading, composer, then examples. -->
           <div class="starter" id="starter">
           <p class="starter-label" id="starter-label">Or start with an example</p>
           <div class="empty-hints" role="group" aria-label="Example prompts">
@@ -73,11 +81,15 @@
       <div class="limit-notice" id="limit-notice" role="status" aria-live="polite" hidden>
         <p class="limit-notice-text"><strong>You’ve used today’s 10 free responses.</strong> Your free allowance resets at 12:00 AM UTC. Your message wasn’t sent; it is still in the message box.</p>
       </div>
+      <!-- A homepage message this page did not send automatically: fixed copy
+           chosen by app.js, in the daily-limit note's style. -->
+      <div class="limit-notice handoff-notice" id="handoff-notice" role="status" aria-live="polite" hidden>
+        <p class="limit-notice-text" id="handoff-notice-text"></p>
+      </div>
       <form class="composer" id="composer" autocomplete="off">
         <div class="composer-shell" id="composer-shell">
-          <!-- End & erase: in the composer so it is visible both full-page and in
-               the homepage's embedded chat (which hides the header). Its label
-               is visible text at every width. Always shown; disabled only when
+          <!-- End & erase: in the composer, next to what it ends. Its label is
+               visible text at every width. Always shown; disabled only when
                there is nothing to end or erase. -->
           <button type="button" class="erase-btn" id="erase-btn" aria-haspopup="dialog" disabled>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -105,7 +117,7 @@
           </button>
         </div>
       </form>
-      <!-- Phone-width frames: the example prompts live here, after the composer. -->
+      <!-- The example prompts live here, after the composer, until the first message. -->
       <div class="starter-dock" id="starter-dock"></div>
 
       <footer class="app-footer">
@@ -148,6 +160,6 @@
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261030-secure-luxury2"></script>
+  <script src="app.js?v=20261104-handoff1"></script>
 </body>
 </html>

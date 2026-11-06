@@ -124,10 +124,13 @@ jobs:
           --junitxml="$RUNNER_TEMP/code-structure-frontend-verification.xml"
 
       # A green run must mean every focused test executed: exactly the
-      # expected number collected (1504, from `pytest --collect-only` over the
-      # files above: the earlier 1447 plus the 57 homepage first-load tests),
-      # exactly 1488 passed and exactly 16 skipped -- each skip one of the
-      # homepage tests' own per-viewport skips -- and none failed or errored.
+      # expected number collected (1636, from `pytest --collect-only` over the
+      # files above: the homepage composer is now native, so the 395 tests of
+      # the framed homepage chat were replaced by 527 native-composer, handoff
+      # (ledger, deadline, stall recovery, early Back and ownership) and /app/
+      # workspace tests), exactly 1617 passed and exactly 19 skipped --
+      # each skip one of the homepage tests' own per-viewport skips -- and none
+      # failed or errored.
       # The suite totals and every test case's own outcome must both agree.
       # A missing browser, site build or git history fails the run instead of
       # skipping.
@@ -164,7 +167,7 @@ jobs:
                       unexpected.append(f"{case.get('classname')}::{case.get('name')}: {reason.strip()}")
           for line in unexpected:
               print("unexpected skip:", line)
-          expected = {"tests": 1504, "passed": 1488, "skipped": 16, "failures": 0, "errors": 0}
+          expected = {"tests": 1636, "passed": 1617, "skipped": 19, "failures": 0, "errors": 0}
           if totals != expected or counted != expected or unexpected:
               sys.exit("the focused verification did not run completely")
           PY

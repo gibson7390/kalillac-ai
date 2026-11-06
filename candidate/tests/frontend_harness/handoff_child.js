@@ -4,7 +4,8 @@
    before app.js. It never touches app.js internals:
    - replaces fetch with a scripted /api/chat (300 ms per reply; a message
      longer than 4,000 characters gets the backend's 422 message_too_long);
-   - records every attempted browser-storage or cookie write;
+   - records every attempted browser-storage or cookie write and, in one
+     ordered list (events), each storage write with its key and each fetch;
    - when the chat is a top-level page (a direct visit or a refresh of
      /app/), checks that it starts empty and standalone, sends one message,
      and reports the result to the loopback test server -- unless the page
@@ -14,10 +15,10 @@
 
   var realFetch = window.fetch.bind(window);
   var state = window.__HANDOFF_CHILD__ = {
-    requests: [], writes: [], received: [], loadedAt: Date.now()
+    requests: [], writes: [], events: [], received: [], loadedAt: Date.now()
   };
 
-  instrumentWrites(window, state.writes);
+  instrumentWrites(window, state.writes, state.events);
 
   // Every message this window receives, so each rejection check can prove
   // its message was actually delivered.
@@ -37,6 +38,7 @@
     var body = null;
     try { body = JSON.parse(init.body); } catch (e) { body = null; }
     state.requests.push({ url: String(url), method: init && init.method, body: body });
+    state.events.push({ op: "fetch", url: String(url) });
 
     if (String(url) !== "/api/chat") {
       return Promise.reject(new TypeError("HANDOFF: unexpected request"));
@@ -86,12 +88,14 @@
     });
   };
 
-  function instrumentWrites(win, log) {
+  function instrumentWrites(win, log, events) {
     try {
       ["setItem", "removeItem", "clear"].forEach(function (name) {
         var original = win.Storage.prototype[name];
         win.Storage.prototype[name] = function () {
           log.push("Storage." + name);
+          events.push({ op: "Storage." + name, key: arguments[0],
+                        local: this === win.localStorage });
           return original.apply(this, arguments);
         };
       });

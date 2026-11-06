@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261030-secure-luxury2"
-CSS_CACHE_KEY = "20261030-secure-luxury2"
+CACHE_KEY = "20261104-handoff1"
+CSS_CACHE_KEY = "20261104-handoff1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -1319,11 +1319,17 @@ def test_no_public_url_or_cdn_dependency():
 def test_production_and_storage_boundaries():
     source = APP_JS.read_text(encoding="utf-8")
 
+    # The homepage handoff is the one sessionStorage use (test_homepage_handoff.py):
+    # it may read, remove and mark, and never touches cookies or localStorage.
+    handoff = source[source.index("  /* ---- the homepage's one-time handoff"):
+                     source.index("  var handoff = takeHandoff();")]
+    assert not re.search(r"document\.cookie|\blocalStorage\s*[.\[]|sendBeacon|\bconsole\.", handoff)
+    rest = source.replace(handoff, "")
     # API use, not the words (the header comment says none of these are used).
     for forbidden in (r"\blocalStorage\s*[.\[]", r"\bsessionStorage\s*[.\[]",
                       r"\bindexedDB\s*\.", r"document\.cookie", r"\bconsole\.",
                       r"location\.reload", r"sendBeacon", r"__HARNESS"):
-        assert not re.search(forbidden, source), forbidden
+        assert not re.search(forbidden, rest), forbidden
 
 
 def test_only_app_js_app_css_and_index_html_changed_in_the_frontend():

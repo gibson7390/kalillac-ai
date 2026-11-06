@@ -39,6 +39,10 @@
   --shine: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 60%);
   --ease: 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
   --rail: clamp(14px, 4vw, 22px);
+  /* The workspace: one reading column; the header matches the public site's. */
+  --measure: 820px;
+  --header-h: 72px;
+  --navy: #0b1737;
 }
 
 * { box-sizing: border-box; }
@@ -51,7 +55,8 @@ html, body {
 }
 
 body {
-  background: radial-gradient(ellipse 70% 40% at 50% -6%, rgba(0, 105, 255, 0.07), transparent 70%), var(--paper);
+  background: radial-gradient(ellipse 60% 38% at 50% 0%, rgba(0, 105, 255, 0.06), transparent 70%),
+              linear-gradient(180deg, #f8fbff 0%, #ffffff 42%);
   color: var(--ink);
   font-family: var(--font-ui);
   font-size: 16px;
@@ -70,42 +75,42 @@ body {
   border: 0;
 }
 
-/* App shell fills the dynamic viewport so it works full-page AND in the
-   homepage iframe, and adapts to Safari's changing chrome / keyboard. */
+/* App shell fills the dynamic viewport and adapts to Safari's changing
+   chrome / keyboard: the header, the conversation (the only scroller) and the
+   dock. Full width; the conversation and the composer share one centred
+   reading column. */
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;          /* fallback */
   height: 100dvh;         /* dynamic viewport for mobile Safari */
-  max-width: 900px;
-  margin: 0 auto;
-  background: var(--paper);
   padding-top: env(safe-area-inset-top, 0);
   overflow: hidden;
 }
 
-/* A full-page visit on a wide screen: the conversation is one white reading
-   column on the lit page field, set off by two hairlines. */
-@media (min-width: 960px) {
-  body:not(.is-embedded) .app {
-    background: var(--panel);
-    border-inline: 1px solid var(--line);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6), 0 30px 80px -40px rgba(14, 21, 38, 0.18);
-  }
-  body:not(.is-embedded) .app-header { background: var(--panel); }
-}
-
 /* ---------------- Header ----------------
-   Deliberately low-profile: 52px of chrome, one hairline, no shadow. The
-   conversation is the product; the header just labels it. */
+   The public site's header: an opaque white bar, the full logo, one crisp
+   hairline and a soft edge shadow. Its end holds a quiet, truthful session
+   status -- and later any account control, without a redesign. */
 .app-header {
   flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 9px var(--rail);
-  border-bottom: 1px solid var(--line);
-  background: var(--paper);
+  min-height: var(--header-h);
+  background: #fff;
+  border-bottom: 1px solid #e8eef8;
+  box-shadow: 0 10px 24px -22px rgba(16, 38, 80, 0.35);
+}
+
+.app-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(1200px, calc(100% - 80px));
+  margin: 0 auto;
 }
 
 .brand {
@@ -116,10 +121,8 @@ body {
 }
 
 .brand-logo {
-  height: 30px;
-  width: auto;
-  max-width: 160px;
-  object-fit: contain;
+  width: 172px;
+  height: auto;
   display: block;
 }
 
@@ -148,30 +151,26 @@ body {
   font-size: 13px;
 }
 
-.session-pill {
-  margin-left: auto;
+.app-header-end {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Plain status text, not a control: what is true of this conversation now. */
+.session-status {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 4px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: linear-gradient(180deg, #fff, #f7faff);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  color: #46536c;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
   white-space: nowrap;
-  box-shadow: var(--inner-light), var(--shadow-soft);
 }
-
-.session-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--blue);
-  box-shadow: 0 0 0 3px rgba(0, 105, 255, 0.14);
-  flex: 0 0 auto;
-}
+.session-status svg { flex: 0 0 auto; width: 16px; height: 16px; color: #008a7c; }
+.session-status-extra { display: inline-flex; align-items: center; gap: 7px; }
 
 /* ---------------- Conversation ----------------
    THE LAYOUT FIX: .conversation is the scroll container, and .thread carries
@@ -197,7 +196,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 20px var(--rail) 12px;
+  width: 100%;
+  max-width: calc(var(--measure) + 2 * var(--rail));
+  margin-inline: auto;
+  padding: 24px var(--rail) 12px;
   min-width: 0;
 }
 
@@ -223,11 +225,11 @@ body {
 
 .empty-title {
   margin: 0 0 8px;
-  color: var(--ink);
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: -0.02em;
+  color: var(--navy);
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
 }
 
 .empty-line {
@@ -514,8 +516,17 @@ body {
 
 .composer {
   padding: 12px var(--rail) 8px;
-  max-width: 900px;
+  max-width: calc(var(--measure) + 2 * var(--rail));
   margin: 0 auto;
+}
+
+/* Notices above the composer share its column. */
+.dock > .erase-receipt,
+.dock > .limit-notice {
+  width: calc(100% - 2 * var(--rail));
+  max-width: var(--measure);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* Single bordered shell containing textarea + action button, so they read as
@@ -546,6 +557,15 @@ body {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(0, 105, 255, 0.14), 0 10px 24px -18px rgba(0, 80, 200, 0.4);
 }
+
+/* A homepage message this page could not show it took (app.js): kept in the
+   box read-only, for selecting and copying, and never sent from here. The box
+   reads as fixed text -- a quiet fill, muted ink, no caret, no hover cue --
+   and keeps its focus ring. */
+.composer[data-authority="withheld"] .composer-shell { background: #f4f6fa; cursor: default; }
+.composer[data-authority="withheld"] .composer-shell:hover { border-color: var(--line-strong); }
+.composer[data-authority="withheld"] .composer-shell:focus-within { border-color: var(--blue); }
+.composer[data-authority="withheld"] textarea { color: var(--muted); caret-color: transparent; }
 
 .composer textarea {
   flex: 1 1 auto;
@@ -613,25 +633,20 @@ body {
 .app-footer a:hover { color: var(--ink); }
 .app-footer .dot-sep { opacity: 0.5; }
 
-/* ---------------- Embedded mode ----------------
-   Set by app.js when the page is framed by the Kalillac homepage. The homepage
-   already supplies the logo, the Privacy/Terms links, and the 18+ notice, so
-   repeating them inside the frame is duplicate chrome that costs vertical
-   space. The private-session indicator STAYS: it describes the app, not the
-   site, and it is the one piece of privacy signalling the homepage does not
-   already carry next to the chat. */
-.is-embedded .brand-logo { display: none; }
-.is-embedded .brand.has-logo .brand-name { display: inline; }
-.is-embedded .app-header { display: none; }
-.is-embedded .app-footer { display: none; }
-.is-embedded .composer { padding-bottom: 12px; }
 
-/* Narrow containers (a slim iframe, a split view). Below this the header
-   cannot hold a wordmark and a pill side by side. */
-@media (max-width: 380px) {
-  .brand-name { font-size: 14px; }
-  .session-pill span:last-child { display: none; }
-  .session-pill { padding: 6px; gap: 0; }
+/* Phones: the site's 64px header and 148px logo (128px below 400px); below
+   375px the status keeps its first, still-true half so the bar never overflows. */
+@media (max-width: 720px) {
+  :root { --header-h: 64px; }
+  .app-header-inner { width: calc(100% - 36px); }
+  .brand-logo { width: 148px; }
+  .session-status { font-size: 12px; }
+}
+@media (max-width: 400px) {
+  .brand-logo { width: 128px; }
+}
+@media (max-width: 374px) {
+  .session-status-extra { display: none; }
 }
 
 /* ---------------- Responsive ---------------- */
@@ -640,7 +655,7 @@ body {
   .msg-user .bubble { max-width: 90%; font-size: 15px; }
   .msg-assistant .bubble { padding: 12px 13px; }
   .brand-name { font-size: 15px; }
-  .empty-title { font-size: 21px; }
+  .empty-title { font-size: 23px; }
   .empty-hints { grid-template-columns: 1fr; gap: 8px; margin-top: 20px; }
   .hint { min-height: 44px; font-size: 14px; padding: 9px 13px; }
   .app-footer { font-size: 11px; gap: 3px 9px; }
@@ -961,32 +976,8 @@ body {
 .hint-icon { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: #eff6ff; color: #0069ff; }.hint-icon svg { width: 27px; height: 27px; }.hint-learning .hint-icon { color: #008b89; background: #eafbf7; }
 .hint-copy { flex: 1; min-width: 0; }.hint-title { display: block; color: #101d39; font-size: 15px; font-weight: 750; line-height: 1.25; }.hint-description { display: block; color: #586780; font-size: 13px; line-height: 1.45; margin-top: 6px; }.hint-arrow { flex: none; width: 15px; height: 15px; color: #0069ff; margin-top: 2px; }
 .hint:hover,.hint:focus-visible { background: #f3f8ff; border-color: #0069ff; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 10px 24px -16px rgba(0, 80, 200, 0.3); }.hint:active { background: #eaf3ff; box-shadow: none; }.hint:focus-visible { outline: 3px solid #0056d8; outline-offset: 3px; }.hint.hint-guide-active { border-color: #a4c6fa; background: #f8fbff; box-shadow: none; }
-.is-embedded { --blue: #0069ff; --blue-deep: #0053cf; --blue-soft: #eaf3ff; --paper: #fff; --rail: 20px; }
-.is-embedded .thread { padding-top: 20px; }.is-embedded .empty { padding: 0 0 4px; width: 100%; }.is-embedded .empty-title { font-size: 24px; font-weight: 800; color: #0b1737; }.is-embedded .empty-line { font-size: 14px; max-width: 44ch; }.is-embedded .empty-hints { margin-top: 24px; }.is-embedded .composer { border-top: 1px solid #e3edfa; padding-top: 12px; padding-bottom: 14px; }.is-embedded .composer-shell { border-color: #d6e3f7; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 8px 20px -16px rgba(16, 38, 80, 0.28); }
-@media (max-width: 560px) { .empty-hints { grid-template-columns: repeat(2,minmax(0,1fr)); }.hint { padding: 12px; gap: 8px; min-height: 128px; }.hint-icon { width: 27px; height: 27px; }.hint-icon svg { width: 24px; height: 24px; }.hint-arrow { width: 12px; height: 12px; }.hint-title { font-size: 14px; }.hint-description { font-size: 13px; }.is-embedded { --rail: 16px; }.is-embedded .empty-title { font-size: 23px; } }
-@media (max-width: 400px) { .empty-hints { grid-template-columns: 1fr; gap: 10px; }.hint { min-height: 88px; padding: 13px; align-items: center; }.hint-icon { width: 34px; height: 34px; }.hint-copy { padding-right: 3px; }.hint-title { font-size: 15px; }.hint-description { font-size: 13px; margin-top: 4px; }.hint-arrow { width: 16px; height: 16px; }.is-embedded .empty-hints { margin-top: 20px; } }
-@media (max-height: 560px) and (min-width: 401px) { .is-embedded .empty-title { font-size: 22px; }.is-embedded .empty-hints { margin-top: 16px; }.is-embedded .hint { min-height: 96px; padding: 11px; }.is-embedded .thread { padding-top: 14px; } }
-/* The same for short narrow frames (one-column cards on phones such as
-   360 x 640 and 375 x 667): the starting state must fit its frame. If it
-   overflows, the conversation scroller has a scroll range and a touch swipe
-   that begins on the cards latches to it instead of scrolling the homepage. */
-@media (max-height: 600px) and (max-width: 400px) { .is-embedded .thread { padding-top: 12px; }.is-embedded .empty-title { font-size: 21px; }.is-embedded .empty-line { line-height: 1.4; }.is-embedded .empty-hints { margin-top: 12px; gap: 8px; }.is-embedded .hint { min-height: 0; padding: 9px 12px; }.is-embedded .hint-icon { width: 30px; height: 30px; }.is-embedded .hint-description { margin-top: 2px; line-height: 1.3; } }
-
-/* Keep the existing interactive composer affordances above the embedded theme. */
-.is-embedded .composer-shell:hover { border-color: #86b8fa; }
-.is-embedded .composer-shell:focus-within { border-color: #0069ff; box-shadow: 0 0 0 3px #0069ff1f, 0 8px 20px -16px rgba(0, 80, 200, 0.4); }
-
-/* A capped phone workspace may need to scroll its task area. Auto margins
-   center a fitting intro without clipping the beginning of an overflowing one. */
-.is-embedded .conversation.is-empty .thread { justify-content: flex-start; }
-/* The homepage's starting state: a vertical swipe that begins on the example
-   cards scrolls the homepage. The conversation scroller's
-   overscroll-behavior: contain otherwise stops that touch scroll at the
-   iframe on Android Chrome, even when the cards fit and nothing inside can
-   scroll. Only the embedded empty state chains; an active conversation and
-   the standalone /app/ keep their containment. */
-.is-embedded .conversation.is-empty { overscroll-behavior-y: auto; }
-.is-embedded .empty { flex-shrink: 0; margin-block: auto; }
+/* Disabled while the message box holds a message kept only for copying (app.js). */
+.hint:disabled { opacity: 0.55; cursor: default; pointer-events: none; }
 
 /* ---------------- Daily-limit dialog ----------------
    A native modal <dialog>: the browser keeps focus inside it and makes the
@@ -1052,8 +1043,7 @@ body {
 }
 
 /* ---------------- End & erase ----------------
-   The control sits at the left edge of the composer box, so it is visible in
-   the full page and in the homepage's embedded chat (which hides the header).
+   The control sits at the left edge of the composer box, next to what it ends.
    As tall as Send (38px), with its "End & erase" label as visible text at
    every width, touch included: an icon alone would be ambiguous. Disabled
    only when there is nothing to end or erase. */
@@ -1090,13 +1080,6 @@ body {
   .composer-shell { flex-wrap: wrap; row-gap: 6px; }
   .composer textarea { order: -1; flex: 1 0 100%; }
   .erase-btn { margin-right: auto; }
-}
-/* Short narrow embedded frames (360 x 640): the second row must not push the
-   compact starting state past its frame, so the composer gives back the
-   height that row costs. */
-@media (max-height: 600px) and (max-width: 400px) {
-  .is-embedded .composer { padding-top: 8px; padding-bottom: 8px; }
-  .is-embedded .composer-shell { padding-top: 6px; padding-bottom: 6px; row-gap: 4px; }
 }
 
 /* The receipt: what End & erase did and did not erase. One box above the
@@ -1253,41 +1236,50 @@ body {
 .limit-notice-text strong { color: var(--ink); font-weight: 650; }
 
 /* ---------------- Example prompts: placement ----------------
-   Under the heading in a wide frame, where the "Or start with an example"
-   label is not needed; after the composer in a phone-width frame (moved there
-   by app.js), as a compact two-column set of rows. */
+   After the composer (placed there by app.js) until the first message: four
+   cards side by side on a wide screen, two by two on a medium one, compact
+   two-column rows without descriptions on a phone. */
 .starter { width: 100%; display: flex; flex-direction: column; align-items: center; }
-.empty .starter-label { display: none; }
-.starter-dock { padding: 0 var(--rail); }
+.starter-dock { width: 100%; max-width: calc(var(--measure) + 2 * var(--rail)); margin: 0 auto; padding: 0 var(--rail); }
 .starter-dock:empty { display: none; }
-.starter-dock .starter { align-items: stretch; padding: 2px 0 14px; }
+.starter-dock .starter { align-items: stretch; padding: 6px 0 16px; }
 .starter-dock .starter-label {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.02em;
 }
-.starter-dock .empty-hints .hint { min-height: 52px; padding: 8px 10px; gap: 8px; align-items: center; }
-.starter-dock .empty-hints { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 0; max-width: none; }
-.starter-dock .empty-hints .hint-icon { width: 28px; height: 28px; border-radius: 8px; }
-.starter-dock .empty-hints .hint-icon svg { width: 18px; height: 18px; }
-.starter-dock .empty-hints .hint-title { font-size: 13px; font-weight: 700; line-height: 1.25; }
-.starter-dock .empty-hints .hint-description { display: none; }
-.starter-dock .empty-hints .hint-arrow { width: 12px; height: 12px; margin-top: 0; }
+.starter-dock .empty-hints { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 0; max-width: none; }
+.starter-dock .empty-hints .hint { min-height: 104px; padding: 13px 12px; gap: 9px; flex-direction: column; }
+.starter-dock .empty-hints .hint-icon { width: 32px; height: 32px; }
+.starter-dock .empty-hints .hint-icon svg { width: 20px; height: 20px; }
+.starter-dock .empty-hints .hint-title { font-size: 14px; }
+.starter-dock .empty-hints .hint-description { margin-top: 4px; font-size: 12.5px; }
+.starter-dock .empty-hints .hint-arrow { display: none; }
+@media (max-width: 860px) {
+  .starter-dock .empty-hints { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .starter-dock .empty-hints .hint { min-height: 76px; flex-direction: row; align-items: flex-start; }
+}
+@media (max-width: 560px) {
+  .starter-dock .empty-hints { gap: 8px; }
+  .starter-dock .empty-hints .hint { min-height: 52px; padding: 8px 10px; gap: 8px; align-items: center; }
+  .starter-dock .empty-hints .hint-icon { width: 28px; height: 28px; border-radius: 8px; }
+  .starter-dock .empty-hints .hint-icon svg { width: 18px; height: 18px; }
+  .starter-dock .empty-hints .hint-title { font-size: 13px; font-weight: 700; line-height: 1.25; }
+  .starter-dock .empty-hints .hint-description { display: none; }
+}
 /* The narrowest frames: one row per example, so each title stays on one line. */
 @media (max-width: 359px) {
   .starter-dock .empty-hints { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .starter-dock .empty-hints .hint { min-height: 44px; padding-block: 6px; }
 }
 
-/* Phone-width empty state: heading, composer and examples read as one
-   centred group instead of a heading at the top and a composer stranded at
-   the bottom. Once a conversation starts, the usual layout returns (the
-   transcript scrolls, the composer is pinned at the bottom). */
-@media (max-width: 560px) and (min-height: 480px) {
-  .conversation.is-empty { flex: 0 0 auto; margin-top: auto; }
-  .conversation.is-empty .thread { padding-bottom: 6px; }
-  .conversation.is-empty + .dock { margin-bottom: auto; border-top: 0; box-shadow: none; background: transparent; }
-  .is-embedded .conversation.is-empty + .dock .composer { border-top: 0; padding-top: 4px; }
-}
+/* The empty workspace: heading, composer and examples read as one centred
+   group instead of a heading in the middle and a composer stranded at the
+   bottom. An empty conversation that does not fit shrinks and scrolls; once a
+   conversation starts the usual layout returns (the transcript scrolls, the
+   composer is pinned at the bottom of the workspace). */
+.conversation.is-empty { flex: 0 1 auto; margin-top: auto; }
+.conversation.is-empty .thread { padding-bottom: 8px; }
+.conversation.is-empty + .dock { margin-bottom: auto; border-top: 0; box-shadow: none; background: transparent; }

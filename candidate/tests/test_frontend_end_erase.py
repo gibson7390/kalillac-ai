@@ -485,11 +485,17 @@ def test_erase_request_contract_in_source():
     assert "setTimeout(function () {\n        eraseAbort.abort();\n        finish(null);" in post
     assert "clearTimeout(timer);" in post
     assert "controller" not in post.replace("AbortController", "")   # never the chat request's
-    # Cookies and storage are never used anywhere in the chat script (API use,
-    # not the words: the header comment names what is not used).
+    # Cookies and storage are never used anywhere else in the chat script (API
+    # use, not the words: the header comment names what is not used).
+    # The homepage handoff is the one sessionStorage use (test_homepage_handoff.py):
+    # it may read, remove and mark, and never touches cookies or localStorage.
+    handoff = source[source.index("  /* ---- the homepage's one-time handoff"):
+                     source.index("  var handoff = takeHandoff();")]
+    assert not re.search(r"document\.cookie|\blocalStorage\s*[.\[]|sendBeacon|\bconsole\.", handoff)
+    rest = source.replace(handoff, "")
     for forbidden in (r"document\.cookie", r"\blocalStorage\s*[.\[]", r"\bsessionStorage\s*[.\[]",
                       r"sendBeacon"):
-        assert not re.search(forbidden, source), forbidden
+        assert not re.search(forbidden, rest), forbidden
 
 
 # Every text source this slice touches. Tab, CR and LF are the only C0 control

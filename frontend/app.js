@@ -2,8 +2,12 @@
    Kalillac AI — native chat frontend (vanilla JS)
    - Same-origin POST /api/chat
    - session_id lives ONLY in a page-memory variable. This script never reads
-     or writes localStorage, sessionStorage, IndexedDB, cookies, or any
-     persistent store.
+     or writes localStorage, IndexedDB, cookies, or any persistent store. Its
+     only sessionStorage use is the homepage's one-time handoff (below): it
+     removes the homepage's envelope -- except one too old for it to take,
+     which it leaves, and one it could not show it took, which it puts back
+     unchanged -- and keeps a bounded list of recently used random
+     identifiers, never a message of its own.
    - Model output is parsed by the locally vendored marked, then sanitized by
      the locally vendored DOMPurify BEFORE it touches innerHTML. Fenced code
      with a known language label is then syntax-highlighted from its text by
@@ -57,18 +61,19 @@
   var input = document.getElementById("composer-input");
   var actionBtn = document.getElementById("send-btn");
 
-  // Logo fallback: start hidden so a missing asset can never flash a
-  // broken-image icon. Also handle cached load/error events that may have
-  // completed before app.js attached its listeners.
+  // Logo fallback: the logo is shown from the first frame (its size is
+  // reserved, so nothing shifts) and only a failed load swaps in the wordmark,
+  // never a broken-image icon. Also handle cached load/error events that may
+  // have completed before app.js attached its listeners.
   var logo = document.getElementById("brand-logo");
   var brand = logo && logo.parentNode;
 
   function syncLogoState() {
     if (!logo) return;
-    var loaded = logo.complete && logo.naturalWidth > 0;
-    logo.hidden = !loaded;
+    var failed = logo.complete && logo.naturalWidth === 0;
+    logo.hidden = failed;
     if (brand && brand.classList) {
-      brand.classList.toggle("has-logo", loaded);
+      brand.classList.toggle("has-logo", !failed);
     }
   }
 
@@ -436,29 +441,21 @@
     placeStarter();
   }
 
-  /* The example prompts belong to the empty state. In a wide frame they sit
-     under the heading, above the composer at the bottom. In a phone-width
-     frame they move into the dock after the composer, so the DOM -- and with
-     it the keyboard and screen-reader order -- is heading, composer, then the
-     examples, exactly as they appear. Once a conversation starts they are
-     detached wherever they are. */
+  /* The example prompts belong to the empty state. They sit in the dock after
+     the composer, so the DOM -- and with it the keyboard and screen-reader
+     order -- is heading, composer, then the examples, exactly as they appear.
+     Once a conversation starts they are detached. */
   var starter = document.getElementById("starter");
   var starterDock = document.getElementById("starter-dock");
-  var compactStarter = window.matchMedia ? window.matchMedia("(max-width: 560px)") : null;
 
   function placeStarter() {
     if (!starter || !emptyState) return;
-    var home = compactStarter && compactStarter.matches && starterDock ? starterDock : emptyState;
+    var home = starterDock || emptyState;
     if (!emptyState.parentNode) {
       if (starter.parentNode) starter.parentNode.removeChild(starter);
     } else if (starter.parentNode !== home) {
       home.appendChild(starter);
     }
-  }
-
-  if (compactStarter) {
-    if (compactStarter.addEventListener) compactStarter.addEventListener("change", placeStarter);
-    else if (compactStarter.addListener) compactStarter.addListener(placeStarter);
   }
 
   function addUserMessage(text) {
@@ -692,6 +689,23 @@
     stickToBottom = atBottom();
   });
 
+  // ---- send authority ------------------------------------------------------
+  /* The one source of truth for whether this page may send what is in the
+     message box, or clear or replace it. It is withheld only while the box
+     holds a homepage message this page could not show it took (see the
+     handoff at the end of this file): the homepage may still own that message
+     and give it back, so here it stays read-only, for selecting and copying,
+     and nothing sends, clears or replaces it. Every request is built by
+     requestReply(), and it and every way into it -- send(), which Enter,
+     Send and the form all call, retryExchange() and retryTurn() -- refuse
+     without authority, as do End & erase and the example prompts. Nothing
+     grants it back in this page: no timer, deadline, navigation, cache
+     restore or later showing. It is kept on the form itself, so any other
+     copy of this script in the document reads the same answer. */
+  function hasAuthority() {
+    return form.getAttribute("data-authority") !== "withheld";
+  }
+
   // ---- busy / send / stop state -------------------------------------------
   function setBusy(busy) {
     inFlight = busy;
@@ -700,7 +714,7 @@
     actionBtn.title = busy ? "Stop" : "Send";
     actionBtn.disabled = false;                 // Stop must stay clickable
     if (!busy) syncSendEnabled();
-    input.readOnly = busy;                      // readOnly, not disabled, so the
+    input.readOnly = busy || !hasAuthority();   // readOnly, not disabled, so the
                                                 // iOS keyboard does not dismiss
     syncEraseEnabled();
   }
@@ -708,6 +722,10 @@
   function syncSendEnabled() {
     syncEraseEnabled();
     if (inFlight) return;
+    if (!hasAuthority()) {
+      actionBtn.disabled = true;
+      return;
+    }
     actionBtn.disabled = limitHeld || input.value.trim().length === 0;
   }
 
@@ -1039,6 +1057,7 @@
   }
 
   function requestReply(exchange) {
+    if (!hasAuthority()) return Promise.resolve();   // never a request without authority
     exchange.epoch = conversationEpoch;
     setBusy(true);
     clearActions(exchange.shell);
@@ -1104,6 +1123,7 @@
 
   // ---- send ----------------------------------------------------------------
   function send() {
+    if (!hasAuthority()) return;     // before anything in the page changes
     var text = input.value.trim();
     // Paused by the daily limit: Enter, Send and touch all end here.
     if (!text || inFlight || limitHeld) return;
@@ -1111,6 +1131,7 @@
     // A deliberate new message replaces any failed exchange still on screen.
     discardFailedExchange();
     dismissSettledEraseReceipt();
+    hideHandoffNotice();
 
     // Snapshot history BEFORE this turn: prior completed exchanges only.
     var history = buildHistory();
@@ -1128,6 +1149,7 @@
   /* Retry a failed or stopped exchange: the same text, the same pre-send
      history and the same rows. Nothing new is added to the thread. */
   function retryExchange(exchange) {
+    if (!hasAuthority()) return;
     if (inFlight || limitHeld || failedExchange !== exchange) return;
 
     /* Ownership is not renewed here: the exchange may restore its text again
@@ -1146,6 +1168,7 @@
      user message is not re-appended to the DOM, so it is never duplicated, and
      buildHistory() stays exactly in step with what is on screen. */
   function retryTurn(index) {
+    if (!hasAuthority()) return;
     if (inFlight || limitHeld) return;
     var turn = TURNS[index];
     if (!turn || !turn.userRow) return;
@@ -1232,8 +1255,9 @@
            input.value !== "" || !!thread.querySelector(".msg");
   }
 
+  // End & erase would empty the message box, so it needs the send authority too.
   function syncEraseEnabled() {
-    if (eraseBtn) eraseBtn.disabled = !hasErasable();
+    if (eraseBtn) eraseBtn.disabled = !hasAuthority() || !hasErasable();
   }
 
   /* The notice leaves on its own about RECEIPT_SHOW_MS after it appears,
@@ -1410,6 +1434,7 @@
   }
 
   function endAndErase() {
+    if (!hasAuthority()) return;
     // The opaque id is the only thing kept, and only for the request below.
     var sessionId = SESSION_ID;
     var requestWasActive = inFlight;
@@ -1460,7 +1485,7 @@
   }
 
   function openEraseDialog() {
-    if (!hasErasable()) return;
+    if (!hasAuthority() || !hasErasable()) return;
 
     if (eraseDialog && eraseCancel && typeof eraseDialog.showModal === "function") {
       try {
@@ -1655,6 +1680,7 @@
     hints[h].addEventListener("mouseleave", resumeHintGuideAfterHover);
 
     hints[h].addEventListener("click", function () {
+      if (!hasAuthority()) return;     // it would replace a message kept for copying
       stopHintGuide();
 
       input.value = this.getAttribute("data-prompt") || "";
@@ -1681,19 +1707,225 @@
     });
   }
 
-  /* Same-origin embed detection. The homepage frames this app at /app/; when
-     it does, the surrounding page already provides branding and the
-     Privacy/Terms links, so the duplicate chrome is suppressed via CSS. */
-  var isEmbedded = false;
-  try { isEmbedded = window.self !== window.top; } catch (e) { isEmbedded = true; }
-  if (isEmbedded) document.body.classList.add("is-embedded");
+  /* ---- the homepage's one-time handoff -------------------------------------
+     The homepage stores one envelope in this tab's sessionStorage when its
+     Send is pressed: { v: 1, draft, nonce, createdAt } -- the trimmed draft, a
+     random 32-hex-digit nonce and the creation time. It is read once, when
+     this page loads, and removed BEFORE anything else is checked or sent --
+     except a well-formed envelope HANDOFF_MAX_AGE_MS old or older, which this
+     page can never take: that is left exactly where it is, so the homepage
+     can still give the message back. A direct visit finds nothing and
+     touches nothing. The key, shape and limits match site/src/App.tsx.
+
+     Only a well-formed envelope whose nonce this tab has not taken before is
+     used, and it is sent only when all of this holds:
+     - it is less than HANDOFF_SEND_MS old. The homepage gives the draft back
+       after 10 seconds without this page, and that is later than this
+       deadline, so once the homepage has given a draft back this page can no
+       longer send it -- whether or not the homepage could withdraw it, and
+       without depending on the homepage's timer;
+     - it was removed, and its nonce was recorded in the ledger and read back.
+     A well-formed envelope that fails any of these (but is not stale, from the
+     future or already taken) is placed in the message box, unsent, with a
+     notice. Nothing else is shown or sent -- including the homepage's
+     withdrawn marker, { v: 1, withdrawn: nonce }, which it leaves in place of
+     an envelope it took back but could not remove.
+
+     Taking a message makes it this page's for good, so it is taken only in a
+     way the homepage can see: its nonce is recorded in the ledger (which the
+     homepage reads first, on every showing), or its envelope is removed and
+     confirmed gone. When neither is verified, this page does not own it:
+     - removal certainly failed: the message is left to the homepage,
+       untouched, and only a notice says so -- the homepage still sees an
+       envelope nobody took, and gives it back;
+     - removal could not be confirmed: the envelope may still be there, or
+       may be gone. It is put back, so the homepage can still give the
+       message back; and the draft is kept here too, but read-only and never
+       sendable: the send authority (see hasAuthority) is withheld for the
+       rest of this page's life, and a notice says ownership could not be
+       confirmed.
+
+     The ledger, { v: 1, entries: [{ n, x }] } under HANDOFF_LEDGER_KEY, holds
+     the nonce of every envelope taken in the last HANDOFF_RETAIN_MS -- never a
+     message. An entry is dropped only once its envelope could not be accepted
+     even after a clock correction of HANDOFF_SKEW_MS; a full list of live
+     entries is never trimmed. A ledger that cannot be read, is malformed or
+     full, or cannot be written and read back sends nothing. */
+  var HANDOFF_KEY = "kalillac.handoff";
+  var HANDOFF_LEDGER_KEY = "kalillac.handoff.ledger";
+  var HANDOFF_SEND_MS = 8000;
+  var HANDOFF_MAX_AGE_MS = 60000;
+  var HANDOFF_SKEW_MS = 5000;
+  var HANDOFF_RETAIN_MS = HANDOFF_MAX_AGE_MS + HANDOFF_SKEW_MS;
+  var HANDOFF_LEDGER_MAX = 32;
+  var HANDOFF_MAX_CHARS = 4000;
+  var COPY_HANDOFF_LATE = "The chat took too long to open, so your message wasn’t sent. " +
+    "It’s in the message box. Press Send to send it.";
+  var COPY_HANDOFF_UNCHECKED = "The chat didn’t send your message automatically, because this " +
+    "browser’s storage didn’t allow its check against sending a message twice. It’s in the " +
+    "message box. Press Send to send it.";
+  var COPY_HANDOFF_LEFT = "Your message wasn’t sent, and it is still on the homepage: this browser’s " +
+    "storage didn’t let the chat take it. Go back to the homepage to send it from there.";
+  // These two are true whatever became of the message before: unsent, sending, answered or failed.
+  var COPY_HANDOFF_UNVERIFIED = "Kalillac couldn’t verify this message’s status. To prevent it from " +
+    "being sent twice, it remains read-only. You can select and copy it.";
+  var COPY_HANDOFF_LEFT_UNVERIFIED = "Kalillac couldn’t verify this message’s status, so this chat " +
+    "didn’t take it. If the homepage still has it, you can send it from there.";
+  var handoffNotice = document.getElementById("handoff-notice");
+  var handoffNoticeText = document.getElementById("handoff-notice-text");
+
+  function isNonce(value) {
+    return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+  }
+
+  // The ledger's entries, or null when it cannot be read or is not exactly the expected shape.
+  function readLedger(store) {
+    var raw, ledger;
+    try { raw = store.getItem(HANDOFF_LEDGER_KEY); } catch (e) { return null; }
+    if (raw === null) return [];
+    try { ledger = JSON.parse(raw); } catch (e) { return null; }
+    if (!ledger || typeof ledger !== "object" || Array.isArray(ledger) ||
+        Object.keys(ledger).sort().join() !== "entries,v" || ledger.v !== 1 ||
+        !Array.isArray(ledger.entries) || ledger.entries.length > HANDOFF_LEDGER_MAX) return null;
+    var seen = {};
+    for (var i = 0; i < ledger.entries.length; i++) {
+      var entry = ledger.entries[i];
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+          Object.keys(entry).sort().join() !== "n,x" || !isNonce(entry.n) ||
+          !Number.isSafeInteger(entry.x) || entry.x <= 0 || seen[entry.n]) return null;
+      seen[entry.n] = true;
+    }
+    return ledger.entries;
+  }
+
+  // Records a nonce and reads it back; false when the list is full of live entries or storage fails.
+  function recordNonce(store, entries, nonce, expires, now) {
+    var kept = entries.filter(function (entry) { return entry.x > now; });
+    if (kept.length >= HANDOFF_LEDGER_MAX) return false;
+    kept.push({ n: nonce, x: expires });
+    var serialized = JSON.stringify({ v: 1, entries: kept });
+    try {
+      store.setItem(HANDOFF_LEDGER_KEY, serialized);
+      return store.getItem(HANDOFF_LEDGER_KEY) === serialized;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* A well-formed envelope -- exactly its four fields, this version, a nonce,
+     a whole-millisecond time and a non-empty draft within the limit -- or null. */
+  function parseEnvelope(raw) {
+    var envelope;
+    try { envelope = JSON.parse(raw); } catch (e) { return null; }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return null;
+    if (Object.keys(envelope).sort().join() !== "createdAt,draft,nonce,v") return null;
+    if (envelope.v !== 1 || typeof envelope.draft !== "string" || !isNonce(envelope.nonce) ||
+        !Number.isSafeInteger(envelope.createdAt)) return null;
+    if (!envelope.draft.trim() || Array.from(envelope.draft).length > HANDOFF_MAX_CHARS) return null;
+    return envelope;
+  }
+
+  /* A message this page could not show it took, and whose removal it could
+     not confirm: the envelope is put back exactly as it was -- harmless if it
+     was never removed -- so the homepage can still give the message back once
+     this page is gone; and this page keeps a read-only copy it never sends.
+     It may still be the homepage's. */
+  function unverifiedHandoff(store, raw, envelope) {
+    try { store.setItem(HANDOFF_KEY, raw); } catch (e) { /* then this page's copy is the only one */ }
+    return { draft: envelope.draft, notice: COPY_HANDOFF_UNVERIFIED, authority: "withheld" };
+  }
+
+  /* { draft, notice[, authority] }: notice is null only when the draft may be
+     sent now; draft is null when the message was left to the homepage; and
+     authority is "withheld" when this page could not show it took it. */
+  function takeHandoff() {
+    var store, raw;
+    try {
+      store = window.sessionStorage;
+      raw = store.getItem(HANDOFF_KEY);
+    } catch (e) {
+      return null;
+    }
+    if (raw === null) return null;
+    var envelope = parseEnvelope(raw);
+    var now = Date.now();
+    // Too old for this page ever to take, so not this page's to remove: it is left exactly
+    // where it is, and the homepage can still give the message back.
+    if (envelope !== null && now - envelope.createdAt >= HANDOFF_MAX_AGE_MS) return null;
+    var removal = "kept";   // "removed", "kept" (certainly still there) or "unchecked"
+    try {
+      store.removeItem(HANDOFF_KEY);
+      try {
+        removal = store.getItem(HANDOFF_KEY) === null ? "removed" : "kept";
+      } catch (e) {
+        removal = "unchecked";
+      }
+    } catch (e) {
+      removal = "kept";
+    }
+
+    if (envelope === null) return null;
+    var age = now - envelope.createdAt;
+    if (age < -HANDOFF_SKEW_MS || age >= HANDOFF_MAX_AGE_MS) return null;
+
+    var left = { draft: null, notice: COPY_HANDOFF_LEFT };
+    var entries = readLedger(store);
+    if (entries === null) {
+      if (removal === "unchecked") return unverifiedHandoff(store, raw, envelope);
+      // Without the ledger, an earlier send of this very envelope cannot be ruled out: say nothing of its past.
+      if (removal === "kept") return { draft: null, notice: COPY_HANDOFF_LEFT_UNVERIFIED };
+      return { draft: envelope.draft, notice: COPY_HANDOFF_UNCHECKED };
+    }
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].n === envelope.nonce) return null;   // taken before: never sent or shown again
+    }
+    var recorded = recordNonce(store, entries, envelope.nonce, envelope.createdAt + HANDOFF_RETAIN_MS, now);
+    if (!recorded && removal === "kept") return left;     // nothing would show the homepage it was taken
+    if (!recorded && removal === "unchecked") return unverifiedHandoff(store, raw, envelope);
+    if (age >= HANDOFF_SEND_MS) return { draft: envelope.draft, notice: COPY_HANDOFF_LATE };
+    if (removal !== "removed" || !recorded) return { draft: envelope.draft, notice: COPY_HANDOFF_UNCHECKED };
+    return { draft: envelope.draft, notice: null };
+  }
+
+  function hideHandoffNotice() {
+    if (handoffNotice) handoffNotice.hidden = true;
+  }
+
+  /* For the rest of this page's life: the message box is read-only, and
+     Send, End & erase and the example prompts are disabled -- the visible
+     side of the refusals in requestReply() and every way into it. */
+  function withholdAuthority() {
+    form.setAttribute("data-authority", "withheld");
+    input.readOnly = true;
+    for (var i = 0; i < hints.length; i++) hints[i].disabled = true;
+    syncSendEnabled();
+  }
 
   if (emptyState) conversation.classList.add("is-empty");
   placeStarter();
   syncSendEnabled();
-  // Standalone, the composer takes focus at once. Framed by the homepage it
-  // does not: focusing it on load would scroll the homepage down to the chat
-  // and pull keyboard focus away from the page the visitor just opened. The
-  // homepage's CTAs focus it deliberately.
-  if (!isEmbedded) input.focus();
+
+  var handoff = takeHandoff();
+  if (handoff !== null && handoff.draft !== null) {
+    // The homepage's draft becomes this conversation's first message, once.
+    // It is shown only as text (addUserMessage) and goes through the same
+    // send() as any typed message -- or, when it may not be sent now, waits
+    // in the message box with a notice -- read-only, when this page could
+    // not show it took it.
+    stopHintGuide();
+    if (handoff.authority === "withheld") withholdAuthority();
+    input.value = handoff.draft;
+    draftRevision++;
+    autoGrow();
+    syncSendEnabled();
+  }
+  if (handoff !== null) {
+    if (handoff.notice === null) {
+      send();
+    } else if (handoffNotice && handoffNoticeText) {
+      handoffNotice.hidden = false;
+      handoffNoticeText.textContent = handoff.notice;
+    }
+  }
+  input.focus();
 })();
