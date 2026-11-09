@@ -261,19 +261,19 @@ def test_chat_paths_use_same_provider_policy_and_preserve_source_text(providers,
             return {"output": [{"type": "function_call", "name": "search_web", "call_id": "s1",
                                 "arguments": json.dumps({"query": "Tavily API documentation"})}]}
         assert "Tavily API documentation evidence." in json.dumps(items)
-        assert "Brave" in instructions
+        assert "configured search provider" in instructions
         return {"output": [{"type": "message", "content": [{"type": "output_text", "text": "Supported answer.\n\nSources: [Reference]"}]}]}
 
     def legacy_model(messages, max_tokens=None):
         providers["model"].append(messages)
         assert "Tavily API documentation evidence." in messages[-1].content
-        assert "Brave" in messages[0].content
+        assert "configured search provider" in messages[0].content
         return SimpleNamespace(content="Supported answer.\n\nSources: [Reference]", incomplete=False)
 
     monkeypatch.setattr(app, "_invoke_openai_native_tools", native_model)
     monkeypatch.setattr(app, "invoke_llm", legacy_model)
     answer = app.chat("Search the web for Tavily API reference on docs.example.test", [], session_id="provider-policy-pipeline")
-    assert answer == "Supported answer.\n\n**Sources**\n\n- [Reference](" + SOURCE + ")"
+    assert answer == "Supported answer.\n\n**Search results**\n\n- [Reference](" + SOURCE + ")"
     assert [c["provider"] for c in providers["calls"]] == (["brave", "tavily"] if fallback_used else ["brave"])
     assert len(providers["model"]) == (2 if native else 1)
 
@@ -574,7 +574,7 @@ def test_native_adequate_brave_evidence_uses_no_tavily(native_lookup, budgeted):
     assert result["provider_provenance"]["evidence_provider"] == "brave"
     assert "adequate" in state["model"][0]["instructions"]
     assert "one follow-up" in state["model"][0]["instructions"]
-    assert answer == "Supported answer.\n\n**Sources**\n\n- [Reference](" + SOURCE + ")"
+    assert answer == "Supported answer.\n\n**Search results**\n\n- [Reference](" + SOURCE + ")"
 
 
 @pytest.mark.parametrize("budgeted", [False, True])
@@ -729,7 +729,7 @@ def test_native_evidence_records_survive_and_display_urls_are_deduplicated(nativ
     answer,_=_run_lookup(state)
     outputs=_lookup_outputs(state)
     assert outputs[0]["results"][0]["content"]==first and outputs[1]["results"][0]["content"]==second
-    assert answer.count("**Sources**")==1 and answer.count("]("+SOURCE+")")==1
+    assert answer.count("**Search results**")==1 and answer.count("]("+SOURCE+")")==1
     assert answer.count("- [Reference]")== (1 if duplicate else 2)
     assert "Wrong" not in answer
 
@@ -1106,7 +1106,7 @@ def test_native_verification_keeps_records_distinct_and_display_urls_deduplicate
     answer, _ = _run_lookup(state, message=FIRMWARE)
     outputs = _lookup_outputs(state)
     assert [o["results"][0]["content"] for o in outputs[1:]] == [DISCOVERY, VERIFIED]
-    assert answer.count("**Sources**") == 1 and answer.count("](" + OFFICIAL_URL + ")") == 1
+    assert answer.count("**Search results**") == 1 and answer.count("](" + OFFICIAL_URL + ")") == 1
     assert "Wrong" not in answer
 
 

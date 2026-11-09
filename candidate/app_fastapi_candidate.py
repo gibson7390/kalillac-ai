@@ -48,6 +48,7 @@ from kalillac_routing.provider_transport import (
     post_json_within_budget,
 )
 from kalillac_routing import tavily_transport, search_providers, provider_usage, provider_controls
+from kalillac_routing import source_trust
 from kalillac_routing.provider_limits import load_controls
 
 MAX_MEMORY = 50
@@ -1191,7 +1192,7 @@ def _looks_like_news_hub_url(url):
     return False
 
 
-def run_web_search(query, include_domains=None):
+def run_web_search(query, include_domains=None, max_results=None, allow_domain_retry=True):
     """Run the configured search policy and return (status, results).
 
     Tavily-only preserves its existing search/retry/extraction behavior.
@@ -1209,6 +1210,11 @@ def run_web_search(query, include_domains=None):
     search-attempt allowance ran out before a later extraction or retry
     could be admitted; the results are exactly those obtained so far.
     Provider errors are never exposed to the user.
+
+    max_results: optional larger recall (at most six) for resource lists,
+    applied only to basic, non-news retrieval and always within the same
+    single provider request. allow_domain_retry=False sends no basic-search
+    domain retry (used for the one bounded ownership follow-up).
     """
     native_context = _NATIVE_SEARCH_CONTEXT.get()
     policy = native_context[0].policy if native_context is not None else SEARCH_PROVIDER_POLICY
@@ -1303,6 +1309,13 @@ def run_web_search(query, include_domains=None):
                 )
             )
         )
+
+        # Resource-list recall stays inside the one provider request. News
+        # retrieval (per-result extraction) and advanced depth keep their
+        # existing limits, so larger recall never adds a provider call.
+        result_limit = MAX_SEARCH_RESULTS
+        if max_results is not None and not news_freshness_search and not use_advanced:
+            result_limit = max(1, min(int(max_results), source_trust.MAX_RESOURCE_RESULTS))
 
         def make_concise_query(value):
             q = str(value)
@@ -1607,13 +1620,13 @@ def run_web_search(query, include_domains=None):
             if budget is not None:
                 budget.ensure_open()
             restriction_domains = search_providers.domains_for_query(requested_domains or search_domains, raw_query)
-            payload = search_providers.brave_payload(search_query, restriction_domains, MAX_SEARCH_RESULTS)
+            payload = search_providers.brave_payload(search_query, restriction_domains, result_limit)
             reason = "missing_credential"
             if BRAVE_API_KEY and str(BRAVE_API_KEY).strip():
                 try:
                     response = _post_single_search("brave", payload)
                     results = search_providers.normalize_brave(
-                        response, restriction_domains, MAX_SEARCH_RESULTS,
+                        response, restriction_domains, result_limit,
                         1600 if technical_verification_search or news_freshness_search else 800,
                     )
                 except RequestBudgetError:
@@ -1671,7 +1684,7 @@ def run_web_search(query, include_domains=None):
                 "search_depth": depth,
                 "max_results": (
                     5 if depth == "advanced"
-                    else MAX_SEARCH_RESULTS
+                    else result_limit
                 ),
                 "timeout": SEARCH_TIMEOUT_SECONDS,
             }
@@ -1729,7 +1742,7 @@ def run_web_search(query, include_domains=None):
             limit = (
                 5
                 if use_advanced
-                else MAX_SEARCH_RESULTS
+                else result_limit
             )
 
             for item in search_response.get(
@@ -1916,6 +1929,7 @@ def run_web_search(query, include_domains=None):
             and results
             and not use_advanced
             and not single_attempt_fallback
+            and allow_domain_retry
         ):
             primary_hosts = set()
 
@@ -1986,7 +2000,7 @@ def run_web_search(query, include_domains=None):
         # Keep downstream prompt size bounded.
         return (
             "partial" if coverage_exhausted is not None else "ok",
-            results[:MAX_SEARCH_RESULTS],
+            results[:result_limit],
         )
 
     except _SEARCH_PATH_STOPS:
@@ -2077,7 +2091,7 @@ You are Kalillac AI, a privacy-first public AI assistant.
 
 IDENTITY:
 - You are Kalillac AI, a privacy-first public AI assistant.
-- Created by Robert Casey. Name the creator only when asked who created, built, developed, or founded Kalillac AI. Do not put that name in routine answers, and do not invent the creator's motivations, beliefs, promises, or decisions.
+- Created by Robert Casey. This is Kalillac AI's own creator. Mention Kalillac AI's creator only when asked who created, built, developed, or founded Kalillac AI; do not volunteer it in routine answers, and do not invent the creator's motivations, beliefs, promises, or decisions. This rule concerns only describing Kalillac AI itself: it never prevents you from reporting a person's name, including this same name, when that name appears in search results or user-supplied material as relevant evidence about another website, organization or topic. Treat such a name exactly like any other name in the evidence, and do not assume a connection to Kalillac AI that the evidence does not state.
 - You are designed to be useful, direct, technically capable, and transparent about your limitations.
 - Privacy-conscious session handling, controlled request routing, and reliable task handling are central parts of your design.
 - Do not describe yourself as a demo, prototype, public face of another system, private build, enterprise product, or lesser version of another product.
@@ -2085,7 +2099,7 @@ IDENTITY:
 - Avoid using the word "fluff" as your own routine wording; prefer "filler", "unnecessary wording", or another natural alternative. This is a writing-style preference, not a prohibited-word rule. If the user explicitly asks you to say, quote, define, translate, discuss, or otherwise use the word itself, use it normally. Never claim that you are forbidden or not allowed to say it.
 
 CAPABILITIES:
-- You can perform live web searches through Tavily when a request needs current information or names a specific website, and you display the sources used.
+- You can perform live web searches through Kalillac's configured search provider when a request needs current information or names a specific website, and you display the sources used.
 - Live search is routed per request. It is not available on every request, it is rate limited per session, and it is unavailable if the search service fails or the session limit is reached.
 - Never claim that you cannot search the web, that you have no live search, or that you only have training data. That is factually wrong about Kalillac AI.
 - If a search did not run for the current request, say that this request was not routed to live search, rather than denying the capability.
@@ -6057,7 +6071,7 @@ def _map_outside_code_fences(text, transform):
     )
 
 
-def strip_model_source_footer(reply, sources=None):
+def strip_model_source_footer(reply, sources=None, *, search_results_heading=False):
     """Remove only a trailing citation-only Source/Sources footer.
 
     Plain names must match explicitly supplied retrieved titles in full.
@@ -6124,9 +6138,13 @@ def strip_model_source_footer(reply, sources=None):
                     math_end = None
             protected[index] = in_math or line.startswith(("    ", "\t"))
 
+    footer_labels = r"(?:Sources?|Search[ \t]+results)" if search_results_heading else r"Sources?"
     heading = re.compile(
-        r"^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*Sources?:?\*\*:?[ \t]*"
-        r"|Sources(?:[ \t]*:[ \t]*|[ \t]+|$)|Source(?:[ \t]*:[ \t]*|$))(.*?)[ \t]*$",
+        (rf"^[ \t]*(?:#{{1,6}}[ \t]+)?(?:\*\*{footer_labels}:?\*\*:?[ \t]*"
+         rf"|{footer_labels}(?:[ \t]*:[ \t]*|[ \t]+|$))(.*?)[ \t]*$"
+         if search_results_heading else
+         r"^[ \t]*(?:#{1,6}[ \t]+)?(?:\*\*Sources?:?\*\*:?[ \t]*"
+         r"|Sources(?:[ \t]*:[ \t]*|[ \t]+|$)|Source(?:[ \t]*:[ \t]*|$))(.*?)[ \t]*$"),
         re.IGNORECASE,
     )
     citation = re.compile(
@@ -11041,7 +11059,7 @@ WEB SEARCH:
 
 KALILLAC RUNTIME:
 - For questions about Kalillac's current architecture, router, routing behavior, request flow, native tools, or provider behavior, request get_kalillac_runtime_facts before answering. Do not reconstruct Kalillac's architecture from generic AI patterns.
-- Name Kalillac's creator only when the CURRENT USER QUESTION specifically asks who created, built, developed, or founded Kalillac. Do not volunteer the creator in a general description of Kalillac.
+- Mention Kalillac's own creator only when the CURRENT USER QUESTION specifically asks who created, built, developed, or founded Kalillac. Do not volunteer Kalillac's creator in a general description of Kalillac. This rule concerns only Kalillac itself: it never prevents you from reporting a person's name, including the same name, when that name appears in search results as relevant evidence about another website, organization or topic.
 - Use get_kalillac_runtime_facts for Kalillac's own configured models,
   providers, search provider, limits, routing, memory behavior, or runtime
   architecture.
@@ -11295,6 +11313,12 @@ def _run_v31_native_tool_chat(
     followup_enabled = lookup.policy.native_tavily_followup
     model_round = 0
     private_request = is_private_search_target(message)
+    # Source selection: a fresh nonce per request (see source_trust).
+    selection_nonce = source_trust.new_selection_nonce()
+    resource_limit = source_trust.resource_result_limit(message)
+    # Ownership follow-up: the hostname comes only from returned results;
+    # it may use only an existing bounded Tavily follow-up slot.
+    lookup.ownership_host = None
 
     current_clock = datetime.now(timezone.utc)
     current_date = current_clock.date().isoformat()
@@ -11312,6 +11336,9 @@ def _run_v31_native_tool_chat(
         + runtime_configuration_context()
         + "\n\n"
         + render_kalillac_product_roadmap()
+        + "\n\n" + source_trust.SOURCE_TRUST_RULES
+        + "\n\nWhen your answer uses a successful search_web result:\n"
+        + source_trust.selection_instructions(selection_nonce, "source_id")
     )
 
     if kalillac_self_knowledge_context_active(message, history):
@@ -11429,6 +11456,25 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             call.arguments["query"], build_web_search_query(message, history),
         )
 
+        # Reuse already supplied first-party ownership evidence when the
+        # model repeats that same ownership question. Generic independent
+        # verification remains subject to the existing bounded lookup rules.
+        if (search_calls >= 1
+                and re.search(r"\b(?:who (?:runs|owns|operates|created|built|maintains)|about|ownership)\b", query, re.I)
+                and not re.search(r"\b(?:independent|corroborat\w*|verif\w*|profile|report)\b", query, re.I)):
+            existing_host = source_trust.ownership_followup_host(query, search_results)
+            if existing_host and source_trust.has_ownership_evidence(existing_host, search_results):
+                return {"status": "ok", "results": [],
+                        "reason": "Matching-host About evidence identifying the operator was already supplied. Reuse it and attribute the claim to the site; it is not independent verification.",
+                        **provider_trace()}
+
+        # Resolve the pending ownership query before the existing narrower-
+        # query check, including when the first search already fell back to
+        # Tavily. Rejections below still take precedence over this follow-up.
+        ownership_host = lookup.ownership_host if followup_enabled and search_calls >= 1 else None
+        if ownership_host is not None:
+            query = source_trust.ownership_followup_query(ownership_host)
+
         selected_provider = lookup.policy.primary
         if search_calls >= 1:
             search_calls += 1
@@ -11458,6 +11504,11 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             if not session_search_allowed(state):
                 return {"status": "limited", "results": [], **provider_trace()}
             lookup.session_admitted = True
+        ownership_followup = ownership_host is not None and selected_provider == "tavily"
+        if ownership_followup:
+            # One ownership follow-up only; a later existing verification
+            # slot retains its ordinary query and all existing bounds.
+            lookup.ownership_host = None
         lookup.last_round = model_round
         lookup.queries.append(query)
 
@@ -11477,12 +11528,21 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             )
         )
 
+        if ownership_followup:
+            domains = [ownership_host]
+        search_kwargs = {"max_results": resource_limit} if resource_limit else {}
+
         if followup_enabled:
             lookup.evidence_provider = None
             tavily_before = lookup.attempts.count("tavily")
             token = _NATIVE_SEARCH_CONTEXT.set((lookup, selected_provider))
             try:
-                status, results = run_web_search(query, include_domains=domains)
+                status, results = run_web_search(query, include_domains=domains, **search_kwargs)
+                admission_host = ownership_host if ownership_followup else (
+                    source_trust.initial_ownership_host(message, results) if search_calls == 1 else None)
+                if admission_host is not None:
+                    results = (source_trust.matching_ownership_results(admission_host, results) if ownership_followup
+                               else source_trust.initial_ownership_results(admission_host, results))
             finally:
                 _NATIVE_SEARCH_CONTEXT.reset(token)
             # Only usable Tavily evidence opens targeted verification. A
@@ -11494,23 +11554,45 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             elif selected_provider == "tavily" or lookup.attempts.count("tavily") > tavily_before:
                 lookup.closed = True
         else:
-            status, results = run_web_search(query, include_domains=domains)
+            status, results = run_web_search(query, include_domains=domains, **search_kwargs)
+            admission_host = source_trust.initial_ownership_host(message, results) if search_calls == 1 else None
+            if admission_host is not None:
+                results = source_trust.initial_ownership_results(admission_host, results)
 
-        if status not in {"ok", "partial"}:
+        if status not in {"ok", "partial"} or (ownership_followup and not results):
             return {
                 "status": "unavailable",
+                **({"reason": source_trust.missing_ownership_note(ownership_host)} if ownership_followup else {}),
                 "results": [],
                 **provider_trace(selected_provider),
             }
 
+        first_source_id = len(search_results) + 1
         search_results.extend(results)
 
         if status == "partial":
             search_coverage_limited = True
 
+        ownership_note = {}
+        if ownership_followup:
+            ownership_note = {"ownership_followup": {"site_hostname": ownership_host,
+                              "note": source_trust.ownership_evidence_note(ownership_host)}}
+        elif followup_enabled and search_calls == 1:
+            lookup.ownership_host = source_trust.ownership_followup_host(message, results)
+            if lookup.ownership_host is not None and source_trust.has_ownership_evidence(lookup.ownership_host, results):
+                lookup.ownership_host = None
+            if lookup.ownership_host is not None:
+                ownership_note = {"ownership_followup": {
+                    "site_hostname": lookup.ownership_host,
+                    "note": ("If these results do not show who operates this site, you may request one more "
+                             "search_web in a later round; Kalillac restricts it to this hostname's About, "
+                             "contact, ownership and privacy pages."),
+                }}
+
         return {
             "status": "ok",
             **provider_trace(selected_provider, lookup.evidence_provider),
+            **ownership_note,
             "coverage": "limited" if status == "partial" else "complete",
             "search_date": current_date,
             "search_date_timezone": "UTC",
@@ -11521,12 +11603,14 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             "query": query,
             "results": [
                 {
-                    "title": item.get("title"),
+                    "source_id": first_source_id + offset,
+                    **({"ownership_provenance": item["ownership_provenance"]} if item.get("ownership_provenance") else {}),
+                    "title": source_trust.neutralize_controls(item.get("title") or ""),
                     "url": item.get("url"),
                     "published": item.get("published"),
-                    "content": item.get("content"),
+                    "content": source_trust.neutralize_controls(item.get("content") or ""),
                 }
-                for item in results
+                for offset, item in enumerate(results)
             ],
         }
 
@@ -11571,15 +11655,18 @@ NATIVE SEARCH EVIDENCE RECOVERY:
         raise ChatInternalError() from None
 
     try:
-        reply = clean_ai_reply(
-            result.text
+        # Every control-like line is removed before any cleaning or output;
+        # ids are validated against every result supplied to the model.
+        reply, selection = source_trust.parse_selection(
+            result.text, selection_nonce, len(search_results),
         )
+        reply = clean_ai_reply(reply)
 
         if explanation_continuation:
             reply = unwrap_accidental_prose_fence(reply, "followup", sources=search_results)
 
         # Sources have exactly one owner: Kalillac application code.
-        reply = strip_model_source_footer(reply, sources=search_results)
+        reply = strip_model_source_footer(reply, sources=search_results, search_results_heading=bool(search_calls))
 
         if result.incomplete:
             print(
@@ -11589,24 +11676,12 @@ NATIVE SEARCH EVIDENCE RECOVERY:
             reply = mark_incomplete_reply(reply)
 
         if not search_results:
-            return reply
+            return source_trust.enforce_answer_links(reply, [], selection) if search_calls else reply
 
         if search_coverage_limited:
             reply = with_limited_search_notice(reply)
 
-        displayed_sources = {}
-        for item in search_results:
-            displayed_sources.setdefault(item["url"], item)
-        sources = "\n".join(
-            f"- [{item['title']}]({item['url']})"
-            for item in displayed_sources.values()
-        )
-
-        return (
-            f"{reply}\n\n"
-            f"**Sources**\n\n"
-            f"{sources}"
-        )
+        return source_trust.enforce_answer_links(reply, search_results, selection) + source_trust.render_source_footer(search_results, selection)
     except Exception as defect:
         # Cleaning, source rendering and incomplete labelling are Kalillac
         # code: a failure is an internal defect, not a model failure.
@@ -12155,9 +12230,11 @@ def _chat_pipeline(message, history, request=None, session_id=None, *, workspace
                 search_history,
             )
 
+            resource_limit = source_trust.resource_result_limit(message)
             status, results = run_web_search(
                 search_query,
                 include_domains=search_domains,
+                **({"max_results": resource_limit} if resource_limit else {}),
             )
 
             if status not in {"ok", "partial"}:
@@ -12176,6 +12253,11 @@ def _chat_pipeline(message, history, request=None, session_id=None, *, workspace
                     "verification."
                 )
 
+            # Initial ownership evidence has the same exact-host admission
+            # as recovery, before verification, prompts or source numbering.
+            admission_host = source_trust.initial_ownership_host(message, results)
+            if admission_host is not None:
+                results = source_trust.initial_ownership_results(admission_host, results)
             log(f"SEARCH: ok ({len(results)} results)")
 
             if verification_required:
@@ -12193,6 +12275,36 @@ def _chat_pipeline(message, history, request=None, session_id=None, *, workspace
                         "the available search results, so I won't guess."
                     )
 
+            # One bounded ownership follow-up: only for an explicit trust or
+            # ownership question whose named site was returned; the hostname
+            # comes from a returned URL and restricts the search. It runs
+            # only if the request's search allowance admits it.
+            ownership_host = source_trust.ownership_followup_host(message, results)
+            ownership_note = ""
+            if ownership_host is not None and not source_trust.has_ownership_evidence(ownership_host, results):
+                try:
+                    followup_status, followup_results = run_web_search(
+                        source_trust.ownership_followup_query(ownership_host),
+                        include_domains=[ownership_host],
+                        allow_domain_retry=False,
+                    )
+                except CallBudgetExhausted as exhausted:
+                    # Not admitted, so nothing was sent.
+                    if exhausted.kind != SEARCH_ATTEMPT:
+                        raise
+                    followup_status, followup_results = "partial", []
+                followup_results = source_trust.matching_ownership_results(ownership_host, followup_results)
+                ownership_note = (source_trust.ownership_evidence_note(ownership_host) if followup_results
+                                  else source_trust.missing_ownership_note(ownership_host))
+                log(f"SEARCH: ownership follow-up {followup_status} ({len(followup_results)} results)")
+                if followup_status == "partial":
+                    status = "partial"
+                if followup_status in {"ok", "partial"}:
+                    results = list(results) + list(followup_results)
+                if not followup_results:
+                    ownership_host = None
+
+            selection_nonce = source_trust.new_selection_nonce()
             result_blocks = []
             for n, item in enumerate(results, start=1):
                 published_line = (
@@ -12208,10 +12320,11 @@ def _chat_pipeline(message, history, request=None, session_id=None, *, workspace
 
                 result_blocks.append(
                     f"WEB RESULT [{n}]\n"
-                    f"TITLE: {item['title']}\n"
-                    f"{published_line}"
+                    f"TITLE: {source_trust.neutralize_controls(item['title'])}\n"
+                    + (f"OWNERSHIP PROVENANCE: {item['ownership_provenance']}\n" if item.get("ownership_provenance") else "")
+                    + f"{published_line}"
                     f"URL: {item['url']}\n"
-                    f"CONTENT:\n{item['content']}"
+                    f"CONTENT:\n{source_trust.neutralize_controls(item['content'])}"
                 )
 
             search_context = "\n\n".join(result_blocks)
@@ -12278,6 +12391,9 @@ Rules:
 - If the results do not contain the answer, say so plainly.
 - Never invent URLs, dates, prices, quotations, or additional sources.
 - Do not mention retrieval systems or internal processing.
+{ownership_note}
+{source_trust.SOURCE_TRUST_RULES}
+{source_trust.selection_instructions(selection_nonce, "number in its WEB RESULT [n] heading")}
 {QUANTITATIVE_GROUNDING_RULES}
 {WEB_EVIDENCE_TIME_RULES}
 {ENGAGEMENT_REMINDER}
@@ -12301,9 +12417,12 @@ Rules:
             )
 
             reply = extract_response_text(response.content)
+            # Every control-like line is removed before any cleaning or
+            # output; ids are validated against the numbered WEB RESULTS.
+            reply, selection = source_trust.parse_selection(reply, selection_nonce, len(results))
             reply = clean_ai_reply(reply)
             reply = unwrap_accidental_prose_fence(reply, route, sources=results)
-            reply = strip_model_source_footer(reply, sources=results)
+            reply = strip_model_source_footer(reply, sources=results, search_results_heading=True)
 
             if is_incomplete_model_response(response):
                 reply = mark_incomplete_reply(reply)
@@ -12311,14 +12430,10 @@ Rules:
             if status == "partial":
                 reply = with_limited_search_notice(reply)
 
-            sources = "\n".join(
-                f"- [{item['title']}]({item['url']})" for item in results
-            )
-
             log("MODEL CALLED: yes")
             log("===== END ROUTE LOG =====\n")
 
-            return f"{reply}\n\n**Sources**\n\n{sources}"
+            return source_trust.enforce_answer_links(reply, results, selection) + source_trust.render_source_footer(results, selection)
 
         if route == "memory":
             direct_memory_answer = answer_direct_memory_question(message, memory)

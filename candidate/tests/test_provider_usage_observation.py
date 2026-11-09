@@ -130,6 +130,9 @@ def test_pipeline_actual_search_and_tool_rounds(model, providers, monkeypatch, n
 
 @pytest.mark.parametrize("native", [False, True])
 def test_pipeline_payloads_and_replies_identical_when_observed(model, monkeypatch, native):
+    # Pin only the per-request control nonce, keeping the entire payload
+    # comparison exact across the two otherwise equivalent requests.
+    monkeypatch.setattr(app.source_trust, "new_selection_nonce", lambda: "0123456789ab")
     monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", native)
     model["responses"] = [response(), response()]
     expected = app.chat("Explain public key encryption simply.", [], session_id="usage-control")

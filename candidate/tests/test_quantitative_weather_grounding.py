@@ -76,7 +76,7 @@ def _provider_text(state):
 
 
 def _expected_source_list(results):
-    return "**Sources**\n\n" + "\n".join(f"- [{item['title']}]({item['url']})" for item in results)
+    return "**Search results**\n\n" + "\n".join(f"- [{item['title']}]({item['url']})" for item in results)
 
 
 def _weather_chat(state, monkeypatch, native):
@@ -158,7 +158,8 @@ def test_weather_time_evidence_and_guidance_reach_actual_provider(pipeline, monk
     if native:
         outputs = [json.loads(item["output"]) for item in pipeline["payloads"][-1]["input"]
                    if item.get("type") == "function_call_output"]
-        assert outputs[0]["results"] == pipeline["results"]
+        assert outputs[0]["results"] == [{**item, "source_id": i}
+                                         for i, item in enumerate(pipeline["results"], 1)]
     else:
         assert all(item["content"] in prompt for item in pipeline["results"])
     if freshness == "mixed-times":
@@ -219,7 +220,9 @@ def test_footer_cleanup_preserves_prose_math_and_code(pipeline, monkeypatch, nat
 
     result = _weather_chat(pipeline, monkeypatch, native)
 
-    assert result == body + "\n\n" + _expected_source_list(pipeline["results"])
+    # Keep every prose/math byte; this unfenced link was never retrieved.
+    expected = body.replace("[Link](https://literal.test)", "Link") if body.startswith("**Sources**") else body
+    assert result == expected + "\n\n" + _expected_source_list(pipeline["results"])
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
@@ -291,6 +294,8 @@ def test_source_cleanup_numeric_and_inline_code_boundaries_pipeline(
 
     result = _weather_chat(pipeline, monkeypatch, native)
 
+    if case.startswith("numeric-after-citation-"):
+        expected = expected.replace("[Reference](https://example.test)", "Reference")
     assert result == expected + "\n\n" + _expected_source_list(pipeline["results"])
 
 
@@ -330,7 +335,10 @@ def test_inline_ticks_cannot_cross_math_paragraph_or_fenced_block_pipeline(pipel
 
     result = _weather_chat(pipeline, monkeypatch, native)
 
-    assert result == answer + "\n\n" + _expected_source_list(pipeline["results"])
+    # The client leaves the paragraph-crossing unmatched-tick fragment
+    # outside protected math. Its unretrieved link is therefore active.
+    expected = answer.replace("[NWS](https://weather.test)", "NWS") if answer.startswith("Use an unmatched") else answer
+    assert result == expected + "\n\n" + _expected_source_list(pipeline["results"])
 
 
 # --- timezone-aware request clock and complete committed calculus context ---
@@ -401,7 +409,8 @@ def test_current_clock_location_date_boundary_in_actual_payload(
         outputs = [json.loads(item["output"]) for item in pipeline["payloads"][-1]["input"]
                    if item.get("type") == "function_call_output"]
         assert outputs[0]["search_date"] == utc_server_clock.date().isoformat()
-        assert outputs[0]["results"] == pipeline["results"]
+        assert outputs[0]["results"] == [{**item, "source_id": i}
+                                         for i, item in enumerate(pipeline["results"], 1)]
     else:
         assert pipeline["results"][0]["content"] in prompt
 
@@ -801,10 +810,11 @@ def test_live_source_footer_examples_through_actual_chat(pipeline, monkeypatch, 
     assert answer == body + "\n\n" + _expected_source_list(sources)
     assert len(pipeline["searches"]) == 1 and len(pipeline["payloads"]) == (2 if native else 1)
     assert pipeline["results"] == sources
-    assert answer.count("**Sources**") == 1 and "\nSource:" not in answer and "\nSources:" not in answer
+    assert answer.count("**Search results**") == 1 and "\nSource:" not in answer and "\nSources:" not in answer
     if native:
         result = next(json.loads(i["output"]) for i in pipeline["payloads"][-1]["input"] if i.get("type")=="function_call_output")
-        assert result["results"] == [{"title":s["title"],"url":s["url"],"published":s["published"],"content":s["content"]} for s in sources]
+        assert result["results"] == [{"source_id":i,"title":s["title"],"url":s["url"],"published":s["published"],"content":s["content"]}
+                                     for i, s in enumerate(sources, 1)]
 
 
 PRESENTATION_PRESERVED_ANSWERS = [
@@ -836,7 +846,8 @@ PRESENTATION_PRESERVED_ANSWERS = [
 def test_evidence_aware_footer_preserves_answer_code_and_math(pipeline, monkeypatch, native, body):
     pipeline["results"] = copy.deepcopy(LIVE_FOOTER_CASES[0][2] + LIVE_FOOTER_CASES[1][2])
     pipeline["text"] = body
-    assert _weather_chat(pipeline, monkeypatch, native) == body + "\n\n" + _expected_source_list(pipeline["results"])
+    expected = body.replace("[Reference](https://example.test)", "Reference") if body.startswith("Sources: [Reference]") else body
+    assert _weather_chat(pipeline, monkeypatch, native) == expected + "\n\n" + _expected_source_list(pipeline["results"])
 
 
 @pytest.mark.parametrize("native", [False, True])

@@ -5,7 +5,7 @@
   OpenAI failure stays 503 model_provider_unavailable.
 - Search-attempt exhaustion after usable results keeps exactly those
   results, marks the native tool result coverage "limited", and appends one
-  fixed application-written notice before Sources.
+  fixed application-written notice before the application source footer.
 
 Every provider is scripted; conftest.py blocks all non-loopback network
 access and refuses a real bounded Tavily transport.
@@ -233,7 +233,7 @@ def tool_outputs(payload):
 
 
 def sources_of(text):
-    head, _, tail = text.partition("\n\n**Sources**\n\n")
+    head, _, tail = text.partition("\n\n**Search results**\n\n")
     return head, [line for line in tail.splitlines() if line.startswith("- [")]
 
 
@@ -533,7 +533,7 @@ def test_legacy_complete_search_has_no_notice(providers, monkeypatch):
     body = post_chat("latest AI news").json()
 
     assert NOTICE not in body["reply"]
-    assert "**Sources**" in body["reply"]
+    assert "**Search results**" in body["reply"]
 
 
 def test_legacy_zero_usable_results_stays_service_unavailable(providers, monkeypatch):

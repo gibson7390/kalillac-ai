@@ -301,7 +301,7 @@ def test_public_requests_still_search(harness, message):
     assert harness["searches"] == ["OpenAI Groq public query"]
     assert harness["allowance"] == 1 and harness["domains"] >= 1
     assert len(state["search_times"]) == 1
-    assert "**Sources**" in reply and "https://example.com/public" in reply
+    assert "**Search results**" in reply and "https://example.com/public" in reply
     assert harness["network"] == []
 
 

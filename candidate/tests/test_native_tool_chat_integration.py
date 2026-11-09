@@ -197,7 +197,7 @@ def test_v31_native_tool_chat_behavior(monkeypatch):
     assert "**Sources**" not in rewrite
 
     assert counters["search"] == 1
-    assert news.count("**Sources**") == 1
+    assert news.count("**Search results**") == 1
     assert "https://example.com/ai-news" in news
     assert "https://wrong.example" not in news
 

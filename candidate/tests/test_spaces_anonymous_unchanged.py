@@ -107,6 +107,10 @@ def run_transcript(module, *, budget, native, install=None):
 
     original_time = module.render_current_time_context
     p = _Patcher()
+    # The control nonce is intentionally fresh per request in production.
+    # Pin it in this byte-for-byte comparison, just as the clock is pinned.
+    if hasattr(module, "source_trust"):
+        p.set(module.source_trust, "new_selection_nonce", lambda: "0123456789ab")
     p.set(module, "OPENAI_API_KEY", "test-only-key")
     p.set(module, "V31_NATIVE_TOOL_ROUTING", native)
     p.set(module, "_request_limits", RequestLimits(**BASE_LIMITS) if budget else None)

@@ -81,7 +81,7 @@ def test_exact_documentation_cases_reach_provider_pipeline(providers, monkeypatc
     with observation_scope(collector, case_number=case_number), budget_scope(budget):
         reply = app.chat(message, [], session_id="documentation-offline")
     assert app.classify_request(message, []) == "web_search"
-    assert answer in reply and url in reply and reply.count("**Sources**") == 1
+    assert answer in reply and url in reply and reply.count("**Search results**") == 1
     assert [c["provider"] for c in providers["calls"]] == (["brave", "tavily"] if fallback else ["brave"])
     assert providers["calls"][0]["payload"]["goggles"] == "$discard\n$site=" + domain
     if fallback:
