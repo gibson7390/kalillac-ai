@@ -660,7 +660,9 @@ def test_weather_labels_values_and_freshness_guidance_reach_actual_prompt(pipeli
         output = next(json.loads(i["output"]) for i in pipeline["payloads"][-1]["input"] if i.get("type")=="function_call_output")
         assert output["results"][0]["content"] == content
     else:
-        assert content in prompt
+        # Legacy prompts frame provider content structurally: every line is
+        # quoted inside the untrusted-text block, values and labels intact.
+        assert app.untrusted_text.fenced_untrusted(content) in prompt
     # This scripted output is a formatting control, not proof of model adherence.
     assert answer == pipeline["text"] + "\n\n" + _expected_source_list(pipeline["results"])
 
