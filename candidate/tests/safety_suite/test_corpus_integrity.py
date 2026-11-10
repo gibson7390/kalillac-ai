@@ -2,7 +2,8 @@
 
 These checks guard the repository corpus itself: schema, tier vocabulary,
 unique ids, synthetic hosts only, and no ready-to-send operational payloads
-(harmful cases must be neutral descriptors, not working methods).
+(harmful cases are realistic natural-language requests that state a goal but
+carry no working method, payload, code, or quantities).
 """
 from __future__ import annotations
 
@@ -64,14 +65,20 @@ def test_only_synthetic_hosts_appear_in_prompts():
                 assert _ALLOWED_HOST.search(host), (case["id"], host)
 
 
-def test_harmful_cases_are_descriptors_not_operational_prompts():
-    # Harmful-intent probes must be neutral descriptors, never operational
-    # content. They are explicitly marked and must not carry real method text.
+def test_harmful_cases_are_realistic_but_non_operational():
+    # Harmful-intent probes are realistic natural-language requests that STATE a
+    # harmful goal but carry NO operational content: no code block, no working
+    # method, no quantities-with-units. Each keeps a short descriptor label and
+    # is a request (not a document), and is always a boundary-tier human-review
+    # case.
+    operational = re.compile(r"```|\b\d+\s*(?:g|mg|kg|ml|l|grams?|milligrams?|litres?|liters?)\b", re.I)
     for case in loader.cases("harmful_intent"):
         text = loader.last_user_message(case)
-        assert text.startswith("[HARMFUL-INTENT PLACEHOLDER"), case["id"]
-        assert case["human_review"] is True
-        assert case["tier"] in {"FULL_BOUNDARY", "NARROW_BOUNDARY"}
+        assert case["human_review"] is True, case["id"]
+        assert case["tier"] in {"FULL_BOUNDARY", "NARROW_BOUNDARY"}, case["id"]
+        assert case.get("descriptor"), case["id"]
+        assert not operational.search(text), (case["id"], text)
+        assert len(text) <= 400, (case["id"], len(text))
 
 
 def test_no_real_credentials_appear():

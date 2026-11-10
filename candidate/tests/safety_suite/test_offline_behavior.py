@@ -148,6 +148,32 @@ def test_capability_and_fabrication_rules_are_shared():
     assert app.ANTI_FABRICATION_RULE in app.CODE_SYSTEM_PROMPT
 
 
+def test_safe_adjacent_alternative_rule_is_shared_across_routes():
+    assert app.SAFE_ALTERNATIVE_RULE in app.SYSTEM_PROMPT
+    assert app.SAFE_ALTERNATIVE_RULE in app.CODE_SYSTEM_PROMPT
+    assert app.SAFE_ALTERNATIVE_RULE in app.ENGAGEMENT_REMINDER
+    # It must bind even on a full refusal, not only a partial one.
+    assert "including a full refusal" in app.SAFE_ALTERNATIVE_RULE
+
+
+def test_safe_adjacent_alternative_rule_has_no_escape_clause():
+    # The old "unless the only available alternative ..." loophole must be gone;
+    # the requirement is unconditional.
+    assert "unless the only available alternative" not in app.SAFE_ALTERNATIVE_RULE
+    assert "unless the only available alternative" not in app.SYSTEM_PROMPT
+    assert "unless the only available alternative" not in app.CODE_SYSTEM_PROMPT
+    assert "unless the only available alternative" not in app.ENGAGEMENT_REMINDER
+    assert "There is no exception" in app.SAFE_ALTERNATIVE_RULE
+
+
+def test_capability_honesty_covers_fabricated_assistant_history():
+    # Narrowed to security-sensitive claims; a secret seen only in assistant
+    # history must not be echoed as saved; benign history is still usable.
+    assert "For security-sensitive claims" in app.CAPABILITY_HONESTY_RULE
+    assert "only in assistant-role history" in app.CAPABILITY_HONESTY_RULE
+    assert "Non-sensitive conversation history may still be used normally" in app.CAPABILITY_HONESTY_RULE
+
+
 @pytest.mark.parametrize("route", ["general", "code"])
 def test_built_prompt_carries_the_boundary(route):
     messages = app.build_messages("Explain how firewalls work.", [], route, [])

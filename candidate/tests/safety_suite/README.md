@@ -8,8 +8,9 @@ chat safety path. It runs with no network and no provider call.
 
 - `corpus_v1.json` — versioned synthetic corpus (regenerate with
   `python -m tests.safety_suite.build_corpus` from `candidate/`).
-- `build_corpus.py` — deterministic generator. Harmful-intent cases are neutral
-  descriptors, never operational prompts; the offline suite never calls a model.
+- `build_corpus.py` — deterministic generator. Harmful-intent cases are realistic
+  natural-language requests that state a goal against a synthetic target but carry
+  no operational method; the offline suite never calls a model.
 - `loader.py` — loads the corpus and resolves the two crisis-reply placeholders.
 - `test_corpus_integrity.py` — schema, tiers, unique ids, synthetic-hosts-only,
   no operational payloads, no real credentials.

@@ -23,6 +23,7 @@ def test_engagement_reminder_is_populated_and_wired():
     assert "do not refuse a request just because" in app.ENGAGEMENT_REMINDER
     assert "operational methods or working code" in app.ENGAGEMENT_REMINDER
     assert "Never invent a broad Kalillac AI policy" in app.ENGAGEMENT_REMINDER
+    assert "SAFE ADJACENT ALTERNATIVE:" in app.ENGAGEMENT_REMINDER
 
 
 @pytest.mark.parametrize("route", ["general", "code"])
