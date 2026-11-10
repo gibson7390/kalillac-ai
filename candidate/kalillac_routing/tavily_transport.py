@@ -15,7 +15,7 @@ decide what a failure means for the user.
 - Responses must be a JSON object whose "results" (absent means none, as
   in the SDK) is a list of objects; anything else is TavilyResponseInvalid,
   an ordinary remote failure.
-- The holder is Tavily's own: separate from every other provider's holder,
+- The holder is search-owned: shared with Brave, separate from OpenAI's holder,
   with its own quarantine and closed state. It is created on the first
   bounded operation, never by shutdown, and close_transport() closes only a
   holder that exists.
@@ -203,6 +203,11 @@ class TavilyTransportSlot:
 
 
 _SLOT = TavilyTransportSlot()
+
+
+def search_holder() -> TransportHolder:
+    """Shared bounded search capacity; creation remains lazy."""
+    return _SLOT.holder()
 
 
 def existing_holder() -> TransportHolder | None:

@@ -1,7 +1,8 @@
 """Aggregate usage metering for signed-in accounts.
 
 Enabled only by KALILLAC_USAGE_METERING_ENABLED. This is the one deliberate
-place where /api/chat looks at the account cookie, and it does so only to
+place where /api/chat looks at the account cookie while quota enforcement is
+off, and it does so only to
 add numbers to the signed-in account's daily totals:
 
 - recorded: successful chat count, request characters, response characters;
@@ -18,7 +19,9 @@ Neither the lookup nor the write ever raises into chat: failures are logged
 by exception class only.
 
 Character counts are Unicode code points. They are usage metrics, not
-provider tokens or inference cost. No quota is enforced here.
+provider tokens or inference cost. No quota is enforced here. With daily
+enforcement on, the separate quota path resolves identity and commits the
+successful count; this meter adds only after-response character totals.
 """
 
 from __future__ import annotations
@@ -156,9 +159,13 @@ class UsageMeter:
         usage_date: date,
         request_chars: int,
         response_chars: int,
+        *,
+        successful_chats: int = 1,
     ) -> None:
         """Add one successful chat to an account's daily aggregate.
 
+        successful_chats defaults to one for the original meter. The quota
+        path passes zero after settling the count, preventing double counting.
         The account was resolved at request acceptance and is not checked
         again. Never raises: the chat has already succeeded, and a missed
         meter during a database incident is preferred over failing it.
@@ -177,6 +184,7 @@ class UsageMeter:
                     usage_date,
                     request_chars=request_chars,
                     response_chars=response_chars,
+                    **({} if successful_chats == 1 else {"successful_chats": successful_chats}),
                 )
         except Exception as exc:
             # Class name only: no SQL, parameters, or account data.

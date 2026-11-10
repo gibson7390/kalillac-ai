@@ -9,23 +9,31 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261009-homepage-redesign1">
+  <link rel="stylesheet" href="app.css?v=20261104-handoff1">
 </head>
 <body>
-  <!-- Direct full-page use at /app/ and same-origin iframe embed on the
-       homepage both render this same shell. No framework branding. -->
+  <!-- The chat workspace at /app/: reached directly, or from the homepage's
+       Send with that one draft. No framework branding. -->
   <div class="app" role="application" aria-label="Kalillac AI chat">
 
+    <!-- The same white bar and full logo as the public site. Not a link: leaving
+         the page would end this browser's access to the conversation. The end
+         of the bar holds only what is true for every visitor now. -->
     <header class="app-header">
-      <div class="brand">
-        <!-- Uses the production logo; falls back to a wordmark if it 404s. -->
-        <img src="/assets/kalillac-ai-logo.png?v=20260820-logo1" alt="" class="brand-logo" id="brand-logo" hidden>
-        <span class="brand-name" id="brand-name">Kalillac AI</span>
+      <div class="app-header-inner">
+        <div class="brand has-logo">
+          <!-- The production logo from the first frame, at its own aspect ratio;
+               the wordmark replaces it only if it fails to load. -->
+          <img src="/assets/kalillac-ai-logo.png?v=20260820-logo1" alt="Kalillac AI" class="brand-logo" id="brand-logo" width="172" height="64">
+          <span class="brand-name" id="brand-name">Kalillac AI</span>
+        </div>
+        <div class="app-header-end">
+          <span class="session-status" title="This conversation uses temporary session memory. It is not saved to an account or a chat history, and reloading starts a new session.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            <span>Temporary session</span><span class="session-status-extra"><span class="sr-only">,</span><span aria-hidden="true">·</span><span>Not saved</span></span>
+          </span>
+        </div>
       </div>
-      <span class="session-pill" title="Session memory is temporary. Reloading this page starts a new session.">
-        <span class="session-dot" aria-hidden="true"></span>
-        <span>Session</span>
-      </span>
     </header>
 
     <main class="conversation" id="conversation">
@@ -40,12 +48,17 @@
             Bring a difficult question, a rough draft, broken code, or something current.
           </p>
           <!-- Each example only fills the composer; nothing is sent until the
-               visitor sends it. -->
+               visitor sends it. While the conversation is empty app.js keeps
+               this block below the composer (#starter-dock), so the reading
+               and keyboard order is heading, composer, then examples. -->
+          <div class="starter" id="starter">
+          <p class="starter-label" id="starter-label">Or start with an example</p>
           <div class="empty-hints" role="group" aria-label="Example prompts">
-            <button type="button" class="hint" data-prompt="Help me reason through a difficult decision">Help me reason through a difficult decision</button>
-            <button type="button" class="hint" data-prompt="Rewrite this without losing my voice">Rewrite this without losing my voice</button>
-            <button type="button" class="hint" data-prompt="Explain why this code fails">Explain why this code fails</button>
-            <button type="button" class="hint" data-prompt="Research this and show me the sources">Research this and show me the sources</button>
+            <button type="button" class="hint hint-research" aria-label="Research the current web" aria-describedby="hint-description-0" data-prompt="Find this week’s biggest technology stories"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></span><span class="hint-copy"><span class="hint-title">Research the current web</span><span class="hint-description" id="hint-description-0">Get up-to-date information with sources.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+            <button type="button" class="hint hint-writing" aria-label="Write and revise" aria-describedby="hint-description-1" data-prompt="Draft a professional email"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></svg></span><span class="hint-copy"><span class="hint-title">Write and revise</span><span class="hint-description" id="hint-description-1">Improve your writing, brainstorm, and get feedback.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+            <button type="button" class="hint hint-code" aria-label="Code and debug" aria-describedby="hint-description-2" data-prompt="Build a simple Python password generator"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m8 5-7 7 7 7m8-14 7 7-7 7"/></svg></span><span class="hint-copy"><span class="hint-title">Code and debug</span><span class="hint-description" id="hint-description-2">Build, fix, and explain code in plain language.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+            <button type="button" class="hint hint-learning" aria-label="Learn anything" aria-describedby="hint-description-3" data-prompt="Explain how encryption works"><span class="hint-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 18h6M9 22h6M9 14c-1-1-3-3-3-6a6 6 0 0 1 12 0c0 3-2 5-3 6v1H9Z"/></svg></span><span class="hint-copy"><span class="hint-title">Learn anything</span><span class="hint-description" id="hint-description-3">Get clear explanations on complex topics.</span></span><svg class="hint-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+          </div>
           </div>
         </div>
 
@@ -54,8 +67,37 @@
     </main>
 
     <div class="dock">
+      <!-- What End & erase did. Fixed copy chosen by app.js; never server text. -->
+      <div class="erase-receipt" id="erase-receipt" role="status" aria-live="polite" hidden>
+        <div class="erase-receipt-body">
+          <p class="erase-receipt-text" id="erase-receipt-text"></p>
+          <p class="erase-receipt-note" id="erase-receipt-note"></p>
+          <button type="button" class="erase-receipt-retry" id="erase-retry" hidden>Retry erase</button>
+        </div>
+        <button type="button" class="erase-receipt-dismiss" id="erase-receipt-dismiss">Dismiss</button>
+      </div>
+      <!-- After the daily-limit dialog: one compact note beside the composer.
+           Fixed copy; app.js only shows or hides it. -->
+      <div class="limit-notice" id="limit-notice" role="status" aria-live="polite" hidden>
+        <p class="limit-notice-text"><strong>You’ve used today’s 10 free responses.</strong> Your free allowance resets at 12:00 AM UTC. Your message wasn’t sent; it is still in the message box.</p>
+      </div>
+      <!-- A homepage message this page did not send automatically: fixed copy
+           chosen by app.js, in the daily-limit note's style. -->
+      <div class="limit-notice handoff-notice" id="handoff-notice" role="status" aria-live="polite" hidden>
+        <p class="limit-notice-text" id="handoff-notice-text"></p>
+      </div>
       <form class="composer" id="composer" autocomplete="off">
         <div class="composer-shell" id="composer-shell">
+          <!-- End & erase: in the composer, next to what it ends. Its label is
+               visible text at every width. Always shown; disabled only when
+               there is nothing to end or erase. -->
+          <button type="button" class="erase-btn" id="erase-btn" aria-haspopup="dialog" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>
+            </svg>
+            <span class="erase-btn-label">End &amp; erase</span>
+          </button>
           <label for="composer-input" class="sr-only">Message Kalillac AI</label>
           <textarea id="composer-input" rows="1"
             placeholder="Message Kalillac AI…"
@@ -75,6 +117,8 @@
           </button>
         </div>
       </form>
+      <!-- The example prompts live here, after the composer, until the first message. -->
+      <div class="starter-dock" id="starter-dock"></div>
 
       <footer class="app-footer">
         <span>Free · adults 18+</span>
@@ -86,11 +130,36 @@
     </div>
   </div>
 
+  <!-- The anonymous daily-limit notice. Fixed copy only; app.js opens it as a
+       native modal dialog for the anonymous_daily_limit_reached response. -->
+  <dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" aria-describedby="limit-dialog-text limit-dialog-reset">
+    <div class="limit-dialog-panel">
+      <h2 class="limit-dialog-title" id="limit-dialog-title">Daily limit reached</h2>
+      <p class="limit-dialog-text" id="limit-dialog-text">You’ve used today’s 10 free responses.</p>
+      <p class="limit-dialog-text" id="limit-dialog-reset">Your free allowance resets at 12:00 AM UTC.</p>
+      <div class="limit-dialog-actions">
+        <button type="button" class="limit-dialog-ok" id="limit-dialog-ok">Got it</button>
+      </div>
+    </div>
+  </dialog>
+  <!-- The End & erase confirmation. Fixed copy; app.js opens it as a native
+       modal dialog and only End & erase confirms. -->
+  <dialog class="erase-dialog" id="erase-dialog" aria-labelledby="erase-dialog-title" aria-describedby="erase-dialog-text">
+    <div class="erase-dialog-panel">
+      <h2 class="erase-dialog-title" id="erase-dialog-title">End and erase this conversation?</h2>
+      <p class="erase-dialog-text" id="erase-dialog-text">This clears the conversation and any unsent draft from this device and asks Kalillac to remove its temporary memory of this session. This can’t be undone.</p>
+      <div class="erase-dialog-actions">
+        <button type="button" class="erase-dialog-cancel" id="erase-dialog-cancel">Cancel</button>
+        <button type="button" class="erase-dialog-confirm" id="erase-dialog-confirm">End &amp; erase</button>
+      </div>
+    </div>
+  </dialog>
   <!-- Local vendored libraries only; no CDN, no remote runtime fetches. -->
   <script src="vendor/marked/marked.min.js"></script>
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
-  <script src="app.js?v=20261009-homepage-redesign1"></script>
+  <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
+  <script src="app.js?v=20261104-handoff1"></script>
 </body>
 </html>

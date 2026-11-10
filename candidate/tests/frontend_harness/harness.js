@@ -42,6 +42,12 @@
             };
             window.addEventListener("message", onMessage);
             frame.setAttribute("allow", "clipboard-write");
+            // A phone-sized viewport for the scenario that measures layout.
+            if (/_360x640$/.test(name)) {
+              frame.style.border = "0";
+              frame.style.width = "360px";
+              frame.style.height = "640px";
+            }
             frame.src = "/app/?scenario=" + encodeURIComponent(name);
             document.body.appendChild(frame);
             var waited = 0;
@@ -80,6 +86,71 @@
   var scenarioName = new URLSearchParams(location.search).get("scenario") || "";
   var queue = [];
   var requests = [];
+  var deferred = {};
+
+  // ---- scenario page: the End & erase timeout, under the scenario's control --
+  // app.js aborts an erase request after 10 seconds. Those timers are held
+  // here instead of running, so a scenario fires them when it chooses and
+  // never waits ten seconds; every other timer is real.
+  var ERASE_TIMEOUT_MS = 10000;
+  var eraseTimers = [];
+  var realSetTimeout = window.setTimeout;
+  var realClearTimeout = window.clearTimeout;
+
+  // The daily-limit pause lifts at the next 00:00 UTC by the device clock.
+  // The clock is fixed at noon UTC, so that timer is about twelve hours long;
+  // timers of a minute or more are held here and fired by a scenario.
+  var FIXED_NOW = Date.UTC(2026, 9, 30, 12, 0, 0);
+  Date.now = function () { return FIXED_NOW; };
+  var LONG_TIMER_MS = 60000;
+  var longTimers = [];
+
+  // The End & erase notice counts its 12 seconds in 250 ms ticks. Those
+  // intervals are held too, and a scenario advances them tick by tick.
+  var RECEIPT_TICK_MS = 250;
+  var tickers = [];
+  var realSetInterval = window.setInterval;
+  var realClearInterval = window.clearInterval;
+
+  window.setTimeout = function (fn, delay) {
+    if (delay === ERASE_TIMEOUT_MS) {
+      var timer = { id: "erase-timer-" + eraseTimers.length, fn: fn, cleared: false, fired: false };
+      eraseTimers.push(timer);
+      return timer.id;
+    }
+    if (delay >= LONG_TIMER_MS) {
+      var held = { id: "long-timer-" + longTimers.length, fn: fn, delay: delay, cleared: false, fired: false };
+      longTimers.push(held);
+      return held.id;
+    }
+    return realSetTimeout.apply(window, arguments);
+  };
+
+  window.clearTimeout = function (id) {
+    for (var i = 0; i < eraseTimers.length; i++) {
+      if (eraseTimers[i].id === id) { eraseTimers[i].cleared = true; return; }
+    }
+    for (var j = 0; j < longTimers.length; j++) {
+      if (longTimers[j].id === id) { longTimers[j].cleared = true; return; }
+    }
+    return realClearTimeout.apply(window, arguments);
+  };
+
+  window.setInterval = function (fn, delay) {
+    if (delay === RECEIPT_TICK_MS) {
+      var ticker = { id: "ticker-" + tickers.length, fn: fn, cleared: false };
+      tickers.push(ticker);
+      return ticker.id;
+    }
+    return realSetInterval.apply(window, arguments);
+  };
+
+  window.clearInterval = function (id) {
+    for (var i = 0; i < tickers.length; i++) {
+      if (tickers[i].id === id) { tickers[i].cleared = true; return; }
+    }
+    return realClearInterval.apply(window, arguments);
+  };
 
   function abortError() {
     return new DOMException("The user aborted a request.", "AbortError");
@@ -93,6 +164,18 @@
     if (spec.hang) {
       return new Promise(function (resolve, reject) {
         if (signal) signal.addEventListener("abort", function () { reject(abortError()); });
+      });
+    }
+
+    // Pending until the scenario settles it by name (api.settle), so
+    // completion order is explicit. ignoreAbort models a response that
+    // arrives even though the request was aborted.
+    if (spec.defer) {
+      return new Promise(function (resolve, reject) {
+        deferred[spec.defer] = { resolve: resolve, reject: reject };
+        if (signal && !spec.ignoreAbort) {
+          signal.addEventListener("abort", function () { reject(abortError()); });
+        }
       });
     }
 
@@ -123,6 +206,13 @@
   window.fetch = function (url, init) {
     var record = { url: String(url), method: init && init.method };
     try { record.body = JSON.parse(init.body); } catch (e) { record.body = null; }
+    record.keepalive = !!(init && init.keepalive);
+    record.contentType = init && init.headers ? init.headers["Content-Type"] || null : null;
+    record.hasSignal = !!(init && init.signal);
+    record.aborted = false;
+    if (init && init.signal) {
+      init.signal.addEventListener("abort", function () { record.aborted = true; });
+    }
     requests.push(record);
 
     var spec = queue.shift();
@@ -147,6 +237,24 @@
   function $(id) { return document.getElementById(id); }
 
   function text(el) { return el ? el.textContent : null; }
+
+  // The daily-limit dialog's state; the cancel event's default is recorded
+  // by cancelDialog below.
+  var lastCancelPrevented = null;
+
+  function dialogState() {
+    var dialog = $("limit-dialog");
+    if (!dialog) return null;
+    var modal = false;
+    try { modal = dialog.open && dialog.matches(":modal"); } catch (e) { modal = null; }
+    return {
+      open: dialog.open,
+      modal: modal,
+      text: dialog.textContent.replace(/\s+/g, " ").trim(),
+      focusIsOk: document.activeElement === $("limit-dialog-ok"),
+      cancelPrevented: lastCancelPrevented
+    };
+  }
 
   function snapshot(label) {
     var input = $("composer-input");
@@ -186,7 +294,56 @@
       emptyShown: !!(empty && empty.isConnected),
       conversationEmpty: $("conversation").classList.contains("is-empty"),
       focusIsComposer: document.activeElement === input,
-      requestCount: requests.length
+      requestCount: requests.length,
+      limitDialog: dialogState(),
+      limitNotice: limitNoticeState(),
+      sendDescribedBy: button.getAttribute("aria-describedby"),
+      erase: eraseState()
+    };
+  }
+
+  function limitNoticeState() {
+    var notice = $("limit-notice");
+    if (!notice) return null;
+    return {
+      shown: !notice.hidden && getComputedStyle(notice).display !== "none",
+      text: notice.textContent.replace(/\s+/g, " ").trim(),
+      role: notice.getAttribute("role"),
+      live: notice.getAttribute("aria-live"),
+      count: document.querySelectorAll(".limit-notice:not([hidden])").length,
+      armedResets: longTimers.filter(function (t) { return !t.cleared && !t.fired; }).length
+    };
+  }
+
+  function eraseState() {
+    var button = $("erase-btn");
+    var dialog = $("erase-dialog");
+    var receipt = $("erase-receipt");
+    if (!button || !dialog || !receipt) return null;
+    var modal = false;
+    try { modal = dialog.open && dialog.matches(":modal"); } catch (e) { modal = null; }
+    var retry = $("erase-retry");
+    return {
+      buttonDisabled: button.disabled,
+      buttonText: button.textContent.replace(/\s+/g, " ").trim(),
+      dialogOpen: dialog.open,
+      dialogModal: modal,
+      dialogText: dialog.textContent.replace(/\s+/g, " ").trim(),
+      focusIsCancel: document.activeElement === $("erase-dialog-cancel"),
+      focusIsButton: document.activeElement === button,
+      receiptShown: !receipt.hidden,
+      receiptText: text($("erase-receipt-text")),
+      receiptNote: $("erase-receipt-note").hidden ? null : text($("erase-receipt-note")),
+      retryShown: !retry.hidden,
+      retryDisabled: retry.disabled,
+      receiptRole: receipt.getAttribute("role"),
+      receiptLive: receipt.getAttribute("aria-live"),
+      receiptDisplay: getComputedStyle(receipt).display,
+      receiptHeight: receipt.getBoundingClientRect().height,
+      receiptLeaving: receipt.classList.contains("is-leaving"),
+      dismissText: text($("erase-receipt-dismiss")),
+      focusIsConfirm: document.activeElement === $("erase-dialog-confirm"),
+      armedTickers: tickers.filter(function (t) { return !t.cleared; }).length
     };
   }
 
@@ -236,6 +393,160 @@
       };
     },
     snap: function (label) { steps.push(snapshot(label)); },
+    snapshotOnly: function (label) { return snapshot(label); },
+    push: function (snap) { steps.push(snap); },
+    // The daily-limit dialog's three close paths, a click inside its panel,
+    // the showModal() fallback and a layout measurement.
+    clickDialogOk: function () { $("limit-dialog-ok").click(); return wait(30); },
+    cancelDialog: function () {
+      var event = new Event("cancel", { cancelable: true });
+      $("limit-dialog").dispatchEvent(event);
+      lastCancelPrevented = event.defaultPrevented;
+      return wait(30);
+    },
+    clickDialogBackdrop: function () {
+      $("limit-dialog").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      return wait(30);
+    },
+    clickDialogTitle: function () { $("limit-dialog-title").click(); return wait(30); },
+    removeShowModal: function () { HTMLDialogElement.prototype.showModal = undefined; },
+    // Rendered fenced code: highlighting, token colors, markup, text and
+    // page safety, plus layout, as one snapshot.
+    inspectCode: function (label) {
+      var snap = snapshot(label);
+      snap.code = Array.prototype.map.call(
+        document.querySelectorAll("#thread .msg-assistant pre > code"), function (code) {
+          var match = /(?:^|\s)language-([\w#+.-]+)/.exec(code.className || "");
+          var colors = {}, tags = {}, attrs = {};
+          Array.prototype.forEach.call(code.querySelectorAll("span"), function (span) {
+            if (!(span.className in colors)) colors[span.className] = getComputedStyle(span).color;
+          });
+          Array.prototype.forEach.call(code.querySelectorAll("*"), function (el) {
+            tags[el.tagName.toLowerCase()] = true;
+            Array.prototype.forEach.call(el.attributes, function (a) { attrs[a.name] = true; });
+          });
+          var pre = code.parentNode.getBoundingClientRect();
+          return {
+            language: match ? match[1] : "",
+            highlighted: code.classList.contains("hljs"),
+            text: code.textContent,
+            spans: code.querySelectorAll("span").length,
+            colors: colors,
+            tags: Object.keys(tags),
+            attrs: Object.keys(attrs),
+            plainColor: getComputedStyle(code).color,
+            preRight: pre.right,
+            preScrolls: code.parentNode.scrollWidth > code.parentNode.clientWidth
+          };
+        });
+      snap.inlineCode = Array.prototype.map.call(
+        document.querySelectorAll("#thread .msg-assistant :not(pre) > code"), function (c) {
+          return { text: c.textContent, spans: c.querySelectorAll("span").length, highlighted: c.classList.contains("hljs") };
+        });
+      snap.prose = Array.prototype.map.call(
+        document.querySelectorAll("#thread .msg-assistant .md > p"), text);
+      snap.page = {
+        scripts: document.querySelectorAll("#thread script").length,
+        images: document.querySelectorAll("#thread img").length,
+        alerts: window.__alerts || [],
+        executed: !!window.__executed,
+        viewport: [window.innerWidth, window.innerHeight],
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth
+      };
+      steps.push(snap);
+    },
+    measureDialog: function (label) {
+      var snap = snapshot(label);
+      var dialog = $("limit-dialog");
+      var box = dialog.getBoundingClientRect();
+      var ok = $("limit-dialog-ok").getBoundingClientRect();
+      snap.layout = {
+        viewport: [window.innerWidth, window.innerHeight],
+        dialog: [box.left, box.top, box.right, box.bottom],
+        button: [ok.left, ok.top, ok.right, ok.bottom],
+        dialogOverflowX: dialog.scrollWidth - dialog.clientWidth,
+        dialogOverflowY: dialog.scrollHeight - dialog.clientHeight,
+        pageOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth
+      };
+      steps.push(snap);
+    },
+    clickErase: function () { $("erase-btn").click(); return wait(30); },
+    confirmErase: function () { $("erase-dialog-confirm").click(); return wait(60); },
+    cancelEraseButton: function () { $("erase-dialog-cancel").click(); return wait(30); },
+    escapeEraseDialog: function () {
+      var event = new Event("cancel", { cancelable: true });
+      $("erase-dialog").dispatchEvent(event);
+      lastCancelPrevented = event.defaultPrevented;
+      return wait(30);
+    },
+    clickEraseBackdrop: function () {
+      $("erase-dialog").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      return wait(30);
+    },
+    clickRetryErase: function () { $("erase-retry").click(); return wait(60); },
+    // Every other way to submit: Enter in the field, the form's own submit
+    // and a click on Send even while it is disabled.
+    pressEnter: function () {
+      $("composer-input").dispatchEvent(new KeyboardEvent("keydown",
+        { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      return wait(30);
+    },
+    submitForm: function () { $("composer").requestSubmit(); return wait(30); },
+    // Fires the held daily-limit release (the next 00:00 UTC).
+    fireLimitReset: function () {
+      longTimers.forEach(function (timer) {
+        if (!timer.cleared && !timer.fired) { timer.fired = true; timer.fn(); }
+      });
+      return wait(30);
+    },
+    longTimerDelays: function () {
+      return longTimers.map(function (t) { return t.delay; });
+    },
+    // Advances the End & erase notice countdown by n ticks of 250 ms.
+    tickReceipt: function (n) {
+      for (var k = 0; k < n; k++) {
+        tickers.forEach(function (ticker) { if (!ticker.cleared) ticker.fn(); });
+      }
+      return wait(0);
+    },
+    hoverReceipt: function (on) {
+      $("erase-receipt").dispatchEvent(new MouseEvent(on ? "mouseenter" : "mouseleave"));
+      return wait(0);
+    },
+    focusDismiss: function () { $("erase-receipt-dismiss").focus(); return wait(0); },
+    blurDismiss: function () { $("erase-receipt-dismiss").blur(); return wait(0); },
+    clickDismiss: function () { $("erase-receipt-dismiss").click(); return wait(0); },
+    // prefers-reduced-motion: reduce, as app.js reads it at dismissal time.
+    forceReducedMotion: function () {
+      var real = window.matchMedia.bind(window);
+      window.matchMedia = function (query) {
+        if (query === "(prefers-reduced-motion: reduce)") return { matches: true, media: query };
+        return real(query);
+      };
+    },
+    // A Tab (or Shift+Tab) key press inside the open erase dialog.
+    tabInEraseDialog: function (shift) {
+      var event = new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey: !!shift,
+                                                bubbles: true, cancelable: true });
+      document.activeElement.dispatchEvent(event);
+      return wait(10);
+    },
+    focusEraseConfirm: function () { $("erase-dialog-confirm").focus(); return wait(10); },
+    // Completes a deferred response with an ordinary spec.
+    settle: function (name, spec) {
+      var pending = deferred[name];
+      if (!pending) throw new Error("HARNESS: nothing deferred as " + name);
+      delete deferred[name];
+      respond(spec, null).then(pending.resolve, pending.reject);
+      return wait(60);
+    },
+    // Fires every erase timeout that is still armed.
+    fireEraseTimeouts: function () {
+      eraseTimers.forEach(function (timer) {
+        if (!timer.cleared && !timer.fired) { timer.fired = true; timer.fn(); }
+      });
+      return wait(60);
+    },
     respondWith: function () {
       for (var i = 0; i < arguments.length; i++) queue.push(arguments[i]);
     }
@@ -252,7 +563,8 @@
     empty_message: 422, message_too_long: 422, history_too_long: 422,
     processing_limit_reached: 422, busy: 429, request_cancelled: 499,
     service_unavailable: 503, model_provider_unavailable: 503,
-    request_timeout: 504, internal_error: 500
+    request_timeout: 504, internal_error: 500,
+    session_ended: 409, unsupported_media_type: 415
   };
 
   // A failed send, then a deliberate new message that succeeds.
@@ -472,6 +784,476 @@
     a.snap("after-next");
   };
 
+  // The anonymous daily allowance is used up (with server text that must never
+  // be shown).
+  var DAILY_LIMIT = {
+    status: 429,
+    json: { error: "anonymous_daily_limit_reached", detail: SECRET, message: SECRET }
+  };
+
+  // The refused prompt is rolled back into the composer, one dialog explains
+  // it, then one note stays beside the composer while sending is paused. No
+  // way of submitting sends anything until the 00:00 UTC release fires.
+  SCENARIOS.code_anonymous_daily_limit_reached = async function (a) {
+    a.respondWith(DAILY_LIMIT, ok("Fine."));
+    await a.send("first question");
+    a.snap("failed");
+    await a.clickDialogOk();
+    a.snap("closed");
+    a.clickSend();
+    await a.pressEnter();
+    await a.submitForm();
+    a.clickSend();
+    await a.wait(60);
+    a.snap("blocked");
+    a.type("first question, revised");
+    a.snap("edited");
+    var delays = a.longTimerDelays();
+    await a.fireLimitReset();
+    var released = a.snapshotOnly("released");
+    released.longTimerDelays = delays;
+    a.push(released);
+    await a.send("next question");
+    a.snap("after-new-send");
+  };
+
+  // A refusal after a completed exchange removes only the refused rows.
+  SCENARIOS.daily_limit_after_conversation = async function (a) {
+    a.respondWith(ok("Earlier answer.", "s-1"), DAILY_LIMIT);
+    await a.send("earlier question");
+    await a.send("second question");
+    a.snap("refused");
+    await a.clickDialogOk();
+    a.snap("closed");
+  };
+
+  SCENARIOS.daily_limit_escape = async function (a) {
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    a.snap("open");
+    await a.cancelDialog();
+    a.snap("closed");
+  };
+
+  SCENARIOS.daily_limit_backdrop = async function (a) {
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    await a.clickDialogTitle();
+    a.snap("panel-click");
+    await a.clickDialogBackdrop();
+    a.snap("closed");
+  };
+
+  // While paused, a second attempt neither sends nor reopens the dialog;
+  // after the release a new refusal opens it once more.
+  SCENARIOS.daily_limit_reopen = async function (a) {
+    a.respondWith(DAILY_LIMIT, DAILY_LIMIT);
+    await a.send("first question");
+    await a.clickDialogOk();
+    a.snap("first-closed");
+    await a.send("second question");
+    a.snap("blocked");
+    await a.fireLimitReset();
+    a.clickSend();
+    await a.wait(60);
+    a.snap("reopened");
+    await a.cancelDialog();
+    a.snap("second-closed");
+  };
+
+  SCENARIOS.daily_limit_without_show_modal = async function (a) {
+    a.removeShowModal();
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    a.snap("failed");
+  };
+
+  // The daily-limit code on any status but 429 is not the daily limit.
+  SCENARIOS.daily_limit_wrong_status = function (a) {
+    return failThenNewSend(
+      { status: 503, json: { error: "anonymous_daily_limit_reached", detail: SECRET } }, a);
+  };
+
+  // Fenced code in several languages, an unknown label, an unlabeled fence,
+  // script-looking code, inline code and prose after the code.
+  var CODE_REPLY = [
+    "Here is the Python version.",
+    "",
+    "```python",
+    "def greet(name):",
+    "    # Say hello.",
+    "    return f\"Hello {name}\"",
+    "```",
+    "",
+    "```javascript",
+    "const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them",
+    "console.log(`total ${total}`);",
+    "```",
+    "",
+    "```sql",
+    "SELECT email, COUNT(*) AS n FROM users WHERE active = 1 GROUP BY email HAVING COUNT(*) > 1;",
+    "```",
+    "",
+    "```json",
+    "{\"name\": \"Ada\", \"admin\": true, \"age\": 36}",
+    "```",
+    "",
+    "```html",
+    "<script>alert(\"test\")</script>",
+    "<img src=x onerror=\"window.__executed=1\">",
+    "```",
+    "",
+    "```foobarlang",
+    "some text that is not code",
+    "```",
+    "",
+    "```",
+    "unlabeled block",
+    "  keeps   spacing",
+    "```",
+    "",
+    "Inline `code` stays plain. This explanation remains normal prose outside the code block."
+  ].join("\n");
+
+  async function highlightedCode(a) {
+    window.__alerts = [];
+    window.alert = function (m) { window.__alerts.push(String(m)); };
+    a.respondWith(ok(CODE_REPLY));
+    await a.send("show me code");
+    await a.wait(100);
+    a.inspectCode("rendered");
+    await a.clickAction("Copy");
+    await a.wait(300);
+  }
+
+  SCENARIOS.syntax_highlighting = highlightedCode;
+  SCENARIOS.syntax_highlighting_360x640 = highlightedCode;
+
+  // Every required language label and its common aliases, through the real
+  // rendering pipeline, plus an unknown label and an unlabeled fence.
+  var LANGUAGE_FENCES = [
+    ["python", "def f(x):\n    return x  # ok"], ["py", "import os"],
+    ["javascript", "const x = 1;"], ["js", "let y = 'a';"],
+    ["typescript", "let n: number = 1;"], ["ts", "interface A { b: string }"],
+    ["html", "<p class=\"a\">hi</p>"], ["css", "a { color: red; }"],
+    ["json", "{\"a\": 1}"], ["sql", "SELECT 1;"],
+    ["bash", "echo \"hi\""], ["sh", "if [ -f x ]; then echo y; fi"], ["shell", "$ ls -la"],
+    ["java", "public class A {}"], ["c", "int main(void) { return 0; }"],
+    ["cpp", "#include <vector>"], ["c++", "std::vector<int> v;"],
+    ["csharp", "public class A { }"], ["c#", "var x = \"s\";"],
+    ["markdown", "# Title"], ["md", "*emphasis*"],
+    ["foobarlang", "plain text"], ["", "unlabeled"]
+  ];
+
+  SCENARIOS.highlight_languages = async function (a) {
+    var reply = LANGUAGE_FENCES.map(function (pair) {
+      return "```" + pair[0] + "\n" + pair[1] + "\n```";
+    }).join("\n\n");
+    a.respondWith(ok(reply));
+    await a.send("show me every language");
+    await a.wait(100);
+    a.inspectCode("rendered");
+  };
+
+  SCENARIOS.daily_limit_layout_360x640 = async function (a) {
+    a.respondWith(DAILY_LIMIT);
+    await a.send("first question");
+    a.measureDialog("open");
+  };
+
+  // ---- End & erase ---------------------------------------------------------------
+  var ENDED = function (state) {
+    return { status: 200, json: { ended: true, kalillac_session_state: state,
+                                  active_requests: 0, cancellation: "none" } };
+  };
+
+  // Enabled only when there is a conversation, a session or a draft.
+  SCENARIOS.erase_enablement = async function (a) {
+    a.snap("initial");
+    a.type("a draft");
+    a.snap("draft");
+    a.type("");
+    a.snap("cleared");
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.snap("conversation");
+  };
+
+  // Cancel, Escape and the backdrop all keep the conversation and send nothing.
+  SCENARIOS.erase_cancel_paths = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.type("my draft");
+    await a.clickErase();
+    a.snap("open");
+    await a.cancelEraseButton();
+    a.snap("after-cancel");
+    await a.clickErase();
+    await a.escapeEraseDialog();
+    a.snap("after-escape");
+    await a.clickErase();
+    await a.clickEraseBackdrop();
+    a.snap("after-backdrop");
+  };
+
+  SCENARIOS.erase_removed = async function (a) {
+    a.respondWith(ok("Answer one.", "s-1"), ok("Answer two.", "s-1"), ENDED("removed"), ok("Fresh.", "s-2"));
+    await a.send("question one");
+    await a.send("question two");
+    a.type("an unsent draft");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("erased");
+    await a.send("a new question");
+    a.snap("after-new-send");
+  };
+
+  // The completion notice leaves by itself after 48 ticks of 250 ms (12 s),
+  // with a 160 ms fade, and leaves nothing behind.
+  SCENARIOS.erase_notice_auto_dismiss = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("shown");
+    await a.tickReceipt(47);
+    a.snap("tick-47");
+    await a.tickReceipt(1);
+    a.snap("tick-48");
+    await a.wait(250);
+    a.snap("dismissed");
+  };
+
+  // Hovering or focusing the notice pauses the countdown; it resumes with
+  // the time that was left, not from the start.
+  SCENARIOS.erase_notice_pause_resume = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.tickReceipt(20);
+    await a.hoverReceipt(true);
+    await a.tickReceipt(100);
+    a.snap("hovered");
+    await a.hoverReceipt(false);
+    await a.focusDismiss();
+    await a.tickReceipt(100);
+    a.snap("focused");
+    await a.blurDismiss();
+    await a.tickReceipt(27);
+    a.snap("resumed-47");
+    await a.tickReceipt(1);
+    await a.wait(250);
+    a.snap("dismissed");
+  };
+
+  // Dismiss closes it at once (after the fade) and hands focus to the composer.
+  SCENARIOS.erase_notice_manual_dismiss = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.focusDismiss();
+    a.snap("focused");
+    await a.clickDismiss();
+    a.snap("leaving");
+    await a.wait(250);
+    a.snap("dismissed");
+  };
+
+  // Under reduced motion it is removed at once, without a fade.
+  SCENARIOS.erase_notice_reduced_motion = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.forceReducedMotion();
+    await a.clickDismiss();
+    a.snap("dismissed");
+  };
+
+  // Focus cycles inside the dialog; Cancel returns focus to End & erase.
+  SCENARIOS.erase_dialog_focus = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    await a.clickErase();
+    a.snap("open");
+    await a.tabInEraseDialog(true);
+    a.snap("shift-tab-from-cancel");
+    await a.tabInEraseDialog(false);
+    a.snap("tab-from-confirm");
+    await a.cancelEraseButton();
+    a.snap("cancelled");
+  };
+
+  // A repeated confirmation erases, and asks the server, exactly once.
+  SCENARIOS.erase_confirm_once = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("removed"), ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    $("erase-dialog-confirm").click();
+    $("erase-dialog-confirm").click();
+    $("erase-dialog-confirm").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    $("erase-dialog-confirm").click();
+    await a.wait(120);
+    a.snap("erased");
+  };
+
+  SCENARIOS.erase_not_found = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), ENDED("not_found"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("erased");
+  };
+
+  // The server cannot confirm removal: the device is still cleared, the
+  // receipt says so, and Retry erase asks again with the same opaque id.
+  SCENARIOS.erase_failure_then_retry = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { status: 503, json: { error: "service_unavailable", detail: SECRET } },
+                  ENDED("removed"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("failed");
+    await a.clickRetryErase();
+    a.snap("retried");
+  };
+
+  SCENARIOS.erase_network_failure = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { reject: "Failed to fetch " + SECRET },
+                  { status: 200, json: { ended: true, kalillac_session_state: "bogus" } });
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("failed");
+    await a.clickRetryErase();
+    a.snap("still-failed");
+  };
+
+  // Erasing while a reply is in flight: the browser request is aborted, a
+  // separate erase request is sent, and nothing from the old exchange returns.
+  SCENARIOS.erase_in_flight = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { hang: true }, ENDED("removed"));
+    await a.send("question one");
+    await a.send("question two");
+    a.snap("in-flight");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.wait(60);
+    a.snap("erased");
+  };
+
+  // No session id ever reached the page: clear locally, call nothing.
+  SCENARIOS.erase_without_session = async function (a) {
+    a.type("only a draft");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("erased");
+  };
+
+  SCENARIOS.erase_first_message_in_flight = async function (a) {
+    a.respondWith({ hang: true });
+    await a.send("first question");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.wait(60);
+    a.snap("erased");
+  };
+
+  var ERASE_FAILED = { status: 503, json: { error: "service_unavailable" } };
+
+  // Two overlapping erase rounds, the newer completing first: erase A stays
+  // pending, B is begun and erased, B is removed, then A fails. Retry erase is
+  // offered for A alone, and its success settles the round.
+  SCENARIOS.erase_overlap_newer_first = async function (a) {
+    a.respondWith(ok("Answer A.", "s-A"), { defer: "A" }, ok("Answer B.", "s-B"), { defer: "B" },
+                  ENDED("not_found"));
+    await a.send("question A");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("a-pending");
+    await a.send("question B");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("both-pending");
+    await a.settle("B", ENDED("removed"));
+    a.snap("b-removed-a-pending");
+    await a.settle("A", ERASE_FAILED);
+    a.snap("a-failed");
+    await a.clickRetryErase();
+    a.snap("a-retried");
+    // The settled round is forgotten: a later local-only erase is just that.
+    a.type("a draft only");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("later-local-erase");
+  };
+
+  // The inverse order: A fails while B is still pending; nothing is decided
+  // until B settles too.
+  SCENARIOS.erase_overlap_older_first = async function (a) {
+    a.respondWith(ok("Answer A.", "s-A"), { defer: "A" }, ok("Answer B.", "s-B"), { defer: "B" },
+                  ENDED("not_found"));
+    await a.send("question A");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.send("question B");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.settle("A", ERASE_FAILED);
+    a.snap("a-failed-b-pending");
+    await a.settle("B", ENDED("removed"));
+    a.snap("b-removed");
+    await a.clickRetryErase();
+    a.snap("a-retried");
+  };
+
+  // Every id not found: the round reports "not found", never "removed".
+  SCENARIOS.erase_overlap_all_not_found = async function (a) {
+    a.respondWith(ok("Answer A.", "s-A"), { defer: "A" }, ok("Answer B.", "s-B"), { defer: "B" });
+    await a.send("question A");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.send("question B");
+    await a.clickErase();
+    await a.confirmErase();
+    await a.settle("B", ENDED("not_found"));
+    await a.settle("A", ENDED("not_found"));
+    a.snap("settled");
+  };
+
+  // The erase request times out: it is aborted and offers Retry erase. A late
+  // answer to the timed-out attempt cannot change the outcome of the retry.
+  SCENARIOS.erase_timeout_then_retry = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { defer: "first", ignoreAbort: true }, { defer: "second" },
+                  ENDED("not_found"));
+    await a.send("question");
+    await a.clickErase();
+    await a.confirmErase();
+    a.snap("pending");
+    await a.fireEraseTimeouts();
+    a.snap("timed-out");
+    await a.clickRetryErase();
+    a.snap("retry-pending");
+    await a.settle("first", ENDED("removed"));         // stale: the timed-out attempt
+    a.snap("stale-answer");
+    await a.settle("second", ERASE_FAILED);
+    a.snap("retry-failed");
+    await a.clickRetryErase();
+    a.snap("final");
+  };
+
+  // A chat reply of session_ended forgets the ended session id.
+  SCENARIOS.session_ended_reply = async function (a) {
+    a.respondWith(ok("Answer.", "s-1"), { status: 409, json: { error: "session_ended" } }, ok("Fresh.", "s-2"));
+    await a.send("question one");
+    await a.send("question two");
+    a.snap("ended");
+    await a.send("question three");
+    a.snap("after-new-send");
+  };
+
   // ---- run ---------------------------------------------------------------------
   window.addEventListener("load", function () {
     var scenario = SCENARIOS[scenarioName];
@@ -481,7 +1263,8 @@
         error: error || null,
         steps: steps,
         requests: requests,
-        copied: copied
+        copied: copied,
+        eraseTimers: eraseTimers.map(function (t) { return { cleared: t.cleared, fired: t.fired }; })
       };
     };
 

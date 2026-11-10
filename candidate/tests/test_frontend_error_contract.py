@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261009-homepage-redesign1"
-CSS_CACHE_KEY = "20261009-homepage-redesign1"
+CACHE_KEY = "20261104-handoff1"
+CSS_CACHE_KEY = "20261104-handoff1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -53,6 +53,16 @@ INCOMPLETE = "Kalillac couldn't complete the request. Please try again."
 UNREADABLE = "Kalillac couldn't read that request. Please try again."
 BUSY = "Kalillac is busy right now. Please try again in a moment."
 STOPPED = "Stopped."
+
+# The anonymous daily allowance (fixed copy; typographic apostrophes).
+DAILY_LIMIT_CODE = "anonymous_daily_limit_reached"
+DAILY_LIMIT_NOTE = "You\u2019ve used today\u2019s 10 free responses."
+DAILY_LIMIT_TITLE = "Daily limit reached"
+DAILY_LIMIT_RESET = "Your free allowance resets at 12:00 AM UTC."
+DAILY_LIMIT_BUTTON = "Got it"
+DAILY_LIMIT_DIALOG = " ".join((DAILY_LIMIT_TITLE, DAILY_LIMIT_NOTE, DAILY_LIMIT_RESET, DAILY_LIMIT_BUTTON))
+DAILY_LIMIT_FORBIDDEN = ("tomorrow", "unlimited", "subscri", "upgrade", "premium", "pricing",
+                         "sign up", "sign-up", "signup", "stripe")
 
 COPY = {
     "invalid_json": UNREADABLE,
@@ -77,8 +87,14 @@ COPY = {
         "That took too long and was stopped. Please try again, or try a simpler request."
     ),
     "internal_error": "Something went wrong on Kalillac's end. Please try again.",
+    DAILY_LIMIT_CODE: DAILY_LIMIT_NOTE,
+    # End & erase: a chat request for an ended session, and the end endpoint's
+    # content-type refusal (never expected from /api/chat; mapped so it is fixed copy).
+    "session_ended": "This conversation was ended. Your next message starts a new one.",
+    "unsupported_media_type": UNREADABLE,
 }
-NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached"}
+NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached",
+            DAILY_LIMIT_CODE, "session_ended"}
 
 # Text that must never reach the page: raw response fields, HTML error pages,
 # provider names and exception messages.
@@ -103,7 +119,55 @@ GENERIC_FAILURES = {
     "success_error_code": INCOMPLETE,
     "success_reply_with_error": INCOMPLETE,
     "render_exception": INCOMPLETE,
+    "daily_limit_wrong_status": INCOMPLETE,
 }
+
+DAILY_LIMIT_SCENARIOS = (
+    "daily_limit_escape", "daily_limit_backdrop", "daily_limit_reopen",
+    "daily_limit_without_show_modal", "daily_limit_layout_360x640", "daily_limit_after_conversation",
+)
+
+# Syntax highlighting of rendered fenced code (frontend presentation only).
+CODE_SCENARIOS = ("syntax_highlighting", "syntax_highlighting_360x640")
+# Required languages (by the label a model would write) and common aliases.
+REQUIRED_LANGUAGE_LABELS = (
+    "python", "py", "javascript", "js", "typescript", "ts", "html", "css", "json", "sql",
+    "bash", "sh", "shell", "java", "c", "cpp", "c++", "csharp", "c#", "markdown", "md",
+)
+# The vendored bundle's grammar for each required language.
+REQUIRED_GRAMMARS = ("python", "javascript", "typescript", "xml", "css", "json", "sql", "bash",
+                     "shell", "java", "c", "cpp", "csharp", "markdown")
+CODE_SOURCES = {
+    "python": 'def greet(name):\n    # Say hello.\n    return f"Hello {name}"\n',
+    "javascript": ("const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them\n"
+                   "console.log(`total ${total}`);\n"),
+    "sql": "SELECT email, COUNT(*) AS n FROM users WHERE active = 1 GROUP BY email HAVING COUNT(*) > 1;\n",
+    "json": '{"name": "Ada", "admin": true, "age": 36}\n',
+    "html": '<script>alert("test")</script>\n<img src=x onerror="window.__executed=1">\n',
+    "foobarlang": "some text that is not code\n",
+    "": "unlabeled block\n  keeps   spacing\n",
+}
+CODE_REPLY = "\n".join([
+    "Here is the Python version.", "",
+    "```python", "def greet(name):", "    # Say hello.", '    return f"Hello {name}"', "```", "",
+    "```javascript", "const total = [1, 2, 3].reduce((sum, n) => sum + n, 0); // add them",
+    "console.log(`total ${total}`);", "```", "",
+    "```sql", "SELECT email, COUNT(*) AS n FROM users WHERE active = 1 GROUP BY email HAVING COUNT(*) > 1;", "```", "",
+    "```json", '{"name": "Ada", "admin": true, "age": 36}', "```", "",
+    "```html", '<script>alert("test")</script>', '<img src=x onerror="window.__executed=1">', "```", "",
+    "```foobarlang", "some text that is not code", "```", "",
+    "```", "unlabeled block", "  keeps   spacing", "```", "",
+    "Inline `code` stays plain. This explanation remains normal prose outside the code block.",
+])
+HIGHLIGHTED_LANGUAGES = ("python", "javascript", "sql", "json", "html")
+CODE_BACKGROUND = "#f1f4fa"   # --panel-2, the fenced-code background
+HIGHLIGHT_JS = FRONTEND / "vendor" / "highlight" / "highlight.min.js"
+HIGHLIGHT_LICENSE = FRONTEND / "vendor" / "highlight" / "LICENSE"
+# highlight.js 11.12.0 from @highlightjs/cdn-assets (npm), integrity-checked
+# against the registry's sha512 before vendoring.
+HIGHLIGHT_JS_SHA256 = "8ab71eb09c51f501e5e25157d9cff100e46cc29bcbfc744d0b746d451fca7f53"
+HIGHLIGHT_LICENSE_SHA256 = "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490"
+VENDORED_HIGHLIGHT = {"frontend/vendor/highlight/highlight.min.js", "frontend/vendor/highlight/LICENSE"}
 
 SCENARIOS = (
     [f"code_{code}" for code in COPY]
@@ -115,6 +179,9 @@ SCENARIOS = (
         "cleared_draft_then_retry", "retry_completed_with_later_failure",
         "message_too_long_4001",
     ]
+    + list(DAILY_LIMIT_SCENARIOS)
+    + list(CODE_SCENARIOS)
+    + ["highlight_languages"]
 )
 
 
@@ -375,14 +442,18 @@ def test_backend_code_shows_fixed_copy_and_action(browser_results, code):
     failed = step(result, "failed")
     message = COPY[code]
 
-    if code == "history_too_long":
-        assert failed["assistants"][0]["actions"] == ["New conversation"]
-        assert [n["text"] for n in failed["assistants"][0]["notes"]] == [message]
+    if code == DAILY_LIMIT_CODE:
+        # Not an answer: the refused prompt is rolled back into the composer
+        # and sending pauses (its own tests cover the dialog and the note).
+        assert_limit_paused(failed, notice=False)
     else:
-        assert_failed(failed, message, retry=code not in NO_RETRY)
-
-    # The submitted text is restored and controls are idle again.
-    assert_idle(failed, composer="first question")
+        if code == "history_too_long":
+            assert failed["assistants"][0]["actions"] == ["New conversation"]
+            assert [n["text"] for n in failed["assistants"][0]["notes"]] == [message]
+        else:
+            assert_failed(failed, message, retry=code not in NO_RETRY)
+        # The submitted text is restored and controls are idle again.
+        assert_idle(failed, composer="first question")
     assert_clean(result)
 
     # The failure never enters history, and a deliberate new send replaces it.
@@ -661,6 +732,441 @@ def test_input_over_4000_characters_is_sent_once_and_refused_with_fixed_copy(bro
     assert_idle(failed, composer="x" * 4001)
 
 
+# --- the anonymous daily limit ----------------------------------------------------------------
+
+
+def assert_dialog_open(snap):
+    dialog = snap["limitDialog"]
+    assert dialog["open"] is True and dialog["modal"] is True, snap["label"]
+    assert dialog["text"] == DAILY_LIMIT_DIALOG
+    assert dialog["focusIsOk"] is True and snap["focusIsComposer"] is False
+
+
+def assert_dialog_closed(snap, focus_composer=True):
+    assert snap["limitDialog"]["open"] is False, snap["label"]
+    assert snap["limitDialog"]["modal"] is False
+    if focus_composer:
+        assert snap["focusIsComposer"] is True, snap["label"]
+
+
+LIMIT_NOTICE_TEXT = ("You’ve used today’s 10 free responses. Your free allowance resets at 12:00 AM UTC. "
+                     "Your message wasn’t sent; it is still in the message box.")
+
+
+def assert_limit_paused(snap, composer="first question", users=(), notice=True):
+    """The refused prompt left no row and no assistant notice behind; its text
+    is back in the editable composer; sending is paused; and the one composer
+    note is shown (after the dialog closes) or not (while it is open)."""
+    assert snap["users"] == list(users), snap["label"]
+    assert all(not row["notes"] for row in snap["assistants"]), snap["label"]   # no quota bubble
+    assert DAILY_LIMIT_NOTE not in snap["threadText"], snap["label"]
+    assert snap["composer"] == composer and snap["readOnly"] is False, snap["label"]
+    assert snap["sendIsStop"] is False and snap["sendLabel"] == "Send message"
+    assert snap["sendDisabled"] is True, snap["label"]                      # paused, though a draft exists
+    assert snap["sendDescribedBy"] == "limit-notice"
+    note = snap["limitNotice"]
+    assert note["shown"] is notice and note["count"] == (1 if notice else 0), snap["label"]
+    assert note["text"] == LIMIT_NOTICE_TEXT and note["role"] == "status" and note["live"] == "polite"
+
+
+def test_daily_limit_rolls_back_the_prompt_into_the_composer_and_opens_one_dialog(browser_results):
+    result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
+    failed, closed = step(result, "failed"), step(result, "closed")
+
+    assert_dialog_open(failed)
+    # No user bubble, no Kalillac row: the empty state is back, the text is in the composer.
+    assert_limit_paused(failed, notice=False)
+    assert failed["rowOrder"] == [] and failed["emptyShown"] is True
+    # Got it: the dialog closes, one composer note replaces it, focus returns to the draft.
+    assert_dialog_closed(closed)
+    assert_limit_paused(closed)
+
+
+def test_daily_limit_pause_ignores_every_submission_path_and_keeps_the_draft_editable(browser_results):
+    result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
+    blocked, edited = step(result, "blocked"), step(result, "edited")
+
+    # Send clicks, Enter and the form's own submit sent nothing and reopened nothing.
+    assert_limit_paused(blocked)
+    assert blocked["requestCount"] == 1 and blocked["limitDialog"]["open"] is False
+    # The composer stays editable while paused.
+    assert_limit_paused(edited, composer="first question, revised")
+    assert edited["requestCount"] == 1
+
+
+def test_daily_limit_pause_lifts_at_the_next_utc_midnight(browser_results):
+    result = scenario(browser_results, f"code_{DAILY_LIMIT_CODE}")
+    released, after = step(result, "released"), step(result, "after-new-send")
+
+    # The harness clock reads 12:00:00 UTC: one release timer, 12 hours (+1 s) out.
+    assert released["longTimerDelays"] == [12 * 3600 * 1000 + 1000]
+    assert released["limitNotice"]["shown"] is False and released["limitNotice"]["count"] == 0
+    assert released["sendDisabled"] is False and released["sendDescribedBy"] is None
+    assert released["composer"] == "first question, revised"
+    assert_dialog_closed(after)
+    assert after["users"] == ["next question"] and after["assistants"][0]["text"].strip() == "Fine."
+    assert [b["message"] for b in bodies(result)] == ["first question", "next question"]
+
+
+def test_daily_limit_after_a_conversation_removes_only_the_refused_rows(browser_results):
+    result = scenario(browser_results, "daily_limit_after_conversation")
+    refused, closed = step(result, "refused"), step(result, "closed")
+    assert_dialog_open(refused)
+    for snap, notice in ((refused, False), (closed, True)):
+        assert_limit_paused(snap, composer="second question", users=["earlier question"], notice=notice)
+        assert snap["rowOrder"] == ["user", "assistant"]
+        assert snap["assistants"][0]["text"].strip() == "Earlier answer."
+
+
+def test_daily_limit_escape_closes_through_the_cancel_handler(browser_results):
+    result = scenario(browser_results, "daily_limit_escape")
+    assert_dialog_open(step(result, "open"))
+    closed = step(result, "closed")
+    assert closed["limitDialog"]["cancelPrevented"] is True   # One close function, not the default.
+    assert_dialog_closed(closed)
+    assert_limit_paused(closed)
+
+
+def test_daily_limit_backdrop_click_closes_but_a_panel_click_does_not(browser_results):
+    result = scenario(browser_results, "daily_limit_backdrop")
+    assert_dialog_open(step(result, "panel-click"))
+    closed = step(result, "closed")
+    assert_dialog_closed(closed)
+    assert_limit_paused(closed)
+
+
+def test_daily_limit_dialog_opens_once_per_refusal(browser_results):
+    result = scenario(browser_results, "daily_limit_reopen")
+    assert_dialog_closed(step(result, "first-closed"))
+    # A second attempt while paused: nothing sent, no second dialog, still one note.
+    blocked = step(result, "blocked")
+    assert_dialog_closed(blocked, focus_composer=False)
+    assert_limit_paused(blocked, composer="second question")
+    assert blocked["requestCount"] == 1
+    # After the release, a new refusal opens the dialog again, once.
+    reopened = step(result, "reopened")
+    assert_dialog_open(reopened)
+    assert_limit_paused(reopened, composer="second question", notice=False)
+    assert_dialog_closed(step(result, "second-closed"))
+    assert [b["message"] for b in bodies(result)] == ["first question", "second question"]
+
+
+def test_daily_limit_without_show_modal_shows_only_the_composer_note(browser_results):
+    failed = step(scenario(browser_results, "daily_limit_without_show_modal"), "failed")
+    assert_dialog_closed(failed, focus_composer=False)
+    assert_limit_paused(failed)
+
+
+def test_daily_limit_dialog_fits_a_360_by_640_viewport(browser_results):
+    snap = step(scenario(browser_results, "daily_limit_layout_360x640"), "open")
+    assert_dialog_open(snap)
+    layout = snap["layout"]
+    assert layout["viewport"] == [360, 640]
+    left, top, right, bottom = layout["dialog"]
+    assert 0 <= left < right <= 360 and 0 <= top < bottom <= 640, layout
+    b_left, b_top, b_right, b_bottom = layout["button"]
+    assert left <= b_left < b_right <= right and top <= b_top < b_bottom <= bottom, layout
+    assert b_bottom - b_top >= 44, layout
+    assert layout["dialogOverflowX"] <= 0 and layout["dialogOverflowY"] <= 0, layout
+    assert layout["pageOverflowX"] <= 0, layout
+
+
+def test_busy_and_bare_429_keep_retry_and_never_open_the_dialog(browser_results):
+    for name in ("code_busy", "bare_429"):
+        failed = step(scenario(browser_results, name), "failed")
+        assert_failed(failed, BUSY, retry=True)
+        assert failed["limitDialog"]["open"] is False, name
+
+
+def test_dialog_stays_closed_unless_the_daily_limit_code_arrives(browser_results):
+    limit_scenarios = {f"code_{DAILY_LIMIT_CODE}", *DAILY_LIMIT_SCENARIOS} - {"daily_limit_without_show_modal"}
+    for name, result in browser_results["results"].items():
+        snaps = [s for s in result["steps"] if "limitDialog" in s]
+        assert snaps, name
+        for snap in snaps:
+            assert snap["limitDialog"] is not None, name
+            if name not in limit_scenarios:
+                assert snap["limitDialog"]["open"] is False, (name, snap["label"])
+                assert snap["limitDialog"]["text"] == DAILY_LIMIT_DIALOG   # Never rewritten.
+
+
+def test_daily_limit_never_shows_server_text(browser_results):
+    for name in (f"code_{DAILY_LIMIT_CODE}", *DAILY_LIMIT_SCENARIOS):
+        result = scenario(browser_results, name)
+        assert_clean(result)
+        for snap in result["steps"]:
+            assert snap["limitDialog"]["text"] == DAILY_LIMIT_DIALOG, (name, snap["label"])
+            for sentinel in SENTINELS:
+                assert sentinel not in snap["limitDialog"]["text"], (name, sentinel)
+
+
+def daily_limit_markup() -> str:
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    start = page.index('<dialog class="limit-dialog"')
+    return page[start:page.index("</dialog>", start) + len("</dialog>")]
+
+
+def test_daily_limit_markup_is_fixed_accessible_copy():
+    markup = daily_limit_markup()
+    page = INDEX_HTML.read_text(encoding="utf-8")
+
+    # Exactly two native dialogs: this one and the End & erase confirmation.
+    assert page.count("<dialog") == 2
+    assert page.count('<dialog class="erase-dialog" id="erase-dialog"') == 1
+    assert ('<dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" '
+            'aria-describedby="limit-dialog-text limit-dialog-reset">') in markup
+    assert f'<h2 class="limit-dialog-title" id="limit-dialog-title">{DAILY_LIMIT_TITLE}</h2>' in markup
+    assert f'<p class="limit-dialog-text" id="limit-dialog-text">{DAILY_LIMIT_NOTE}</p>' in markup
+    assert f'<p class="limit-dialog-text" id="limit-dialog-reset">{DAILY_LIMIT_RESET}</p>' in markup
+    assert (f'<button type="button" class="limit-dialog-ok" id="limit-dialog-ok">{DAILY_LIMIT_BUTTON}'
+            '</button>') in markup
+    assert "Retry" not in markup
+
+
+def test_daily_limit_copy_avoids_unapproved_claims():
+    source = js_source()
+    outcome = source[source.index("var OUTCOME_DAILY_LIMIT"):]
+    outcome = outcome[: outcome.index("\n")]
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    note = page[page.index('<div class="limit-notice"'):]
+    note = note[: note.index("</div>")]
+    for text in (daily_limit_markup().lower(), outcome.lower(), f'"{DAILY_LIMIT_NOTE}"'.lower(), note.lower()):
+        for word in DAILY_LIMIT_FORBIDDEN:
+            assert word not in text, word
+    assert f'var COPY_DAILY_LIMIT = "{DAILY_LIMIT_NOTE}";' in source
+    assert 'action: null, dialog: true' in outcome
+    # The composer note is fixed markup with the dialog's own reset wording.
+    assert '<div class="limit-notice" id="limit-notice" role="status" aria-live="polite" hidden>' in note
+    assert DAILY_LIMIT_RESET in note
+
+
+def test_daily_limit_dialog_script_contract():
+    source = js_source()
+
+    # Only a 429 carrying the exact code opens it.
+    assert 'if (code === "anonymous_daily_limit_reached" && status !== 429) code = null;' in source
+    assert "anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT" in source
+    # Feature-detected, opened once, focus on Got it.
+    assert 'typeof limitDialog.showModal !== "function"' in source
+    assert "if (!limitDialog.open) limitDialog.showModal();" in source
+    assert "limitDialogOk.focus();" in source
+    # Escape is the cancel event: its default is prevented and one function closes.
+    cancel = source[source.index('limitDialog.addEventListener("cancel"'):]
+    cancel = cancel[: cancel.index("});")]
+    assert "event.preventDefault();" in cancel and "closeLimitDialog();" in cancel
+    assert 'limitDialogOk.addEventListener("click", closeLimitDialog);' in source
+    assert "if (event.target === limitDialog) closeLimitDialog();" in source
+    close = source[source.index("function closeLimitDialog()"):]
+    close = close[: close.index("\n  }")]
+    assert "input.focus({ preventScroll: true });" in close
+    # A settled send never pulls focus out of the open dialog.
+    assert source.count(".then(focusComposer);") == 3
+    assert "if (!inFlight && !limitDialogOpen()) input.focus({ preventScroll: true });" in source
+    # No client-side counter or countdown: the server's 429 is the only
+    # authority. After it, sending pauses on this page until the documented
+    # 00:00 UTC reset; the device clock is read only to find that moment.
+    region = source[source.index("// ---- daily-limit dialog"):source.index("function restoreDraft")]
+    for forbidden in ("Date(", "setInterval", "countdown", "remaining", "localStorage", "sessionStorage"):
+        assert forbidden not in region, forbidden
+    assert region.count("Date.now()") == 1
+    assert "return DAY_MS - (Date.now() % DAY_MS) + 1000;" in region
+    assert "limitHoldTimer = setTimeout(releaseDailyLimit, msUntilUtcReset());" in region
+    # Every way to send checks the pause; the rejected rows are removed.
+    assert "if (!text || inFlight || limitHeld) return;" in source
+    assert "if (inFlight || limitHeld || failedExchange !== exchange) return;" in source
+    assert "if (inFlight || limitHeld) return;" in source
+    assert "actionBtn.disabled = limitHeld || input.value.trim().length === 0;" in source
+    reject = region[region.index("function rejectForDailyLimit"):]
+    assert "restoreDraft(exchange);" in reject and "removeChild(rows[i])" in reject
+
+
+def test_daily_limit_dialog_styles():
+    css = (FRONTEND / "app.css").read_text(encoding="utf-8")
+    block = css[css.index("/* ---------------- Daily-limit dialog"):]
+
+    assert ".limit-dialog {" in block and "width: min(400px, calc(100vw - 2 * var(--rail)));" in block
+    assert "max-height: calc(100dvh - 32px);" in block and "overflow: auto;" in block
+    ok = block[block.index(".limit-dialog-ok {"):]
+    assert "min-height: 44px;" in ok[: ok.index("}")]
+    reduced = block[block.index("@media (prefers-reduced-motion: reduce)"):]
+    assert ".limit-dialog[open] { animation: none; }" in reduced
+    for token in ("var(--panel)", "var(--ink)", "var(--muted)", "var(--line)", "var(--radius)",
+                  "var(--shadow)", "var(--blue)", "var(--font-ui)"):
+        assert token in block, token
+
+
+# --- syntax highlighting ---------------------------------------------------------------------------
+
+
+def rgb(value: str) -> tuple[int, int, int]:
+    return tuple(int(part) for part in re.findall(r"\d+", value)[:3])
+
+
+def contrast(color: tuple[int, int, int], background: str) -> float:
+    def lum(c):
+        def channel(v):
+            v = v / 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b = (channel(v) for v in c)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    bg = tuple(int(background[i:i + 2], 16) for i in (1, 3, 5))
+    hi, lo = sorted((lum(color), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def rendered_code(browser_results, name):
+    return step(scenario(browser_results, name), "rendered")
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_known_languages_get_restrained_visible_token_colors(browser_results, name):
+    blocks = {b["language"]: b for b in rendered_code(browser_results, name)["code"]}
+    assert set(blocks) == set(CODE_SOURCES)
+    for language in HIGHLIGHTED_LANGUAGES:
+        block = blocks[language]
+        assert block["highlighted"] is True and block["spans"] > 0, language
+        # Only token spans with classes: no other element or attribute.
+        assert set(block["tags"]) == {"span"} and set(block["attrs"]) == {"class"}, language
+    for language, classes in {
+        "python": {"hljs-keyword", "hljs-string", "hljs-comment"},
+        "javascript": {"hljs-keyword", "hljs-string", "hljs-comment", "hljs-number"},
+        "sql": {"hljs-keyword", "hljs-number"},
+        "json": {"hljs-attr", "hljs-string", "hljs-number"},
+        "html": {"hljs-tag", "hljs-name", "hljs-attr", "hljs-string"},
+    }.items():
+        assert classes <= set(blocks[language]["colors"]), (language, blocks[language]["colors"])
+    # Keywords, strings, comments and plain code are visibly different colors.
+    python = blocks["python"]
+    distinct = {python["colors"]["hljs-keyword"], python["colors"]["hljs-string"],
+                python["colors"]["hljs-comment"], python["plainColor"]}
+    assert len(distinct) == 4, python["colors"]
+    # Every rendered token color stays readable on the code background.
+    for language in HIGHLIGHTED_LANGUAGES:
+        for token, color in blocks[language]["colors"].items():
+            assert contrast(rgb(color), CODE_BACKGROUND) >= 4.5, (language, token, color)
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_highlighting_never_changes_the_code_text(browser_results, name):
+    for block in rendered_code(browser_results, name)["code"]:
+        assert block["text"] == CODE_SOURCES[block["language"]], block["language"]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_unknown_and_unlabeled_fences_stay_readable_plain_code(browser_results, name):
+    blocks = {b["language"]: b for b in rendered_code(browser_results, name)["code"]}
+    for language in ("foobarlang", ""):
+        assert blocks[language]["highlighted"] is False and blocks[language]["spans"] == 0
+        assert blocks[language]["text"] == CODE_SOURCES[language]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_inline_code_and_prose_are_not_highlighted(browser_results, name):
+    snap = rendered_code(browser_results, name)
+    assert snap["inlineCode"] == [{"text": "code", "spans": 0, "highlighted": False}]
+    assert snap["prose"] == [
+        "Here is the Python version.",
+        "Inline code stays plain. This explanation remains normal prose outside the code block.",
+    ]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_script_looking_code_is_displayed_and_never_executed(browser_results, name):
+    snap = rendered_code(browser_results, name)
+    assert snap["page"]["scripts"] == 0 and snap["page"]["images"] == 0
+    assert snap["page"]["alerts"] == [] and snap["page"]["executed"] is False
+    html_block = next(b for b in snap["code"] if b["language"] == "html")
+    assert html_block["text"] == CODE_SOURCES["html"]
+
+
+@pytest.mark.parametrize("name", CODE_SCENARIOS)
+def test_copy_returns_the_original_reply_text(browser_results, name):
+    assert scenario(browser_results, name)["copied"] == [CODE_REPLY]
+
+
+def test_every_required_language_label_and_alias_is_highlighted(browser_results):
+    blocks = rendered_code(browser_results, "highlight_languages")["code"]
+    assert [b["language"] for b in blocks] == list(REQUIRED_LANGUAGE_LABELS) + ["foobarlang", ""]
+    by_label = {b["language"]: b for b in blocks}
+    for label in REQUIRED_LANGUAGE_LABELS:
+        block = by_label[label]
+        assert block["highlighted"] is True and block["spans"] > 0, label
+        assert set(block["tags"]) == {"span"} and set(block["attrs"]) == {"class"}, label
+    # Unknown and unlabeled fences still fall back to plain, readable code.
+    for label, text in (("foobarlang", "plain text\n"), ("", "unlabeled\n")):
+        assert by_label[label]["highlighted"] is False and by_label[label]["spans"] == 0
+        assert by_label[label]["text"] == text
+
+
+def test_the_vendored_bundle_registers_every_required_grammar():
+    """Deterministic, browser-free: the bundle defines each grammar it
+    registers as grmr_<name> and registers every one under its name."""
+    source = HIGHLIGHT_JS.read_text(encoding="utf-8")
+    grammars = set(re.findall(r"\bgrmr_(\w+)\s*:", source))
+    assert set(REQUIRED_GRAMMARS) <= grammars, set(REQUIRED_GRAMMARS) - grammars
+    assert 'Object.keys(Pe)){\nconst n=e.replace("grmr_","").replace("_","-");Ke.registerLanguage(n,Pe[e])}' in source
+    # The aliases the browser test relies on are declared by those grammars.
+    for alias in ('"py"', '"js"', '"ts"', '"html"', '"sh"', '"c++"', '"c#"', '"md"'):
+        assert alias in source, alias
+
+
+def test_highlighted_code_fits_a_narrow_mobile_viewport(browser_results):
+    snap = rendered_code(browser_results, "syntax_highlighting_360x640")
+    assert snap["page"]["viewport"] == [360, 640]
+    assert snap["page"]["overflowX"] <= 0                      # no page-level horizontal overflow
+    assert all(block["preRight"] <= 360 for block in snap["code"])
+    # Long lines scroll inside their own block, as before.
+    assert any(block["preScrolls"] for block in snap["code"])
+
+
+def test_vendored_highlightjs_is_the_verified_local_release():
+    import hashlib
+    assert hashlib.sha256(HIGHLIGHT_JS.read_bytes()).hexdigest() == HIGHLIGHT_JS_SHA256
+    assert hashlib.sha256(HIGHLIGHT_LICENSE.read_bytes()).hexdigest() == HIGHLIGHT_LICENSE_SHA256
+    source = HIGHLIGHT_JS.read_text(encoding="utf-8")
+    assert source.startswith("/*!\n  Highlight.js v11.12.0")
+    assert "BSD 3-Clause License" in HIGHLIGHT_LICENSE.read_text(encoding="utf-8")
+    for network in ("fetch(", "XMLHttpRequest", "sendBeacon", "import(", "WebSocket", "eval(", "new Function"):
+        assert network not in source, network
+    assert {p.name for p in HIGHLIGHT_JS.parent.iterdir()} == {"highlight.min.js", "LICENSE"}
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    tag = '<script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>'
+    assert page.count(tag) == 1 and page.index(tag) < page.index('<script src="app.js?v=')
+
+
+def test_highlighting_keeps_the_sanitizer_boundary():
+    source = APP_JS.read_text(encoding="utf-8")
+    render = source[source.index("function renderAssistantText"):source.index("function highlightCode")]
+    # Highlighting runs after Markdown is sanitized, on the sanitized DOM.
+    assert render.index("renderMarkdownSafe(") < render.index("highlightCode(shell.body);")
+    block = source[source.index("function highlightCode"):]
+    block = block[: block.index("\n  }\n")]
+    assert 'container.querySelectorAll("pre > code")' in block           # fenced code only
+    assert "hljs.getLanguage(match[1])" in block                          # known labels only
+    assert "var source = code.textContent;" in block                      # from the text, not markup
+    assert "window.DOMPurify.sanitize(tokens, HIGHLIGHT_PURIFY_CONFIG)" in block
+    assert "if (code.textContent === source)" in block and "code.textContent = source;" in block
+    config = source[source.index("var HIGHLIGHT_PURIFY_CONFIG"):]
+    config = config[: config.index("};")]
+    assert 'ALLOWED_TAGS: ["span"]' in config and 'ALLOWED_ATTR: ["class"]' in config
+    for automatic in ("highlightAll", "highlightElement", "highlightBlock"):
+        assert automatic not in source, automatic
+
+
+def test_syntax_token_colors_meet_contrast_on_the_code_background():
+    css = (FRONTEND / "app.css").read_text(encoding="utf-8")
+    block = css[css.index("/* Syntax highlighting (highlight.js token classes)"):]
+    block = block[: block.index(".md .hljs-emphasis")]
+    colors = set(re.findall(r"(?<![-\w])color: (#[0-9a-f]{6});", block))
+    assert len(colors) >= 6, colors
+    for color in colors:
+        value = tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+        assert contrast(value, CODE_BACKGROUND) >= 4.5, color
+    # Colors only: no font-size, spacing or layout change for highlighted code.
+    for property_name in ("font-size", "padding", "margin", "white-space", "display", "overflow"):
+        assert property_name + ":" not in block, property_name
+
+
 def test_embedded_chat_never_messages_its_parent(browser_results):
     """Every scenario runs framed by the runner (its parent window). The chat
     posts nothing to its parent: the homepage workspace has one stable size,
@@ -682,12 +1188,75 @@ def js_source() -> str:
     return re.sub(r'"\s*\+\s*\n?\s*"', "", APP_JS.read_text(encoding="utf-8"))
 
 
+REPOSITORIES = REPO / "candidate" / "kalillac_db" / "repositories"
+# Account errors reach the chat only with accounts enabled; their frontend
+# copy is a separate, later change. Until then the chat shows an unmapped
+# 429 (daily_limit_reached) with its existing busy outcome.
+DEFERRED_UNMAPPED = {"not_authenticated", "daily_limit_reached"}
+
+
+def quota_error_codes() -> set[str]:
+    """The fixed code of every QuotaError subclass in the repositories, read
+    statically (the app raises these as _budget_error(status, defect.code))."""
+    import ast
+
+    classes = {}
+    for path in REPOSITORIES.glob("*.py"):
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.ClassDef):
+                bases = {b.id if isinstance(b, ast.Name) else getattr(b, "attr", None) for b in node.bases}
+                code = next((stmt.value.value for stmt in node.body
+                             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                             and getattr(stmt.targets[0], "id", None) == "code"
+                             and isinstance(stmt.value, ast.Constant)), None)
+                classes[node.name] = (bases, code)
+
+    def is_quota_error(name, seen=()):
+        if name == "QuotaError":
+            return True
+        if name not in classes or name in seen:
+            return False
+        return any(is_quota_error(base, seen + (name,)) for base in classes[name][0])
+
+    codes = set()
+    for name, (bases, code) in classes.items():
+        if is_quota_error(name):
+            # A subclass without its own code inherits its parent's.
+            current = name
+            while code is None and classes.get(current):
+                parents = [b for b in classes[current][0] if b in classes]
+                if not parents:
+                    break
+                current = parents[0]
+                code = classes[current][1]
+            if code is not None:
+                codes.add(code)
+    return codes
+
+
 def backend_error_codes() -> set[str]:
     source = BACKEND.read_text(encoding="utf-8")
     codes = set(re.findall(r'_budget_error\(\s*\d+\s*,\s*"([a-z_]+)"\s*\)', source))
     codes |= set(re.findall(r'"error"\s*:\s*"([a-z_]+)"', source))
     codes |= {"empty_message", "message_too_long", "history_too_long", "invalid_request"}
-    return codes
+    codes |= quota_error_codes()
+    return codes - DEFERRED_UNMAPPED
+
+
+def test_quota_error_codes_are_discovered_statically():
+    codes = quota_error_codes()
+    assert {DAILY_LIMIT_CODE, "busy", "service_unavailable"} <= codes, codes
+    # The deferred code is discovered too, so it cannot silently disappear.
+    assert DEFERRED_UNMAPPED <= codes
+    assert DAILY_LIMIT_CODE in backend_error_codes()
+
+
+def test_account_daily_limit_falls_back_to_the_busy_outcome_until_mapped():
+    # No frontend copy yet: the code is unmapped, and a bare 429 is busy.
+    source = js_source()
+    assert "daily_limit_reached" in quota_error_codes()
+    assert not re.search(r"(?<![a-z_])daily_limit_reached\s*:", source)
+    assert "if (status === 429) return OUTCOME_BUSY;" in source
 
 
 def test_every_backend_error_code_is_mapped():
@@ -750,11 +1319,17 @@ def test_no_public_url_or_cdn_dependency():
 def test_production_and_storage_boundaries():
     source = APP_JS.read_text(encoding="utf-8")
 
+    # The homepage handoff is the one sessionStorage use (test_homepage_handoff.py):
+    # it may read, remove and mark, and never touches cookies or localStorage.
+    handoff = source[source.index("  /* ---- the homepage's one-time handoff"):
+                     source.index("  var handoff = takeHandoff();")]
+    assert not re.search(r"document\.cookie|\blocalStorage\s*[.\[]|sendBeacon|\bconsole\.", handoff)
+    rest = source.replace(handoff, "")
     # API use, not the words (the header comment says none of these are used).
     for forbidden in (r"\blocalStorage\s*[.\[]", r"\bsessionStorage\s*[.\[]",
                       r"\bindexedDB\s*\.", r"document\.cookie", r"\bconsole\.",
                       r"location\.reload", r"sendBeacon", r"__HARNESS"):
-        assert not re.search(forbidden, source), forbidden
+        assert not re.search(forbidden, rest), forbidden
 
 
 def test_only_app_js_app_css_and_index_html_changed_in_the_frontend():
@@ -772,6 +1347,7 @@ def test_only_app_js_app_css_and_index_html_changed_in_the_frontend():
         cwd=REPO, capture_output=True, text=True, check=True,
     ).stdout.split()
 
+    # Plus exactly the two vendored highlight.js files (pinned by hash below).
     assert set(changed) | set(untracked) <= {
         "frontend/app.js", "frontend/app.css", "frontend/index.html",
-    }
+    } | VENDORED_HIGHLIGHT

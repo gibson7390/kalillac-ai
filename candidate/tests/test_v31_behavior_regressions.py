@@ -50,5 +50,7 @@ def test_native_policy_guards_behavior():
     policy = app.V31_NATIVE_TOOL_POLICY
 
     assert "capability question" in policy
-    assert "Do not volunteer the creator" in policy
+    assert "Do not volunteer Kalillac's creator" in policy
+    assert "This rule concerns only Kalillac itself" in policy
+    assert "another website, organization or topic" in policy
     assert "Do not reconstruct Kalillac's architecture" in policy

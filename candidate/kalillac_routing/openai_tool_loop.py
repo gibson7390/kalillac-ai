@@ -14,6 +14,10 @@ import json
 import re
 from typing import Any, Callable, Mapping, Sequence
 
+from .provider_refusal import (
+    output_has_refusal,
+    resolve_visible_text,
+)
 from .tool_contract import (
     ValidatedToolCall,
     validate_tool_call,
@@ -167,6 +171,11 @@ class ToolLoopResult:
     bounded continuation attempt; incomplete_reason carries the provider's
     reason so callers can surface it instead of presenting broken output
     as a finished answer.
+
+    refused is True when the final model turn carried a provider refusal
+    part. text then already holds the fixed Kalillac reply (alone, or after
+    whatever visible text the model did produce); the raw refusal payload
+    is never copied.
     """
 
     text: str
@@ -174,6 +183,7 @@ class ToolLoopResult:
     tool_calls: tuple[ValidatedToolCall, ...]
     incomplete: bool = False
     incomplete_reason: str | None = None
+    refused: bool = False
 
 
 ModelCaller = Callable[
@@ -336,12 +346,32 @@ def run_tool_loop(
 
         output = _response_output(response)
         incomplete_reason = response_incomplete_reason(response)
+        refused = output_has_refusal(output)
 
         function_calls = [
             item
             for item in output
             if item.get("type") == "function_call"
         ]
+
+        if refused:
+            # A provider refusal ends the turn: no tool requested beside it
+            # is executed, no continuation is attempted, and the complete
+            # visible output for this turn (including accumulated partial
+            # text) is discarded and replaced by the fixed Kalillac reply.
+            text = resolve_visible_text(
+                stitch_continuation(partial_text, _raw_output_text(response)),
+                True,
+            ).strip()
+
+            return ToolLoopResult(
+                text=text,
+                model_calls=model_calls,
+                tool_calls=tuple(validated_history),
+                incomplete=False,
+                incomplete_reason=None,
+                refused=True,
+            )
 
         if function_calls and incomplete_reason is not None:
             # A cut-off response may carry truncated tool arguments.

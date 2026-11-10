@@ -196,6 +196,7 @@ def test_openai_success_is_unchanged(openai):
     assert payload["reasoning"] == {"effort": "low"}
     assert payload["max_output_tokens"] == 123
     assert payload["input"] == [
+        {"role": "system", "content": app.CURRENT_INTERFACE_CAPABILITIES},
         {"role": "system", "content": "system"},
         {"role": "user", "content": "hello"},
     ]
@@ -678,13 +679,23 @@ def test_api_failure_wording_is_accurate():
 # updated deliberately in the error-contract slice (base cc6a3b43) to keep
 # usable results when the search-attempt allowance runs out ("partial"). Any
 # later change to the search path must update these deliberately.
+# Deliberately reviewed search-policy slice: Brave primary/bounded fallback
+# and the shared search holder. Native evidence follow-up extends only
+# run_web_search; all fingerprint assertions remain exact. The query-cleanup
+# slice changed only run_web_search's make_concise_query (identifiers and
+# site:/-site: operators are preserved whole); provider calls and restrictions
+# are unchanged. The privacy-safe logging slice changed only run_web_search's
+# debug log line: it records the query's length, never the query text.
+# The general source-trust slice adds bounded per-request result recall and
+# allows a hostname-restricted ownership follow-up to disable domain retries.
+# No other fingerprint or transport contract changes.
 TAVILY_PATH_SOURCE = {
-    "run_web_search": "82fbaeeb24c6db7d7eca63f72976ad935daa4d7ee9c6cc95dab8377c6b56428d",
+    "run_web_search": "2912e83523ebbf1346237d5d2820807a3155ad986811b83d7bdde0098afc9e35",
     "session_search_allowed": "72f8e0ddb4b565727df13f43e81a4d9fd5a84e3f4d5ab92b163b94edec364cc6",
     "_post_tavily_for_attempt": "6306efca81fd92af1693b72c8051424b4bef550c26eebe5b3f24045f4ffb2a19",
     "_close_tavily_transport": "959524931116e7a98ac510b6613245a5936cf265ab4c0f80b66c45b20906e5f8",
 }
-TAVILY_TRANSPORT_MODULE_SOURCE = "3e448019cf1fd14992ead2ffb3aaba64fb0faff82005108e3749f2f1812e6676"
+TAVILY_TRANSPORT_MODULE_SOURCE = "ac0a2191549120fda5447be4360cc5157ca4b8697521bbaec0d94c255cdee37d"
 
 
 @pytest.mark.parametrize("name", list(TAVILY_PATH_SOURCE))
@@ -896,9 +907,12 @@ def test_disclosure_uses_the_configured_model_not_a_hard_coded_one():
         assert "luna" not in lowered, name
         assert "gpt-5.6" not in lowered, name
 
-    # Surfaces that state the model name the configured value.
+    # Generic identity names the provider; precise model facts come from runtime.
+    assert "OpenAI provides all model inference." in surfaces["system_prompt"]
+    assert "__OPENAI_MODEL__" not in surfaces["system_prompt"]
+    # Surfaces that state a model must name the configured value.
     for name in (
-        "system_prompt", "facts", "code_reference", "diagram", "identity",
+        "facts", "code_reference", "diagram", "identity",
         "how_it_works", "model", "search", "runtime_facts",
         "self_knowledge_prompt", "python_repair_prompt",
     ):

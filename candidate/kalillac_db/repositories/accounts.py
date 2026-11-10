@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -111,3 +111,53 @@ def revoke_account_session(
         )
         .values(revoked_at=now)
     )
+
+
+def revoke_all_account_sessions(session: Session, user_id: uuid.UUID, now: datetime) -> None:
+    """Revoke every unrevoked device for one account, including expired sessions."""
+    session.execute(
+        update(AccountSession)
+        .where(AccountSession.user_id == user_id, AccountSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+
+
+class AccountAuthorizationUnavailable(RuntimeError):
+    """The fresh PostgreSQL authorization contract could not be established."""
+
+
+def original_session_binding(session: Session, token_hash: str):
+    # Scalar columns avoid both stale ORM identity-map state and deferred loads.
+    with session.no_autoflush:
+        return session.execute(
+            select(AccountSession.user_id, AccountSession.id, AccountSession.token_hash)
+            .where(AccountSession.token_hash == token_hash)
+        ).one_or_none()
+
+
+def locked_original_account(session: Session, user_id, session_id, token_hash):
+    """Caller owns a clean READ COMMITTED transaction; no writes or commits."""
+    if session.get_bind().dialect.name != "postgresql" or session.new or session.dirty or session.deleted:
+        raise AccountAuthorizationUnavailable()
+    with session.no_autoflush:
+        if getattr(session.connection().connection.driver_connection, "autocommit", True):
+            raise AccountAuthorizationUnavailable()
+        if session.scalar(text("SELECT current_setting('transaction_isolation')")) != "read committed":
+            raise AccountAuthorizationUnavailable()
+        locked = session.scalar(select(User.id).where(User.id == user_id).with_for_update())
+        # Separate statement AFTER acquiring the account lock: neither now()
+        # nor a timestamp evaluated before a blocking SELECT is fresh enough.
+        checked_at = session.scalar(text("SELECT clock_timestamp()"))
+        if locked is None:
+            return None, checked_at
+        row = session.execute(
+            select(
+                User.id, User.email, User.created_at, User.is_active, User.email_verified_at,
+                User.quarantined_at, User.sessions_valid_after,
+                AccountSession.created_at.label("session_created_at"),
+                AccountSession.expires_at, AccountSession.revoked_at,
+            ).join(AccountSession, AccountSession.user_id == User.id)
+            .where(User.id == user_id, AccountSession.user_id == user_id,
+                   AccountSession.id == session_id, AccountSession.token_hash == token_hash)
+        ).one_or_none()
+        return row, checked_at

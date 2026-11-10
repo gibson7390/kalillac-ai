@@ -219,3 +219,11 @@ def isolated_tavily_transport(monkeypatch):
         "_SLOT",
         tavily_transport.TavilyTransportSlot(factory=_refuse_tavily_transport),
     )
+
+@pytest.fixture(autouse=True)
+def legacy_registration_contract_fixture(request, monkeypatch):
+    # The unchanged legacy browser suite's fake server now reports its contract.
+    # Preserve all its assertions, request recording and production UI execution.
+    if request.node.module.__name__ == "test_account_ui":
+        from registration_ui_contract_support import install_contract
+        install_contract(monkeypatch, request.node.module.FakeAccountApi)

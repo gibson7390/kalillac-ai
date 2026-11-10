@@ -37,7 +37,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_INPUT: "1"
@@ -139,10 +139,12 @@ jobs:
           --junitxml="$RUNNER_TEMP/anonymous-allowance-offline.xml"
 
       # A green run must mean every focused test executed: none skipped,
-      # failed or errored, and exactly the expected number collected
+      # failed or errored, and exactly the expected number collected. The
+      # release candidate carries the safety-release code, whose focused
+      # modules collect more than main's 340
       # (test_anonymous_chat.py 55 + test_usage_limits.py 135 +
-      # test_usage_enforcement.py 57 + test_frontend_error_contract.py 74 +
-      # test_homepage_handoff.py 19 = 340).
+      # test_usage_enforcement.py 67 + test_frontend_error_contract.py 98 +
+      # test_homepage_handoff.py 253 = 608).
       - name: Require every focused test to have run
         run: |
           python - "$RUNNER_TEMP/anonymous-allowance-offline.xml" <<'PY'
@@ -152,6 +154,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 340, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 608, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused anonymous allowance verification did not run completely")
           PY

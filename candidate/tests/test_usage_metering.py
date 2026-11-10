@@ -192,6 +192,7 @@ def _import_app_with(env_overrides):
     env.setdefault("GROQ_API_KEY", "test-not-real")
 
     script = (
+        "import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();"
         "import app_fastapi_candidate as a;"
         "from fastapi.testclient import TestClient;"
         "r = TestClient(a.api, base_url='https://testserver')"
@@ -210,6 +211,7 @@ def _import_app_with(env_overrides):
 
 
 DB_ENV = {
+    "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
     "KALILLAC_DB_ENABLED": "true",
     "KALILLAC_DATABASE_URL": (
         "postgresql+psycopg://user:pw@unreachable.invalid/kalillac"

@@ -306,12 +306,26 @@ def test_logout_without_session_is_idempotent(client):
 
 def test_account_schema_holds_identity_only():
     billing_tables = {"kalillac.account_billing", "kalillac.stripe_webhook_events"}
+    # Spaces (default-off) are the one deliberate store of conversation
+    # content: account-owned Spaces, their conversations and completed
+    # messages. Every other table keeps the original identity-only rules below.
+    spaces_tables = {"kalillac.spaces", "kalillac.conversations", "kalillac.messages"}
 
-    assert set(Base.metadata.tables) == {
+    assert set(Base.metadata.tables) - spaces_tables == {
         "kalillac.users",
+        "kalillac.account_registration_intents",
+        "kalillac.account_registration_activation",
         "kalillac.account_sessions",
+        "kalillac.account_recovery_tokens",
+        "kalillac.account_email_verification_tokens",
         "kalillac.account_entitlements",
         "kalillac.account_usage_daily",
+        "kalillac.account_usage_slots",
+        "kalillac.provider_usage_pools",
+        # The anonymous daily allowance: hashed visitor digests and counts,
+        # no identity or conversation data.
+        "kalillac.anonymous_usage_days",
+        "kalillac.anonymous_usage_slots",
         *billing_tables,
     }
 
@@ -330,11 +344,14 @@ def test_account_schema_holds_identity_only():
     ):
         assert not any(forbidden in column for column in columns), forbidden
 
-    # Nothing anywhere stores conversation content or memory.
+    assert spaces_tables <= set(Base.metadata.tables)
+
+    # Nothing outside Spaces stores conversation content or memory.
     # (Aggregate counters such as successful_chats are numbers, not content.)
     all_columns = {
         column.name
-        for table in Base.metadata.tables.values()
+        for name, table in Base.metadata.tables.items()
+        if name not in spaces_tables
         for column in table.columns
     }
 
@@ -342,7 +359,7 @@ def test_account_schema_holds_identity_only():
         "conversation", "message", "history", "memory", "transcript",
         "prompt", "query", "content", "text", "reply", "chat_session",
     ):
-        assert not any(forbidden in column for column in all_columns), forbidden
+        assert not any(forbidden in column for column in all_columns if column != "email_ciphertext"), forbidden
 
     # The temporary chat session id is never stored. (A Stripe Checkout
     # Session id, stripe_checkout_session_id, is billing data, not chat.)
@@ -367,7 +384,7 @@ def test_account_schema_holds_identity_only():
         "card", "payment", "invoice", "amount", "cents", "currency",
         "payload", "raw", "secret", "bank", "iban", "cvc", "last4",
     ):
-        assert not any(forbidden in column for column in all_columns), forbidden
+        assert not any(forbidden in column for column in all_columns if column != "email_ciphertext"), forbidden
 
 
 def test_account_creation_creates_no_conversation_state(client, db):
@@ -383,14 +400,35 @@ def test_account_creation_creates_no_conversation_state(client, db):
 
     assert tables == {
         "users",
+        "account_registration_intents",
+        "account_registration_activation",
         "account_sessions",
+        "account_recovery_tokens",
+        "account_email_verification_tokens",
         "account_entitlements",
         "account_usage_daily",
+        "account_usage_slots",
+        "provider_usage_pools",
+        "anonymous_usage_days",
+        "anonymous_usage_slots",
         "account_billing",
         "stripe_webhook_events",
+        # Default-off Spaces tables exist in the schema...
+        "spaces",
+        "conversations",
+        "messages",
     }
     assert _count(db, User) == 1
     assert _count(db, AccountSession) == 1
+    # ...and registering, signing in and reading /me put nothing in them.
+    from kalillac_db.models import Conversation, Message, Space
+    for model in (Space, Conversation, Message):
+        assert _count(db, model) == 0, model.__tablename__
+    from kalillac_db.models import AccountUsageSlot, AnonymousUsageDay, AnonymousUsageSlot
+    assert _count(db, AccountUsageSlot) == 0
+    # Registering and signing in never creates anonymous allowance rows.
+    assert _count(db, AnonymousUsageDay) == 0
+    assert _count(db, AnonymousUsageSlot) == 0
 
     # No temporary chat session was created or touched.
     assert app.SESSION_STATE == chat_state_before
@@ -516,6 +554,7 @@ def _import_app_with(env_overrides, block_module=None):
 
     # /api/account/me without a cookie answers before any DB access.
     script = blocker + (
+        "import sys;sys.path.insert(0,'tests');from registration_startup_test_support import install_unactivated_schema;install_unactivated_schema();"
         "import app_fastapi_candidate as a;"
         "from fastapi.testclient import TestClient;"
         "r = TestClient(a.api, base_url='https://testserver')"
@@ -540,11 +579,12 @@ def test_enabled_accounts_require_database():
     assert "KALILLAC_ACCOUNTS_ENABLED requires KALILLAC_DB_ENABLED" in result.stderr
 
 
-def test_enabled_accounts_mount_routes_without_connecting():
-    # The engine is lazy: mounting routes must not open a DB connection,
-    # so an unreachable host is fine at import time.
+def test_enabled_accounts_probe_synthetic_schema_before_mounting_routes():
+    # AR8 requires the schema probe. The subprocess supplies an unactivated
+    # synthetic schema; no configured external database is contacted.
     result = _import_app_with(
         {
+            "KALILLAC_SITE_ORIGIN": "https://kalillac.ai",
             "KALILLAC_ACCOUNTS_ENABLED": "true",
             "KALILLAC_DB_ENABLED": "true",
             "KALILLAC_DATABASE_URL": (

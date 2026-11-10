@@ -34,6 +34,20 @@ def make_sqlite_engine() -> Engine:
     def _on_begin(connection):
         connection.exec_driver_sql("BEGIN")
 
+    # SQLite's inline ADD COLUMN reference is enforced by PRAGMA, but its
+    # ON DELETE is omitted by SQLAlchemy's table-SQL reflection parser.
+    original_foreign_keys = engine.dialect.get_foreign_keys
+    def foreign_keys(connection, table_name, schema=None, **kw):
+        keys = original_foreign_keys(connection, table_name, schema=schema, **kw)
+        rows = engine.dialect._get_table_pragma(connection, "foreign_key_list", table_name, schema=schema)
+        for key in keys:
+            matches = [row for row in rows if row[2] == key["referred_table"] and row[3] in key["constrained_columns"]]
+            if matches:
+                for label, index in [("onupdate", 5), ("ondelete", 6)]:
+                    if matches[0][index] != "NO ACTION":
+                        key["options"][label] = matches[0][index]
+        return keys
+    engine.dialect.get_foreign_keys = foreign_keys
     return engine
 
 
@@ -64,6 +78,20 @@ def make_sqlite_file_engine(directory: str) -> Engine:
         # would serialize conflicting upserts.
         connection.exec_driver_sql("BEGIN IMMEDIATE")
 
+    # SQLite's inline ADD COLUMN reference is enforced by PRAGMA, but its
+    # ON DELETE is omitted by SQLAlchemy's table-SQL reflection parser.
+    original_foreign_keys = engine.dialect.get_foreign_keys
+    def foreign_keys(connection, table_name, schema=None, **kw):
+        keys = original_foreign_keys(connection, table_name, schema=schema, **kw)
+        rows = engine.dialect._get_table_pragma(connection, "foreign_key_list", table_name, schema=schema)
+        for key in keys:
+            matches = [row for row in rows if row[2] == key["referred_table"] and row[3] in key["constrained_columns"]]
+            if matches:
+                for label, index in [("onupdate", 5), ("ondelete", 6)]:
+                    if matches[0][index] != "NO ACTION":
+                        key["options"][label] = matches[0][index]
+        return keys
+    engine.dialect.get_foreign_keys = foreign_keys
     return engine
 
 

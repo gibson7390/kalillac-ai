@@ -34,6 +34,7 @@ from kalillac_db.repositories.accounts import (
     revoke_account_session,
     set_password_hash,
 )
+from kalillac_db.repositories.billing import lock_account
 from kalillac_db.repositories.entitlements import (
     create_default_entitlement,
     get_entitlement,
@@ -54,6 +55,8 @@ from .rate_limit import (
     trust_cloudflare_client_ip,
 )
 from .tokens import hash_session_token, new_session_token
+from .password_work import PASSWORD_WORK_GATE, PasswordWorkBusy
+from .registration_rate_limit import RegistrationRateLimiter
 
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -73,6 +76,10 @@ class AccountSettings:
     session_days: int = 14
     # See rate_limit.client_identifier before enabling.
     trust_cloudflare_client_ip: bool = False
+    # KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED. While false, /me and
+    # Checkout are exactly as before; while true, /me adds email_verified and
+    # new Checkout sessions require a verified email.
+    email_verification_enabled: bool = False
 
     @property
     def cookie_name(self) -> str:
@@ -96,6 +103,9 @@ def load_account_settings() -> AccountSettings:
         cookie_secure=secure.strip().lower() in _TRUE_VALUES,
         session_days=max(1, days),
         trust_cloudflare_client_ip=trust_cloudflare_client_ip(),
+        email_verification_enabled=os.getenv(
+            "KALILLAC_ACCOUNT_EMAIL_VERIFICATION_ENABLED", ""
+        ).strip().lower() in _TRUE_VALUES,
     )
 
 
@@ -142,10 +152,21 @@ async def _read_credentials(request: Request) -> tuple[str, str] | JSONResponse:
     if not content_type.lower().startswith("application/json"):
         return _error(415, "json_required")
 
-    raw = await request.body()
+    # An honest Content-Length over the limit is refused before any body is
+    # read. A missing or dishonest one is caught while streaming: each chunk
+    # is checked before it is kept, so no more than the limit is buffered.
+    # A malformed Content-Length is ignored here, as it always was.
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isascii() and declared.isdigit():
+        significant = declared.lstrip("0") or "0"
+        if len(significant) > len(str(MAX_BODY_BYTES)) or int(significant) > MAX_BODY_BYTES:
+            return _error(413, "body_too_large")
 
-    if len(raw) > MAX_BODY_BYTES:
-        return _error(413, "body_too_large")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_BODY_BYTES:
+            return _error(413, "body_too_large")
+        raw.extend(chunk)
 
     try:
         body = json.loads(raw)
@@ -173,6 +194,10 @@ def build_account_router(
     ),
     settings: AccountSettings | None = None,
     limiter: LoginRateLimiter | None = None,
+    registration_limiter: RegistrationRateLimiter | None = None,
+    password_gate=None,
+    registration_http=None,
+    v1_security=None,
 ) -> APIRouter:
     """Build the /api/account router.
 
@@ -182,7 +207,11 @@ def build_account_router(
     """
 
     settings = settings or load_account_settings()
+    from .v1_security import load_v1_security
+    v1_security = v1_security if v1_security is not None else load_v1_security(session_factory)
     limiter = limiter or LoginRateLimiter()
+    registration_limiter = registration_limiter if registration_limiter is not None else RegistrationRateLimiter()
+    password_gate = password_gate if password_gate is not None else PASSWORD_WORK_GATE
     router = APIRouter(prefix="/api/account")
 
     def run_in_transaction(work: Callable[[Session], Any]) -> Any:
@@ -218,8 +247,25 @@ def build_account_router(
             samesite="lax",
         )
 
+    @router.get("/registration-contract")
+    async def registration_contract(request: Request):
+        # A fresh, non-secret challenge binds the response to this request.
+        # Authority is the handler actually mounted by this router factory.
+        nonces = [value for name, value in request.scope["headers"]
+                  if name.lower() == b"x-kalillac-registration-nonce"]
+        headers = {"Cache-Control": "no-store", "Pragma": "no-cache",
+                   "Vary": "X-Kalillac-Registration-Nonce"}
+        if (request.scope.get("query_string", b"") or len(nonces) != 1
+                or len(nonces[0]) != 32
+                or any(c not in b"0123456789abcdef" for c in nonces[0])):
+            return JSONResponse({"error": "invalid_request"}, status_code=400, headers=headers)
+        return JSONResponse({"contract": "email-first-v1" if registration_http is not None else "legacy-v1",
+                             "nonce": nonces[0].decode("ascii")}, headers=headers)
+
     @router.post("/register")
     async def register(request: Request):
+        if registration_http is not None:
+            return await registration_http.request(request)
         credentials = await _read_credentials(request)
 
         if isinstance(credentials, JSONResponse):
@@ -230,8 +276,21 @@ def build_account_router(
         if not password_length_ok(password):
             return _error(422, "password_length")
 
-        # Hash outside the transaction; Argon2 is deliberately slow.
-        password_hash = await run_in_threadpool(hash_password, password)
+        decision, attempt = registration_limiter.begin(client_identifier(
+            request.client.host if request.client else None, request.headers,
+            settings.trust_cloudflare_client_ip,
+        ))
+        if not decision.allowed:
+            response = _error(429, "too_many_attempts")
+            response.headers["Retry-After"] = str(decision.retry_after_seconds)
+            return response
+        try:
+            # No transaction while waiting/hashing. Charge at actual worker start.
+            password_hash = await password_gate.run(hash_password, password, on_start=attempt.charge)
+        except PasswordWorkBusy:
+            return _error(503, "busy")
+        finally:
+            attempt.release()
 
         def work(session: Session) -> dict[str, Any]:
             # One transaction: the user and its free entitlement are created
@@ -296,7 +355,17 @@ def build_account_router(
                 password,
             )
 
-            if user is None or not password_ok or not user.is_active:
+            if user is None or not password_ok or not user.is_active or (registration_http is not None and (user.email_verified_at is None or user.quarantined_at is not None)):
+                return None
+
+            # A password reset may commit while Argon2 runs. Recheck under the
+            # account lock a reset also takes: either the reset sees and
+            # revokes this session, or this login sees the replaced password.
+            verified_hash = user.password_hash
+            lock_account(session, user.id)
+            session.refresh(user)
+
+            if user.password_hash != verified_hash or not user.is_active or (registration_http is not None and (user.email_verified_at is None or user.quarantined_at is not None)):
                 return None
 
             if needs_rehash(user.password_hash):
@@ -312,7 +381,12 @@ def build_account_router(
             return _user_json(user)
 
         try:
-            payload = await run_in_threadpool(run_in_transaction, work)
+            # One admission covers verification and optional rehash, without
+            # recursively acquiring the permit. Wait before opening the transaction.
+            payload = await password_gate.run(run_in_transaction, work)
+        except PasswordWorkBusy:
+            limiter.release(limit_keys)
+            return _error(503, "busy")
         except BaseException:
             # A server-side error is not a failed guess; free the slot.
             limiter.release(limit_keys)
@@ -356,8 +430,35 @@ def build_account_router(
         clear_session_cookie(response)
         return response
 
+    async def v1_read(request: Request, entitlement=False):
+        from .auth import RequestRejected, session_token_hash
+        from .v1_security import V1SecurityUnavailable
+        token_hash = session_token_hash(request.cookies, settings.cookie_name)
+        if token_hash is None:
+            return _error(401, "not_authenticated")
+
+        def payload(session, account):
+            if entitlement:
+                return effective_entitlement(
+                    get_entitlement(session, account.id), account.authorized_at,
+                ).as_json()
+            result = _user_json(account)
+            if settings.email_verification_enabled:
+                result["user"]["email_verified"] = True
+            return result
+
+        try:
+            result = await v1_security.read_async(token_hash, payload)
+        except RequestRejected as rejected:
+            return _error(rejected.status, rejected.code)
+        except V1SecurityUnavailable:
+            return _error(503, "account_unavailable")
+        return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
     @router.get("/me")
     async def me(request: Request):
+        if v1_security is not None:
+            return await v1_read(request)
         token = request.cookies.get(settings.cookie_name)
 
         if not token:
@@ -368,7 +469,17 @@ def build_account_router(
 
         def work(session: Session) -> dict[str, Any] | None:
             user = get_signed_in_user(session, token_hash, checked_at)
-            return _user_json(user) if user else None
+
+            if user is None:
+                return None
+
+            payload = _user_json(user)
+
+            if settings.email_verification_enabled:
+                # A boolean only; the verification time is never exposed.
+                payload["user"]["email_verified"] = user.email_verified_at is not None
+
+            return payload
 
         payload = await run_in_threadpool(run_in_transaction, work)
 
@@ -384,6 +495,8 @@ def build_account_router(
     # come only from internal, verified callers (later, billing).
     @router.get("/entitlements")
     async def entitlements(request: Request):
+        if v1_security is not None:
+            return await v1_read(request, entitlement=True)
         token = request.cookies.get(settings.cookie_name)
 
         if not token:
@@ -413,4 +526,7 @@ def build_account_router(
             headers={"Cache-Control": "no-store"},
         )
 
+    if registration_http is not None:
+        from .registration_http import confirmation_router
+        router.include_router(confirmation_router(registration_http))
     return router

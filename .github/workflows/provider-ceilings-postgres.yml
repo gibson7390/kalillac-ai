@@ -71,7 +71,9 @@ jobs:
           --junitxml="$RUNNER_TEMP/provider-ceilings-postgres.xml"
 
       # A green run must mean every focused test executed: none skipped,
-      # failed or errored, and exactly the expected number collected.
+      # failed or errored, and exactly the expected number collected. The
+      # release candidate's tests/test_provider_controls_postgres.py collects
+      # 29 (this branch carries the safety-release code, not main's 24).
       - name: Require every focused test to have run
         run: |
           python - "$RUNNER_TEMP/provider-ceilings-postgres.xml" <<'PY'
@@ -81,6 +83,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 24, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 29, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused PostgreSQL verification did not run completely")
           PY

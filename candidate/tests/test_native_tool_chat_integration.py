@@ -82,8 +82,8 @@ def test_v31_native_tool_chat_behavior(monkeypatch):
 
             if name == "get_kalillac_runtime_facts":
                 return _message_response(
-                    "Kalillac is configured to use GPT-5.6 Luna through "
-                    "OpenAI as its primary model, with configured fallbacks. "
+                    f"Kalillac is configured to use {app.OPENAI_MODEL} through "
+                    "OpenAI as its primary model, with no automatic model fallback. "
                     "The current response contract does not prove which "
                     "provider handled this particular completed response."
                 )
@@ -197,11 +197,12 @@ def test_v31_native_tool_chat_behavior(monkeypatch):
     assert "**Sources**" not in rewrite
 
     assert counters["search"] == 1
-    assert news.count("**Sources**") == 1
+    assert news.count("**Search results**") == 1
     assert "https://example.com/ai-news" in news
     assert "https://wrong.example" not in news
 
     assert counters["runtime"] == 1
-    assert "GPT-5.6 Luna" in runtime
+    assert app.OPENAI_MODEL in runtime
+    assert "no automatic model fallback" in runtime
     assert "particular completed response" in runtime
     assert "**Sources**" not in runtime

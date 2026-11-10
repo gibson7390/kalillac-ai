@@ -8,6 +8,10 @@ Account routes (cookie-authenticated, same rules as every account endpoint):
 Stripe route (authenticated only by the Stripe signature):
 - POST /api/billing/stripe/webhook
 
+While email verification is enabled (AccountSettings), Checkout refuses an
+unverified account with 403 email_verification_required before any Stripe
+call or billing write.
+
 Request bodies on the account routes are ignored entirely: the Price,
 customer, URLs, and tier are all server-controlled. No route here writes
 billing state or entitlement; only verified webhook reconciliation does.
@@ -31,7 +35,13 @@ from kalillac_db.repositories.billing import get_billing
 
 from .config import BillingConfig
 from .gateway import BillingGateway, BillingProviderError, InvalidWebhookSignature
-from .service import ReconciliationConflict, process_webhook, start_checkout
+from .service import (
+    ReconciliationConflict,
+    SubscriptionStateInvalid,
+    WebhookModeMismatch,
+    process_webhook,
+    start_checkout,
+)
 
 
 # Stripe events are small; this bounds memory for unauthenticated input.
@@ -120,12 +130,21 @@ def build_billing_router(
 
     @router.post("/api/account/billing/checkout")
     async def checkout(request: Request):
-        found = await signed_in(request, lambda session, user: user.id)
+        found = await signed_in(
+            request,
+            lambda session, user: (user.id, user.email_verified_at is not None),
+        )
 
         if found is None:
             return _error(401, "not_authenticated")
 
-        user_id = found[1]
+        user_id, email_verified = found[1]
+
+        # Read-only so far: refused before start_checkout, so before any
+        # Stripe call or billing write. Portal, webhooks and reconciliation
+        # are unaffected, and a verified address never becomes unverified.
+        if settings.email_verification_enabled and not email_verified:
+            return _error(403, "email_verification_required")
 
         # Attempt ids, session ids, keys, and expiry are all server-side;
         # the request body is never read.
@@ -245,11 +264,22 @@ def build_billing_router(
                     signature,
                     gateway=gateway,
                     session_factory=factory(),
-                    paid_price_id=config.price_id,
+                    allowed_price_ids=config.allowed_price_ids,
+                    livemode=config.livemode,
                 )
             )
         except InvalidWebhookSignature:
             return _error(400, "invalid_signature")
+        except WebhookModeMismatch:
+            # Signed, but for the other Stripe mode: nothing read, written,
+            # or recorded.
+            print("WARN: STRIPE_WEBHOOK_MODE_MISMATCH")
+            return _error(400, "livemode_mismatch")
+        except SubscriptionStateInvalid:
+            # A paying subscription without a usable period end: rolled
+            # back and unrecorded, so Stripe retries.
+            print("WARN: STRIPE_WEBHOOK_INVALID_SUBSCRIPTION_STATE")
+            return _error(500, "subscription_state_invalid")
         except ReconciliationConflict:
             # Two different nonterminal subscriptions for one account:
             # nothing written, event left unrecorded, so Stripe keeps

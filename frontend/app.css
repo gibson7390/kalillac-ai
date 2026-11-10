@@ -6,17 +6,20 @@
    Mobile-first. No remote fonts, no CDN, no tracking.
    ========================================================================== */
 
+/* Token values follow the public site's (site/src/index.css): Kalillac blue,
+   pale-blue layers, crisp hairlines, restrained layered shadows, one motion
+   curve. Sizes and spacing below are unchanged; this layer is surface only. */
 :root {
-  --paper: #fafbfd;
+  --paper: #f6f8fc;
   --panel: #ffffff;
   --panel-2: #f1f4fa;
   --ink: #0e1526;
   --muted: #5c677e;
-  --line: #e2e7f1;
-  --line-strong: #cfd7e6;
-  --blue: #3e5bff;
-  --blue-deep: #2a41c8;
-  --blue-soft: #e7ecfd;
+  --line: #e2e9f4;
+  --line-strong: #cdd8ea;
+  --blue: #0069ff;
+  --blue-deep: #0053cf;
+  --blue-soft: #eaf3ff;
   --live: #12a15c;
   --live-soft: #e3f7ec;
   --danger: #b42318;
@@ -29,10 +32,17 @@
 
   --radius: 12px;
   --radius-sm: 9px;
-  --shadow: 0 1px 2px rgba(14, 21, 38, 0.05), 0 8px 24px rgba(14, 21, 38, 0.07);
+  --shadow: 0 1px 2px rgba(14, 21, 38, 0.05), 0 24px 48px -20px rgba(14, 21, 38, 0.28);
   --shadow-soft: 0 1px 2px rgba(14, 21, 38, 0.04);
-  --ease: 160ms ease;
+  --shadow-reading: 0 1px 2px rgba(14, 21, 38, 0.04), 0 10px 24px -18px rgba(14, 21, 38, 0.2);
+  --inner-light: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  --shine: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 60%);
+  --ease: 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
   --rail: clamp(14px, 4vw, 22px);
+  /* The workspace: one reading column; the header matches the public site's. */
+  --measure: 820px;
+  --header-h: 72px;
+  --navy: #0b1737;
 }
 
 * { box-sizing: border-box; }
@@ -45,7 +55,8 @@ html, body {
 }
 
 body {
-  background: var(--paper);
+  background: radial-gradient(ellipse 60% 38% at 50% 0%, rgba(0, 105, 255, 0.06), transparent 70%),
+              linear-gradient(180deg, #f8fbff 0%, #ffffff 42%);
   color: var(--ink);
   font-family: var(--font-ui);
   font-size: 16px;
@@ -64,31 +75,42 @@ body {
   border: 0;
 }
 
-/* App shell fills the dynamic viewport so it works full-page AND in the
-   homepage iframe, and adapts to Safari's changing chrome / keyboard. */
+/* App shell fills the dynamic viewport and adapts to Safari's changing
+   chrome / keyboard: the header, the conversation (the only scroller) and the
+   dock. Full width; the conversation and the composer share one centred
+   reading column. */
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;          /* fallback */
   height: 100dvh;         /* dynamic viewport for mobile Safari */
-  max-width: 900px;
-  margin: 0 auto;
-  background: var(--paper);
   padding-top: env(safe-area-inset-top, 0);
   overflow: hidden;
 }
 
 /* ---------------- Header ----------------
-   Deliberately low-profile: 52px of chrome, one hairline, no shadow. The
-   conversation is the product; the header just labels it. */
+   The public site's header: an opaque white bar, the full logo, one crisp
+   hairline and a soft edge shadow. Its end holds a quiet, truthful session
+   status -- and later any account control, without a redesign. */
 .app-header {
   flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 9px var(--rail);
-  border-bottom: 1px solid var(--line);
-  background: var(--paper);
+  min-height: var(--header-h);
+  background: #fff;
+  border-bottom: 1px solid #e8eef8;
+  box-shadow: 0 10px 24px -22px rgba(16, 38, 80, 0.35);
+}
+
+.app-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(1200px, calc(100% - 80px));
+  margin: 0 auto;
 }
 
 .brand {
@@ -99,10 +121,8 @@ body {
 }
 
 .brand-logo {
-  height: 24px;
-  width: auto;
-  max-width: 130px;
-  object-fit: contain;
+  width: 172px;
+  height: auto;
   display: block;
 }
 
@@ -131,28 +151,26 @@ body {
   font-size: 13px;
 }
 
-.session-pill {
-  margin-left: auto;
+.app-header-end {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Plain status text, not a control: what is true of this conversation now. */
+.session-status {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 4px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: var(--panel);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  color: #46536c;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
   white-space: nowrap;
 }
-
-.session-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--blue);
-  flex: 0 0 auto;
-}
+.session-status svg { flex: 0 0 auto; width: 16px; height: 16px; color: #008a7c; }
+.session-status-extra { display: inline-flex; align-items: center; gap: 7px; }
 
 /* ---------------- Conversation ----------------
    THE LAYOUT FIX: .conversation is the scroll container, and .thread carries
@@ -178,7 +196,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 20px var(--rail) 12px;
+  width: 100%;
+  max-width: calc(var(--measure) + 2 * var(--rail));
+  margin-inline: auto;
+  padding: 24px var(--rail) 12px;
   min-width: 0;
 }
 
@@ -204,11 +225,11 @@ body {
 
 .empty-title {
   margin: 0 0 8px;
-  color: var(--ink);
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: -0.02em;
+  color: var(--navy);
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
 }
 
 .empty-line {
@@ -280,11 +301,12 @@ body {
 
 /* User: compact blue chip, right-aligned. Distinct without being cartoonish. */
 .msg-user .bubble {
-  background: var(--blue);
+  background-color: var(--blue);
+  background-image: var(--shine);
   color: #fff;
   padding: 10px 14px;
   border-radius: 14px 14px 4px 14px;
-  box-shadow: 0 1px 2px rgba(42, 65, 200, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 1px 2px rgba(0, 50, 140, 0.2), 0 6px 16px -8px rgba(0, 105, 255, 0.5);
   font-size: 15.5px;
 }
 
@@ -300,7 +322,11 @@ body {
   border-left: 3px solid var(--blue);
   border-radius: 4px var(--radius) var(--radius) 4px;
   padding: 13px 16px;
-  box-shadow: var(--shadow-soft);
+  box-shadow: var(--shadow-reading);
+}
+/* Long answers keep a comfortable line length on wide screens. */
+@media (min-width: 820px) {
+  .msg-assistant .bubble { max-width: 46rem; }
 }
 
 .msg-role {
@@ -465,6 +491,7 @@ body {
 .error-note {
   background: var(--danger-soft);
   border: 1px solid #f3c9c5;
+  border-left: 3px solid var(--danger);
   color: var(--danger);
   border-radius: var(--radius-sm);
   padding: 10px 13px;
@@ -483,13 +510,23 @@ body {
   flex: 0 0 auto;
   background: var(--panel);
   border-top: 1px solid var(--line);
+  box-shadow: 0 -14px 28px -26px rgba(14, 21, 38, 0.3);
   padding-bottom: env(safe-area-inset-bottom, 0);
 }
 
 .composer {
   padding: 12px var(--rail) 8px;
-  max-width: 900px;
+  max-width: calc(var(--measure) + 2 * var(--rail));
   margin: 0 auto;
+}
+
+/* Notices above the composer share its column. */
+.dock > .erase-receipt,
+.dock > .limit-notice {
+  width: calc(100% - 2 * var(--rail));
+  max-width: var(--measure);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* Single bordered shell containing textarea + action button, so they read as
@@ -503,7 +540,7 @@ body {
   border: 1px solid var(--line-strong);
   border-radius: 16px;
   background: var(--panel);
-  box-shadow: var(--shadow-soft);
+  box-shadow: var(--inner-light), 0 1px 2px rgba(14, 21, 38, 0.05), 0 10px 24px -18px rgba(14, 21, 38, 0.3);
   transition: border-color var(--ease), box-shadow var(--ease);
   /* The whole box is the typing area: its padding shows the text cursor and
      a click there focuses the field (app.js). Send keeps its own cursor. */
@@ -513,13 +550,22 @@ body {
 /* A restrained hover cue that the whole box is an input; the focus ring
    below (declared later, same specificity) takes over once it has focus. */
 .composer-shell:hover {
-  border-color: rgba(62, 91, 255, 0.45);
+  border-color: rgba(0, 105, 255, 0.45);
 }
 
 .composer-shell:focus-within {
   border-color: var(--blue);
-  box-shadow: 0 0 0 3px var(--blue-soft);
+  box-shadow: 0 0 0 3px rgba(0, 105, 255, 0.14), 0 10px 24px -18px rgba(0, 80, 200, 0.4);
 }
+
+/* A homepage message this page could not show it took (app.js): kept in the
+   box read-only, for selecting and copying, and never sent from here. The box
+   reads as fixed text -- a quiet fill, muted ink, no caret, no hover cue --
+   and keeps its focus ring. */
+.composer[data-authority="withheld"] .composer-shell { background: #f4f6fa; cursor: default; }
+.composer[data-authority="withheld"] .composer-shell:hover { border-color: var(--line-strong); }
+.composer[data-authority="withheld"] .composer-shell:focus-within { border-color: var(--blue); }
+.composer[data-authority="withheld"] textarea { color: var(--muted); caret-color: transparent; }
 
 .composer textarea {
   flex: 1 1 auto;
@@ -551,21 +597,24 @@ body {
   height: 38px;
   border: none;
   border-radius: 12px;
-  background: var(--blue);
+  background-color: var(--blue);
+  background-image: var(--shine);
   color: #fff;
   cursor: pointer;
-  transition: background var(--ease), opacity var(--ease), transform var(--ease);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 1px 2px rgba(0, 40, 120, 0.25), 0 6px 14px -6px rgba(0, 105, 255, 0.55);
+  transition: background-color var(--ease), opacity var(--ease), transform var(--ease), box-shadow var(--ease);
 }
 .action-btn svg { width: 19px; height: 19px; }
-.action-btn:hover { background: var(--blue-deep); }
+.action-btn:hover { background-color: var(--blue-deep); }
 .action-btn:active { transform: scale(0.94); }
-.action-btn:focus-visible { outline: 3px solid var(--blue-soft); outline-offset: 2px; }
-.action-btn:disabled { opacity: 0.35; cursor: default; }
-.action-btn:disabled:hover { background: var(--blue); }
+.action-btn:focus-visible { outline: 3px solid rgba(0, 105, 255, 0.35); outline-offset: 2px; }
+/* Nothing to send: a flat, quiet control rather than a faded bright one. */
+.action-btn:disabled { opacity: 0.35; cursor: default; box-shadow: none; }
+.action-btn:disabled:hover { background-color: var(--blue); }
 
 .action-btn .icon-stop { display: none; }
-.action-btn.is-stop { background: var(--ink); }
-.action-btn.is-stop:hover { background: #000; }
+.action-btn.is-stop { background-color: var(--ink); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 1px 2px rgba(14, 21, 38, 0.3); }
+.action-btn.is-stop:hover { background-color: #000; }
 .action-btn.is-stop .icon-send { display: none; }
 .action-btn.is-stop .icon-stop { display: block; }
 
@@ -584,25 +633,20 @@ body {
 .app-footer a:hover { color: var(--ink); }
 .app-footer .dot-sep { opacity: 0.5; }
 
-/* ---------------- Embedded mode ----------------
-   Set by app.js when the page is framed by the Kalillac homepage. The homepage
-   already supplies the logo, the Privacy/Terms links, and the 18+ notice, so
-   repeating them inside the frame is duplicate chrome that costs vertical
-   space. The private-session indicator STAYS: it describes the app, not the
-   site, and it is the one piece of privacy signalling the homepage does not
-   already carry next to the chat. */
-.is-embedded .brand-logo { display: none; }
-.is-embedded .brand.has-logo .brand-name { display: inline; }
-.is-embedded .app-header { display: none; }
-.is-embedded .app-footer { display: none; }
-.is-embedded .composer { padding-bottom: 12px; }
 
-/* Narrow containers (a slim iframe, a split view). Below this the header
-   cannot hold a wordmark and a pill side by side. */
-@media (max-width: 380px) {
-  .brand-name { font-size: 14px; }
-  .session-pill span:last-child { display: none; }
-  .session-pill { padding: 6px; gap: 0; }
+/* Phones: the site's 64px header and 148px logo (128px below 400px); below
+   375px the status keeps its first, still-true half so the bar never overflows. */
+@media (max-width: 720px) {
+  :root { --header-h: 64px; }
+  .app-header-inner { width: calc(100% - 36px); }
+  .brand-logo { width: 148px; }
+  .session-status { font-size: 12px; }
+}
+@media (max-width: 400px) {
+  .brand-logo { width: 128px; }
+}
+@media (max-width: 374px) {
+  .session-status-extra { display: none; }
 }
 
 /* ---------------- Responsive ---------------- */
@@ -611,7 +655,7 @@ body {
   .msg-user .bubble { max-width: 90%; font-size: 15px; }
   .msg-assistant .bubble { padding: 12px 13px; }
   .brand-name { font-size: 15px; }
-  .empty-title { font-size: 21px; }
+  .empty-title { font-size: 23px; }
   .empty-hints { grid-template-columns: 1fr; gap: 8px; margin-top: 20px; }
   .hint { min-height: 44px; font-size: 14px; padding: 9px 13px; }
   .app-footer { font-size: 11px; gap: 3px 9px; }
@@ -781,6 +825,45 @@ body {
   line-height: inherit;
 }
 
+/* Syntax highlighting (highlight.js token classes) for fenced code with a
+   known language. Restrained, Kalillac-blue led, every token at least 4.5:1
+   against the code background (--panel-2); plain code stays --ink. Colors
+   only: no font, size, spacing or layout change, so whitespace, wrapping and
+   horizontal scrolling are exactly those of unhighlighted code. */
+.md pre code.hljs { color: var(--ink); }
+.md .hljs-keyword,
+.md .hljs-selector-tag,
+.md .hljs-name,
+.md .hljs-doctag { color: #2a41c8; }
+.md .hljs-built_in,
+.md .hljs-type,
+.md .hljs-selector-class,
+.md .hljs-selector-id { color: #0b6178; }
+.md .hljs-title.function_,
+.md .hljs-title.class_,
+.md .hljs-title,
+.md .hljs-section { color: #6a36b0; }
+.md .hljs-string,
+.md .hljs-regexp,
+.md .hljs-symbol,
+.md .hljs-char.escape_,
+.md .hljs-template-tag { color: #15693a; }
+.md .hljs-number,
+.md .hljs-literal,
+.md .hljs-variable.constant_ { color: #9a4204; }
+.md .hljs-attr,
+.md .hljs-attribute,
+.md .hljs-property,
+.md .hljs-params { color: #7a4d06; }
+.md .hljs-meta,
+.md .hljs-meta .hljs-keyword { color: #4b5876; }
+.md .hljs-comment,
+.md .hljs-quote { color: #5c677e; font-style: italic; }
+.md .hljs-addition { color: #15693a; background: #e3f4e8; }
+.md .hljs-deletion { color: #b42318; background: #fdeceb; }
+.md .hljs-emphasis { font-style: italic; }
+.md .hljs-strong { font-weight: 600; }
+
 /* Quotes are intentionally understated rather than callout-card styled. */
 .msg-assistant .md blockquote {
   margin: 12px 0 14px;
@@ -886,3 +969,317 @@ body {
     padding-bottom: 8px;
   }
 }
+
+/* Functional task cards: same .hint/data-prompt handler, no new chat protocol. */
+.empty-hints { gap: 12px; }
+.hint { display: flex; align-items: flex-start; gap: 11px; min-width: 0; min-height: 112px; padding: 16px 13px; border-color: #dce8fb; border-radius: 12px; background: linear-gradient(180deg, #fbfdff, #fff 55%); color: #101d39; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 8px 20px -16px rgba(16, 38, 80, 0.22); transition: border-color var(--ease), color var(--ease), background var(--ease), box-shadow var(--ease); }
+.hint-icon { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: #eff6ff; color: #0069ff; }.hint-icon svg { width: 27px; height: 27px; }.hint-learning .hint-icon { color: #008b89; background: #eafbf7; }
+.hint-copy { flex: 1; min-width: 0; }.hint-title { display: block; color: #101d39; font-size: 15px; font-weight: 750; line-height: 1.25; }.hint-description { display: block; color: #586780; font-size: 13px; line-height: 1.45; margin-top: 6px; }.hint-arrow { flex: none; width: 15px; height: 15px; color: #0069ff; margin-top: 2px; }
+.hint:hover,.hint:focus-visible { background: #f3f8ff; border-color: #0069ff; box-shadow: var(--inner-light), 0 1px 2px rgba(16, 38, 80, 0.04), 0 10px 24px -16px rgba(0, 80, 200, 0.3); }.hint:active { background: #eaf3ff; box-shadow: none; }.hint:focus-visible { outline: 3px solid #0056d8; outline-offset: 3px; }.hint.hint-guide-active { border-color: #a4c6fa; background: #f8fbff; box-shadow: none; }
+/* Disabled while the message box holds a message kept only for copying (app.js). */
+.hint:disabled { opacity: 0.55; cursor: default; pointer-events: none; }
+
+/* ---------------- Daily-limit dialog ----------------
+   A native modal <dialog>: the browser keeps focus inside it and makes the
+   page behind it inert. The panel fills the dialog box, so a click whose
+   target is the dialog element itself can only be on the backdrop. Sized to
+   fit a 360 x 640 phone viewport (and the homepage's embedded chat frame). */
+.limit-dialog {
+  width: min(400px, calc(100vw - 2 * var(--rail)));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font-family: var(--font-ui);
+  overflow: auto;
+}
+.limit-dialog::backdrop { background: rgba(14, 21, 38, 0.32); }
+.limit-dialog[open] { animation: limit-dialog-in var(--ease) both; }
+@keyframes limit-dialog-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.limit-dialog-panel { padding: 22px 22px 18px; }
+.limit-dialog-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.limit-dialog-text {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.limit-dialog-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+.limit-dialog-ok {
+  min-height: 44px;
+  min-width: 96px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--blue);
+  color: #ffffff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ease);
+}
+.limit-dialog-ok:hover { background: var(--blue-deep); }
+.limit-dialog-ok:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-width: 400px) {
+  .limit-dialog-panel { padding: 18px 16px 16px; }
+  .limit-dialog-ok { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .limit-dialog[open] { animation: none; }
+  .limit-dialog-ok { transition: none; }
+}
+
+/* ---------------- End & erase ----------------
+   The control sits at the left edge of the composer box, next to what it ends.
+   As tall as Send (38px), with its "End & erase" label as visible text at
+   every width, touch included: an icon alone would be ambiguous. Disabled
+   only when there is nothing to end or erase. */
+.erase-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 38px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease), border-color var(--ease), box-shadow var(--ease);
+}
+.erase-btn svg { flex: 0 0 auto; width: 15px; height: 15px; }
+.erase-btn:not(:disabled) { color: #46526a; box-shadow: var(--shadow-soft); }
+.erase-btn:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.erase-btn:active:not(:disabled) { background: #fbdedb; box-shadow: none; }
+.erase-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.erase-btn:disabled { opacity: 0.45; cursor: default; }
+/* Phone-width frames: one row cannot hold the field, the visible label and
+   Send without crushing the field, so the field takes the full first row and
+   End & erase (left) and Send (right) share the second. */
+@media (max-width: 400px) {
+  .composer-shell { flex-wrap: wrap; row-gap: 6px; }
+  .composer textarea { order: -1; flex: 1 0 100%; }
+  .erase-btn { margin-right: auto; }
+}
+
+/* The receipt: what End & erase did and did not erase. One box above the
+   composer, inside the same rail; a failed removal stays visible with Retry. */
+/* One compact notice in the workspace: a white surface with a teal edge for
+   a completed erase (red when removal is unconfirmed), and a Dismiss
+   control. It fades out over 160 ms (at once under reduced motion). */
+.erase-receipt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 10px var(--rail) 0;
+  padding: 10px 8px 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #008c8d;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+  box-shadow: var(--shadow-reading);
+  transition: opacity 160ms ease;
+}
+.erase-receipt[hidden] { display: none; }
+.erase-receipt.is-leaving { opacity: 0; }
+.erase-receipt.is-failed { border-color: #f3c9c5; border-left-color: var(--danger); background: var(--danger-soft); }
+.erase-receipt-body { flex: 1 1 auto; min-width: 0; }
+.erase-receipt-dismiss {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--ease), color var(--ease), border-color var(--ease);
+}
+.erase-receipt-dismiss:hover { color: var(--ink); background: var(--panel-2); }
+.erase-receipt-dismiss:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.erase-receipt-text { margin: 0; font-weight: 600; }
+.erase-receipt-note { margin: 4px 0 0; color: var(--muted); }
+.erase-receipt-note[hidden] { display: none; }
+.erase-receipt-retry {
+  margin-top: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--danger);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.erase-receipt-retry[hidden] { display: none; }
+.erase-receipt-retry:disabled { opacity: 0.6; cursor: default; }
+.erase-receipt-retry:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* The confirmation: a native modal <dialog>, sized like the daily-limit
+   dialog to fit a 360 x 640 phone viewport and the embedded chat frame. */
+.erase-dialog {
+  width: min(400px, calc(100vw - 2 * var(--rail)));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font-family: var(--font-ui);
+  overflow: auto;
+}
+.erase-dialog::backdrop { background: rgba(14, 21, 38, 0.32); }
+.erase-dialog-panel { padding: 22px 22px 18px; }
+.erase-dialog-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.erase-dialog-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.erase-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.erase-dialog-cancel,
+.erase-dialog-confirm {
+  min-height: 44px;
+  min-width: 96px;
+  padding: 0 18px;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.erase-dialog-cancel {
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+}
+.erase-dialog-confirm {
+  border: 0;
+  background: var(--danger);
+  color: #ffffff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 1px 2px rgba(120, 20, 10, 0.25);
+}
+.erase-dialog-cancel:hover { border-color: #a9bcdc; background: #f7faff; }
+.erase-dialog-confirm:hover { background: #9c1e14; }
+.erase-dialog-cancel:focus-visible,
+.erase-dialog-confirm:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-width: 400px) {
+  .erase-dialog-panel { padding: 18px 16px 16px; }
+  .erase-dialog-cancel,
+  .erase-dialog-confirm { flex: 1 1 auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .erase-btn { transition: none; }
+  .erase-receipt { transition: none; }
+}
+
+/* ---------------- Daily-limit note ----------------
+   Shown after the daily-limit dialog closes, directly above the composer:
+   one line of fixed copy while sending is paused. */
+.limit-notice {
+  margin: 10px var(--rail) 0;
+  padding: 9px 12px;
+  border: 1px solid #d9e4f6;
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-sm);
+  background: #f4f8ff;
+  color: #33445f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.limit-notice[hidden] { display: none; }
+.limit-notice-text { margin: 0; }
+.limit-notice-text strong { color: var(--ink); font-weight: 650; }
+
+/* ---------------- Example prompts: placement ----------------
+   After the composer (placed there by app.js) until the first message: four
+   cards side by side on a wide screen, two by two on a medium one, compact
+   two-column rows without descriptions on a phone. */
+.starter { width: 100%; display: flex; flex-direction: column; align-items: center; }
+.starter-dock { width: 100%; max-width: calc(var(--measure) + 2 * var(--rail)); margin: 0 auto; padding: 0 var(--rail); }
+.starter-dock:empty { display: none; }
+.starter-dock .starter { align-items: stretch; padding: 6px 0 16px; }
+.starter-dock .starter-label {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.starter-dock .empty-hints { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 0; max-width: none; }
+.starter-dock .empty-hints .hint { min-height: 104px; padding: 13px 12px; gap: 9px; flex-direction: column; }
+.starter-dock .empty-hints .hint-icon { width: 32px; height: 32px; }
+.starter-dock .empty-hints .hint-icon svg { width: 20px; height: 20px; }
+.starter-dock .empty-hints .hint-title { font-size: 14px; }
+.starter-dock .empty-hints .hint-description { margin-top: 4px; font-size: 12.5px; }
+.starter-dock .empty-hints .hint-arrow { display: none; }
+@media (max-width: 860px) {
+  .starter-dock .empty-hints { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .starter-dock .empty-hints .hint { min-height: 76px; flex-direction: row; align-items: flex-start; }
+}
+@media (max-width: 560px) {
+  .starter-dock .empty-hints { gap: 8px; }
+  .starter-dock .empty-hints .hint { min-height: 52px; padding: 8px 10px; gap: 8px; align-items: center; }
+  .starter-dock .empty-hints .hint-icon { width: 28px; height: 28px; border-radius: 8px; }
+  .starter-dock .empty-hints .hint-icon svg { width: 18px; height: 18px; }
+  .starter-dock .empty-hints .hint-title { font-size: 13px; font-weight: 700; line-height: 1.25; }
+  .starter-dock .empty-hints .hint-description { display: none; }
+}
+/* The narrowest frames: one row per example, so each title stays on one line. */
+@media (max-width: 359px) {
+  .starter-dock .empty-hints { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .starter-dock .empty-hints .hint { min-height: 44px; padding-block: 6px; }
+}
+
+/* The empty workspace: heading, composer and examples read as one centred
+   group instead of a heading in the middle and a composer stranded at the
+   bottom. An empty conversation that does not fit shrinks and scrolls; once a
+   conversation starts the usual layout returns (the transcript scrolls, the
+   composer is pinned at the bottom of the workspace). */
+.conversation.is-empty { flex: 0 1 auto; margin-top: auto; }
+.conversation.is-empty .thread { padding-bottom: 8px; }
+.conversation.is-empty + .dock { margin-bottom: auto; border-top: 0; box-shadow: none; background: transparent; }

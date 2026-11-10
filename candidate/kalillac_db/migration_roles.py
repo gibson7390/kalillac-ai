@@ -17,6 +17,13 @@ roles (kalillac_staging_owner / kalillac_staging_app):
 Each name is validated as a simple lowercase PostgreSQL identifier before it
 is placed in SQL. An invalid name raises InvalidRoleName and the migration
 fails; it never falls back to the default.
+
+The V1 private-authority roles are operator-provisioned and have no default
+at all; an unset or blank setting raises RoleNameRequired:
+
+- KALILLAC_V1_SECURITY_SERVICE_ROLE: NOLOGIN service role S, the only
+  grantee of the fixed V1 security functions
+- KALILLAC_V1_SECURITY_EXECUTOR_ROLE: NOLOGIN executor role E that owns them
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ DEFAULT_MIGRATION_APP_ROLE = "kalillac_app"
 
 OWNER_ROLE_ENV = "KALILLAC_MIGRATION_OWNER_ROLE"
 APP_ROLE_ENV = "KALILLAC_MIGRATION_APP_ROLE"
+V1_SECURITY_SERVICE_ROLE_ENV = "KALILLAC_V1_SECURITY_SERVICE_ROLE"
+V1_SECURITY_EXECUTOR_ROLE_ENV = "KALILLAC_V1_SECURITY_EXECUTOR_ROLE"
 
 # Unquoted PostgreSQL identifier, lowercase only (unquoted names fold to
 # lowercase, so uppercase would silently name a different role), at most
@@ -41,6 +50,10 @@ _ROLE_NAME_RE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 class InvalidRoleName(ValueError):
     """A configured role name is not a safe simple identifier."""
+
+
+class RoleNameRequired(InvalidRoleName):
+    """A role setting without a default was not configured."""
 
 
 def validate_role_name(name: str, setting: str) -> str:
@@ -65,6 +78,21 @@ def migration_owner_role() -> str:
 
 def migration_app_role() -> str:
     return _configured_role(APP_ROLE_ENV, DEFAULT_MIGRATION_APP_ROLE)
+
+
+def _required_role(setting: str) -> str:
+    value = os.getenv(setting, "").strip()
+    if not value:
+        raise RoleNameRequired(f"{setting} must be set; it has no default.")
+    return validate_role_name(value, setting)
+
+
+def v1_security_service_role() -> str:
+    return _required_role(V1_SECURITY_SERVICE_ROLE_ENV)
+
+
+def v1_security_executor_role() -> str:
+    return _required_role(V1_SECURITY_EXECUTOR_ROLE_ENV)
 
 
 def assume_migration_owner(connection: Connection) -> None:
