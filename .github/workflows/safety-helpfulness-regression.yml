@@ -88,6 +88,7 @@ jobs:
           tests/test_crisis_routing.py
           tests/test_source_list_contract.py
           tests/test_source_list_spaces.py
+          tests/test_citation_markers.py
           -v -rA -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/safety-helpfulness-regression.xml"
 

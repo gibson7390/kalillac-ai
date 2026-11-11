@@ -6317,7 +6317,9 @@ def strip_model_source_footer(reply, sources=None, *, search_results_heading=Fal
 
 
 def clean_ai_reply(reply):
-    cleaned = str(reply)
+    # Model citation markers are not Kalillac sources; they go first, before
+    # any other cleanup and before answer-link enforcement.
+    cleaned = source_trust.strip_citation_markers(str(reply))
     pre_context_cleanup = cleaned
 
     opening_patterns = [

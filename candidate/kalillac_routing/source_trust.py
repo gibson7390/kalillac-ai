@@ -545,6 +545,48 @@ class _AnchorGate(HTMLParser):
     handle_startendtag = handle_starttag
 
 
+# --- model citation markers -------------------------------------------------
+# The model can emit its own citation syntax, delimited by Private Use Area
+# characters: U+E200 opens a marker, U+E202 separates its fields and U+E201
+# closes it (for example "citeturn0search0"). Kalillac has no
+# such references: its sources are the application-owned footer only. The
+# markers are not evidence and render as broken glyphs, so they are removed
+# from prose -- never turned into links -- before link enforcement runs, so the
+# removal cannot join text into a new address. Code is left exactly as written.
+_ONE_MARKER = (
+    r"(?:[^\n]{0,200}?"            # complete marker
+    r"|[A-Za-z_]*(?:[^\s-]{0,80})*"  # marker without its closing character
+    r"|[-])"                                    # any other character of the marker range
+)
+# One run of adjacent markers (and the blanks between them) is removed as a unit.
+_CITATION_MARKER = re.compile(r"([ \t]*)" + _ONE_MARKER + r"(?:[ \t]*" + _ONE_MARKER + r")*([ \t]*)")
+
+
+def _drop_citation_markers(text):
+    def replace(match):
+        before = text[match.start() - 1] if match.start() else "\n"
+        after = text[match.end()] if match.end() < len(text) else "\n"
+        if before == "\n" or after == "\n" or after in ".,;:!?)]}":
+            return ""
+        return " " if match.group(1) or match.group(2) else ""
+    return _CITATION_MARKER.sub(replace, text)
+
+
+def strip_citation_markers(text):
+    """Remove model citation markers from prose; fenced and inline code (as the
+    client parses them) and every other character are left unchanged."""
+    text = str(text)
+    if not re.search(r"[-]", text):
+        return text
+    out, cursor = [], 0
+    for start, end, _ in _frontend_code_regions(text):
+        out.append(_drop_citation_markers(text[cursor:start]))
+        out.append(text[start:end])
+        cursor = end
+    out.append(_drop_citation_markers(text[cursor:]))
+    return "".join(out)
+
+
 def _frontend_code_regions(source):
     """The client's mapOutsideCode boundaries, including multi-backtick spans."""
     boundaries = re.compile(r"^[ \t]*(`{3,}|~{3,})[^\n]*(?:\n|$)|(`+)", re.M)
