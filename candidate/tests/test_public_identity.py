@@ -159,3 +159,113 @@ def test_built_legal_pages_describe_current_service(path, tmp_path_factory):
         "Cloudflare Workers AI and Groq are not part of the current active model-provider path.", ""
     )
     assert not re.search(r"\bGroq\b|Workers AI", text)
+
+
+# --- public branding: contact address, footer and positioning ------------------------------------
+
+CONTACT = "contact@arogetech.com"
+ACCURACY_NOTICE = "Kalillac can make mistakes. Verify important information."
+FOOTER_LINKS = [["Product", "/#product"], ["Privacy", "/privacy"], ["How it works", "/#how-it-works"],
+                ["Terms", "/terms"]]
+CONTACT_SENTENCE = {
+    "/privacy": f"Questions and corrections can be sent to Kalillac AI at {CONTACT}.",
+    "/terms": f"Questions about these Terms can be sent to Kalillac AI at {CONTACT}.",
+}
+# Positioning the public copy must not carry: Kalillac is presented as a product.
+OUTDATED_POSITIONING = re.compile(
+    r"\bstudents?\b|computer[ -]science|\bhobby\b|side project|personal project|class project|school project"
+    r"|programming exercise|learning (?:demonstration|exercise|project)|\bexperiment(?:al|s)?\b", re.I)
+
+
+def public_source_files():
+    """The public website's own source and the chat page's markup."""
+    files = [p for p in (SITE / "src").rglob("*") if p.suffix in (".ts", ".tsx", ".css")]
+    files += [SITE / "index.html", SITE / "public-metadata.ts", REPO / "frontend/index.html"]
+    assert len(files) > 5 and all(p.is_file() for p in files)
+    return files
+
+
+def test_public_source_and_build_have_no_linkedin_reference():
+    built_files = [p for p in SITE_DIST.rglob("*") if p.suffix in (".js", ".html", ".css", ".xml", ".txt")]
+    assert built_files and any(p.suffix == ".js" for p in built_files)
+    for path in public_source_files() + built_files + [REPO / "frontend/app.js", REPO / "frontend/app.css"]:
+        assert not re.search(r"linkedin|lnkd[.]in", path.read_text(encoding="utf-8"), re.I), path
+
+
+def test_public_source_has_no_outdated_positioning():
+    for path in public_source_files():
+        found = OUTDATED_POSITIONING.search(path.read_text(encoding="utf-8"))
+        assert not found, (path, found.group(0))
+
+
+def test_contact_address_is_exactly_the_two_legal_contact_links():
+    source = (SITE / "src/App.tsx").read_text(encoding="utf-8")
+    link = f'<a href="mailto:{CONTACT}" data-testid="link-%s-contact">{CONTACT}</a>'
+    for page in ("privacy", "terms"):
+        assert source.count(link % page) == 1, page
+    assert source.count("arogetech") == 4 and source.count("mailto:") == 2
+    # No formation claim: the operator's legal form is not stated anywhere public.
+    for path in public_source_files():
+        assert not re.search(r"\bLLC\b|Aroge Tech", path.read_text(encoding="utf-8")), path
+    # The approved accuracy notice stays in the footer and beneath the chat composer.
+    assert source.count(f"<span>{ACCURACY_NOTICE}</span>") == 1
+    assert (REPO / "frontend/index.html").read_text(encoding="utf-8").count(ACCURACY_NOTICE) == 1
+
+
+@pytest.mark.parametrize("viewport", ["desktop", "mobile"])
+@pytest.mark.parametrize("path", ROUTES)
+def test_public_pages_render_footer_contact_and_current_branding(path, viewport, tmp_path_factory):
+    browser = require_browser_and_build()
+    profile = tmp_path_factory.mktemp("edge-public-branding")
+    site = Site()
+    with site.http:
+        with browser_page(browser, profile, VIEWPORTS[viewport], viewport == "mobile") as (dt, session):
+            page = Page(dt, session)
+            dt.call("Page.navigate", {"url": site.http.origin + path}, session)
+            page.wait_for("document.querySelector('.site-footer .footer-bottom')"
+                          + ("" if path == "/" else " && document.querySelector('.doc-updated')"))
+            seen = page.eval("""
+                const links = (root) => Array.from(root.querySelectorAll('a')).map(a => {
+                  const r = a.getBoundingClientRect();
+                  return {text: a.textContent.trim(), href: a.getAttribute('href'), target: a.getAttribute('target'),
+                          tabIndex: a.tabIndex, visible: r.width > 0 && r.height > 0,
+                          inside: r.left >= -0.5 && r.right <= window.innerWidth + 0.5};
+                });
+                const footer = document.querySelector('.site-footer');
+                const contact = document.querySelector('section#contact');
+                return {
+                  text: document.body.innerText,
+                  hrefs: Array.from(document.querySelectorAll('a[href]')).map(a => a.getAttribute('href')),
+                  footerLinks: links(footer.querySelector('.footer-links')),
+                  footerBottom: footer.querySelector('.footer-bottom').innerText,
+                  footerHeight: footer.getBoundingClientRect().height,
+                  contactText: contact ? contact.innerText : null,
+                  contactLinks: contact ? links(contact) : null,
+                  overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                };
+            """)
+    shutil.rmtree(profile, ignore_errors=True)
+
+    # The shared footer: the four site links, nothing external, and the approved notice.
+    assert [[link["text"], link["href"]] for link in seen["footerLinks"]] == FOOTER_LINKS
+    assert all(link["visible"] and link["inside"] and link["tabIndex"] == 0 and link["target"] is None
+               for link in seen["footerLinks"]), seen["footerLinks"]
+    assert ACCURACY_NOTICE in seen["footerBottom"] and "Adults 18+" in seen["footerBottom"]
+    assert seen["footerHeight"] > 0 and seen["overflow"] <= 0
+
+    # No LinkedIn link or mention, and no outdated positioning, anywhere on the page.
+    assert not [href for href in seen["hrefs"] if re.search(r"linkedin|lnkd[.]in", href, re.I)]
+    assert not re.search(r"linkedin", seen["text"], re.I)
+    found = OUTDATED_POSITIONING.search(seen["text"])
+    assert not found, found.group(0)
+
+    if path == "/":
+        assert seen["contactLinks"] is None
+        assert not [href for href in seen["hrefs"] if href.startswith("mailto:")]
+        return
+    # Privacy and Terms: one ordinary mailto link in the Contact section.
+    assert seen["contactText"].split("\n", 1)[0].strip() == "Contact"
+    assert CONTACT_SENTENCE[path] in seen["contactText"]
+    assert seen["contactLinks"] == [{"text": CONTACT, "href": "mailto:" + CONTACT, "target": None,
+                                     "tabIndex": 0, "visible": True, "inside": True}]
+    assert [href for href in seen["hrefs"] if href.startswith("mailto:")] == ["mailto:" + CONTACT]
