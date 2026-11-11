@@ -80,7 +80,7 @@ function SiteFooter() {
           <a href="https://www.linkedin.com/in/kalillacai" target="_blank" rel="noopener noreferrer" data-testid="link-footer-linkedin">LinkedIn</a>
         </nav>
       </div>
-      <div className="container-wide footer-bottom"><span>&copy; 2026 Kalillac AI &middot; Adults 18+</span><span>Kalillac AI can make mistakes. Verify important information.</span></div>
+      <div className="container-wide footer-bottom"><span>&copy; 2026 Kalillac AI &middot; Adults 18+</span><span>Kalillac can make mistakes. Verify important information.</span></div>
     </footer>
   );
 }

@@ -332,6 +332,8 @@
    * commands that can inject arbitrary HTML, attributes, URLs, or resources.
    *
    * pre/code are ignored so literal LaTeX inside code examples stays literal.
+   * The server's source list (presentSourceList) is ignored too: its titles
+   * are literal search-result text, never mathematics.
    */
   function renderMathSafe(container) {
     if (
@@ -357,6 +359,7 @@
           "code",
           "option"
         ],
+        ignoredClasses: ["source-list"],
         throwOnError: false,
         trust: false,
         strict: "warn"
@@ -398,6 +401,151 @@
       links[i].setAttribute("target", "_blank");
       links[i].setAttribute("rel", "noopener noreferrer");
     }
+  }
+
+  /* ---- the server's source list: presentation only ------------------------
+     After a web search the server appends one list as the reply's last two
+     blocks: a paragraph that is exactly **Sources** or **Search results**,
+     then a bullet list with one link per entry (source_footer in
+     candidate/kalillac_routing/source_trust.py). The server alone decides
+     which results are listed, validates every address and limits every link
+     in the answer to that list; titles arrive as literal text.
+
+     Markdown alone cannot show who wrote a list: a model can write the same
+     shape. So the server also reports the footer it appended, outside the
+     reply text, as the response's source_list: { kind: "sources" |
+     "search_results", count: N }, computed by application code and sent only
+     while the reply still ends with exactly that footer. Without it, or when
+     the displayed list's label or entry count disagrees with it, nothing is
+     restyled and the reply keeps its ordinary Markdown presentation.
+
+     This step only restyles that final list, after DOMPurify, and only when
+     the sanitized DOM has exactly that shape. It reads each link's sanitized
+     href and visible text and builds new nodes with textContent, so no title
+     is ever parsed as HTML. It never makes anything a link that was not
+     already one, never adds, drops, merges or reorders an entry, and never
+     changes an address. Anything else -- including a list that is not the
+     last block or an entry with extra text or markup -- is left exactly as
+     rendered. Copy and history keep the original reply text. */
+  // Footer label -> the server's source_list kind and this page's class suffix.
+  var SOURCE_LIST_KINDS = {
+    "Sources": { kind: "sources", css: "sources" },
+    "Search results": { kind: "search_results", css: "search-results" }
+  };
+  var SOURCE_LIST_MAX = 100;
+  var sourceListCount = 0;
+
+  // The response's source_list, if it is exactly the server's shape; else null.
+  function sourceListMeta(data) {
+    var meta = data && data.source_list;
+    if (!meta || typeof meta !== "object") return null;
+    if (meta.kind !== "sources" && meta.kind !== "search_results") return null;
+    var count = meta.count;
+    if (typeof count !== "number" || Math.floor(count) !== count || count < 1 || count > SOURCE_LIST_MAX) return null;
+    return { kind: meta.kind, count: count };
+  }
+
+  function onlyWhitespaceText(node) {
+    return node.nodeType === 3 && !/\S/.test(node.nodeValue);
+  }
+
+  // The hostname a reader recognizes. The browser's own URL parser gives
+  // the host exactly as the address bar would (IDNs stay in their ASCII
+  // form); only a leading "www." is dropped. Never shortened.
+  function sourceHost(href) {
+    var parsed;
+    try { parsed = new URL(href); } catch (e) { return null; }
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) return null;
+    return parsed.hostname.replace(/^www\./i, "");
+  }
+
+  function sourceListEntries(list) {
+    var entries = [];
+    var nodes = list.childNodes;
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (onlyWhitespaceText(node)) continue;
+      if (node.nodeType !== 1 || node.tagName !== "LI") return null;
+      var link = null;
+      for (var j = 0; j < node.childNodes.length; j++) {
+        var part = node.childNodes[j];
+        if (onlyWhitespaceText(part)) continue;
+        if (link || part.nodeType !== 1 || part.tagName !== "A") return null;
+        link = part;
+      }
+      if (!link || link.children.length) return null;
+      var href = link.getAttribute("href");
+      var title = (link.textContent || "").trim();
+      var host = href ? sourceHost(href) : null;
+      if (!host || !title) return null;
+      entries.push({ href: href, title: title, host: host });
+    }
+    return entries.length ? entries : null;
+  }
+
+  function presentSourceList(container, meta) {
+    if (!meta) return;
+    var blocks = container.children;
+    if (blocks.length < 2) return;
+    var heading = blocks[blocks.length - 2];
+    var list = blocks[blocks.length - 1];
+    if (heading.tagName !== "P" || list.tagName !== "UL") return;
+    if (heading.childNodes.length !== 1) return;
+    var strong = heading.firstChild;
+    if (strong.nodeType !== 1 || strong.tagName !== "STRONG" || strong.children.length) return;
+    var label = strong.textContent;
+    if (!Object.prototype.hasOwnProperty.call(SOURCE_LIST_KINDS, label)) return;
+    if (SOURCE_LIST_KINDS[label].kind !== meta.kind) return;
+    var entries = sourceListEntries(list);
+    if (!entries || entries.length !== meta.count) return;
+
+    sourceListCount += 1;
+    var labelId = "source-list-label-" + sourceListCount;
+    var kind = SOURCE_LIST_KINDS[label].css;
+
+    var wrap = document.createElement("div");
+    wrap.className = "source-list source-list-" + kind;
+    wrap.setAttribute("data-source-kind", kind);
+
+    var caption = document.createElement("p");
+    caption.className = "source-list-label";
+    caption.id = labelId;
+    caption.textContent = label;
+    wrap.appendChild(caption);
+
+    var items = document.createElement("ul");
+    items.className = "source-list-items";
+    items.setAttribute("aria-labelledby", labelId);
+
+    for (var i = 0; i < entries.length; i++) {
+      var item = document.createElement("li");
+      item.className = "source-item";
+      var link = document.createElement("a");
+      link.className = "source-link";
+      link.setAttribute("href", entries[i].href);
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
+
+      var title = document.createElement("span");
+      title.className = "source-title";
+      title.textContent = entries[i].title;
+      var host = document.createElement("span");
+      host.className = "source-host";
+      host.textContent = entries[i].host;
+      var hint = document.createElement("span");
+      hint.className = "sr-only";
+      hint.textContent = " (opens in a new tab)";
+
+      link.appendChild(title);
+      link.appendChild(host);
+      link.appendChild(hint);
+      item.appendChild(link);
+      items.appendChild(item);
+    }
+    wrap.appendChild(items);
+
+    container.replaceChild(wrap, list);
+    container.removeChild(heading);
   }
 
   // ---- icons ---------------------------------------------------------------
@@ -506,7 +654,7 @@
     scrollToBottom();
   }
 
-  function renderAssistantText(shell, text) {
+  function renderAssistantText(shell, text, sourceList) {
     var protectedMath = protectMathForMarkdown(text);
 
     // Markdown-generated HTML is sanitized before entering the DOM.
@@ -519,6 +667,8 @@
       protectedMath.items,
       protectedMath.prefix
     );
+    // Before KaTeX, which skips the presented list: titles stay literal text.
+    presentSourceList(shell.body, sourceList);
     renderMathSafe(shell.body);
 
     wrapTables(shell.body);
@@ -1000,11 +1150,11 @@
 
   /* Render the reply and its actions first; only a fully rendered answer
      becomes a completed turn. */
-  function completeExchange(exchange, reply, sessionId) {
+  function completeExchange(exchange, reply, sessionId, sourceList) {
     var index = TURNS.length;
 
     try {
-      renderAssistantText(exchange.shell, reply);
+      renderAssistantText(exchange.shell, reply, sourceList);
       clearActions(exchange.shell);
       addActions(exchange.shell, index);
     } catch (e) {
@@ -1048,7 +1198,7 @@
         return;
       }
 
-      completeExchange(exchange, reply, data.session_id);
+      completeExchange(exchange, reply, data.session_id, sourceListMeta(data));
     }, function (err) {
       if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
       // The response arrived but its body could not be read.

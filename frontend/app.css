@@ -1283,3 +1283,105 @@ body {
 .conversation.is-empty { flex: 0 1 auto; margin-top: auto; }
 .conversation.is-empty .thread { padding-bottom: 8px; }
 .conversation.is-empty + .dock { margin-bottom: auto; border-top: 0; box-shadow: none; background: transparent; }
+
+/* ---------------- Accuracy notice ----------------
+   Fixed copy directly beneath the composer, in the footer's quiet ink: always
+   visible, never a control, never over the composer or its notices. */
+.accuracy-notice {
+  max-width: calc(var(--measure) + 2 * var(--rail));
+  margin: -2px auto 0;
+  padding: 0 var(--rail) 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 560px) {
+  .accuracy-notice { font-size: 11.5px; padding-bottom: 6px; }
+}
+@media (max-height: 460px) and (orientation: landscape) {
+  .accuracy-notice { padding-bottom: 6px; }
+}
+
+/* ---------------- The server's source list ----------------
+   Built by app.js from the reply's final Sources / Search results list
+   (presentation only). Sources: the results the answer relied on, white
+   cards with a Kalillac-blue edge. Search results: every result found, on the
+   quieter pale layer. Titles wrap and stop at three lines; hostnames are
+   never shortened, so the end of a domain is always visible. */
+.md .source-list {
+  margin: 16px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.md .source-list-label {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--ink);
+}
+.md .source-list-search-results .source-list-label { color: var(--muted); }
+.msg-assistant .md .source-list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+.msg-assistant .md .source-item { margin: 0; padding: 0; min-width: 0; }
+.msg-assistant .md .source-link {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  height: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  text-decoration: none;
+  transition: border-color var(--ease), background-color var(--ease);
+}
+.msg-assistant .md .source-list-sources .source-link { border-left: 3px solid var(--blue); padding-left: 10px; }
+.msg-assistant .md .source-list-search-results .source-link { background: var(--panel-2); }
+.msg-assistant .md .source-link:hover { border-color: var(--line-strong); background: #f8fbff; }
+.msg-assistant .md .source-list-sources .source-link:hover { border-left-color: var(--blue-deep); }
+.msg-assistant .md .source-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.md .source-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--blue-deep);
+  overflow-wrap: anywhere;
+}
+.md .source-list-search-results .source-title { color: var(--ink); font-weight: 560; }
+.msg-assistant .md .source-link:hover .source-title,
+.msg-assistant .md .source-link:focus-visible .source-title {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md .source-host {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+@media (min-width: 820px) {
+  .msg-assistant .md .source-list-items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-assistant .md .source-link { transition: none; }
+}

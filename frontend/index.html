@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261104-handoff1">
+  <link rel="stylesheet" href="app.css?v=20261110-trust1">
 </head>
 <body>
   <!-- The chat workspace at /app/: reached directly, or from the homepage's
@@ -102,6 +102,7 @@
           <textarea id="composer-input" rows="1"
             placeholder="Message Kalillac AI…"
             aria-label="Message Kalillac AI"
+            aria-describedby="accuracy-notice"
             enterkeyhint="send"></textarea>
 
           <!-- One control, two states. type=button so Stop never submits. -->
@@ -117,6 +118,10 @@
           </button>
         </div>
       </form>
+      <!-- Fixed copy, always shown directly beneath the composer. The message
+           box names it as its description, so assistive technology announces
+           it inside the role=application workspace too. -->
+      <p class="accuracy-notice" id="accuracy-notice">Kalillac can make mistakes. Verify important information.</p>
       <!-- The example prompts live here, after the composer, until the first message. -->
       <div class="starter-dock" id="starter-dock"></div>
 
@@ -160,6 +165,6 @@
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261104-handoff1"></script>
+  <script src="app.js?v=20261110-trust1"></script>
 </body>
 </html>

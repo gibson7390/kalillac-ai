@@ -493,7 +493,8 @@ def test_legacy_news_partial_answers_from_fetched_articles_only(providers, monke
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"reply", "session_id"}            # no public coverage field
+    assert set(body) == {"reply", "session_id", "source_list"}  # no public coverage field
+    assert body["source_list"] == {"kind": "search_results", "count": 1}
     answer, sources = sources_of(body["reply"])
     assert answer == f"Here is the news.\n\n{NOTICE}"
     assert body["reply"].count(NOTICE) == 1
@@ -624,7 +625,8 @@ def test_native_complete_search_reports_complete_coverage(providers, monkeypatch
     (output,) = tool_outputs(providers["openai_posts"][1])
     assert output["status"] == "ok" and output["coverage"] == "complete"
     assert NOTICE not in body["reply"]
-    assert set(body) == {"reply", "session_id"}
+    assert set(body) == {"reply", "session_id", "source_list"}
+    assert body["source_list"] == {"kind": "search_results", "count": 1}
 
 
 def test_native_partial_search_reports_limited_coverage(providers, monkeypatch):
@@ -640,7 +642,8 @@ def test_native_partial_search_reports_limited_coverage(providers, monkeypatch):
     assert output["status"] == "ok" and output["coverage"] == "limited"
     assert [item["url"] for item in output["results"]] == [article(1)["url"]]
     assert "RAW-SNIPPET" not in json.dumps(output)
-    assert set(body) == {"reply", "session_id"}
+    assert set(body) == {"reply", "session_id", "source_list"}
+    assert body["source_list"] == {"kind": "search_results", "count": 1}
     assert "coverage" not in response.text
     answer, sources = sources_of(body["reply"])
     assert answer == f"The news.\n\n{NOTICE}"

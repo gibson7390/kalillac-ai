@@ -96,6 +96,66 @@ _NATIVE_SEARCH_CONTEXT = ContextVar("native_search_context", default=None)
 # never reads it.
 _SPACE_REQUEST = ContextVar("space_request", default=None)
 
+
+class SourceFooterRecord:
+    """The source footer application code appended during one /api/chat
+    request, with its kind and entry count (source_trust.source_footer).
+
+    Created by the /api/chat handler and made current for the request's
+    worker only; nothing outside the two footer call sites writes it, and
+    model or user text never reaches it. for_reply() returns the metadata
+    only while the final reply still ends with exactly that footer text --
+    anything that replaced or extended the reply afterwards gets none, and
+    the client then shows its ordinary Markdown.
+    """
+
+    __slots__ = ("footer", "metadata")
+
+    def __init__(self):
+        self.footer = ""
+        self.metadata = None
+
+    def note(self, footer, metadata):
+        if footer and metadata:
+            self.footer, self.metadata = footer, dict(metadata)
+
+    def for_reply(self, reply):
+        if self.metadata and self.footer and isinstance(reply, str) and reply.endswith(self.footer):
+            return dict(self.metadata)
+        return None
+
+
+_SOURCE_FOOTER = ContextVar("source_footer", default=None)
+
+
+def _with_source_footer(reply, results, selection):
+    """reply + the application-owned footer, recorded for the response."""
+    footer, metadata = source_trust.source_footer(results, selection)
+    record = _SOURCE_FOOTER.get()
+    if record is not None:
+        record.note(footer, metadata)
+    return reply + footer
+
+
+def _start_chat_work(core, *args):
+    """Start core in a worker with a fresh SourceFooterRecord current for it
+    alone. The task copies this context when it is created, so the record is
+    reset here at once and never leaks into another request."""
+    record = SourceFooterRecord()
+    token = _SOURCE_FOOTER.set(record)
+    try:
+        return asyncio.ensure_future(run_in_threadpool(core, *args)), record
+    finally:
+        _SOURCE_FOOTER.reset(token)
+
+
+def _chat_reply_content(reply, out_sid, record):
+    content = {"reply": reply, "session_id": out_sid}
+    source_list = record.for_reply(reply) if record is not None else None
+    if source_list is not None:
+        content["source_list"] = source_list
+    return content
+
 # Every application-authored prompt statement that depends on the mode: the
 # Free Chat text (verbatim) here, the Space text in
 # kalillac_spaces.facts.SPACE_PROMPT_LINES. Sites call _mode_line(key) while
@@ -11947,7 +12007,7 @@ NATIVE SEARCH EVIDENCE RECOVERY:
         if search_coverage_limited:
             reply = with_limited_search_notice(reply)
 
-        return source_trust.enforce_answer_links(reply, search_results, selection) + source_trust.render_source_footer(search_results, selection)
+        return _with_source_footer(source_trust.enforce_answer_links(reply, search_results, selection), search_results, selection)
     except Exception as defect:
         # Cleaning, source rendering and incomplete labelling are Kalillac
         # code: a failure is an internal defect, not a model failure.
@@ -12775,7 +12835,7 @@ Rules:
             log("MODEL CALLED: yes")
             log("===== END ROUTE LOG =====\n")
 
-            return source_trust.enforce_answer_links(reply, results, selection) + source_trust.render_source_footer(results, selection)
+            return _with_source_footer(source_trust.enforce_answer_links(reply, results, selection), results, selection)
 
         if route == "memory":
             direct_memory_answer = answer_direct_memory_question(message, memory)
@@ -15301,11 +15361,10 @@ async def _api_chat_with_budget(request, req, history, limits, session, binding=
             else:
                 core = chat_core
 
-            # The worker thread sees this budget through a copied context.
+            # The worker thread sees this budget (and its own source-footer
+            # record) through a copied context.
             with budget_scope(budget):
-                work = asyncio.ensure_future(
-                    run_in_threadpool(core, req.message, history, sid, True)
-                )
+                work, source_record = _start_chat_work(core, req.message, history, sid, True)
 
             work_state = await _await_task_or_stop(
                 work,
@@ -15390,7 +15449,7 @@ async def _api_chat_with_budget(request, req, history, limits, session, binding=
 
         # Success. Sending it is not proof of delivery: a disconnect after
         # this point is not detected, as before this change.
-        response = JSONResponse(content={"reply": reply, "session_id": out_sid})
+        response = JSONResponse(content=_chat_reply_content(reply, out_sid, source_record))
 
         if meter is not None and meter_user_id is not None and quota_request is None:
             response.background = meter.background_for_chat(
@@ -15731,8 +15790,9 @@ async def _api_chat_dispatch(request, req, history, session):
         # directly here would block the event loop for the whole model call and
         # stall every other request including /api/health. run_in_threadpool
         # hands it to a worker thread and yields control back to the loop.
-        work = asyncio.ensure_future(
-            run_in_threadpool(_chat_core_with_account_quota if quota_request is not None else chat_core, req.message, history, sid, True)
+        work, source_record = _start_chat_work(
+            _chat_core_with_account_quota if quota_request is not None else chat_core,
+            req.message, history, sid, True,
         )
 
         try:
@@ -15787,7 +15847,7 @@ async def _api_chat_dispatch(request, req, history, session):
                 entry.lock.release()
             _session_lock_unref(sid, entry)
 
-    response = JSONResponse(content={"reply": reply, "session_id": out_sid})
+    response = JSONResponse(content=_chat_reply_content(reply, out_sid, source_record))
 
     # Aggregate metering only on this normal 200 path, after every chat
     # resource above is released, and only for a request that was signed in

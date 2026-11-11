@@ -34,6 +34,9 @@ Rendering (``render_source_footer``):
 - valid "none", missing or invalid -> "**Search results**" listing every
   supplied result, de-duplicated by URL;
 - no results -> no footer and no heading.
+``source_footer`` also returns that footer's kind and entry count; /api/chat
+reports them as ``source_list`` only while its reply still ends with exactly
+that application-made footer, so the client can tell it from model Markdown.
 
 Every control-like occurrence, valid or not and whatever its nonce, is
 removed from the reply (``strip_selection_controls``) before the reply is
@@ -466,10 +469,21 @@ def displayed_sources(results, selection):
     return dedupe_results(item for item in chosen if safe_source_url(item.get("url"))), label
 
 
-def render_source_footer(results, selection):
+# The kind each footer label reports in the chat response's source_list.
+SOURCE_LIST_KINDS = {SOURCES_LABEL: "sources", SEARCH_RESULTS_LABEL: "search_results"}
+
+
+def source_footer(results, selection):
+    """(footer text, source_list metadata) from one displayed_sources call.
+
+    The metadata describes exactly the footer text returned with it: its kind
+    ("sources" or "search_results") and its number of entries. Both are
+    computed here, from the validated selection and the supplied results,
+    never from model text. No footer -> ("", None).
+    """
     chosen, label = displayed_sources(results, selection)
     if not chosen:
-        return ""
+        return "", None
     lines = []
     for item in chosen:
         destination = html.escape(item["url"], quote=False)
@@ -477,7 +491,12 @@ def render_source_footer(results, selection):
             # Backslash escapes would be mistaken for LaTeX by the client.
             destination = "<" + destination + ">"
         lines.append(f"- [{_footer_title(item)}]({destination})")
-    return f"\n\n**{label}**\n\n" + "\n".join(lines)
+    text = f"\n\n**{label}**\n\n" + "\n".join(lines)
+    return text, {"kind": SOURCE_LIST_KINDS[label], "count": len(chosen)}
+
+
+def render_source_footer(results, selection):
+    return source_footer(results, selection)[0]
 
 # --- complete-answer citation boundary --------------------------------------
 # markdown-it-py is already pinned in requirements-production-lock.txt. It is
