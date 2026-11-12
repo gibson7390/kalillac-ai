@@ -9893,19 +9893,66 @@ def explicit_search_requested(message):
         or any(signal in text for signal in EXPLICIT_SEARCH_SIGNALS)
         or re.search(r"\bindependent(?:ly)?\s+verif\w*|\bverify\s+(?:it\s+|this\s+|that\s+)?independently\b", text)
         or re.search(r"^\s*(?:please\s+|can you\s+|could you\s+|would you\s+)*research\b", text)
+        # Separable "look X up" ("look Aroge Tech up online").
+        or re.search(r"\blook\s+(?:\S+\s+){1,4}up\b", text)
     )
 
 
-def developer_search_withheld(message):
+def _is_developer_question(message):
+    text = normalize_for_router(message)
+    return bool(AROGE_TECH_MENTION_RE.search(text) or CANONICAL_CREATOR_RE.search(text))
+
+
+# A follow-up that refers back instead of naming its subject ("Who owns it?",
+# "Is it an LLC?", "What does that have to do with Kalillac?"). Same pronoun
+# idea as is_verification_followup, with word boundaries so "it?" counts.
+_REFERENTIAL_FOLLOWUP_RE = re.compile(
+    r"\b(?:it|its|that|this|they|them|their|that company|this company|the company|the business)\b"
+)
+
+
+_DEVELOPER_TOPIC_NAMES = {"kalillac", "ai", "aroge", "tech", "llc", "openai", "i"}
+
+
+def _is_referential_followup(message):
+    """Short, refers back, and introduces no other named subject: "Tell me
+    about Python, is it fast?" names Python, so it starts a new topic."""
+    text = normalize_for_router(message)
+    later_words = re.findall(r"[A-Za-z][\w'’-]*", str(message))[1:]
+    names_other_subject = any(
+        word[0].isupper() and word.lower().strip("'’s") not in _DEVELOPER_TOPIC_NAMES
+        for word in later_words
+    )
+    return (len(text.split()) <= 12 and not names_other_subject
+            and bool(_REFERENTIAL_FOLLOWUP_RE.search(text)))
+
+
+def developer_topic_active(history):
+    """The active conversation topic is Kalillac's developer: within the last
+    three USER turns, the most recent turn that is not a referential
+    follow-up asked about Aroge Tech or who created Kalillac, and every later
+    user turn refers back to it. Any other self-contained question
+    supersedes the topic. Assistant text is never used."""
+    for prior in reversed(get_recent_user_messages(history or [], limit=3)):
+        if _is_developer_question(prior):
+            return True
+        if not _is_referential_followup(prior):
+            return False
+    return False
+
+
+def developer_search_withheld(message, history=None):
     """Ordinary questions about Aroge Tech or about who created/developed
-    Kalillac are answered from verified application facts: search_web is not
+    Kalillac, including referential follow-ups while that is the active
+    topic, are answered from verified application facts: search_web is not
     offered and any requested search is rejected before a provider call.
     An explicit request to search, research or independently verify keeps
     the normal search path."""
-    text = normalize_for_router(message)
-    if not (AROGE_TECH_MENTION_RE.search(text) or CANONICAL_CREATOR_RE.search(text)):
+    if explicit_search_requested(message):
         return False
-    return not explicit_search_requested(message)
+    if _is_developer_question(message):
+        return True
+    return _is_referential_followup(message) and developer_topic_active(history)
 
 
 DEVELOPER_SEARCH_REASON = (
@@ -10286,6 +10333,7 @@ def kalillac_self_knowledge_context_active(message, history, route=None):
         or any(
             is_self_knowledge_request(user_message)
             or mentions_kalillac_self_topic(user_message)
+            or bool(AROGE_TECH_MENTION_RE.search(normalize_for_router(user_message)))
             for user_message in recent_user_messages
         )
         or recent_kalillac_own_code_request(history, limit=3)
@@ -11708,7 +11756,7 @@ def _run_v31_native_tool_chat(message, history, state):
     """The native path, with search_web withheld for this request when it
     asks about Kalillac's developer without an explicit search request
     (see developer_search_withheld)."""
-    token = _NATIVE_SEARCH_WITHHELD.set(developer_search_withheld(message))
+    token = _NATIVE_SEARCH_WITHHELD.set(developer_search_withheld(message, history))
     try:
         return _run_v31_native_tool_chat_unscoped(message, history, state)
     finally:

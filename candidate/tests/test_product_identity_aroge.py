@@ -283,7 +283,7 @@ def test_a_requested_search_is_rejected_before_any_provider(world, monkeypatch, 
     assert app._NATIVE_SEARCH_WITHHELD.get() is False             # reset after the request
 
 
-def _offered_tools(world, monkeypatch, question, turns):
+def _offered_tools(world, monkeypatch, question, turns, history=()):
     """Run the real payload builder and record the tools offered in each model round."""
     monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
     monkeypatch.setattr(app, "_invoke_openai_native_tools", REAL_NATIVE_INVOKE)
@@ -297,7 +297,7 @@ def _offered_tools(world, monkeypatch, question, turns):
         return script.pop(0)(payload["input"], nonce and nonce.group(1))
 
     monkeypatch.setattr(app, "_post_openai_for_attempt", model)
-    reply, record = _chat(question)
+    reply, record = _chat(question, history)
     return offered, reply, record
 
 
@@ -344,3 +344,108 @@ def test_explicit_search_about_kalillac_developer_keeps_verified_facts_authorita
     assert _facts_in(instructions) == []
     assert "DEVELOPER - VERIFIED APPLICATION FACTS, NOT SEARCH RESULTS:" in instructions
     assert "keep the established facts authoritative" in instructions
+
+
+# --- 6. referential follow-ups inherit the developer-search rule ------------------------------
+#
+# Live evaluation of 54658f6: after "What is Aroge Tech?", the follow-ups no longer named
+# Aroge Tech, so search_web was still offered on those turns. While the developer is the
+# active topic, a referential follow-up must not be offered or execute a search.
+
+
+def _history(*user_turns):
+    history = []
+    for turn in user_turns:
+        history += [{"role": "user", "content": turn},
+                    {"role": "assistant", "content": "Aroge Tech is the technology business developing Kalillac AI."}]
+    return history
+
+
+AROGE_HISTORY = _history("What is Aroge Tech?")
+FOLLOWUPS = [
+    "What does that have to do with Kalillac?",
+    "Who created it?",
+    "Who founded it?",
+    "Who owns it?",
+    "Is it already a legally formed LLC?",
+    "What does it sell?",
+]
+EXPLICIT_FOLLOWUPS = ["Search it online.", "Can you independently verify that?",
+                      "Look Aroge Tech up online", "Research that company"]
+
+
+@pytest.mark.parametrize("followup", FOLLOWUPS)
+def test_referential_followups_withhold_search(followup):
+    assert app.developer_search_withheld(followup, AROGE_HISTORY)
+    assert not app.developer_search_withheld(followup, [])          # needs the established topic
+    assert app.classify_request(followup, AROGE_HISTORY) != "web_search"
+    assert app.kalillac_self_knowledge_context_active(followup, AROGE_HISTORY)
+
+
+@pytest.mark.parametrize("followup", FOLLOWUPS)
+def test_referential_followups_are_not_offered_search(world, monkeypatch, followup):
+    world["script"] = lambda provider, payload: pytest.fail("no search provider may be called")
+    offered, reply, record = _offered_tools(world, monkeypatch, followup, [answer_turn(NOT_ESTABLISHED)],
+                                            history=AROGE_HISTORY)
+    assert offered == [["get_kalillac_runtime_facts"]]
+    assert world["calls"] == [] and record.metadata is None and reply == NOT_ESTABLISHED
+    assert "DEVELOPER - VERIFIED APPLICATION FACTS, NOT SEARCH RESULTS:" in world["instructions"][0]
+
+
+@pytest.mark.parametrize("followup", FOLLOWUPS)
+def test_referential_followup_search_requests_are_rejected_unsent(world, monkeypatch, followup):
+    monkeypatch.setattr(app, "V31_NATIVE_TOOL_ROUTING", True)
+    world["script"] = lambda provider, payload: pytest.fail("no search provider may be called")
+    world["turns"] = [search_turn("Aroge Tech owner", "s1"), answer_turn(NOT_ESTABLISHED)]
+    reply, record = _chat(followup, AROGE_HISTORY)
+    assert world["calls"] == []
+    assert tool_outputs(world) == [{"status": "rejected", "reason": app.DEVELOPER_SEARCH_REASON}]
+    assert reply == NOT_ESTABLISHED and record.metadata is None and record.for_reply(reply) is None
+
+
+def test_the_topic_survives_a_chain_of_referential_followups():
+    history = _history("What is Aroge Tech?", "What does that have to do with Kalillac?", "Who created it?")
+    assert app.developer_search_withheld("Is it already a legally formed LLC?", history)
+    assert app.developer_search_withheld("Who owns it?", _history("Who created Kalillac AI?"))
+
+
+@pytest.mark.parametrize("followup", EXPLICIT_FOLLOWUPS)
+def test_explicit_followup_searches_are_not_withheld(followup):
+    assert app.explicit_search_requested(followup)
+    assert not app.developer_search_withheld(followup, AROGE_HISTORY)
+
+
+@pytest.mark.parametrize("followup", EXPLICIT_FOLLOWUPS[:2])
+def test_explicit_followup_searches_still_run(world, monkeypatch, followup):
+    rows = [("https://news.example/a", "Unrelated Aroge item", "Text.")]
+    world["script"] = lambda provider, payload: brave(rows)
+    offered, reply, record = _offered_tools(world, monkeypatch, followup, [
+        search_turn("Aroge Tech", "s1"), answer_turn("Only the listed result was found.", "1")],
+        history=AROGE_HISTORY)
+    assert "search_web" in offered[0]
+    assert [call["provider"] for call in world["calls"]] == ["brave"]
+    assert record.for_reply(reply) == {"kind": "sources", "count": 1}
+
+
+@pytest.mark.parametrize("history, question", [
+    (_history("What is Aroge Tech?"), "Who won the 2026 World Cup?"),                       # unrelated question
+    (_history("What is Aroge Tech?", "What is the capital of France?"), "What is its population?"),
+    (_history("What is Aroge Tech?", "Tell me about the Eiffel Tower"), "Who built it?"),
+    (_history("What is Aroge Tech?", "Tell me about Python, is it fast?"), "Who created it?"),
+    (_history("What is Aroge Tech?", "Explain recursion", "Explain closures", "Explain generators"), "Who created it?"),
+    (_history("What is Aroga Technologies?"), "Who owns it?"),                              # similar name
+    (_history("What is Aroge Tech?"), "Is it related to Aroga Technologies?"),              # names an external company
+], ids=["unrelated", "superseded", "superseded_place", "superseded_named", "stale", "similar_name", "external_named"])
+def test_a_superseded_or_unrelated_topic_keeps_search(history, question):
+    assert not app.developer_search_withheld(question, history)
+
+
+def test_topic_switch_question_is_offered_and_runs_search(world, monkeypatch):
+    rows = [("https://stats.example/paris", "Paris population", "About 2.1 million.")]
+    world["script"] = lambda provider, payload: brave(rows)
+    history = _history("What is Aroge Tech?", "What is the capital of France?")
+    offered, reply, record = _offered_tools(world, monkeypatch, "What is its population?", [
+        search_turn("Paris population", "s1"), answer_turn("About 2.1 million.", "1")], history=history)
+    assert "search_web" in offered[0]
+    assert [call["provider"] for call in world["calls"]] == ["brave"]
+    assert record.for_reply(reply) == {"kind": "sources", "count": 1}
