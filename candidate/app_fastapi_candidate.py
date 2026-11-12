@@ -87,6 +87,9 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 SEARCH_PROVIDER_POLICY = search_providers.load_policy(os.environ)
 _NATIVE_SEARCH_CONTEXT = ContextVar("native_search_context", default=None)
+# True while a native request must not search (developer_search_withheld):
+# search_web is not offered, and a requested search is rejected unsent.
+_NATIVE_SEARCH_WITHHELD = ContextVar("native_search_withheld", default=False)
 # The Space a request runs in (kalillac_spaces.context.WorkspaceContext),
 # set by chat() only for that request, inside its worker. Unset -- every
 # anonymous request -- nothing reads it and every prompt is exactly as
@@ -4396,6 +4399,7 @@ def is_kalillac_own_code_request(message, history=None):
 # exact name (or its domain) counts: "Aroga Technologies", "Argo-Tech" and
 # other similar names are different businesses and stay ordinary questions.
 _AROGE_TECH_NAME = r"(?:aroge[ -]?tech\b|arogetech(?:\.com)?\b)"
+AROGE_TECH_MENTION_RE = re.compile(r"\b" + _AROGE_TECH_NAME)
 AROGE_TECH_IDENTITY_RE = re.compile(
     r"\b(?:what|who)(?:['’]s| is| are| was)?\s+(?:the\s+)?" + _AROGE_TECH_NAME
     + r"|\bwho\s+(?:founded|owns|runs|started|created|built|made|leads)\s+" + _AROGE_TECH_NAME
@@ -9850,30 +9854,66 @@ def is_web_search_request(message, history=None):
     if is_private_context_request(text):
         return False
 
-    # Explicit search verbs.
-    explicit_search_signals = [
-        "search for",
-        "search the web",
-        "search online",
-        "web search for",
-        "look up",
-        "look this up",
-        "browse for",
-        "check online",
-        "find online",
-        "verify online",
-        "google",
-        "find me a link",
-        "give me a link",
-        "give me sources",
-        "cite sources",
-        "find sources",
-    ]
-
     # Whether an ordinary question needs current information is the model's
     # decision (V31 search_web); words such as "latest", "current" or "price"
     # no longer force a search.
-    return any(signal in text for signal in explicit_search_signals)
+    return any(signal in text for signal in EXPLICIT_SEARCH_SIGNALS)
+
+
+# Explicit search verbs (shared by is_web_search_request and
+# explicit_search_requested).
+EXPLICIT_SEARCH_SIGNALS = (
+    "search for",
+    "search the web",
+    "search online",
+    "web search for",
+    "look up",
+    "look this up",
+    "browse for",
+    "check online",
+    "find online",
+    "verify online",
+    "google",
+    "find me a link",
+    "give me a link",
+    "give me sources",
+    "cite sources",
+    "find sources",
+)
+
+
+def explicit_search_requested(message):
+    """The user explicitly asked for web search, research or independent
+    verification. Only explicit wording counts: unlike is_web_search_request,
+    a question merely about a named entity is not a search request."""
+    text = normalize_for_router(message)
+    return bool(
+        has_explicit_search_command(text)
+        or is_search_action_with_target(text)
+        or any(signal in text for signal in EXPLICIT_SEARCH_SIGNALS)
+        or re.search(r"\bindependent(?:ly)?\s+verif\w*|\bverify\s+(?:it\s+|this\s+|that\s+)?independently\b", text)
+        or re.search(r"^\s*(?:please\s+|can you\s+|could you\s+|would you\s+)*research\b", text)
+    )
+
+
+def developer_search_withheld(message):
+    """Ordinary questions about Aroge Tech or about who created/developed
+    Kalillac are answered from verified application facts: search_web is not
+    offered and any requested search is rejected before a provider call.
+    An explicit request to search, research or independently verify keeps
+    the normal search path."""
+    text = normalize_for_router(message)
+    if not (AROGE_TECH_MENTION_RE.search(text) or CANONICAL_CREATOR_RE.search(text)):
+        return False
+    return not explicit_search_requested(message)
+
+
+DEVELOPER_SEARCH_REASON = (
+    "Do not search. Kalillac's developer and Aroge Tech's relationship to Kalillac are established "
+    "application facts; nothing was sent to a search provider. Answer from the verified facts. If the "
+    "user asks for a detail they do not state (for example a founder, owner, legal status, products or "
+    "prices), say it is not established in Kalillac's verified facts. Do not cite any source."
+)
 
 
 def is_emotional_context(message):
@@ -10236,6 +10276,7 @@ def kalillac_self_knowledge_context_active(message, history, route=None):
     return (
         route == "self_knowledge"
         or is_self_knowledge_request(message)
+        or bool(AROGE_TECH_MENTION_RE.search(normalize_for_router(message)))
         or is_kalillac_own_code_request(message, history)
         or mentions_kalillac_self_topic(message)
         or (
@@ -11479,7 +11520,10 @@ def _invoke_openai_native_tools(input_items, instructions):
         "reasoning": {
             "effort": OPENAI_REASONING_EFFORT,
         },
-        "tools": OPENAI_TOOLS,
+        "tools": (
+            [tool for tool in OPENAI_TOOLS if tool["name"] != "search_web"]
+            if _NATIVE_SEARCH_WITHHELD.get() else OPENAI_TOOLS
+        ),
         "tool_choice": "auto",
         "max_output_tokens": MAX_RESPONSE_TOKENS,
     }
@@ -11660,7 +11704,18 @@ def native_semantic_route_eligible(route, history):
     return True
 
 
-def _run_v31_native_tool_chat(
+def _run_v31_native_tool_chat(message, history, state):
+    """The native path, with search_web withheld for this request when it
+    asks about Kalillac's developer without an explicit search request
+    (see developer_search_withheld)."""
+    token = _NATIVE_SEARCH_WITHHELD.set(developer_search_withheld(message))
+    try:
+        return _run_v31_native_tool_chat_unscoped(message, history, state)
+    finally:
+        _NATIVE_SEARCH_WITHHELD.reset(token)
+
+
+def _run_v31_native_tool_chat_unscoped(
     message,
     history,
     state,
@@ -11823,6 +11878,14 @@ NATIVE SEARCH EVIDENCE RECOVERY:
                     "and offer help using only the current conversation."
                 ),
             }
+
+        # Kalillac's developer is an application fact: search_web was not
+        # offered for this request, and a search requested anyway is
+        # rejected before any provider, session admission or source list.
+        if _NATIVE_SEARCH_WITHHELD.get():
+            log("V31 SEARCH: rejected (verified developer facts)")
+            lookup.closed = followup_enabled
+            return {"status": "rejected", "reason": DEVELOPER_SEARCH_REASON}
 
         if followup_enabled and search_requests > 3:
             return {"status": "rejected", "reason": "The bounded lookup permits only three search requests; no fourth search is allowed.",
