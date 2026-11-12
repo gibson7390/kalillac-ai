@@ -2,6 +2,12 @@
 
 Counters are conservative reserved/potential attempts, NOT invoiced usage.
 No provider/account/visitor-linked log, payload, tracking ID or background job.
+
+With Financial Safeguards configured (ProviderControls.finance), each attempt
+also reserves its worst-case micro-USD in the finance ledger in the SAME
+transaction as its attempt-pool reservation, so both commit before dispatch
+is allowed; a dispatched attempt is settled afterwards, a never-dispatched one
+released. Without it every path below is exactly the attempt ceiling alone.
 """
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -37,14 +43,16 @@ class Lease:
     period_start: int
     anonymous: bool
     dispatch_deadline: float
+    finance: object = None  # finance_ledger.FinanceLease when Financial Safeguards is on
     dispatched: bool = False
     released: bool = False
     lock: object = field(default_factory=threading.Lock, repr=False)
 
 
 class ProviderControls:
-    def __init__(self, config, session_factory=None, clock=None):
+    def __init__(self, config, session_factory=None, clock=None, finance=None):
         self.config, self._factory, self._clock = config, session_factory, clock
+        self.finance = finance  # kalillac_finance.config.FinancialConfig or None
         if set(config.providers) != set(PROVIDERS):
             raise ValueError("All provider ceilings must be explicit.")
         for limit in config.providers.values():
@@ -88,10 +96,12 @@ class ProviderControls:
             print("WARN: PROVIDER_CEILING_DATABASE_FAILED", type(error).__name__)
             raise CeilingUnavailable() from None
 
-    def reserve(self, provider, anonymous):
+    def reserve(self, provider, anonymous, charge=None):
         from kalillac_db.repositories.provider_usage import reserve
         if provider not in PROVIDERS or type(anonymous) is not bool:
             raise CeilingUnavailable()
+        if (self.finance is None) != (charge is None):
+            raise CeilingUnavailable()  # Never one ledger without the other.
         limit = self.config.providers[provider]
         def operation(session):
             checkpoint = {}
@@ -99,8 +109,14 @@ class ProviderControls:
                 checkpoint["monotonic"] = time.monotonic()
                 return self._now(session)
             start, now = reserve(session, provider, limit, clock, anonymous)
+            finance = None
+            if charge is not None:
+                from kalillac_db.repositories import finance_ledger
+                if charge.provider != provider:
+                    raise CeilingUnavailable()
+                finance = finance_ledger.reserve(session, charge, now, self.finance.limits)
             end = checkpoint["monotonic"] + start + limit.period_seconds - now.timestamp()
-            return Lease(provider, start, anonymous, end)
+            return Lease(provider, start, anonymous, end, finance)
         return self._transaction(operation)
 
     def release(self, lease):
@@ -108,17 +124,44 @@ class ProviderControls:
         with lease.lock:
             if lease.dispatched or lease.released: return
             lease.released = True  # Exactly one refund attempt, no hidden retry.
+        def operation(session):
+            release(session, lease)
+            if lease.finance is not None:
+                from kalillac_db.repositories import finance_ledger
+                finance_ledger.release(session, lease.finance, self._now(session))
         # Cleanup must still run after cancellation; no request-budget admission.
         try:
-            self._transaction(lambda session: release(session, lease), check_budget=False)
+            self._transaction(operation, check_budget=False)
         except Exception as error:
             # Unknown cleanup remains charged; never alter the chat contract.
             print("WARN: PROVIDER_CEILING_REFUND_UNCONFIRMED", type(error).__name__)
 
+    def settle(self, lease, value, returned):
+        """Settle a DISPATCHED attempt's financial reservation exactly once.
+
+        A failure leaves the reservation outstanding, so it stays charged.
+        """
+        finance = lease.finance
+        if finance is None:
+            return
+        with lease.lock:
+            if not lease.dispatched or finance.resolved: return
+            finance.resolved = True
+        try:
+            from kalillac_finance.runtime import settlement_for
+            from kalillac_db.repositories import finance_ledger
+            settlement = settlement_for(self.finance.prices, finance.charge, value, returned)
+            self._transaction(lambda session: finance_ledger.settle(
+                session, finance, settlement, self._now(session), self.finance.limits), check_budget=False)
+        except Exception as error:
+            print("WARN: FINANCE_SETTLEMENT_UNCONFIRMED", type(error).__name__)
+
 
 class ControlRequest:
     def __init__(self, service):
+        from kalillac_finance.scopes import TrafficClass
         self.service, self.anonymous = service, True
+        self.traffic_class = TrafficClass.ANONYMOUS
         self.lock = threading.Lock()
         self.closed = self.started = self.finished = False
         self.session = self.session_lock = None
@@ -178,9 +221,15 @@ def end_request(state, token):
         _REQUEST.reset(token)
 
 
-def account_status(authenticated):
+def account_status(authenticated, paid_entitlement=None):
+    """The request's only traffic classification (see kalillac_finance.traffic)."""
+    from kalillac_finance.traffic import resolve_traffic_class
     state = _REQUEST.get()
-    if state is not None: state.anonymous = not authenticated
+    if state is not None:
+        state.anonymous = not authenticated
+        state.traffic_class = resolve_traffic_class(
+            authenticated=authenticated is True, request=state, paid_entitlement=paid_entitlement)
+
 
 
 def session_admit(state, lock):
@@ -210,16 +259,42 @@ def protect(function, provider=None):
         selected = provider or args[0]
         # Budgeted Tavily is protected by its shared search/extract seam.
         if provider is None and selected == "tavily": return function(*args, **kwargs)
-        lease = service.reserve(selected, request.anonymous)
+        finance = getattr(service, "finance", None)
+        if finance is None:
+            lease = service.reserve(selected, request.anonymous)
+        else:
+            from kalillac_finance.runtime import charge_for
+            try:
+                charge = charge_for(finance.prices, selected, args, request.traffic_class)
+            except Exception:
+                print("WARN: FINANCE_RESERVATION_UNBOUNDED", selected)
+                raise CeilingUnavailable() from None
+            lease = service.reserve(selected, request.anonymous, charge)
         token = _LEASE.set(lease)
+        returned, value = False, None
         try:
             request.ensure_open()
-            return function(*args, **kwargs)
+            value = function(*args, **kwargs)
+            returned = True
+            return value
         finally:
             # Claiming release fences late transport callbacks before refund.
             service.release(lease)
+            if finance is not None:
+                service.settle(lease, value, returned)
             _LEASE.reset(token)
     return guarded
+
+
+def financial_openai(function):
+    """With Financial Safeguards on, pin the OpenAI service tier the prices are
+    for (Standard: "default"); otherwise the payload passes through untouched."""
+    @wraps(function)
+    def pinned(payload, *args, **kwargs):
+        if getattr(SERVICE, "finance", None) is not None and type(payload) is dict:
+            payload = {**payload, "service_tier": "default"}
+        return function(payload, *args, **kwargs)
+    return pinned
 
 
 def dispatch():
@@ -227,6 +302,8 @@ def dispatch():
     request, lease = _REQUEST.get(), _LEASE.get()
     if request is None or lease is None: raise CeilingUnavailable()
     request.ensure_open()
+    if getattr(SERVICE, "finance", None) is not None and lease.finance is None:
+        raise CeilingUnavailable()  # Both leases, or no network operation.
     with lease.lock:
         if lease.released or lease.dispatched or time.monotonic() >= lease.dispatch_deadline:
             raise CeilingBusy()

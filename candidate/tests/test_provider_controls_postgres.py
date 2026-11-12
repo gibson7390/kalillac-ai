@@ -51,8 +51,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0014_v1_session_issuance"
+HEAD = "0015_finance_ledger"
 CHAIN = (
+    "0015_finance_ledger",
     "0014_v1_session_issuance",
     "0013_v1_session_revocation",
     "0012_v1_account_security",
@@ -1131,3 +1132,375 @@ def test_anonymous_pruning_skips_locked_rows_and_is_bounded(app_engine):
     assert remaining() == kept_days
     assert prune(2) == 0
     assert remaining() == kept_days
+
+
+# --- Financial Safeguards ledger (0015) on real PostgreSQL ---------------------------------
+#
+# The committed ProviderControls with a FinancialConfig, driven through protect()
+# exactly as the application wraps each seam (finance_test_support.attempt).
+# Every test uses its own UTC month, so ledger rows never interact across tests;
+# the application role cannot delete ledger rows or latches, so latches are
+# cleared between tests by the disposable admin role (the operator's action).
+
+FINANCE_TOTAL = 1000  # Attempt ceilings far above every financial ceiling below.
+FINANCE_TABLES = {
+    "finance_ledger_buckets": {"period_kind", "period_start", "scope", "reserved_microusd", "settled_microusd",
+                               "overrun_microusd"},
+    "finance_reservations": {"id", "provider", "scope", "day", "month", "reserved_microusd", "state",
+                             "charged_microusd", "overrun_microusd", "bound_exceeded", "basis", "created_at",
+                             "resolved_at"},
+    "finance_unsafe_latches": {"scope", "reason", "latched_at", "reservation_id"},
+}
+
+
+def _fin():
+    import finance_test_support
+    return finance_test_support
+
+
+def _when(month, day=15, hour=12, year=2031, minute=0, second=0):
+    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+
+
+def _r():
+    fin = _fin()
+    return fin.openai_reservation(fin.finance_config())
+
+
+def make_finance_service(factory, finance, clock, total=FINANCE_TOTAL):
+    from kalillac_routing.provider_controls import ProviderControls
+    from kalillac_routing.provider_limits import ControlConfig, ProviderLimit
+    config = ControlConfig({p: ProviderLimit(total, total, PERIOD) for p in PROVIDERS})
+    return ProviderControls(config, session_factory=lambda: factory,
+                            clock=clock if callable(clock) else (lambda: clock), finance=finance)
+
+
+@pytest.fixture
+def finance_latches(database):
+    def clear():
+        with _connect(database) as conn:
+            conn.execute("DELETE FROM kalillac.finance_unsafe_latches")
+    clear()
+    yield
+    clear()
+
+
+def _finance_worker(spec, barrier, results):
+    """Child process: one attempt with both ledgers on its own engine and connection."""
+    engine = None
+    index = spec["index"]
+    try:
+        STATE["nonce"] = spec["nonce"]
+        _recheck_worker_environment()
+        fin = _fin()
+        engine = _engine(APP, application=f"finance-worker-{index}", pool_size=1, max_overflow=0)
+        finance = fin.finance_config(day=spec["day"], month=spec["month"])
+        service = make_finance_service(_factory(engine), finance, spec["now"])
+        with engine.connect():
+            pass  # The verified physical connection exists before the race starts.
+        on_event = (lambda name: results.put((index, "event", name))) if spec["events"] else None
+        barrier.wait(timeout=30)
+        outcome = fin.attempt(service, provider=spec["provider"], traffic=spec["traffic"], behavior=spec["behavior"],
+                              value=spec["value"], on_event=on_event)
+        results.put((index, "result", outcome))
+    except BaseException as error:  # Reported to the parent, never swallowed.
+        results.put((index, "error", f"{type(error).__name__}: {error}"))
+        raise
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _finance_spec(index, now, day, month=None, traffic="anonymous", behavior="ok", value="missing",
+                  provider="openai", events=False):
+    fin = _fin()
+    return {"index": index, "now": now, "day": day, "month": month or tuple(v * 31 for v in day),
+            "traffic": traffic, "behavior": behavior, "provider": provider, "events": events,
+            "value": fin.model_response(usage=False) if value == "missing" else value, "nonce": STATE["nonce"]}
+
+
+def _finance_race(specs):
+    return race(specs, target=_finance_worker)
+
+
+def _ledger(app_engine):
+    return _factory(app_engine)
+
+
+def test_finance_tables_columns_and_narrow_grants(database):
+    with _connect(database) as conn:
+        for table, columns in FINANCE_TABLES.items():
+            assert {r[0] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'kalillac' "
+                "AND table_name = %s", [table]).fetchall()} == columns, table
+            allowed = {"SELECT", "INSERT"} | ({"UPDATE"} if table != "finance_unsafe_latches" else set())
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
+                assert conn.execute("SELECT has_table_privilege(%s::name, %s::text, %s::text)",
+                                    [APP, "kalillac." + table, privilege]).fetchone() == (privilege in allowed,), \
+                    (table, privilege)
+                assert conn.execute("SELECT has_table_privilege(%s::name, %s::text, %s::text)",
+                                    [APP, "kalillac." + table, privilege + " WITH GRANT OPTION"]).fetchone() \
+                    == (False,), (table, privilege)
+    with _connect(APP) as conn:
+        for statement in ("DELETE FROM kalillac.finance_unsafe_latches",
+                          "UPDATE kalillac.finance_unsafe_latches SET reason = 'overrun'",
+                          "DELETE FROM kalillac.finance_reservations",
+                          "DELETE FROM kalillac.finance_ledger_buckets",
+                          "TRUNCATE kalillac.finance_ledger_buckets"):
+            _expect_sqlstate(conn, statement)
+        # A calendar month is stored by its first day only.
+        _expect_sqlstate(conn, "INSERT INTO kalillac.finance_ledger_buckets VALUES "
+                               "('month', DATE '2031-01-02', 'global', 0, 0, 0)", "23514")
+        _expect_sqlstate(conn, "INSERT INTO kalillac.finance_ledger_buckets VALUES "
+                               "('day', DATE '2031-01-02', 'global', -1, 0, 0)", "23514")
+
+
+def test_finance_concurrent_free_reservations_never_exceed_the_free_ceiling(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(1), fin.scopes_for(3 * R + R // 2, 3 * R + R // 2)
+    results = _finance_race([_finance_spec(i, now, day) for i in range(RACERS)])
+    assert tally(results) == Counter(ok=3, busy=RACERS - 3)
+    assert sum(r["entered"] for r in results) == sum(r["dispatched"] for r in results) == 3
+    factory = _ledger(app_engine)
+    assert fin.bucket(factory, "day", now.date(), "free") == (0, 3 * R, 0)
+    assert fin.bucket(factory, "day", now.date(), "global") == (0, 3 * R, 0)
+    assert fin.bucket(factory, "day", now.date(), "paid") == (0, 0, 0)
+    fin.check_invariants(factory, fin.finance_config(day=day).limits, {now.date(), date(2031, 1, 1)})
+    assert counts(app_engine) == (3, 3)  # Refused reservations consumed no attempt either.
+
+
+def test_finance_concurrent_paid_reservations_never_exceed_the_paid_ceiling(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(2), fin.scopes_for(R, 2 * R + R // 2)
+    results = _finance_race([_finance_spec(i, now, day, traffic="paid") for i in range(RACERS)])
+    assert tally(results) == Counter(ok=2, busy=RACERS - 2)
+    factory = _ledger(app_engine)
+    assert fin.bucket(factory, "day", now.date(), "paid") == (0, 2 * R, 0)
+    assert fin.bucket(factory, "day", now.date(), "free") == (0, 0, 0)
+    assert counts(app_engine) == (2, 0)
+
+
+def test_finance_free_racing_cannot_consume_paid_capacity(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(3), fin.scopes_for(2 * R + R // 2, 2 * R + R // 2)
+    specs = [_finance_spec(i, now, day, traffic=("anonymous", "free", "paid")[i % 3]) for i in range(RACERS + 1)]
+    results = _finance_race(specs)
+    by_scope = Counter(("paid" if s["traffic"] == "paid" else "free", r["outcome"]) for s, r in zip(specs, results))
+    assert by_scope[("free", "ok")] == 2 and by_scope[("paid", "ok")] == 2
+    # Free exhaustion refused free only; paid kept exactly its own ceiling.
+    factory = _ledger(app_engine)
+    assert fin.attempt(make_finance_service(factory, fin.finance_config(day=day), now), traffic="paid")["outcome"] \
+        == "busy"
+    assert fin.bucket(factory, "day", now.date(), "global") == (0, 4 * R, 0)
+
+
+def test_finance_free_and_paid_racing_against_an_exhausted_global_headroom(app_engine, database, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(4), fin.scopes_for(4 * R, 4 * R)
+    seeded = day[0] - 3 * R - R // 2  # GLOBAL exposure already consumed (for example by overruns).
+    with _connect(database) as conn:
+        conn.execute("INSERT INTO kalillac.finance_ledger_buckets VALUES ('day', %s, 'global', 0, %s, 0)",
+                     [now.date(), seeded])
+    specs = [_finance_spec(i, now, day, traffic="paid" if i % 2 else "anonymous") for i in range(RACERS)]
+    results = _finance_race(specs)
+    assert tally(results) == Counter(ok=3, busy=RACERS - 3)
+    factory = _ledger(app_engine)
+    assert fin.bucket(factory, "day", now.date(), "global") == (0, seeded + 3 * R, 0)
+    assert sum(fin.bucket(factory, "day", now.date(), s)[1] for s in ("free", "paid")) == 3 * R
+
+
+def test_finance_day_and_month_ceilings_hold_together_under_concurrency(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    day, month = fin.scopes_for(4 * R, 4 * R), fin.scopes_for(5 * R, 5 * R)
+    first = _when(5, day=10)
+    service = make_finance_service(_ledger(app_engine), fin.finance_config(day=day, month=month), first)
+    assert [fin.attempt(service, value=fin.model_response(usage=False))["outcome"] for _ in range(3)] == ["ok"] * 3
+    later = _when(5, day=11)  # A fresh day with 4 R of day room, but 2 R of month room.
+    results = _finance_race([_finance_spec(i, later, day, month) for i in range(RACERS)])
+    assert tally(results) == Counter(ok=2, busy=RACERS - 2)
+    factory = _ledger(app_engine)
+    assert fin.bucket(factory, "day", first.date(), "free") == (0, 3 * R, 0)
+    assert fin.bucket(factory, "day", later.date(), "free") == (0, 2 * R, 0)
+    assert fin.bucket(factory, "month", date(2031, 5, 1), "free") == (0, 5 * R, 0)
+
+
+def test_finance_reservation_commits_before_dispatch_and_release_returns_it(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now = _when(6)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    seen = {}
+
+    def on_event(name):
+        if name == "entered":  # Read on another pooled connection: only committed data is visible.
+            seen["rows"] = [(r["state"], r["reserved"]) for r in fin.reservations(factory) if r["day"] == now.date()]
+            seen["global"] = fin.bucket(factory, "day", now.date(), "global")
+    assert fin.attempt(service, value=fin.model_response(10, 10), on_event=on_event)["outcome"] == "ok"
+    assert seen == {"rows": [("reserved", R)], "global": (R, 0, 0)}
+    assert fin.attempt(service, behavior="reject_before_dispatch")["outcome"] == "local_reject"
+    states = sorted(r["state"] for r in fin.reservations(factory) if r["day"] == now.date())
+    assert states == ["released", "settled"]
+    assert fin.bucket(factory, "day", now.date(), "global")[0] == 0
+    assert counts(app_engine) == (1, 1)
+
+
+@pytest.mark.parametrize("behavior, events", [
+    ("hang_before_dispatch", ["entered"]),
+    ("hang_after_dispatch", ["entered", "dispatched"]),
+])
+def test_finance_killed_worker_stays_charged_across_a_restart(app_engine, finance_latches, behavior, events):
+    fin, R = _fin(), _r()
+    now = _when(7, day=1 if behavior == "hang_before_dispatch" else 2)
+    day = fin.scopes_for(2 * R, 2 * R)
+    with worker_group([_finance_spec(0, now, day, behavior=behavior, events=True)], _finance_worker) as group:
+        deadline = time.monotonic() + CHILD_SECONDS
+        assert [group.next_message(deadline)[2] for _ in events] == events
+        process = group.processes[0]
+        process.kill()  # SIGKILL: no release, settlement or cleanup can run.
+        process.join(timeout=10)
+        assert process.exitcode == -signal.SIGKILL
+        group.no_trailing_messages()
+    end = time.monotonic() + 15
+    with app_engine.connect() as conn:
+        while conn.exec_driver_sql("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'finance-worker-0'"
+                                   ).scalar_one():
+            assert time.monotonic() < end, "the killed worker's backend did not end"
+            time.sleep(0.2)
+            conn.rollback()
+    engine = _engine(APP, application="finance-restart", pool_size=1, max_overflow=0)  # A new process's view.
+    try:
+        factory = _factory(engine)
+        assert fin.bucket(factory, "day", now.date(), "free") == (R, 0, 0)
+        assert [r["state"] for r in fin.reservations(factory) if r["day"] == now.date()] == ["reserved"]
+        service = make_finance_service(factory, fin.finance_config(day=day), now)
+        assert [fin.attempt(service)["outcome"] for _ in range(2)] == ["ok", "busy"]
+    finally:
+        engine.dispose()
+
+
+def test_finance_settlement_failure_stays_charged(app_engine, database, finance_latches):
+    fin, R = _fin(), _r()
+    now = _when(8)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    holder = _connect(database, autocommit=False, application="finance-lock-holder")
+
+    def on_event(name):
+        if name == "dispatched":  # Settlement will hit a held lock and its 3 s lock timeout.
+            holder.execute("LOCK TABLE kalillac.finance_reservations IN ACCESS EXCLUSIVE MODE")
+    try:
+        assert fin.attempt(service, value=fin.model_response(10, 10), on_event=on_event)["outcome"] == "ok"
+    finally:
+        holder.rollback()
+        holder.close()
+    assert [(r["state"], r["reserved"]) for r in fin.reservations(factory) if r["day"] == now.date()] == \
+        [("reserved", R)]
+    assert fin.bucket(factory, "day", now.date(), "global") == (R, 0, 0)
+
+
+def test_finance_database_unavailable_means_no_dispatch(app_engine, database, finance_latches):
+    fin = _fin()
+    now = _when(9)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    holder = _connect(database, autocommit=False, application="finance-lock-holder")
+    try:
+        holder.execute("LOCK TABLE kalillac.finance_ledger_buckets IN ACCESS EXCLUSIVE MODE")
+        result = fin.attempt(service)
+    finally:
+        holder.rollback()
+        holder.close()
+    assert result == {"entered": 0, "dispatched": 0, "outcome": "unavailable"}
+    assert counts(app_engine) == (0, 0)  # The attempt reservation rolled back with it.
+
+
+def test_finance_settlement_by_usage(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now = _when(10)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    fin.attempt(service, value=fin.model_response(usage=False))
+    fin.attempt(service, value=fin.model_response(1000, 200, cached=400))
+    fin.attempt(service, provider="brave")
+    fin.attempt(service, provider="tavily", value={"results": []})
+    rows = sorted((r["provider"], r["charged"], r["basis"]) for r in fin.reservations(factory) if r["day"] == now.date())
+    below = -(-(600 * 125_000 + 400 * 10_000 + 200 * 500_000) // 1_000_000)
+    assert rows == sorted([("openai", R, "missing"), ("openai", below, "usage"), ("brave", 5000, "usage"),
+                           ("tavily", 8000, "missing")])
+    assert fin.bucket(factory, "day", now.date(), "free") == (0, R + below + 5000 + 8000, 0)
+    assert fin.latches(factory) == {}
+
+
+def test_finance_free_overrun_latches_free_and_keeps_safe_paid(app_engine, finance_latches):
+    fin = _fin()
+    now = _when(11)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    fin.attempt(service, value=fin.model_response(10**6, 3200))
+    [row] = [r for r in fin.reservations(factory) if r["day"] == now.date()]
+    assert row["overrun"] == row["charged"] - row["reserved"] > 0 and row["bound_exceeded"]
+    assert fin.bucket(factory, "day", now.date(), "global") == (0, row["charged"], row["overrun"])
+    assert fin.latches(factory) == {"free": "overrun"}
+    engine = _engine(APP, application="finance-restart", pool_size=1, max_overflow=0)
+    try:  # A restarted process still honours the latch.
+        restarted = make_finance_service(_factory(engine), fin.finance_config(), now)
+        assert fin.attempt(restarted, traffic="anonymous")["entered"] == 0
+        assert fin.attempt(restarted, traffic="free")["entered"] == 0
+        assert fin.attempt(restarted, traffic="paid", value=fin.model_response(1, 1))["outcome"] == "ok"
+    finally:
+        engine.dispose()
+
+
+def test_finance_overrun_exhausting_global_headroom_stops_everything(app_engine, finance_latches):
+    fin = _fin()
+    now = _when(12)
+    finance = fin.finance_config(day=(100_000, 40_000, 40_000))
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, finance, now)
+    fin.attempt(service, value=fin.model_response(2 * 10**5, 3200))
+    assert fin.latches(factory) == {"free": "overrun", "global": "headroom_exhausted"}
+    for traffic in ("anonymous", "free", "paid"):
+        assert fin.attempt(service, traffic=traffic)["entered"] == 0
+
+
+def test_finance_paid_overrun_is_paid_only(app_engine, finance_latches):
+    fin = _fin()
+    now = _when(4, year=2032)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    fin.attempt(service, traffic="paid", value=fin.model_response(10**6, 3200))
+    assert fin.bucket(factory, "day", now.date(), "free") == (0, 0, 0)
+    assert fin.bucket(factory, "day", now.date(), "paid")[2] > 0
+    assert fin.latches(factory) == {"paid": "overrun"}
+    assert fin.attempt(service, traffic="paid")["entered"] == 0
+    assert fin.attempt(service, value=fin.model_response(1, 1))["outcome"] == "ok"
+
+
+def test_finance_utc_day_and_month_rollover_keep_reservations_in_their_period(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    clock = {"now": _when(1, day=31, hour=23, minute=59, second=59, year=2032)}
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), lambda: clock["now"])
+
+    def on_event(name):
+        if name == "dispatched":  # Settled after the UTC day and month have both rolled over.
+            clock["now"] = _when(2, day=1, hour=0, minute=0, second=1, year=2032)
+    fin.attempt(service, value=fin.model_response(usage=False), on_event=on_event)
+    fin.attempt(service, value=fin.model_response(usage=False))
+    assert fin.bucket(factory, "day", date(2032, 1, 31), "free") == (0, R, 0)
+    assert fin.bucket(factory, "month", date(2032, 1, 1), "free") == (0, R, 0)
+    assert fin.bucket(factory, "day", date(2032, 2, 1), "free") == (0, R, 0)
+    assert fin.bucket(factory, "month", date(2032, 2, 1), "free") == (0, R, 0)
+
+
+def test_finance_and_attempt_ceilings_are_both_required(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now = _when(3, year=2032)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(day=fin.scopes_for(2 * R, 4 * R)), now, total=3)
+    outcomes = [fin.attempt(service, value=fin.model_response(usage=False))["outcome"] for _ in range(3)]
+    assert outcomes == ["ok", "ok", "busy"] and counts(app_engine) == (2, 2)  # money refusal: no attempt used
+    outcomes = [fin.attempt(service, traffic="paid", value=fin.model_response(usage=False))["outcome"]
+                for _ in range(2)]
+    assert outcomes == ["ok", "busy"] and counts(app_engine) == (3, 2)  # attempt refusal despite money room
+    assert fin.bucket(factory, "day", now.date(), "paid") == (0, R, 0)

@@ -648,24 +648,25 @@ def test_free_traffic_can_never_exhaust_paid_capacity():
 # --- 7. behaviour neutrality --------------------------------------------------------------
 
 
-def test_no_runtime_module_imports_the_financial_package():
-    offenders = []
+def test_only_the_provider_control_seam_and_startup_use_the_financial_package():
+    # Batch 2 wires the ledger in at exactly these two places (see test_finance_ledger.py).
+    users = []
     for path in CANDIDATE.rglob("*.py"):
         relative = path.relative_to(CANDIDATE).parts
         if relative[0] in ("tests", "kalillac_finance") or "__pycache__" in relative:
             continue
         if "kalillac_finance" in path.read_text(encoding="utf-8", errors="replace"):
-            offenders.append("/".join(relative))
-    assert offenders == []
+            users.append("/".join(relative))
+    assert sorted(users) == ["app_fastapi_candidate.py", "kalillac_routing/provider_controls.py"]
 
 
-def test_application_starts_unchanged_without_prices_even_if_the_flag_is_set():
+def test_application_starts_unchanged_when_the_flag_is_unset():
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("KALILLAC_", "OPENAI_", "BRAVE_", "TAVILY_", "STRIPE_", "RESEND_", "GROQ_"))}
-    env.update({pricing.ENABLE: "true", "PYTHONDONTWRITEBYTECODE": "1"})
-    script = ("import sys, app_fastapi_candidate as app; "
-              "print('LOADED', any(m == 'kalillac_finance' or m.startswith('kalillac_finance.') for m in sys.modules))")
+    env.update({"PYTHONDONTWRITEBYTECODE": "1"})
+    script = ("import app_fastapi_candidate as app; from kalillac_routing import provider_controls as c; "
+              "print('OFF', app._financial_config is None and c.SERVICE is None)")
     result = subprocess.run([sys.executable, "-c", script], cwd=CANDIDATE, env=env, capture_output=True,
                             text=True, timeout=120)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.strip().splitlines()[-1] == "LOADED False"
+    assert result.stdout.strip().splitlines()[-1] == "OFF True"

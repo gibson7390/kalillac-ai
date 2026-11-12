@@ -31,6 +31,7 @@ import re
 
 from kalillac_routing.provider_usage import MAX_TOKENS as MAX_OUTPUT_TOKENS
 
+from .limits import REQUIRED as LIMIT_VARIABLES
 from .money import MICROUSD_PER_USD, MoneyError, is_count, parse_usd
 
 # µUSD per 1,000,000 tokens: at most $100,000 per million tokens.
@@ -73,7 +74,8 @@ TAVILY_MAX_CREDITS = {op: "KALILLAC_FINANCE_TAVILY_MAX_CREDITS_" + op[0].upper()
 
 REQUIRED = (OPENAI_MODEL, *OPENAI_RATES.values(), LONG_CONTEXT_ABOVE, OPENAI_OVERHEAD,
             BRAVE_REQUEST, TAVILY_CREDIT, *TAVILY_MAX_CREDITS.values())
-KNOWN = frozenset(REQUIRED) | frozenset(LONG_CONTEXT_RATES.values())
+# Ceilings (limits.py) share the KALILLAC_FINANCE_ family, so they are known names here.
+KNOWN = frozenset(REQUIRED) | frozenset(LONG_CONTEXT_RATES.values()) | frozenset(LIMIT_VARIABLES)
 _FAMILIES = ("KALILLAC_PRICE_", "KALILLAC_FINANCE_")
 
 

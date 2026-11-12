@@ -67,8 +67,10 @@ def _statements(sql):
 # --- graph -----------------------------------------------------------------------------------
 
 def test_0014_is_the_sole_head_directly_after_0013():
+    # Only the Financial Safeguards ledger (0015) sits above 0014.
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["0015_finance_ledger"]
+    assert script.get_revision("0015_finance_ledger").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()
     assert (module.revision, module.down_revision, module.branch_labels, module.depends_on) == (

@@ -43,7 +43,8 @@ HEAD = "0012_v1_account_security"
 # 0013 (V1-02B) sits directly above this revision, and 0014 (V1-02C) above that.
 REVOCATION = "0013_v1_session_revocation"
 ISSUANCE = "0014_v1_session_issuance"
-CHAIN = (ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
+FINANCE = "0015_finance_ledger"  # Financial Safeguards ledger, directly above 0014.
+CHAIN = (FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
          "0008_account_recovery_tokens", "0007_anonymous_usage", "0006_provider_usage_pools",
          "0005_account_usage_slots", "0004_account_billing", "0003_account_usage_daily",
          "0002_account_entitlements", "0001_account_tables")
@@ -66,7 +67,8 @@ def forbidden():
 
 def test_0012_follows_the_exact_0011_chain_directly_below_0013():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [ISSUANCE]
+    assert script.get_heads() == [FINANCE]
+    assert script.get_revision(FINANCE).down_revision == ISSUANCE
     assert script.get_revision(ISSUANCE).down_revision == REVOCATION
     assert script.get_revision(REVOCATION).down_revision == HEAD
     assert script.get_revision(HEAD).down_revision == "0011_registration_intents"

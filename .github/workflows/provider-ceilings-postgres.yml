@@ -73,7 +73,8 @@ jobs:
       # A green run must mean every focused test executed: none skipped,
       # failed or errored, and exactly the expected number collected. The
       # release candidate's tests/test_provider_controls_postgres.py collects
-      # 29 (this branch carries the safety-release code, not main's 24).
+      # 46: the 29 attempt-ceiling and anonymous-allowance tests plus 17
+      # Financial Safeguards ledger tests (migration 0015) on the same server.
       - name: Require every focused test to have run
         run: |
           python - "$RUNNER_TEMP/provider-ceilings-postgres.xml" <<'PY'
@@ -83,17 +84,18 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 29, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 46, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused PostgreSQL verification did not run completely")
           PY
 
-      # Financial Safeguards V1, batch 1: pure money, pricing, usage, cost and
-      # scope primitives. No database, network or provider; counted on its own
-      # so the 29 PostgreSQL ceiling tests above keep their exact gate.
+      # Financial Safeguards V1: batch 1's pure money, pricing, usage, cost and
+      # scope primitives (229) and batch 2's single-process ledger, startup,
+      # traffic-class and randomized-invariant tests on SQLite (51). No
+      # network or provider; counted on its own beside the PostgreSQL gate.
       - name: Run the financial pricing foundation tests
         working-directory: candidate
         run: >-
-          python -m pytest tests/test_financial_pricing.py -v -rA -p no:cacheprovider
+          python -m pytest tests/test_financial_pricing.py tests/test_finance_ledger.py -v -rA -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/financial-pricing.xml"
 
       - name: Require every financial pricing test to have run
@@ -105,6 +107,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 229, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 280, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the financial pricing verification did not run completely")
           PY

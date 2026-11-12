@@ -50,7 +50,8 @@ from kalillac_routing.provider_transport import (
 from kalillac_routing import tavily_transport, search_providers, provider_usage, provider_controls
 from kalillac_routing import source_trust
 from kalillac_routing import provider_refusal, untrusted_text
-from kalillac_routing.provider_limits import load_controls
+from kalillac_routing.provider_limits import ControlConfigError, load_controls
+from kalillac_finance.config import load_financial_config
 
 MAX_MEMORY = 50
 MAX_SESSIONS = 200
@@ -486,7 +487,8 @@ def _post_openai_for_attempt(payload):
     return _post_openai_bounded(payload, budget, timeout, request_selected)
 
 
-_post_openai_for_attempt = provider_controls.protect(provider_usage.observe_model(_post_openai_for_attempt), "openai")
+_post_openai_for_attempt = provider_controls.financial_openai(
+    provider_controls.protect(provider_usage.observe_model(_post_openai_for_attempt), "openai"))
 
 
 def _post_openai_bounded(payload, budget, timeout, request_selected):
@@ -14986,8 +14988,16 @@ from kalillac_accounts.usage_limits import load_usage_limits
 _usage_limits = load_usage_limits()
 _usage_quota = None
 _provider_control_config = load_controls()
+# Financial Safeguards: None (reading only its flag) unless explicitly enabled;
+# when enabled, complete prices and ceilings or startup refuses.
+_financial_config = load_financial_config()
+if _financial_config is not None:
+    if _provider_control_config is None:
+        raise ControlConfigError("KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED requires KALILLAC_PROVIDER_CEILINGS_ENABLED.")
+    if OPENAI_MODEL != _financial_config.prices.openai.model:
+        raise ControlConfigError("KALILLAC_PRICE_OPENAI_MODEL must equal the configured OpenAI model.")
 if _provider_control_config is not None:
-    provider_controls.SERVICE = provider_controls.ProviderControls(_provider_control_config)
+    provider_controls.SERVICE = provider_controls.ProviderControls(_provider_control_config, finance=_financial_config)
 
 if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
     "1", "true", "yes", "on",
