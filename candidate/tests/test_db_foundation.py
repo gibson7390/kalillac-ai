@@ -54,6 +54,10 @@ def test_only_approved_account_tables_exist():
         "kalillac.provider_usage_pools",
         "kalillac.anonymous_usage_days",
         "kalillac.anonymous_usage_slots",
+        # Financial Safeguards ledger (0015): financial and control metadata only.
+        "kalillac.finance_ledger_buckets",
+        "kalillac.finance_reservations",
+        "kalillac.finance_unsafe_latches",
         "kalillac.account_billing",
         "kalillac.stripe_webhook_events",
     }

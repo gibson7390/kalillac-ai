@@ -59,6 +59,9 @@ def _world(monkeypatch):
         w.owner_engine = create_engine(w.migration.url, hide_parameters=True,
                                        connect_args={"options": "-c role=" + w.names["owner"]})
         w.owner_factory = sessionmaker(bind=w.owner_engine)
+        # These tests verify 0014 itself: stand exactly on it, below the
+        # Financial Safeguards ledger (0015) that the shared world upgrades to.
+        migrate(w, REVISION, down=True)
         try:
             yield w
         finally:

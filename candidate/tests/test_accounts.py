@@ -326,6 +326,10 @@ def test_account_schema_holds_identity_only():
         # no identity or conversation data.
         "kalillac.anonymous_usage_days",
         "kalillac.anonymous_usage_slots",
+        # Financial Safeguards ledger: financial and control metadata only.
+        "kalillac.finance_ledger_buckets",
+        "kalillac.finance_reservations",
+        "kalillac.finance_unsafe_latches",
         *billing_tables,
     }
 
@@ -411,6 +415,11 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "provider_usage_pools",
         "anonymous_usage_days",
         "anonymous_usage_slots",
+        # Financial Safeguards ledger (0015): micro-USD aggregates, reservations
+        # and latches only; no identity, visitor or conversation data.
+        "finance_ledger_buckets",
+        "finance_reservations",
+        "finance_unsafe_latches",
         "account_billing",
         "stripe_webhook_events",
         # Default-off Spaces tables exist in the schema...
