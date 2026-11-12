@@ -86,3 +86,25 @@ jobs:
           if totals != {"tests": 29, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused PostgreSQL verification did not run completely")
           PY
+
+      # Financial Safeguards V1, batch 1: pure money, pricing, usage, cost and
+      # scope primitives. No database, network or provider; counted on its own
+      # so the 29 PostgreSQL ceiling tests above keep their exact gate.
+      - name: Run the financial pricing foundation tests
+        working-directory: candidate
+        run: >-
+          python -m pytest tests/test_financial_pricing.py -v -rA -p no:cacheprovider
+          --junitxml="$RUNNER_TEMP/financial-pricing.xml"
+
+      - name: Require every financial pricing test to have run
+        run: |
+          python - "$RUNNER_TEMP/financial-pricing.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          if totals != {"tests": 229, "skipped": 0, "failures": 0, "errors": 0}:
+              sys.exit("the financial pricing verification did not run completely")
+          PY
