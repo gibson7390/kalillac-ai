@@ -4,7 +4,9 @@
 #
 # Usage (as root):  ROLLBACK_DIR=<the directory printed by activate.sh> bash rollback.sh
 #
-# Restores the drop-ins exactly as they were before activation (from the byte copy in ROLLBACK_DIR),
+# Holds the deploy lock. Refuses before any change unless the next start would use the configuration
+# approved at activation (envcheck.py). Restores the drop-ins exactly as they were before activation
+# (from the byte copy in ROLLBACK_DIR),
 # reloads systemd, verifies the effective WorkingDirectory and ExecStart are the previous release's
 # BEFORE restarting, restarts, and then verifies the process actually running: cwd, command line,
 # Git HEAD and every tracked file, launcher, configuration hash, flags, listener and health.
@@ -15,6 +17,7 @@ load_all_conf
 banner rollback
 
 require_root_and_tools
+acquire_deploy_lock
 [[ -n ${ROLLBACK_DIR:-} && -f $ROLLBACK_DIR/state/state.txt ]] || die "set ROLLBACK_DIR to the activation's rollback directory"
 readonly ROLLBACK_DIR
 [[ "$(state_get release_commit)" == "$RELEASE_COMMIT" && "$(state_get previous_commit)" == "$PREVIOUS_COMMIT" ]] \
@@ -38,6 +41,9 @@ verify_release_tree "$OLD_RELEASE" "$PREVIOUS_COMMIT"
 verify_launcher "$OLD_RELEASE" "$OLD_LAUNCHER_SHA"
 [[ "$(g "$OLD_RELEASE" rev-parse "$PREVIOUS_COMMIT:candidate/app_fastapi_candidate.py")" == "$PREVIOUS_APP_BLOB" ]] || die "previous application blob is not $PREVIOUS_APP_BLOB"
 [[ "$(webroot_hash)" == "$OLD_WEBROOT_HASH" ]] || die "web root differs from the one recorded at activation"
+# The previous release is restarted only under the configuration approved at activation.
+expect_file "$ROLLBACK_DIR/state/env.approved"
+env_check - "$ROLLBACK_DIR/state/env.approved"
 pid=$(main_pid)
 if [[ "$(proc_cwd "$pid" 2>/dev/null || true)" == "$NEW_CWD" ]]; then log "currently running: pid $pid from $NEW_RELEASE"
 else log "note: the service is not currently running from $NEW_RELEASE (pid ${pid:-none})"; fi

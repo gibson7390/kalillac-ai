@@ -2,7 +2,8 @@
 
 Accepts uvicorn's command line (only --host and --port are used) and serves, from the release it
 runs in (cwd = <release>/candidate), GET /api/health -> {"status":"ok"}; everything else is 404.
-It starts listening after KDT_STARTUP_SECONDS, like an application import.
+At start-up it imports the release's kalillac_server.py (standard library only), so the interpreter
+loads or writes real release bytecode; it starts listening after KDT_STARTUP_SECONDS.
 
 Faults, for tests only, read once at start-up from KDT_FAULT_FILE: lines "<mode> <release directory
 name>", mode crash (exit before listening), unhealthy (health answers 503) or slow (20 s extra).
@@ -26,6 +27,10 @@ if fault_file and os.path.exists(fault_file):
                 mode = parts[0]
 if mode == "crash":
     sys.exit(3)
+# Import a real, standard-library-only module of the release from cwd, as uvicorn imports the
+# application: the interpreter loads (or writes) its __pycache__ bytecode exactly as in production.
+sys.path.insert(0, os.getcwd())
+import kalillac_server  # noqa: E402,F401
 time.sleep(float(os.environ.get("KDT_STARTUP_SECONDS", "3")) + (20 if mode == "slow" else 0))
 
 

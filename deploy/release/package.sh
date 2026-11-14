@@ -14,12 +14,17 @@
 # records tooling_commit=UNCOMMITTED. Such a package is for disposable tests, never for production.
 set -euo pipefail
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# The exact approved commits are packaged: no inherited GIT_* variable, no replacement objects or
+# grafts (they would substitute other objects for the named commits), no hooks.
+while IFS= read -r _var; do unset "$_var"; done < <(compgen -e | grep '^GIT_' || true)
+export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null
+git() { command git --no-replace-objects -c core.hooksPath=/dev/null -c advice.graftFileDeprecated=false "$@"; }
 [[ $# -eq 2 ]] || die "usage: package.sh <release short sha> <new output directory>"
 short=$1; out=$2
 [[ $short =~ ^[0-9a-f]{8}$ ]] || die "release short sha must be 8 hex characters"
 repo=$(git rev-parse --show-toplevel)
 cd "$repo"
-readonly FILES=(lib.sh check.sh stage.sh activate.sh rollback.sh preflight.py production.env README.md)
+readonly FILES=(lib.sh check.sh stage.sh activate.sh rollback.sh preflight.py envcheck.py bytecheck.py production.env README.md)
 conf=deploy/release/releases/$short.env
 
 if [[ ${KALILLAC_PACKAGE_FROM_WORKTREE:-} == 1 ]]; then

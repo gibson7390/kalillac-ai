@@ -43,6 +43,9 @@ jobs:
           sudo systemctl start postgresql
           sudo -u postgres psql -XAtqc 'select version()'
 
+      - name: Packaging cannot be steered by Git replacement objects
+        run: bash deploy/release/tests/git-provenance.sh "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+
       - name: Build the upload package from this commit
         run: bash deploy/release/package.sh 54e38ecf "$RUNNER_TEMP/package"
 
@@ -84,5 +87,5 @@ jobs:
           -r requirements-database.txt
           -r requirements-dev.txt
 
-      - name: Application preflight against the real release code
-        run: python -m pytest deploy/release/tests/test_preflight.py -v -rA -p no:cacheprovider
+      - name: Application preflight against the real release code; verifier unit tests
+        run: python -m pytest deploy/release/tests/test_preflight.py deploy/release/tests/test_verifiers.py -v -rA -p no:cacheprovider

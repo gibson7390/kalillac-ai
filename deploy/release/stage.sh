@@ -4,6 +4,8 @@
 # Usage (as root, from the unpacked package directory):
 #   LAUNCHER_SHA256=<the launcher sha256 printed by check.sh> bash stage.sh
 #
+# Holds the deploy lock (one stage/activate/rollback at a time). The release directory is created
+# atomically by this run (mkdir), and on failure only that same directory is removed.
 # Creates only <RELEASE_PARENT>/<RELEASE_PREFIX><short>, in this order:
 #   1. a clone of the release commit from the package's Git bundle (objects fsck-verified), proven
 #      PRISTINE by content: every tracked file hashes to the commit, no untracked or ignored file;
@@ -28,7 +30,18 @@ cleanup() {
     trap - EXIT
     ((status == 0 && STAGED)) && return 0
     ((status == 0)) && status=1
-    if ((MADE)); then rm -rf -- "$NEW_RELEASE"; echo "removed $NEW_RELEASE (created by this run only)"; fi
+    # Delete only the very directory this run created (same device and inode), and never one the
+    # service runs from or the unit references; otherwise keep it and say so.
+    if ((MADE)); then
+        if [[ -d $NEW_RELEASE && ! -L $NEW_RELEASE && "$(stat -c '%d:%i' -- "$NEW_RELEASE" 2>/dev/null || true)" == "$MADE_ID" ]]             && [[ "$(proc_cwd "$(main_pid)" 2>/dev/null || true)" != "$NEW_RELEASE"/* ]]             && [[ "$(systemctl cat "$SERVICE" 2>/dev/null || true)" != *"$NEW_RELEASE"* ]]; then
+            rm -rf -- "$NEW_RELEASE"; echo "removed $NEW_RELEASE (the directory this run created)"
+        else
+            echo "KEPT $NEW_RELEASE: not provably the directory this run created, or referenced by the service"
+        fi
+    fi
+    if [[ -n ${WORK:-} && -d $WORK && ! -L $WORK && "$(stat -c '%d:%i' -- "$WORK" 2>/dev/null || true)" == "$WORK_ID" ]]; then
+        rm -rf -- "$WORK"
+    fi
     echo "STAGE FAILED (status $status); the running service, its unit and drop-ins were not touched."
     exit "$status"
 }
@@ -36,6 +49,7 @@ trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 require_root_and_tools
+acquire_deploy_lock
 [[ ${LAUNCHER_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || die "set LAUNCHER_SHA256 to the running launcher's sha256 (printed by check.sh)"
 BUNDLE=$KD_DIR/kalillac-source-$RELEASE_SHORT.bundle
 expect_file "$BUNDLE"
@@ -46,7 +60,11 @@ verify_launcher "$LIVE_RELEASE" "$LAUNCHER_SHA256"
 log "running: pid $LIVE_PID, $LIVE_RELEASE at $PREVIOUS_COMMIT (tracked files exact, only [$DEPLOY_ARTIFACTS] untracked)"
 log "launcher: $LAUNCHER_OWNER $LAUNCHER_MODE, sha256 $LAUNCHER_SHA256 (approved)"
 
-if [[ -e $NEW_RELEASE || -L $NEW_RELEASE ]]; then
+# Atomic creation is the only existence test (no check-then-create window). This run owns the
+# release directory only if its own mkdir created it.
+log "Create $NEW_RELEASE"
+if ! mkdir -m 755 -- "$NEW_RELEASE" 2>/dev/null; then
+    [[ -e $NEW_RELEASE || -L $NEW_RELEASE ]] || die "cannot create $NEW_RELEASE"
     [[ ${QUARANTINE_EXISTING:-} == 1 ]] || die "$NEW_RELEASE already exists (for example from a failed attempt). Nothing was changed. To move it aside (nothing is deleted), rerun with QUARANTINE_EXISTING=1"
     [[ $NEW_RELEASE != "$LIVE_RELEASE" ]] || die "$NEW_RELEASE is the running release"
     [[ "$(systemctl cat "$SERVICE" 2>/dev/null)" != *"$NEW_RELEASE"* ]] || die "the unit or a loaded drop-in references $NEW_RELEASE"
@@ -60,12 +78,23 @@ if [[ -e $NEW_RELEASE || -L $NEW_RELEASE ]]; then
     install -d -m 700 "$ROLLBACK_PARENT" "$ROLLBACK_PARENT/quarantine"
     mv -T -- "$NEW_RELEASE" "$QUARANTINE"
     log "existing, unreferenced $NEW_RELEASE moved to $QUARANTINE (kept, not deleted)"
+    mkdir -m 755 -- "$NEW_RELEASE" || die "cannot create $NEW_RELEASE after quarantine (created by someone else meanwhile?)"
 fi
-
-log "Clone $RELEASE_COMMIT"
 MADE=1
-git -c init.defaultBranch=release -c transfer.fsckObjects=true clone --quiet --no-checkout "$BUNDLE" "$NEW_RELEASE"
-g "$NEW_RELEASE" checkout --quiet --detach "$RELEASE_COMMIT"
+MADE_ID=$(stat -c '%d:%i' -- "$NEW_RELEASE")
+
+# Clone into a private directory: git's own failure cleanup empties the clone path, so it must never
+# be a path someone else could have taken over. The result is then renamed onto the reservation,
+# only while that is still the empty directory this run created.
+log "Clone $RELEASE_COMMIT"
+WORK=$(mktemp -d -- "$RELEASE_PARENT/.kalillac-stage-$RELEASE_SHORT.XXXXXX")
+WORK_ID=$(stat -c '%d:%i' -- "$WORK")
+gx -c init.defaultBranch=release -c transfer.fsckObjects=true clone --quiet --no-checkout "$BUNDLE" "$WORK/release"
+g "$WORK/release" checkout --quiet --detach "$RELEASE_COMMIT"
+[[ "$(stat -c '%d:%i' -- "$NEW_RELEASE" 2>/dev/null || true)" == "$MADE_ID" && -z "$(ls -A -- "$NEW_RELEASE")" ]]     || die "$NEW_RELEASE is no longer the empty directory this run reserved"
+mv -T -- "$WORK/release" "$NEW_RELEASE"
+MADE_ID=$(stat -c '%d:%i' -- "$NEW_RELEASE")
+rmdir -- "$WORK"; WORK=""
 verify_release_tree "$NEW_RELEASE" "$RELEASE_COMMIT" pristine
 [[ "$(g "$NEW_RELEASE" rev-parse "$RELEASE_COMMIT:candidate/app_fastapi_candidate.py")" == "$APP_BLOB" ]] || die "application blob is not the reviewed $APP_BLOB"
 g "$NEW_RELEASE" merge-base --is-ancestor "$PREVIOUS_COMMIT" "$RELEASE_COMMIT" || die "$PREVIOUS_SHORT is not an ancestor of $RELEASE_SHORT"

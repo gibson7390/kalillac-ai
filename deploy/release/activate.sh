@@ -74,6 +74,7 @@ trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 # ================================================================ preflight (read-only)
 log "Preflight"
 require_root_and_tools
+acquire_deploy_lock
 identify_live "$OLD_RELEASE_EXPECTED" "$PREVIOUS_COMMIT" "$PREVIOUS_APP_BLOB"
 OLD_PID=$LIVE_PID
 OLD_RELEASE=$LIVE_RELEASE
@@ -164,6 +165,9 @@ printf '%s\n' "$BEFORE_DROPINS" >"$ROLLBACK_DIR/state/dropins.before"
     printf '# release=%s previous=%s activated=%s\n' "$RELEASE_COMMIT" "$PREVIOUS_COMMIT" "$TS"
     pointer_body "$NEW_RELEASE"
 } >"$ROLLBACK_DIR/systemd/new-pointer.conf"
+# The approved next-start configuration (names and per-variable hashes; no value): rollback
+# restarts and post-restart checks are compared with it.
+env_check "$OLD_PID" "" "$ROLLBACK_DIR/state/env.approved"
 log "backups and state written to $ROLLBACK_DIR"
 
 # ================================================================ pointer swap (first production change)
@@ -191,6 +195,11 @@ verify_effective_unit "$NEW_RELEASE"
 [[ "$(main_pid)" == "$OLD_PID" ]] || die "the main process changed during reload"
 log "effective unit verified BEFORE restart: WorkingDirectory=$NEW_CWD; ExecStart=$(launch_cmd "$NEW_RELEASE") (single entry);"
 log "  all other drop-ins byte-identical and in the same order; other unit settings unchanged"
+# Immediately before the restart: the release (tracked files, artifacts, bytecode, permissions)
+# and the configuration the restart will use, again.
+verify_release_tree "$NEW_RELEASE" "$RELEASE_COMMIT"
+env_check "$OLD_PID" "$ROLLBACK_DIR/state/env.approved"
+log "release and next-start configuration verified immediately before restart"
 
 # ================================================================ restart
 PHASE=restarted
@@ -198,6 +207,7 @@ log "Restarting $SERVICE"
 systemctl restart "$SERVICE"
 wait_healthy "$NEW_CWD" new "$OLD_PID" || die "the new release did not become healthy"
 NEW_PID=$HEALTHY_PID
+env_check "$NEW_PID" "$ROLLBACK_DIR/state/env.approved"
 log "healthy: pid $NEW_PID ($HEALTH_STABLE_CHECKS consecutive checks)"
 
 # ================================================================ verification

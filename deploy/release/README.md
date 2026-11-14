@@ -19,10 +19,12 @@ web root, and never deletes a release or rollback directory.
 | `rollback.sh` | Manual rollback after a successful activation. |
 | `lib.sh` | Shared checks (sourced). |
 | `preflight.py` | Imports the staged application with the live environment, in a separate process, and checks the resulting objects. |
+| `envcheck.py` | Composes the environment systemd will give the **next** start and checks it against the running process, an approved snapshot and the flag/ceiling policy. |
+| `bytecheck.py` | Proves every `.pyc` in a release is its source compiled by the service's interpreter. |
 | `production.env` | Production environment facts (paths, service, port). No secrets. |
 | `releases/<short>.env` | Release facts: commits, reviewed blob, unchanged paths, migration head, required flag state. Packaged as `release.env`. |
 | `package.sh` | Builds the upload package from Git on a workstation. |
-| `tests/` | Disposable-environment tests (real systemd) and preflight tests (real application). |
+| `tests/` | Disposable-environment tests (real systemd), Git provenance test, verifier unit tests and preflight tests (real application). |
 
 Configuration files are `KEY=VALUE`, parsed, never sourced; unknown, duplicate or missing keys are refused.
 
@@ -44,6 +46,64 @@ must be `root:root 600`, and is copied from the running release and compared by 
 also requires the operator to pin its sha256 (`LAUNCHER_SHA256`, printed by `check.sh`).
 `activate.sh` accepts only a directory produced by `stage.sh` (a marker inside `.git`, outside the
 worktree, records the commit, launcher hash and ownership).
+
+## Next-start configuration
+
+The running process's environment is that of its last start. A reloaded `Environment=` drop-in, a
+rewritten `EnvironmentFile` or a changed manager environment only takes effect at the next start
+(with `NeedDaemonReload=no`). `envcheck.py` composes the next-start environment from systemd's loaded
+state over D-Bus (`busctl --json`): manager environment, then `Environment=`, then each
+`EnvironmentFile` as it is now (later wins). It requires:
+
+* the policy to hold for the next start: every `FLAGS_OFF` flag off, every `FLAGS_ON` flag on,
+  `FLAG_VALUES` exact, `OPENAI_MODEL` unset or approved, provider ceilings on with all nine limits;
+* the next-start environment to equal the running process's, except per-start names systemd
+  generates and names in `LAUNCHER_ENV_VARS` (variables the launcher adds before `exec`; empty in
+  production; a flag, ceiling, model, `PYTHON*`, `LD_*` or `PATH` name can never be listed);
+* during activation and rollback, equality with the snapshot approved at activation
+  (`state/env.approved`: names and per-variable SHA-256, no value).
+
+It runs in every preflight, again immediately before the restart, after the restart, before any
+rollback restart (which is refused, `ROLLBACK_INCOMPLETE`, rather than restart the previous release
+under an unapproved configuration) and before a manual rollback. Unsupported mechanisms fail closed:
+`PassEnvironment=`, `UnsetEnvironment=`, `PAMName=`, `ExecStartPre=`, glob `EnvironmentFile` paths, and
+`EnvironmentFile` syntax beyond a strict subset (no backslash, `$`, backtick, CR or inline comment).
+
+Not covered: a change made by root in the moment between the last check and systemd reading the
+files during the restart (detected after the restart by the configuration hashes, which then
+triggers rollback, which is itself refused under drift); credential files (`LoadCredential=`), which
+are files rather than environment; and files the launcher itself reads.
+
+## Bytecode
+
+CPython runs `__pycache__/<module>.<tag>.pyc` instead of `<module>.py` whenever the pyc header matches
+the source's mtime and size; `-B` / `PYTHONDONTWRITEBYTECODE` only stop writing. Every pyc in a
+release must therefore be its tracked source compiled by the service's own interpreter
+(`bytecheck.py`, which compares code objects), be for this interpreter, sit next to its source, and
+be inside `__pycache__`. Releases must have one owner and no group/other-writable entry (only that
+owner and root can add files). The new release is checked at preflight, again immediately before the
+restart and after the start (bytecode the interpreter wrote, or anything planted in between, is
+verified then; a mismatch rolls back). The running release's interpreter-written caches are verified
+read-only, never cleaned. A fresh stage holds no bytecode, and the preflight import writes none.
+
+## Git provenance
+
+Every security-relevant Git call runs with no inherited `GIT_*` variable, `--no-replace-objects`,
+`GIT_NO_REPLACE_OBJECTS=1`, an empty graft file, no system/global configuration or attributes, and
+no hooks, fsmonitor or untracked cache. Release repositories must hold no `refs/replace/*`, grafts,
+alternates, shallow or linked-worktree files, and only the configuration keys a plain clone writes.
+`package.sh` applies the same object rules, so a replacement object cannot substitute either the
+tooling scripts or the release tree in the package.
+
+## Mutual exclusion
+
+`stage.sh`, `activate.sh` and `rollback.sh` take an exclusive, non-blocking `flock` on
+`<ROLLBACK_PARENT>/.deploy.lock` (root-only directory) before anything else; a second invocation fails
+before changing anything. The kernel releases the lock when the process and any child holding it
+exit, including after SIGKILL. The release directory is reserved with an atomic `mkdir` (the only
+existence test), cloned in a private `mktemp -d` directory (git's own failure cleanup can only touch
+that), and renamed onto the reservation only while it is still the empty directory this run
+created. On failure, cleanup removes only directories proven by device and inode to be this run's.
 
 ## Process identity (the launcher execs the server)
 
@@ -140,8 +200,10 @@ ROLLBACK_DIR=<printed by activate.sh> bash rollback.sh    # ROLLED_BACK_TO_f347e
 # Real systemd, disposable host only (CI runner, throwaway VM or WSL), as root:
 KALILLAC_PACKAGE_FROM_WORKTREE=1 bash deploy/release/package.sh 54e38ecf /tmp/pkg   # or a committed build
 sudo bash deploy/release/tests/disposable-systemd.sh /tmp/pkg /tmp/evidence
-# Preflight against the real application (pinned dependencies installed):
-python -m pytest deploy/release/tests/test_preflight.py -v
+# Packaging under Git replacement objects (no root):
+bash deploy/release/tests/git-provenance.sh "$PWD" "$(git rev-parse HEAD)"
+# Verifier unit tests, and the preflight against the real application (pinned dependencies installed):
+python -m pytest deploy/release/tests/test_verifiers.py deploy/release/tests/test_preflight.py -v
 ```
 
 The disposable test uses a uniquely named transient unit (`/run/systemd/system/kalillac-deploytest-<id>.service`),

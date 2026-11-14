@@ -54,6 +54,7 @@ listener_owned_by "$pid" && echo "  port $LISTEN_PORT held by pid $pid" || note 
 health_ok && echo "  local health $HEALTH_BODY" || note "local health is not $HEALTH_BODY"
 echo "  flags:"; flag_report "$pid" 2>/dev/null | sed 's/^/  /'
 try verify_flags "$pid" && echo "  flag policy: OK" || note "flag policy not satisfied"
+try env_check "$pid" && echo "  next start: same configuration as the running process, policy OK" || note "the next start would not use the running (approved) configuration"
 
 echo "== running release $running"
 case $running in
@@ -94,6 +95,9 @@ echo "== release directories"
 for r in "$RELEASE_PARENT/$RELEASE_PREFIX"*; do
     [[ -d $r ]] || continue
     echo "  $r  HEAD=$(g "$r" rev-parse --short=12 HEAD 2>/dev/null || echo '?')$([[ $r == "$running" ]] && echo '  <== RUNNING')"
+done
+for w in "$RELEASE_PARENT"/.kalillac-stage-*; do
+    [[ -e $w ]] && echo "  leftover private staging directory (from an interrupted stage; inspect and remove by hand): $w"
 done
 echo "== rollback directories (latest 5)"
 ls -1dt "$ROLLBACK_PARENT"/release-* 2>/dev/null | head -n 5 | sed 's/^/  /'

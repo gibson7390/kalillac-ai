@@ -28,7 +28,24 @@ truthy() { case "${1,,}" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
 expect_dir()  { [[ -d $1 && ! -L $1 ]] || die "expected a real directory: $1"; }
 expect_file() { [[ -f $1 && ! -L $1 ]] || die "expected a regular file: $1"; }
 sha256() { sha256sum -- "$1" | cut -d' ' -f1; }
-g() { local dir=$1; shift; git -c safe.directory="$dir" -c core.hooksPath=/dev/null --no-optional-locks -C "$dir" "$@"; }
+
+# Git object resolution is pinned for every security-relevant Git operation:
+#   * no inherited GIT_* variable (GIT_DIR, GIT_REPLACE_REF_BASE, GIT_OBJECT_DIRECTORY,
+#     GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_CONFIG_*, ...) reaches git;
+#   * replacement refs and grafts are never honoured (GIT_NO_REPLACE_OBJECTS, --no-replace-objects,
+#     an empty graft file);
+#   * no system, global or user configuration or attributes (only the repository's own, which
+#     verify_repo_hygiene restricts to the keys a plain clone writes); no hooks, fsmonitor or
+#     untracked cache, which could run programs or change what git reports.
+while IFS= read -r _var; do unset "$_var"; done < <(compgen -e | grep '^GIT_' || true)
+unset _var
+export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+gx() {
+    HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent git --no-replace-objects -c core.hooksPath=/dev/null \
+        -c core.fsmonitor=false -c core.untrackedCache=false -c core.attributesFile=/dev/null -c advice.graftFileDeprecated=false "$@"
+}
+g() { local dir=$1; shift; gx -c safe.directory="$dir" --no-optional-locks -C "$dir" "$@"; }
 
 # ---------------------------------------------------------------- configuration
 # KEY=VALUE files, parsed (never sourced). Unknown, duplicate or missing keys are refused, as are
@@ -56,7 +73,7 @@ load_conf() {   # load_conf <file> <key>...
 
 readonly ENV_KEYS=(ENVIRONMENT_KIND SERVICE RELEASE_PARENT RELEASE_PREFIX VENV DROPIN_DIR ROLLBACK_PARENT
     LISTEN_HOST LISTEN_PORT HEALTH_PATH HEALTH_BODY HEALTH_TIMEOUT_SECONDS HEALTH_STABLE_CHECKS
-    WEBROOT LAUNCHER_NAME LAUNCHER_OWNER LAUNCHER_MODE DEPLOY_ARTIFACTS PROCESS_ARGV REQUIRED_UNITS
+    WEBROOT LAUNCHER_NAME LAUNCHER_OWNER LAUNCHER_MODE DEPLOY_ARTIFACTS PROCESS_ARGV LAUNCHER_ENV_VARS REQUIRED_UNITS
     PUBLIC_BASE APP_PREFLIGHT DB_CHECK DB_OS_USER DB_NAME DB_SCHEMA)
 readonly RELEASE_KEYS=(RELEASE_COMMIT RELEASE_SHORT RELEASE_TITLE PREVIOUS_COMMIT PREVIOUS_SHORT
     APP_BLOB PREVIOUS_APP_BLOB IDENTICAL_PATHS MIGRATION_HEAD DB_REVISION EMPTY_TABLES
@@ -91,6 +108,15 @@ load_all_conf() {
     [[ " $PROCESS_ARGV " == *" --host $LISTEN_HOST "* && " $PROCESS_ARGV " == *" --port $LISTEN_PORT "* ]] \
         || die "PROCESS_ARGV must bind --host $LISTEN_HOST --port $LISTEN_PORT"
     [[ $PROCESS_ARGV != *"$RELEASE_PARENT/$RELEASE_PREFIX"* ]] || die "PROCESS_ARGV must not name a release directory (the release is the process cwd)"
+    # Names the launcher may add or override (their values are not systemd's to compare). A flag,
+    # ceiling, model or interpreter-control name can never be launcher-supplied: those must come
+    # from systemd's configuration, where the next-start check can see them.
+    local name pair
+    for name in $LAUNCHER_ENV_VARS; do
+        [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "LAUNCHER_ENV_VARS: invalid name $name"
+        [[ ! $name =~ ^(KALILLAC_|OPENAI_|PYTHON|LD_) && $name != PATH ]] || die "LAUNCHER_ENV_VARS may not contain $name"
+        for pair in $FLAGS_OFF $FLAGS_ON $FLAG_VALUES; do [[ ${pair%%=*} != "$name" ]] || die "LAUNCHER_ENV_VARS may not contain $name"; done
+    done
     NEW_RELEASE=$RELEASE_PARENT/$RELEASE_PREFIX$RELEASE_SHORT
     OLD_RELEASE_EXPECTED=$RELEASE_PARENT/$RELEASE_PREFIX$PREVIOUS_SHORT
     NEW_CWD=$NEW_RELEASE/candidate
@@ -108,7 +134,7 @@ banner() {   # banner <script name>
 require_root_and_tools() {
     [[ $(id -u) -eq 0 ]] || die "must run as root"
     local tool
-    for tool in git systemctl curl sha256sum cmp comm sed awk grep sort tr readlink stat ss runuser find install mktemp; do
+    for tool in git systemctl busctl flock curl sha256sum cmp comm sed awk grep sort tr readlink stat ss runuser find install mktemp; do
         command -v "$tool" >/dev/null || die "missing tool: $tool"
     done
 }
@@ -206,14 +232,54 @@ verify_effective_unit() {   # verify_effective_unit <release dir>
 }
 
 # ---------------------------------------------------------------- Git-tracked source integrity
+# verify_repo_hygiene <dir>: nothing in the release repository can change which objects Git
+# resolves or run code during verification. Refused: replacement refs, a graft file, alternates,
+# a shallow or linked repository, and any repository configuration key a plain clone does not write
+# (core.fsmonitor, core.worktree, filter.*, include.*, extensions.*, ...). Key names are printed,
+# never values.
+verify_repo_hygiene() {
+    local dir=$1 path refs keys bad
+    for path in info/grafts objects/info/alternates objects/info/http-alternates shallow commondir; do
+        [[ ! -e $dir/.git/$path ]] || die "$dir: .git/$path exists (it can change which objects Git resolves)"
+    done
+    refs=$(g "$dir" for-each-ref --format='%(refname)' refs/replace/)
+    [[ -z $refs ]] || die "$dir: Git replacement refs present: $(echo $refs | cut -c1-200)"
+    keys=$(g "$dir" config --local --name-only --list)
+    bad=$(printf '%s\n' "$keys" | sed '/^$/d' | grep -vE '^(core\.(repositoryformatversion|filemode|bare|logallrefupdates)|remote\.origin\.(url|fetch)|branch\.[A-Za-z0-9._-]+\.(remote|merge))$' || true)
+    [[ -z $bad ]] || die "$dir: unexpected repository configuration: $(echo $bad | cut -c1-200)"
+}
+
+# verify_release_perms <dir>: one owner for every entry and no group/other write anywhere, so only
+# that owner (the previous release's owner, normally root) and root can add files such as bytecode
+# between verification and start-up.
+verify_release_perms() {
+    local dir=$1 owner bad
+    owner=$(stat -c '%U' -- "$dir")
+    # The launcher is excluded: verify_launcher requires it to be exactly LAUNCHER_OWNER LAUNCHER_MODE.
+    bad=$(find "$dir" -path "$dir/$LAUNCHER_NAME" -prune -o \( \( ! -type l -perm /022 \) -o ! -user "$owner" \) -print -quit)
+    [[ -z $bad ]] || die "$dir: entry not owned by $owner or writable by group/others: ${bad#"$dir"/}"
+}
+
+# verify_bytecode <dir>: every *.pyc is exactly its tracked source, compiled by the service's own
+# interpreter (bytecheck.py). Python executes a pyc whose header matches the source instead of the
+# source, with or without -B, so names alone prove nothing.
+verify_bytecode() {
+    local out
+    out=$("$VENV_PYTHON" -I -B "$KD_DIR/bytecheck.py" "$1" 2>&1) || die "$1: $(tail -n 1 <<<"$out")"
+    [[ $(tail -n 1 <<<"$out") == BYTECODE_OK* ]] || die "$1: bytecode check did not confirm"
+}
+
 # verify_release_tree <dir> <commit> [pristine]
+#   Repository hygiene (no replacement objects, grafts, alternates or unexpected configuration);
 #   HEAD must be <commit>; every tracked file must hash to its blob in <commit> (re-hashed through a
-#   throwaway index, so neither the stat cache nor the repository's own index is trusted or written);
-#   untracked files must be exactly DEPLOY_ARTIFACTS (none at all when "pristine"); ignored files
-#   may only be Python bytecode under __pycache__/ (none at all when "pristine").
+#   throwaway index with replacement objects disabled, so neither the stat cache, the repository's
+#   own index nor a substituted object is trusted); untracked files must be exactly DEPLOY_ARTIFACTS
+#   (none when "pristine"); ignored files may only be __pycache__/*.pyc, and each must be its source
+#   compiled (none at all when "pristine"); one owner, no group/other write.
 verify_release_tree() {
     local dir=$1 commit=$2 mode=${3:-} index status untracked ignored expected
     expect_dir "$dir"; expect_dir "$dir/.git"
+    verify_repo_hygiene "$dir"
     [[ "$(g "$dir" rev-parse --verify -q HEAD)" == "$commit" ]] || die "$dir HEAD is not $commit"
     index=$(mktemp)
     status=0
@@ -238,6 +304,8 @@ verify_release_tree() {
         bad=$(printf '%s\n' "$ignored" | grep -vE '(^|/)__pycache__/[^/]+\.pyc$' || true)
         [[ -z $bad ]] || die "$dir: ignored files other than Python bytecode: $(echo $bad | cut -c1-300)"
     fi
+    verify_bytecode "$dir"
+    verify_release_perms "$dir"
 }
 
 # The launcher: an explicit deployment artifact. Never tracked, root-only, compared by content.
@@ -431,6 +499,35 @@ verify_public() {   # public health and /app/ through the edge (GET only, cache-
     [[ $body == *"$key"* ]] || die "public /app/ does not reference $key"
 }
 
+# ---------------------------------------------------------------- the next-start environment
+# env_check <pid | -> [approved snapshot] [snapshot out]: the environment systemd will give the
+# NEXT start (envcheck.py: manager environment, Environment=, EnvironmentFile contents as they are
+# now) must satisfy the flag and ceiling policy, equal process <pid>'s environment (except per-start
+# and approved launcher-supplied names), and equal the approved snapshot when one is given. With
+# [snapshot out], writes the next-start snapshot there (names and per-variable hashes; no value).
+# Only variable names are ever printed.
+env_check() {
+    local out
+    out=$("$VENV_PYTHON" -I -B "$KD_DIR/envcheck.py" --service "$SERVICE" --pid "${1#-}" --approved "${2:-}"         --snapshot-out "${3:-}" --flags-off "$FLAGS_OFF" --flags-on "$FLAGS_ON" --flag-values "$FLAG_VALUES"         --model "$OPENAI_MODEL_ALLOWED" --launcher-vars "$LAUNCHER_ENV_VARS" 2>&1)         || { log "$(tail -n 1 <<<"$out")"; die "the next start would not use the approved configuration"; }
+    log "$(tail -n 1 <<<"$out")"
+}
+
+# ---------------------------------------------------------------- mutual exclusion
+# One stage, activate or rollback at a time: an exclusive, non-blocking flock on a root-only file.
+# The kernel releases it when the process exits for any reason (including SIGKILL); a second
+# invocation fails before changing anything.
+acquire_deploy_lock() {
+    local lock=$ROLLBACK_PARENT/.deploy.lock
+    install -d -m 700 -- "$ROLLBACK_PARENT"
+    expect_dir "$ROLLBACK_PARENT"
+    [[ "$(stat -c '%U' -- "$ROLLBACK_PARENT")" == root && -z "$(find "$ROLLBACK_PARENT" -maxdepth 0 -perm /022)" ]] \
+        || die "$ROLLBACK_PARENT must be owned by root and not writable by group or others"
+    [[ ! -L $lock ]] || die "$lock is a symbolic link"
+    exec {DEPLOY_LOCK_FD}>>"$lock"
+    flock -n "$DEPLOY_LOCK_FD" || die "another stage, activate or rollback is running ($lock is held); nothing was changed"
+    log "deploy lock held: $lock"
+}
+
 # ---------------------------------------------------------------- the live release
 # identify_live <expected release dir> <commit> <app blob>
 # Sets LIVE_PID, LIVE_RELEASE, LIVE_POINTER. Proves, from the running process, its Git tree and
@@ -457,6 +554,8 @@ identify_live() {
     [[ "$(dirname "$LIVE_POINTER")" == "$DROPIN_DIR" ]] || die "the effective release pointer $LIVE_POINTER is outside $DROPIN_DIR"
     is_pointer_for "$LIVE_POINTER" "$LIVE_RELEASE" \
         || die "the last drop-in assigning WorkingDirectory/ExecStart, $LIVE_POINTER, is not exactly the release pointer for $LIVE_RELEASE (unknown override)"
+    # The NEXT start must get the environment the running process has (no pending drift).
+    env_check "$LIVE_PID"
 }
 
 # ---------------------------------------------------------------- the release pointer and rollback
@@ -469,7 +568,7 @@ restore_pointer() {
     local saved=$ROLLBACK_DIR/systemd/old-pointer.conf tmp=$DROPIN_DIR/.kalillac-restore-$$.tmp
     [[ -f $saved ]] || { log "ROLLBACK: saved pointer $saved missing"; return 1; }
     if [[ $NEW_POINTER != "$OLD_POINTER" ]]; then rm -f -- "$NEW_POINTER" || return 1; fi
-    rm -f -- "$DROPIN_DIR"/.kalillac-active-release-*.tmp
+    [[ -z ${POINTER_TMP:-} ]] || rm -f -- "$POINTER_TMP"   # only this activation's own temporary file
     cp -p -- "$saved" "$tmp" && mv -T -- "$tmp" "$OLD_POINTER" || return 1
     cmp -s -- "$saved" "$OLD_POINTER" && [[ ! -e $NEW_POINTER || $NEW_POINTER == "$OLD_POINTER" ]]
 }
@@ -490,20 +589,29 @@ rollback_to_previous() {
     if (verify_effective_unit "$OLD_RELEASE"); then log "ROLLBACK: effective WorkingDirectory and ExecStart are $OLD_RELEASE again"
     else ok=0; fi
     [[ "$(unit_fingerprint)" == "$BEFORE_UNIT_FP" ]] || { log "ROLLBACK: other unit settings differ from before"; ok=0; }
+    local approved=$ROLLBACK_DIR/state/env.approved
     if [[ $restart == yes ]]; then
+        # Never restart the previous release under a configuration other than the approved one.
+        if ((ok)) && ! (env_check - "$approved"); then
+            log "ROLLBACK: NOT restarting $OLD_RELEASE: its next start would not use the approved configuration"
+            ok=0
+        fi
         if ((ok)); then
             ref=$(main_pid)
             log "ROLLBACK: restarting $SERVICE"
             systemctl restart "$SERVICE" || { log "ROLLBACK: restart command failed"; ok=0; }
             if wait_healthy "$OLD_RELEASE/candidate" new "$ref"; then pid=$HEALTHY_PID; log "ROLLBACK: healthy, pid $pid"
             else ok=0; pid=$(main_pid); fi
+            if ((ok)) && ! (env_check "$pid" "$approved"); then log "ROLLBACK: the restarted process's configuration is not the approved one"; ok=0; fi
         else
-            log "ROLLBACK: NOT restarting: the unit is not verifiably back on $OLD_RELEASE"; pid=$(main_pid)
+            log "ROLLBACK: NOT restarting: the unit is not verifiably back on $OLD_RELEASE with the approved configuration"; pid=$(main_pid)
         fi
     else
         pid=$OLD_PID
         if wait_healthy "$OLD_RELEASE/candidate" same "$OLD_PID"; then log "ROLLBACK: no restart was needed; original pid $OLD_PID still serving"
         else ok=0; fi
+        (env_check "$OLD_PID" "$approved") \
+            || log "ROLLBACK: WARNING: the running process is unchanged, but its NEXT start would not use the approved configuration (pending change above)"
     fi
     if ((ok)) && (verify_running "$pid" "$OLD_RELEASE" "$PREVIOUS_COMMIT" "$PREVIOUS_APP_BLOB"); then
         log "ROLLBACK: running process $pid is $OLD_RELEASE at $PREVIOUS_COMMIT (tracked files exact)"
