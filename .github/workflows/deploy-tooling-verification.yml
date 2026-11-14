@@ -1,0 +1,88 @@
+# Verification of the release tooling in deploy/release.
+#
+# Both jobs run on disposable GitHub-hosted runners that are destroyed when the job ends. No
+# repository secret, production host, credential or setting is used. The systemd job creates a
+# uniquely named transient unit on the runner and removes it; its PostgreSQL database is the
+# runner's local server with a synthetic schema. Nothing here deploys anything.
+name: deploy-tooling-verification
+
+on:
+  push:
+    branches: ["ops/**"]
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy-tooling-verification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-tooling-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  disposable-systemd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository (full history: the package bundles f347e50f..54e38ecf)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Shell syntax and shellcheck (errors)
+        run: |
+          for f in deploy/release/*.sh deploy/release/tests/*.sh; do bash -n "$f"; done
+          shellcheck --version | head -n 2
+          shellcheck -S error -s bash deploy/release/*.sh deploy/release/tests/*.sh
+
+      - name: Start the runner's local PostgreSQL (read-only database check section)
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres psql -XAtqc 'select version()'
+
+      - name: Build the upload package from this commit
+        run: bash deploy/release/package.sh 54e38ecf "$RUNNER_TEMP/package"
+
+      - name: Disposable-environment stage / activate / rollback verification (real systemd)
+        run: sudo bash deploy/release/tests/disposable-systemd.sh "$RUNNER_TEMP/package" "$RUNNER_TEMP/evidence"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-tooling-evidence
+          path: |
+            ${{ runner.temp }}/evidence
+            ${{ runner.temp }}/package/SHA256SUMS
+            ${{ runner.temp }}/package/PACKAGE.txt
+          if-no-files-found: warn
+
+  preflight-real-application:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the repository's pinned dependencies
+        run: >-
+          python -m pip install
+          -r requirements-production-lock.txt
+          -r requirements-database.txt
+          -r requirements-dev.txt
+
+      - name: Application preflight against the real release code
+        run: python -m pytest deploy/release/tests/test_preflight.py -v -rA -p no:cacheprovider

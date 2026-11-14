@@ -18,3 +18,6 @@ site/**/*.svg text eol=lf
 site/**/*.txt text eol=lf
 site/.gitignore text eol=lf
 site/**/*.png -text
+
+# Release tooling runs on Linux: LF only, whatever core.autocrlf says.
+deploy/** text eol=lf
