@@ -1,18 +1,20 @@
-"""Disposable-test stand-in for the root-only production launcher (launch-production.py).
+"""Disposable-test stand-in for <venv>/bin/uvicorn: the process exec_launcher.py replaces itself with.
 
-Serves GET /api/health -> {"status":"ok"} on 127.0.0.1:$KDT_PORT from the release it was started in
-(cwd = <release>/candidate); every other path is 404. It starts listening after KDT_STARTUP_SECONDS,
-like an application import.
+Accepts uvicorn's command line (only --host and --port are used) and serves, from the release it
+runs in (cwd = <release>/candidate), GET /api/health -> {"status":"ok"}; everything else is 404.
+It starts listening after KDT_STARTUP_SECONDS, like an application import.
 
-Faults, for tests only, are read once at start-up from the file named by KDT_FAULT_FILE (outside every
-release directory, so releases stay pristine): lines "<mode> <release directory name>", where mode is
-crash (exit before listening), unhealthy (health answers 503) or slow (20 s extra start-up).
+Faults, for tests only, read once at start-up from KDT_FAULT_FILE: lines "<mode> <release directory
+name>", mode crash (exit before listening), unhealthy (health answers 503) or slow (20 s extra).
 """
 import http.server
 import os
 import sys
 import time
 
+args = sys.argv[1:]
+host = args[args.index("--host") + 1]
+port = int(args[args.index("--port") + 1])
 release = os.path.basename(os.path.dirname(os.getcwd()))
 mode = ""
 fault_file = os.environ.get("KDT_FAULT_FILE", "")
@@ -20,7 +22,7 @@ if fault_file and os.path.exists(fault_file):
     with open(fault_file) as handle:
         for line in handle:
             parts = line.split()
-            if len(parts) == 2 and parts[1] == release:
+            if len(parts) == 2 and parts[1] == release and parts[0] in ("crash", "unhealthy", "slow"):
                 mode = parts[0]
 if mode == "crash":
     sys.exit(3)
@@ -37,10 +39,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/api/health":
-            if mode == "unhealthy":
-                self._send(503, b'{"status":"unavailable"}')
-            else:
-                self._send(200, b'{"status":"ok"}')
+            self._send(503, b'{"status":"unavailable"}') if mode == "unhealthy" else self._send(200, b'{"status":"ok"}')
         else:
             self._send(404, b'{"detail":"Not Found"}')
 
@@ -51,4 +50,4 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-http.server.ThreadingHTTPServer(("127.0.0.1", int(os.environ["KDT_PORT"])), Handler).serve_forever()
+http.server.ThreadingHTTPServer((host, port), Handler).serve_forever()

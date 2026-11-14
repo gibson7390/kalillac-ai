@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Disposable-environment verification of deploy/release against REAL systemd.
+# Disposable-environment verification of deploy/release against REAL systemd, reproducing the
+# production shape observed on the live server:
+#   * the launcher replaces itself (os.execv) with the server: the unit's ExecStart names
+#     <venv>/bin/python3 <release>/launch-production.py, while the main process (same PID) carries
+#     "<venv>/bin/python3 <venv>/bin/uvicorn app_fastapi_candidate:api --host 127.0.0.1 --port N --workers 1";
+#   * drop-ins named exactly like production's (z-runs 64, 72, 80): legacy pointers for 3ef0956a and
+#     f126a245, the current f347e50f pointer, and provider-ceilings.conf (z-run 96) loaded AFTER the
+#     pointer and carrying the provider attempt ceilings.
 #
 #   sudo bash deploy/release/tests/disposable-systemd.sh <package dir> [<evidence dir>]
 #
-# Requires Linux, root, a running systemd, git, python3, curl and ss. Run it only on a disposable host
-# (a CI runner, a throwaway VM or WSL instance). Everything it creates is uniquely named and removed
-# at the end: a transient unit /run/systemd/system/kalillac-deploytest-<id>.service (+ .d drop-ins)
-# and /tmp/kalillac-deploytest-<id>. It never touches a production path, unit or credential.
+# Requires Linux, root, a running systemd, git, python3, curl and ss; optionally a local
+# peer-authenticated PostgreSQL (section 13). Run it only on a disposable host (CI runner, throwaway
+# VM or WSL instance). Everything it creates is uniquely named and removed at the end: a transient
+# unit /run/systemd/system/kalillac-deploytest-<id>.service (+ .d) and /tmp/kalillac-deploytest-<id>.
 #
 # The packaged scripts run unmodified; only KALILLAC_DEPLOY_ENV points them at a disposable-test
-# environment (its own service, paths and port; the application import and database checks are
-# replaced by the stub launcher, see stub_launcher.py). Releases are real clones of f347e50f and
-# 54e38ecf from the package's bundle. The unit mimics production: a base fragment, an override with
-# the feature flags and a sentinel "secret", a legacy pointer drop-in and the current pointer.
+# environment (its own service, paths, port and PROCESS_ARGV; the application import is replaced by
+# exec_launcher.py + stub_uvicorn.py). Releases are real Git clones of f347e50f and 54e38ecf.
 set -uo pipefail
 [[ $(id -u) -eq 0 ]] || { echo "run as root on a disposable host"; exit 2; }
 [[ -d ${1:-} ]] || { echo "usage: disposable-systemd.sh <package dir> [<evidence dir>]"; exit 2; }
@@ -32,6 +37,15 @@ NEW_COMMIT=54e38ecf36a4a25db20946019dd298311a632c1d
 SENTINEL=KDT-SENTINEL-SECRET-$ID
 FAULTS=$T/faults
 EVIDENCE=${2:-}
+VENV=$T/venv
+ARGV="$VENV/bin/python3 $VENV/bin/uvicorn app_fastapi_candidate:api --host 127.0.0.1 --port $PORT --workers 1"
+z() { printf 'z%.0s' $(seq 1 "$1"); }
+P3EF=$DROPIN/$(z 64)-release-3ef0956a.conf
+PF12=$DROPIN/$(z 72)-release-f126a245.conf
+PF34=$DROPIN/$(z 80)-release-f347e50f.conf
+PCEIL=$DROPIN/$(z 96)-provider-ceilings.conf
+STABLE=$DROPIN/$(z 80)-kalillac-active-release.conf
+CEILING_RE='^KALILLAC_(PROVIDER_CEILINGS_ENABLED|(OPENAI|BRAVE|TAVILY)_(TOTAL_ATTEMPTS|ANONYMOUS_ATTEMPTS|PERIOD_SECONDS))='
 
 PASS=0; FAIL=0
 ok()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
@@ -41,10 +55,14 @@ section() { echo; echo "== $*"; }
 
 pid_now() { systemctl show -p MainPID --value "$SERVICE"; }
 cwd_now() { readlink "/proc/$(pid_now)/cwd" 2>/dev/null; }
-snap() { local f; for f in $(systemctl show -p DropInPaths --value "$SERVICE"); do sha256sum "$f"; done; }
-dropin_count() { systemctl show -p DropInPaths --value "$SERVICE" | wc -w; }
+argv_now() { tr '\0' ' ' <"/proc/$(pid_now)/cmdline" 2>/dev/null | sed 's/ $//'; }
+ceilings_of() { tr '\0' '\n' <"/proc/$1/environ" | grep -E "$CEILING_RE" | sort; }
+loaded() { systemctl show -p DropInPaths --value "$SERVICE" | tr ' ' '\n' | sed '/^$/d'; }
+snap() { local f; for f in $(loaded); do sha256sum "$f"; done; }
+dropin_count() { loaded | wc -l; }
 healthy() { [[ "$(curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null)" == '{"status":"ok"}' ]]; }
-wait_up() { local i; for i in $(seq 1 30); do healthy && return 0; sleep 1; done; return 1; }
+wait_up() { local i; for i in $(seq 1 40); do healthy && return 0; sleep 1; done; return 1; }
+restart_service() { systemctl daemon-reload; systemctl restart "$SERVICE"; wait_up; }
 # run <log name> <script> [VAR=value...]: run a packaged script; status in RC, output in $LOGS/<name>.log
 run() {
     local name=$1 script=$2; shift 2
@@ -53,8 +71,12 @@ run() {
     echo "  [$name] exit $RC: $(tail -n 1 "$LOGS/$name.log")"
 }
 logged() { grep -qF -- "$2" "$LOGS/$1.log"; }
-pointer() {   # pointer <release dir>: the exact format earlier releases installed
-    printf '%s\n' '[Service]' "WorkingDirectory=$1/candidate" 'ExecStart=' "ExecStart=$T/venv/bin/python3 $1/launch-production.py"
+untouched() { [[ "$(pid_now)" == "$1" && "$(snap)" == "$2" ]]; }   # untouched <pid> <snapshot>
+refused_before_change() {   # refused_before_change <log> <pid> <snapshot>
+    logged "$1" FAILED_BEFORE_PRODUCTION_CHANGE && untouched "$2" "$3"
+}
+pointer() {   # the exact format earlier releases' activate scripts installed
+    printf '%s\n' '[Service]' "WorkingDirectory=$1/candidate" 'ExecStart=' "ExecStart=$VENV/bin/python3 $1/launch-production.py"
 }
 
 cleanup() {
@@ -71,7 +93,8 @@ trap cleanup EXIT
 # ------------------------------------------------------------------------------------------ setup
 section "setup: disposable environment $ID (service $SERVICE, port $PORT)"
 mkdir -p "$T"/{opt,venv/bin,www/app,rollbacks,logs}
-ln -s "$(command -v python3)" "$T/venv/bin/python3"
+ln -s "$(command -v python3)" "$VENV/bin/python3"
+install -m 755 "$HERE/stub_uvicorn.py" "$VENV/bin/uvicorn"
 cp -r -- "$1" "$PKG"
 (cd "$PKG" && sha256sum --check --strict --quiet SHA256SUMS) && ok "package checksums verify" || bad "package checksums"
 cat >"$T/test.env" <<EOF
@@ -79,7 +102,7 @@ ENVIRONMENT_KIND=disposable-test
 SERVICE=$SERVICE
 RELEASE_PARENT=$T/opt
 RELEASE_PREFIX=kalillac-release-
-VENV=$T/venv
+VENV=$VENV
 DROPIN_DIR=$DROPIN
 ROLLBACK_PARENT=$T/rollbacks
 LISTEN_HOST=127.0.0.1
@@ -93,6 +116,7 @@ LAUNCHER_NAME=launch-production.py
 LAUNCHER_OWNER=root:root
 LAUNCHER_MODE=600
 DEPLOY_ARTIFACTS=launch-production.py
+PROCESS_ARGV=$ARGV
 REQUIRED_UNITS=
 PUBLIC_BASE=
 APP_PREFLIGHT=skip
@@ -103,7 +127,7 @@ DB_SCHEMA=none
 EOF
 git -c init.defaultBranch=x clone -q --no-checkout "$PKG/kalillac-source-54e38ecf.bundle" "$OLD" 2>/dev/null
 git -C "$OLD" checkout -q --detach "$OLD_COMMIT"
-install -o root -g root -m 600 "$HERE/stub_launcher.py" "$OLD/launch-production.py"
+install -o root -g root -m 600 "$HERE/exec_launcher.py" "$OLD/launch-production.py"
 LAUNCHER_SHA=$(sha256sum "$OLD/launch-production.py" | cut -d' ' -f1)
 (cd "$OLD/frontend" && git ls-files | while IFS= read -r f; do mkdir -p "$T/www/app/$(dirname "$f")"; cp "$f" "$T/www/app/$f"; done)
 echo '<html>site</html>' >"$T/www/index.html"
@@ -120,205 +144,260 @@ Restart=no
 EOF
 cat >"$DROPIN/override.conf" <<EOF
 [Service]
-Environment=KALILLAC_DB_ENABLED=true KALILLAC_REQUEST_BUDGET_ENABLED=true KALILLAC_PROVIDER_CEILINGS_ENABLED=true
-Environment=KALILLAC_OPENAI_TOTAL_ATTEMPTS=500 KALILLAC_OPENAI_ANONYMOUS_ATTEMPTS=200 KALILLAC_OPENAI_PERIOD_SECONDS=86400
+Environment=KALILLAC_DB_ENABLED=true KALILLAC_REQUEST_BUDGET_ENABLED=true
 Environment=KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED=true KALILLAC_ANONYMOUS_DAILY_LIMIT=10
 Environment=KALILLAC_SEARCH_PRIMARY=brave KALILLAC_SEARCH_FALLBACK=tavily
 Environment=KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED=false KALILLAC_ACCOUNTS_ENABLED=false KALILLAC_BILLING_ENABLED=false
 Environment=OPENAI_API_KEY=$SENTINEL STRIPE_SECRET_KEY=$SENTINEL KALILLAC_DB_PASSWORD=$SENTINEL
-Environment=KDT_PORT=$PORT KDT_FAULT_FILE=$FAULTS KDT_STARTUP_SECONDS=3
+Environment=KDT_VENV=$VENV KDT_PORT=$PORT KDT_FAULT_FILE=$FAULTS KDT_STARTUP_SECONDS=3
 EOF
-pointer "$T/opt/kalillac-release-f126a245" >"$DROPIN/zzzzzzzz-release-f126a245.conf"
-pointer "$OLD" >"$DROPIN/zzzzzzzzzzzzzzzz-release-f347e50f.conf"
+pointer "$T/opt/kalillac-release-3ef0956a" >"$P3EF"
+pointer "$T/opt/kalillac-release-f126a245" >"$PF12"
+pointer "$OLD" >"$PF34"
+cat >"$PCEIL" <<EOF
+[Service]
+Environment=KALILLAC_PROVIDER_CEILINGS_ENABLED=true
+Environment=KALILLAC_OPENAI_TOTAL_ATTEMPTS=500 KALILLAC_OPENAI_ANONYMOUS_ATTEMPTS=200 KALILLAC_OPENAI_PERIOD_SECONDS=86400
+Environment=KALILLAC_BRAVE_TOTAL_ATTEMPTS=300 KALILLAC_BRAVE_ANONYMOUS_ATTEMPTS=100 KALILLAC_BRAVE_PERIOD_SECONDS=86400
+Environment=KALILLAC_TAVILY_TOTAL_ATTEMPTS=200 KALILLAC_TAVILY_ANONYMOUS_ATTEMPTS=50 KALILLAC_TAVILY_PERIOD_SECONDS=86400
+Environment=BRAVE_API_KEY=$SENTINEL
+EOF
 chmod 644 "$DROPIN"/*.conf
+CEIL_SHA=$(sha256sum <"$PCEIL")
 systemctl daemon-reload
 systemctl start "$SERVICE"
 check "f347e50f stand-in running and healthy" wait_up
-check "running from $OLD" test "$(cwd_now)" == "$OLD/candidate"
-SNAP0=$(snap); COUNT0=$(dropin_count)
+SNAP0=$(snap); COUNT0=$(dropin_count); P=$(pid_now); CEILINGS0=$(ceilings_of "$P")
+
+section "0. the two production characteristics are reproduced"
+check "ExecStart names the launcher" bash -c "systemctl show -p ExecStart --value '$SERVICE' | grep -qF 'argv[]=$VENV/bin/python3 $OLD/launch-production.py '"
+check "the main process exec'd into the approved uvicorn argv (same PID as systemd started)" test "$(argv_now)" == "$ARGV"
+check "  ...and its argv no longer mentions the launcher" bash -c "! tr '\\0' ' ' </proc/$P/cmdline | grep -q launch-production"
+check "provider-ceilings.conf loads AFTER the f347e50f pointer (and last)" test "$(loaded | tail -n 2 | tr '\n' ' ')" == "$PF34 $PCEIL "
+check "the provider ceilings come from provider-ceilings.conf and are on" test "$(echo "$CEILINGS0" | wc -l)" -eq 10
 
 # ------------------------------------------------------------------------------------------ 1
-section "1. read-only check on the initial state"
-P=$(pid_now)
+section "1. initial release detection and read-only check"
 run check-initial check.sh
-check "check.sh reports READY_TO_STAGE" test "$(tail -n 1 "$LOGS/check-initial.log")" == READY_TO_STAGE
-check "check.sh prints the launcher sha256 for pinning" logged check-initial "$LAUNCHER_SHA"
-check "check.sh changed nothing (pid, drop-ins)" test "$(pid_now)" == "$P" -a "$(snap)" == "$SNAP0"
+check "check.sh: READY_TO_STAGE" test "$(tail -n 1 "$LOGS/check-initial.log")" == READY_TO_STAGE
+check "the f347e50f pointer is identified as the EFFECTIVE pointer (not the last drop-in)" \
+    logged check-initial "$(basename "$PF34")  [EFFECTIVE release pointer -> $OLD]"
+check "provider-ceilings.conf shown with key names only" logged check-initial "$(basename "$PCEIL")  [assigns: Environment]"
+check "legacy pointers shown as overridden" logged check-initial "pointer -> $T/opt/kalillac-release-f126a245 (overridden)"
+check "argv recognised as the approved invocation" logged check-initial "argv = the approved invocation"
+check "provider ceilings reported enabled" logged check-initial "provider ceilings: enabled"
+check "launcher sha256 printed for pinning" logged check-initial "$LAUNCHER_SHA"
+check "check.sh changed nothing" untouched "$P" "$SNAP0"
+
+section "1b. migration-head discovery on real checkouts"
+mh() { bash -c 'source "$1/lib.sh"; migration_head "$2" "$3"' _ "$PKG" "$@" 2>&1; }
+check "f347e50f head = 0014_v1_session_issuance" test "$(mh "$OLD" "$OLD_COMMIT")" == 0014_v1_session_issuance
 
 # ------------------------------------------------------------------------------------------ 2
-section "2. root cause: a release dir with the launcher copied in, as the failed attempt left it"
+section "2. the original failure: a release dir with the launcher copied in"
 git -c init.defaultBranch=x clone -q --no-checkout "$PKG/kalillac-source-54e38ecf.bundle" "$NEW" 2>/dev/null
 git -C "$NEW" checkout -q --detach "$NEW_COMMIT"
 cp -p "$OLD/launch-production.py" "$NEW/launch-production.py"
-check "the old gate fails: plain 'git status --porcelain' reports the launcher as untracked" \
-    test "$(git -C "$NEW" status --porcelain)" == "?? launch-production.py"
-check "...although no tracked file differs ('--untracked-files=no' is empty)" \
-    test -z "$(git -C "$NEW" status --porcelain --untracked-files=no)"
-P=$(pid_now)
+check "54e38ecf head = 0015_finance_ledger (real checkout)" test "$(mh "$NEW" "$NEW_COMMIT")" == 0015_finance_ledger
+check "old gate fails: 'git status --porcelain' lists the launcher" test "$(git -C "$NEW" status --porcelain)" == "?? launch-production.py"
+check "  although no tracked file differs" test -z "$(git -C "$NEW" status --porcelain --untracked-files=no)"
 run stage-exists stage.sh LAUNCHER_SHA256="$LAUNCHER_SHA"
-check "stage.sh refuses the existing directory" test "$RC" -ne 0
-check "  ...and says how to move it aside" logged stage-exists "QUARANTINE_EXISTING=1"
-check "  ...without touching it or the service" test -f "$NEW/launch-production.py" -a "$(pid_now)" == "$P" -a "$(snap)" == "$SNAP0"
+check "stage.sh refuses the existing dir and names QUARANTINE_EXISTING=1" logged stage-exists "QUARANTINE_EXISTING=1"
+check "  dir and service untouched" test -f "$NEW/launch-production.py" -a "$(pid_now)" == "$P" -a "$(snap)" == "$SNAP0"
 run check-leftover check.sh
-check "check.sh: leftover dir is not a verified staged release (NOT_READY)" logged check-leftover "NOT_READY"
+check "check.sh: leftover dir -> NOT_READY" logged check-leftover NOT_READY
 run activate-leftover activate.sh
-check "activate.sh refuses the leftover dir (no stage marker)" logged activate-leftover "was not produced by stage.sh"
-check "  ...before any production change: FAILED_BEFORE_PRODUCTION_CHANGE, same pid, same drop-ins" \
-    test "$(logged activate-leftover FAILED_BEFORE_PRODUCTION_CHANGE && echo y)" == y -a "$(pid_now)" == "$P" -a "$(snap)" == "$SNAP0"
+check "activate.sh refuses the leftover dir (no stage marker), before any change" \
+    bash -c "grep -qF 'was not produced by stage.sh' '$LOGS/activate-leftover.log'"
+check "  FAILED_BEFORE_PRODUCTION_CHANGE, service untouched" refused_before_change activate-leftover "$P" "$SNAP0"
 
 # ------------------------------------------------------------------------------------------ 3
-section "3. stage: negative cases fail before any production change"
+section "3. stage: launcher pin"
 run stage-badpin stage.sh LAUNCHER_SHA256=0000000000000000000000000000000000000000000000000000000000000000 QUARANTINE_EXISTING=1
-check "wrong LAUNCHER_SHA256 refused" logged stage-badpin "is not the approved"
-check "  ...leftover dir untouched, service untouched" test -d "$NEW" -a "$(pid_now)" == "$P"
+check "a launcher hash other than the pinned one is refused" logged stage-badpin "is not the approved"
+check "  leftover and service untouched" test -d "$NEW" -a "$(pid_now)" == "$P"
 run stage-nopin stage.sh
 check "missing LAUNCHER_SHA256 refused" logged stage-nopin "set LAUNCHER_SHA256"
 
 # ------------------------------------------------------------------------------------------ 4
-section "4. stage: quarantine the leftover and stage cleanly"
+section "4. stage: quarantine the leftover, stage fresh"
 run stage stage.sh LAUNCHER_SHA256="$LAUNCHER_SHA" QUARANTINE_EXISTING=1
 check "STAGED_OK" logged stage STAGED_OK
 check "leftover moved to quarantine (kept)" test -n "$(ls -d "$T"/rollbacks/quarantine/kalillac-release-54e38ecf-* 2>/dev/null)"
 check "pristine checkout verified before the launcher was installed" logged stage "pristine checkout verified"
-check "untracked files in the staged release are exactly the launcher" \
-    test "$(git -C "$NEW" status --porcelain --untracked-files=all)" == "?? launch-production.py"
-check "staged launcher root:root 600, identical to the running one" \
-    test "$(stat -c '%U:%G %a' "$NEW/launch-production.py")" == "root:root 600" -a "$(sha256sum <"$NEW/launch-production.py")" == "$(sha256sum <"$OLD/launch-production.py")"
-check "service untouched by staging (pid, drop-ins)" test "$(pid_now)" == "$P" -a "$(snap)" == "$SNAP0"
+check "live release identified through exec'd process and effective pointer" logged stage "running: pid $P"
+check "staged release: untracked files exactly the launcher" test "$(git -C "$NEW" status --porcelain --untracked-files=all)" == "?? launch-production.py"
+check "staged launcher root:root 600, identical" test "$(stat -c '%U:%G %a' "$NEW/launch-production.py")" == "root:root 600" -a "$(sha256sum <"$NEW/launch-production.py")" == "$(sha256sum <"$OLD/launch-production.py")"
+check "service untouched by staging" untouched "$P" "$SNAP0"
 run check-staged check.sh
-check "check.sh reports READY_TO_ACTIVATE" test "$(tail -n 1 "$LOGS/check-staged.log")" == READY_TO_ACTIVATE
+check "check.sh: READY_TO_ACTIVATE" test "$(tail -n 1 "$LOGS/check-staged.log")" == READY_TO_ACTIVATE
 
 # ------------------------------------------------------------------------------------------ 5
-section "5. activate: preflight refusals (no reload, no restart)"
+section "5. activate refuses unsupported states before any change"
 echo "# stray" >"$NEW/candidate/stray.py"
 run act-untracked activate.sh
-check "an extra untracked file in the release is refused" logged act-untracked "untracked files are"
+check "extra untracked file in the release" logged act-untracked "untracked files are"
 rm -f "$NEW/candidate/stray.py"
+
 cp -p "$NEW/candidate/alembic.ini" "$T/alembic.ini.bak"
-printf 'X' | dd of="$NEW/candidate/alembic.ini" bs=1 seek=10 conv=notrunc status=none   # same size
-touch -r "$T/alembic.ini.bak" "$NEW/candidate/alembic.ini"                                # same mtime
+printf 'X' | dd of="$NEW/candidate/alembic.ini" bs=1 seek=10 conv=notrunc status=none
+touch -r "$T/alembic.ini.bak" "$NEW/candidate/alembic.ini"
 run act-tracked activate.sh
-check "a modified tracked file is refused (content re-hashed, stat cache not trusted)" logged act-tracked "tracked files differ"
+check "modified tracked file (same size and mtime; content re-hashed)" logged act-tracked "tracked files differ"
 cp -p "$T/alembic.ini.bak" "$NEW/candidate/alembic.ini"
-printf '[Service]\nEnvironment=KDT_MANUAL=1\n' >"$DROPIN/zzzzzzzzzzzzzzzzzzzzzzzzzzzz-manual.conf"; systemctl daemon-reload
-run act-override activate.sh
-check "an unrecognised last drop-in (uncontrolled override) is refused" logged act-override "is not exactly the release pointer"
-rm -f "$DROPIN/zzzzzzzzzzzzzzzzzzzzzzzzzzzz-manual.conf"; systemctl daemon-reload
+
+cp -p "$NEW/launch-production.py" "$T/launcher.bak"; echo "# changed" >>"$NEW/launch-production.py"
+run act-launcher activate.sh
+check "staged launcher changed after staging (hash differs)" logged act-launcher "is not the approved"
+cp -p "$T/launcher.bak" "$NEW/launch-production.py"
+
+cp -p "$T/www/app/app.js" "$T/app.js.bak"; printf 'X' | dd of="$T/www/app/app.js" bs=1 seek=5 conv=notrunc status=none
+run act-webroot activate.sh
+check "live /app/ differs from the release's frontend/" logged act-webroot "is not this release's frontend/app.js"
+cp -p "$T/app.js.bak" "$T/www/app/app.js"
+
+M=$DROPIN/$(z 100)-manual.conf
+{ pointer "$OLD"; echo "Environment=KDT_MANUAL=1"; } >"$M"; systemctl daemon-reload
+run act-override-copy activate.sh
+check "unknown override after provider-ceilings re-asserting the same ExecStart (not an exact pointer)" logged act-override-copy "is not exactly the release pointer"
+printf '[Service]\nExecStart=\nExecStart=/bin/sleep 1000\n' >"$M"; systemctl daemon-reload
+run act-override-exec activate.sh
+check "unknown override replacing ExecStart" logged act-override-exec "effective ExecStart is '/bin/sleep 1000'"
+printf '[Service]\nWorkingDirectory=/tmp\n' >"$M"; systemctl daemon-reload
+run act-override-wd activate.sh
+check "unknown override changing only WorkingDirectory" logged act-override-wd "effective WorkingDirectory is '/tmp'"
+rm -f "$M"; systemctl daemon-reload
+
 echo "# pending" >>"$DROPIN/override.conf"
 run act-reload activate.sh
-check "unit files changed without daemon-reload (NeedDaemonReload=yes) is refused" logged act-reload "NeedDaemonReload"
+check "unit files changed without daemon-reload (NeedDaemonReload=yes)" logged act-reload "NeedDaemonReload"
 sed -i '/^# pending$/d' "$DROPIN/override.conf"; systemctl daemon-reload
-for log in act-untracked act-tracked act-override act-reload; do
-    check "  $log: FAILED_BEFORE_PRODUCTION_CHANGE" logged "$log" FAILED_BEFORE_PRODUCTION_CHANGE
+for log in act-untracked act-tracked act-launcher act-webroot act-override-copy act-override-exec act-override-wd act-reload; do
+    check "  $log: FAILED_BEFORE_PRODUCTION_CHANGE, same pid, drop-ins unchanged" refused_before_change "$log" "$P" "$SNAP0"
 done
-check "  service never restarted; drop-ins unchanged" test "$(pid_now)" == "$P" -a "$(snap)" == "$SNAP0"
 
-section "5b. flag policy: a forbidden flag in the live service blocks staging and activation"
-printf '[Service]\nEnvironment=KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED=true\n' >"$DROPIN/p-test-flag.conf"
-systemctl daemon-reload; systemctl restart "$SERVICE"; wait_up
-P2=$(pid_now); SNAPF=$(snap)
+section "5b. the live process must already be the approved state"
+echo "badargs kalillac-release-f347e50f" >"$FAULTS"; restart_service; P2=$(pid_now); SNAPB=$(snap)
+run check-badargs check.sh
+check "check.sh: argv with non-matching uvicorn arguments -> NOT_READY" logged check-badargs "argv is not exactly"
+run act-badargs-live activate.sh
+check "activate refuses a live process with non-matching uvicorn arguments" logged act-badargs-live "argv is not exactly the approved invocation"
+check "  before any change" refused_before_change act-badargs-live "$P2" "$SNAPB"
+: >"$FAULTS"
+printf '[Service]\nEnvironment=KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED=true\n' >"$DROPIN/p-test-flag.conf"; restart_service; P2=$(pid_now); SNAPB=$(snap)
 run act-flag activate.sh
-check "Financial Safeguards on in the live service: refused" logged act-flag "KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED is enabled"
-check "  before any production change" test "$(pid_now)" == "$P2" -a "$(snap)" == "$SNAPF"
-rm -f "$DROPIN/p-test-flag.conf"; systemctl daemon-reload; systemctl restart "$SERVICE"; wait_up
-P=$(pid_now)
-check "drop-ins back to the initial set" test "$(snap)" == "$SNAP0"
+check "Financial Safeguards on in the live service: refused before any change" refused_before_change act-flag "$P2" "$SNAPB"
+rm -f "$DROPIN/p-test-flag.conf"
+printf '[Service]\nEnvironment=KALILLAC_PROVIDER_CEILINGS_ENABLED=false\n' >"$DROPIN/$(z 100)-test-ceilings-off.conf"; restart_service; P2=$(pid_now); SNAPB=$(snap)
+run act-ceilings-off activate.sh
+check "provider ceilings off in the live service (later override): refused" logged act-ceilings-off "KALILLAC_PROVIDER_CEILINGS_ENABLED is not enabled"
+check "  before any change" refused_before_change act-ceilings-off "$P2" "$SNAPB"
+rm -f "$DROPIN/$(z 100)-test-ceilings-off.conf"; restart_service; P=$(pid_now)
+check "back to the initial drop-ins and ceilings" test "$(snap)" == "$SNAP0" -a "$(ceilings_of "$P")" == "$CEILINGS0"
 
 # ------------------------------------------------------------------------------------------ 6
-section "6. activate: interrupted after the pointer swap, before restart (operator Ctrl-C / SSH drop)"
+section "6. interrupted after the pointer swap, before restart (Ctrl-C / SSH drop)"
 (cd "$PKG" && KALILLAC_DEPLOY_ENV="$T/test.env" exec bash activate.sh) >"$LOGS/act-interrupt.log" 2>&1 &
 APID=$!
-for i in $(seq 1 600); do grep -q "pointer installed" "$LOGS/act-interrupt.log" 2>/dev/null && break; sleep 0.05; done
+for _ in $(seq 1 600); do grep -q "pointer installed" "$LOGS/act-interrupt.log" 2>/dev/null && break; sleep 0.05; done
 kill -STOP "$APID" 2>/dev/null; pkill -STOP -P "$APID" 2>/dev/null
 kill -TERM "$APID" 2>/dev/null; pkill -CONT -P "$APID" 2>/dev/null; kill -CONT "$APID" 2>/dev/null
 wait "$APID"; RC=$?
 echo "  [act-interrupt] exit $RC: $(tail -n 1 "$LOGS/act-interrupt.log")"
 check "interrupted in phase pointer/reloaded" grep -qE "FAILED in phase (pointer|reloaded)" "$LOGS/act-interrupt.log"
-check "ROLLBACK_RECOVERED with no restart needed" logged act-interrupt "no restart was needed"
-check "  original process never restarted" test "$(pid_now)" == "$P"
-check "  drop-ins byte-identical to before" test "$(snap)" == "$SNAP0"
+check "ROLLBACK_RECOVERED, no restart needed" logged act-interrupt "no restart was needed"
+check "  original process never restarted; drop-ins byte-identical" untouched "$P" "$SNAP0"
 
 # ------------------------------------------------------------------------------------------ 7
-section "7. activate: new release unhealthy after restart -> automatic rollback"
+section "7. failures after the restart -> automatic, verified rollback"
 echo "unhealthy kalillac-release-54e38ecf" >"$FAULTS"
 run act-unhealthy activate.sh
-check "activation fails (non-zero exit)" test "$RC" -ne 0
-check "effective unit verified before the restart" logged act-unhealthy "effective unit verified BEFORE restart"
-check "ROLLBACK_RECOVERED after restart" logged act-unhealthy "ROLLBACK_RECOVERED: f347e50f restarted and verified running"
-check "  rollback verified the running process by Git content" logged act-unhealthy "at $OLD_COMMIT (tracked files exact)"
-check "  service runs f347e50f again, healthy, new pid" test "$(cwd_now)" == "$OLD/candidate" -a "$(pid_now)" != "$P"
-healthy && ok "  healthy" || bad "  healthy"
-check "  drop-ins byte-identical to before" test "$(snap)" == "$SNAP0"
+check "unhealthy new release: ROLLBACK_RECOVERED after restart" logged act-unhealthy "ROLLBACK_RECOVERED: f347e50f restarted and verified running"
+check "  effective unit verified before the restart" logged act-unhealthy "effective unit verified BEFORE restart"
+check "  rollback verified the exec'd process by Git content" logged act-unhealthy "at $OLD_COMMIT (tracked files exact)"
+check "  provider ceilings verified after rollback" logged act-unhealthy "provider ceilings enabled and unchanged"
+check "  f347e50f runs again with the approved argv, new pid" test "$(cwd_now)" == "$OLD/candidate" -a "$(argv_now)" == "$ARGV" -a "$(pid_now)" != "$P"
+check "  drop-ins byte-identical (provider-ceilings.conf included)" test "$(snap)" == "$SNAP0"
 P=$(pid_now)
 
 echo "crash kalillac-release-54e38ecf" >"$FAULTS"
 run act-crash activate.sh
-check "new release crashing at start-up: ROLLBACK_RECOVERED" logged act-crash "ROLLBACK_RECOVERED: f347e50f restarted"
-check "  fails fast on the failed unit state" logged act-crash "unit entered the failed state"
+check "crashing new release: fails fast, ROLLBACK_RECOVERED" bash -c "grep -qF 'unit entered the failed state' '$LOGS/act-crash.log' && grep -qF 'ROLLBACK_RECOVERED: f347e50f restarted' '$LOGS/act-crash.log'"
 check "  f347e50f running, drop-ins as before" test "$(cwd_now)" == "$OLD/candidate" -a "$(snap)" == "$SNAP0"
 P=$(pid_now)
 
-section "7b. rollback target itself broken -> must report ROLLBACK_INCOMPLETE, never RECOVERED"
+echo "badargs kalillac-release-54e38ecf" >"$FAULTS"
+run act-badargs-new activate.sh
+check "new release healthy but exec'd with non-matching uvicorn arguments: refused after restart" logged act-badargs-new "argv is not exactly the approved invocation"
+check "  ROLLBACK_RECOVERED" logged act-badargs-new "ROLLBACK_RECOVERED: f347e50f restarted"
+check "  f347e50f running with the approved argv; drop-ins as before" test "$(argv_now)" == "$ARGV" -a "$(cwd_now)" == "$OLD/candidate" -a "$(snap)" == "$SNAP0"
+P=$(pid_now)
+
+section "7b. rollback target itself broken -> ROLLBACK_INCOMPLETE, never RECOVERED"
 printf 'unhealthy kalillac-release-54e38ecf\nunhealthy kalillac-release-f347e50f\n' >"$FAULTS"
 run act-badrollback activate.sh
-check "ROLLBACK_INCOMPLETE reported" logged act-badrollback "ROLLBACK_INCOMPLETE"
+check "ROLLBACK_INCOMPLETE reported" logged act-badrollback ROLLBACK_INCOMPLETE
 check "  ROLLBACK_RECOVERED not reported" bash -c "! grep -q ROLLBACK_RECOVERED '$LOGS/act-badrollback.log'"
-check "  drop-ins nevertheless restored to before" test "$(snap)" == "$SNAP0"
-: >"$FAULTS"; systemctl restart "$SERVICE"; wait_up; P=$(pid_now)
+check "  drop-ins nevertheless restored" test "$(snap)" == "$SNAP0"
+: >"$FAULTS"; restart_service; P=$(pid_now)
 
 # ------------------------------------------------------------------------------------------ 8
-section "8. activate: slow start-up is allowed for; success"
+section "8. successful activation (slow start-up allowed for)"
 echo "slow kalillac-release-54e38ecf" >"$FAULTS"
 sed -i 's/^HEALTH_TIMEOUT_SECONDS=.*/HEALTH_TIMEOUT_SECONDS=60/' "$T/test.env"
 run activate activate.sh
 check "KALILLAC_RELEASE_54E38ECF_ACTIVATED" logged activate KALILLAC_RELEASE_54E38ECF_ACTIVATED
-check "service runs 54e38ecf, healthy" test "$(cwd_now)" == "$NEW/candidate"
+check "provider-ceilings.conf reported kept and still after the pointer" logged activate "later drop-in kept byte-for-byte and still loaded after the pointer: $(basename "$PCEIL") (assigns: Environment)"
+NP=$(pid_now)
+check "process identity: cwd 54e38ecf, approved argv, new pid" test "$(cwd_now)" == "$NEW/candidate" -a "$(argv_now)" == "$ARGV" -a "$NP" != "$P"
+check "process identity: executable is the venv interpreter" test "$(readlink "/proc/$NP/exe")" == "$(readlink -f "$VENV/bin/python3")"
+check "process identity: listener owned by the main pid" bash -c "ss -Hltnp 'sport = :$PORT' | grep -q 'pid=$NP,'"
 healthy && ok "  healthy" || bad "  healthy"
-check "drop-in count unchanged (no extra override)" test "$(dropin_count)" -eq "$COUNT0"
-check "the stable pointer is loaded last" test "$(systemctl show -p DropInPaths --value "$SERVICE" | tr ' ' '\n' | tail -n 1)" == "$DROPIN/zzzzzzzzzzzzzzzzz-kalillac-active-release.conf"
-check "legacy f347e50f pointer moved into the rollback directory" test ! -e "$DROPIN/zzzzzzzzzzzzzzzz-release-f347e50f.conf"
-check "effective WorkingDirectory / ExecStart = 54e38ecf" \
-    test "$(systemctl show -p WorkingDirectory --value "$SERVICE")" == "$NEW/candidate"
+check "stable pointer at the old pointer's position (z-run 80)" test "$(loaded | tail -n 2 | tr '\n' ' ')" == "$STABLE $PCEIL "
+check "provider-ceilings.conf byte-identical" test "$(sha256sum <"$PCEIL")" == "$CEIL_SHA"
+check "provider ceiling settings in the new process identical to the old process" test "$(ceilings_of "$NP")" == "$CEILINGS0"
+check "drop-in count unchanged" test "$(dropin_count)" -eq "$COUNT0"
+check "legacy f347e50f pointer moved out; 3ef0956a/f126a245 history kept" test ! -e "$PF34" -a -f "$P3EF" -a -f "$PF12"
 check "NeedDaemonReload=no" test "$(systemctl show -p NeedDaemonReload --value "$SERVICE")" == no
-check "previous release directory intact" test -f "$OLD/launch-production.py" -a -z "$(git -C "$OLD" status --porcelain --untracked-files=no)"
+check "previous release intact" test -f "$OLD/launch-production.py" -a -z "$(git -C "$OLD" status --porcelain --untracked-files=no)"
 run check-active check.sh
-check "check.sh reports ACTIVE_54e38ecf" test "$(tail -n 1 "$LOGS/check-active.log")" == ACTIVE_54e38ecf
+check "check.sh: ACTIVE_54e38ecf" test "$(tail -n 1 "$LOGS/check-active.log")" == ACTIVE_54e38ecf
 : >"$FAULTS"
-ROLLBACK_DIR=$(sed -n 's/^Rollback directory: *//p; s/^Manual rollback: *ROLLBACK_DIR=\([^ ]*\) .*/\1/p' "$LOGS/activate.log" | tail -n 1)
+ROLLBACK_DIR=$(sed -n 's/^Manual rollback: *ROLLBACK_DIR=\([^ ]*\) .*/\1/p' "$LOGS/activate.log")
 
 # ------------------------------------------------------------------------------------------ 9
-section "9. manual rollback after a successful activation"
-P=$(pid_now)
+section "9. manual rollback"
 run rollback rollback.sh ROLLBACK_DIR="$ROLLBACK_DIR"
 check "ROLLED_BACK_TO_f347e50f" logged rollback ROLLED_BACK_TO_f347e50f
 check "  effective unit checked before restart" logged rollback "effective WorkingDirectory and ExecStart are $OLD again"
-check "  running f347e50f, new pid, healthy" test "$(cwd_now)" == "$OLD/candidate" -a "$(pid_now)" != "$P"
-check "  drop-ins byte-identical to the original state" test "$(snap)" == "$SNAP0"
-check "  both release directories kept" test -d "$OLD" -a -d "$NEW"
+check "  f347e50f, approved argv, new pid" test "$(cwd_now)" == "$OLD/candidate" -a "$(argv_now)" == "$ARGV" -a "$(pid_now)" != "$NP"
+check "  drop-ins byte-identical to the original, same order" test "$(snap)" == "$SNAP0"
+check "  provider ceilings identical" test "$(ceilings_of "$(pid_now)")" == "$CEILINGS0"
 run rollback-again rollback.sh ROLLBACK_DIR="$ROLLBACK_DIR"
-check "a second rollback with the same directory is refused (state no longer matches)" test "$RC" -ne 0
+check "a second rollback with the same directory is refused" test "$RC" -ne 0
 run check-after-rollback check.sh
-check "check.sh: READY_TO_ACTIVATE again" test "$(tail -n 1 "$LOGS/check-after-rollback.log")" == READY_TO_ACTIVATE
+check "check.sh: READY_TO_ACTIVATE" test "$(tail -n 1 "$LOGS/check-after-rollback.log")" == READY_TO_ACTIVATE
 
 # ------------------------------------------------------------------------------------------ 10
 section "10. a later activation rewrites the stable pointer in place"
-mv "$DROPIN/zzzzzzzzzzzzzzzz-release-f347e50f.conf" "$T/legacy.conf"
-{ echo "# Kalillac AI active release pointer."; pointer "$OLD"; } >"$DROPIN/zzzzzzzzzzzzzzzzz-kalillac-active-release.conf"
-chmod 644 "$DROPIN/zzzzzzzzzzzzzzzzz-kalillac-active-release.conf"
+mv "$PF34" "$T/legacy.conf"
+{ echo "# Kalillac AI active release pointer."; pointer "$OLD"; } >"$STABLE"; chmod 644 "$STABLE"
 systemctl daemon-reload; SNAP1=$(snap); COUNT1=$(dropin_count)
 run activate-inplace activate.sh
 check "activated, pointer rewritten in place" logged activate-inplace "rewritten in place"
-check "  drop-in count unchanged" test "$(dropin_count)" -eq "$COUNT1"
-check "  running 54e38ecf" test "$(cwd_now)" == "$NEW/candidate"
+check "  drop-in count unchanged; provider-ceilings.conf still last and identical" \
+    test "$(dropin_count)" -eq "$COUNT1" -a "$(loaded | tail -n 1)" == "$PCEIL" -a "$(sha256sum <"$PCEIL")" == "$CEIL_SHA"
 RB2=$(sed -n 's/^Manual rollback: *ROLLBACK_DIR=\([^ ]*\) .*/\1/p' "$LOGS/activate-inplace.log")
 run rollback-inplace rollback.sh ROLLBACK_DIR="$RB2"
-check "  rolled back; drop-ins byte-identical to before" test "$(snap)" == "$SNAP1" -a "$(cwd_now)" == "$OLD/candidate"
+check "  rolled back; drop-ins byte-identical" test "$(snap)" == "$SNAP1" -a "$(cwd_now)" == "$OLD/candidate"
 
-# ------------------------------------------------------------------------------------------ 12
-section "12. read-only database check (local peer-authenticated PostgreSQL; synthetic schema)"
+# ------------------------------------------------------------------------------------------ 13
+section "13. read-only database check (local peer-authenticated PostgreSQL; synthetic schema)"
 if command -v psql >/dev/null && runuser -u postgres -- psql -XAtqc 'select 1' >/dev/null 2>&1; then
     DB=kdt_$ID
     pg() { runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d "$DB" -c "$1" >/dev/null 2>&1; }
+    pgq() { runuser -u postgres -- psql -XAtq -d "$DB" -c "$1"; }
+    state() { pgq "SELECT version_num || ':' || (SELECT count(*) FROM kalillac.finance_ledger_buckets) || ':' || (SELECT count(*) FROM kalillac.finance_reservations) || ':' || (SELECT count(*) FROM kalillac.finance_unsafe_latches) FROM kalillac.alembic_version"; }
     runuser -u postgres -- createdb "$DB" 2>/dev/null
     pg "CREATE SCHEMA kalillac; CREATE TABLE kalillac.alembic_version (version_num varchar(32) PRIMARY KEY);
         INSERT INTO kalillac.alembic_version VALUES ('0015_finance_ledger');
@@ -328,19 +407,24 @@ if command -v psql >/dev/null && runuser -u postgres -- psql -XAtqc 'select 1' >
         "$T/test.env" >"$T/test-db.env"
     KDT_ENV=$T/test-db.env run check-db check.sh
     check "revision 0015 and empty ledger: check passes" logged check-db "database: revision 0015_finance_ledger; 3 Financial Safeguards tables empty"
-    check "  check.sh READY_TO_ACTIVATE" test "$(tail -n 1 "$LOGS/check-db.log")" == READY_TO_ACTIVATE
+    check "  READY_TO_ACTIVATE" test "$(tail -n 1 "$LOGS/check-db.log")" == READY_TO_ACTIVATE
     pg "UPDATE kalillac.alembic_version SET version_num = '0014_v1_session_issuance'"
     P=$(pid_now); SNAPD=$(snap)
     KDT_ENV=$T/test-db.env run act-db-revision activate.sh
-    check "database at another revision: activation refused" logged act-db-revision "database revision is '0014_v1_session_issuance', expected 0015_finance_ledger"
-    check "  before any production change" test "$(logged act-db-revision FAILED_BEFORE_PRODUCTION_CHANGE && echo y)" == y -a "$(pid_now)" == "$P" -a "$(snap)" == "$SNAPD"
+    check "database at another revision: refused before any change" bash -c "grep -qF \"database revision is '0014_v1_session_issuance', expected 0015_finance_ledger\" '$LOGS/act-db-revision.log'"
+    check "  FAILED_BEFORE_PRODUCTION_CHANGE, untouched" refused_before_change act-db-revision "$P" "$SNAPD"
     pg "UPDATE kalillac.alembic_version SET version_num = '0015_finance_ledger'; INSERT INTO kalillac.finance_unsafe_latches VALUES (1)"
-    KDT_ENV=$T/test-db.env run check-db-latch check.sh
-    check "a non-empty Financial Safeguards table is reported" logged check-db-latch "finance_unsafe_latches has 1 rows"
-    check "  check.sh NOT_READY" logged check-db-latch NOT_READY
+    KDT_ENV=$T/test-db.env run act-db-latch activate.sh
+    check "non-empty Financial Safeguards table: refused before any change" logged act-db-latch "finance_unsafe_latches has 1 rows"
+    check "  untouched" refused_before_change act-db-latch "$P" "$SNAPD"
     pg "DELETE FROM kalillac.finance_unsafe_latches"
-    check "the checks wrote nothing (row counts and revision unchanged)" \
-        test "$(runuser -u postgres -- psql -XAtq -d "$DB" -c "SELECT version_num || ':' || (SELECT count(*) FROM kalillac.finance_ledger_buckets) FROM kalillac.alembic_version")" == "0015_finance_ledger:0"
+    KDT_ENV=$T/test-db.env run act-db activate.sh
+    check "activation with the database checks: ACTIVATED" logged act-db KALILLAC_RELEASE_54E38ECF_ACTIVATED
+    check "  database checked before and after the restart" test "$(grep -c 'database: revision 0015_finance_ledger; 3 Financial Safeguards tables empty' "$LOGS/act-db.log")" -ge 2
+    check "  revision unchanged and ledger still empty after activation" test "$(state)" == "0015_finance_ledger:0:0:0"
+    RB3=$(sed -n 's/^Manual rollback: *ROLLBACK_DIR=\([^ ]*\) .*/\1/p' "$LOGS/act-db.log")
+    KDT_ENV=$T/test-db.env run rollback-db rollback.sh ROLLBACK_DIR="$RB3"
+    check "  rolled back; revision and ledger unchanged" test "$(tail -n 1 "$LOGS/rollback-db.log")" == ROLLED_BACK_TO_f347e50f -a "$(state)" == "0015_finance_ledger:0:0:0"
 else
     echo "  SKIP  no local peer-authenticated PostgreSQL on this host (CI runs this section)"
 fi
@@ -348,7 +432,7 @@ fi
 # ------------------------------------------------------------------------------------------ 11
 section "11. no credential in any output or state file"
 if grep -rqF -- "$SENTINEL" "$LOGS" "$T"/rollbacks/*/state 2>/dev/null; then bad "sentinel secret found in output/state"
-else ok "sentinel secret absent from every script output and state file"; fi
+else ok "sentinel secret (in override.conf and provider-ceilings.conf) absent from every output and state file"; fi
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed (environment $ID)"

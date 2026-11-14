@@ -22,6 +22,8 @@ readonly ROLLBACK_DIR
 [[ "$(state_get service)" == "$SERVICE" ]] || die "$ROLLBACK_DIR is for another service"
 OLD_RELEASE=$(state_get old_release); OLD_PID=$(state_get old_pid)
 OLD_LAUNCHER_SHA=$(state_get old_launcher_sha256); OLD_CONFIG_HASH=$(state_get old_config_sha256)
+OLD_CEILING_HASH=$(state_get old_ceiling_sha256)
+[[ $OLD_CEILING_HASH =~ ^[0-9a-f]{64}$ ]] || die "state has no provider-ceiling fingerprint (not written by this activate.sh)"
 OLD_WEBROOT_HASH=$(state_get old_webroot_sha256); BEFORE_UNIT_FP=$(state_get unit_fingerprint)
 OLD_POINTER=$(state_get old_pointer); NEW_POINTER=$(state_get new_pointer)
 [[ $OLD_RELEASE == "$OLD_RELEASE_EXPECTED" && "$(state_get new_release)" == "$NEW_RELEASE" ]] || die "state names unexpected release directories"
@@ -30,7 +32,7 @@ OLD_POINTER=$(state_get old_pointer); NEW_POINTER=$(state_get new_pointer)
 log "Preflight (read-only)"
 [[ $(need_reload) == no ]] || die "NeedDaemonReload=yes: unit files changed on disk since the last reload; investigate first"
 is_pointer_for "$NEW_POINTER" "$NEW_RELEASE" || die "$NEW_POINTER is not the pointer to $NEW_RELEASE; this rollback directory does not describe the current state"
-[[ "$(dropin_paths | tail -n 1)" == "$NEW_POINTER" ]] || die "$NEW_POINTER is not the last drop-in"
+[[ "$(effective_pointer)" == "$NEW_POINTER" ]] || die "$NEW_POINTER is not the effective release pointer (the last drop-in assigning WorkingDirectory/ExecStart)"
 is_pointer_for "$ROLLBACK_DIR/systemd/old-pointer.conf" "$OLD_RELEASE" || die "the saved pointer is not the pointer to $OLD_RELEASE"
 verify_release_tree "$OLD_RELEASE" "$PREVIOUS_COMMIT"
 verify_launcher "$OLD_RELEASE" "$OLD_LAUNCHER_SHA"

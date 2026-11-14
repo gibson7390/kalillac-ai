@@ -56,8 +56,8 @@ load_conf() {   # load_conf <file> <key>...
 
 readonly ENV_KEYS=(ENVIRONMENT_KIND SERVICE RELEASE_PARENT RELEASE_PREFIX VENV DROPIN_DIR ROLLBACK_PARENT
     LISTEN_HOST LISTEN_PORT HEALTH_PATH HEALTH_BODY HEALTH_TIMEOUT_SECONDS HEALTH_STABLE_CHECKS
-    WEBROOT LAUNCHER_NAME LAUNCHER_OWNER LAUNCHER_MODE DEPLOY_ARTIFACTS REQUIRED_UNITS PUBLIC_BASE
-    APP_PREFLIGHT DB_CHECK DB_OS_USER DB_NAME DB_SCHEMA)
+    WEBROOT LAUNCHER_NAME LAUNCHER_OWNER LAUNCHER_MODE DEPLOY_ARTIFACTS PROCESS_ARGV REQUIRED_UNITS
+    PUBLIC_BASE APP_PREFLIGHT DB_CHECK DB_OS_USER DB_NAME DB_SCHEMA)
 readonly RELEASE_KEYS=(RELEASE_COMMIT RELEASE_SHORT RELEASE_TITLE PREVIOUS_COMMIT PREVIOUS_SHORT
     APP_BLOB PREVIOUS_APP_BLOB IDENTICAL_PATHS MIGRATION_HEAD DB_REVISION EMPTY_TABLES
     FLAGS_OFF FLAGS_ON FLAG_VALUES OPENAI_MODEL_ALLOWED INACTIVE_GET INACTIVE_POST INACTIVE_PREFIXES)
@@ -84,6 +84,13 @@ load_all_conf() {
     [[ $RELEASE_COMMIT == "$RELEASE_SHORT"* && $PREVIOUS_COMMIT == "$PREVIOUS_SHORT"* ]] || die "short names do not match the commits"
     [[ $LISTEN_PORT =~ ^[0-9]+$ && $HEALTH_TIMEOUT_SECONDS =~ ^[0-9]+$ && $HEALTH_STABLE_CHECKS =~ ^[1-9]$ ]] || die "bad numeric setting"
     VENV_PYTHON=$VENV/bin/python3
+    # The approved server process: the launcher replaces itself (exec) with exactly this argv. It
+    # must start with the venv interpreter and bind exactly LISTEN_HOST and LISTEN_PORT.
+    local -a argv; read -r -a argv <<<"$PROCESS_ARGV"
+    [[ ${argv[0]:-} == "$VENV/bin/python3" ]] || die "PROCESS_ARGV must start with $VENV/bin/python3"
+    [[ " $PROCESS_ARGV " == *" --host $LISTEN_HOST "* && " $PROCESS_ARGV " == *" --port $LISTEN_PORT "* ]] \
+        || die "PROCESS_ARGV must bind --host $LISTEN_HOST --port $LISTEN_PORT"
+    [[ $PROCESS_ARGV != *"$RELEASE_PARENT/$RELEASE_PREFIX"* ]] || die "PROCESS_ARGV must not name a release directory (the release is the process cwd)"
     NEW_RELEASE=$RELEASE_PARENT/$RELEASE_PREFIX$RELEASE_SHORT
     OLD_RELEASE_EXPECTED=$RELEASE_PARENT/$RELEASE_PREFIX$PREVIOUS_SHORT
     NEW_CWD=$NEW_RELEASE/candidate
@@ -116,6 +123,24 @@ dropin_paths()  { systemctl show -p DropInPaths --value "$SERVICE" | tr ' ' '\n'
 unit_execstart() { systemctl show -p ExecStart --value "$SERVICE" | { grep -o 'argv\[\]=[^;]*' || true; } | sed -e 's/^argv\[\]=//' -e 's/[[:space:]]*$//'; }
 proc_cwd()      { [[ $1 =~ ^[1-9][0-9]*$ ]] && readlink "/proc/$1/cwd"; }
 proc_cmdline()  { [[ $1 =~ ^[1-9][0-9]*$ ]] && tr '\0' ' ' <"/proc/$1/cmdline" | sed 's/ $//'; }
+# The process argv is exactly PROCESS_ARGV: same number of arguments, each identical (an argument
+# containing a space cannot pass, because the counts would differ). Not a substring test.
+proc_argv_ok() {
+    local -a actual expected
+    [[ $1 =~ ^[1-9][0-9]*$ ]] || return 1
+    mapfile -d '' -t actual <"/proc/$1/cmdline" || return 1
+    read -r -a expected <<<"$PROCESS_ARGV"
+    ((${#actual[@]} == ${#expected[@]})) || return 1
+    local i
+    for i in "${!expected[@]}"; do [[ ${actual[$i]} == "${expected[$i]}" ]] || return 1; done
+}
+# The process executable is the venv interpreter (resolved), i.e. the image the launcher exec'd into.
+proc_exe_ok() { [[ "$(readlink "/proc/$1/exe" 2>/dev/null)" == "$(readlink -f -- "$VENV_PYTHON")" ]]; }
+# Names (never values) of environment variables that point into another release directory.
+proc_env_other_releases() {   # proc_env_other_releases <pid> <release dir>
+    tr '\0' '\n' <"/proc/$1/environ" | { grep -F -- "$RELEASE_PARENT/$RELEASE_PREFIX" || true; } \
+        | { grep -vF -- "$2/" || true; } | { grep -vE "=$2\$" || true; } | cut -d= -f1 | sort -u | tr '\n' ' '
+}
 proc_env()      { tr '\0' '\n' <"/proc/$1/environ" | sed -n "/^$2=/{s/^$2=//p;q;}"; }
 proc_has_env()  { local e; e=$(tr '\0' '\n' <"/proc/$1/environ"); [[ $'\n'$e == *$'\n'"$2="* ]]; }
 config_hash()   { tr '\0' '\n' <"/proc/$1/environ" | { grep -E "$CONFIG_VARS" || true; } | LC_ALL=C sort | sha256sum | cut -d' ' -f1; }
@@ -148,6 +173,26 @@ dropin_snapshot() {
 pointer_body() { printf '[Service]\nWorkingDirectory=%s/candidate\nExecStart=\nExecStart=%s\n' "$1" "$(launch_cmd "$1")"; }
 is_pointer_for() {   # is_pointer_for <file> <release dir>
     [[ -f $1 && ! -L $1 ]] && cmp -s <(grep -v '^#' "$1") <(pointer_body "$2")
+}
+# The release a drop-in points at, if it is exactly a release pointer (for any release directory,
+# existing or not); prints nothing otherwise.
+pointer_release() {
+    local wd
+    wd=$(sed -nE '/^WorkingDirectory=.*\/candidate$/{s/^WorkingDirectory=(.*)\/candidate$/\1/p;q;}' -- "$1")
+    [[ -n $wd ]] && is_pointer_for "$1" "$wd" && printf '%s' "$wd"
+    return 0
+}
+# Does a drop-in assign WorkingDirectory or ExecStart (the keys that select what runs and where)?
+dropin_sets_exec() { grep -Eq '^[[:space:]]*(WorkingDirectory|ExecStart)[[:space:]]*=' -- "$1"; }
+# Key names a drop-in assigns (never values), e.g. "Environment EnvironmentFile".
+dropin_keys() { sed -nE 's/^[[:space:]]*([A-Za-z][A-Za-z0-9]*)[[:space:]]*=.*/\1/p' -- "$1" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'; }
+# The EFFECTIVE release pointer: the last loaded drop-in that assigns WorkingDirectory or ExecStart.
+# It need not be the last drop-in: later drop-ins (such as provider-ceilings.conf) may follow it, as
+# long as they assign neither key. Prints nothing if no drop-in assigns them.
+effective_pointer() {
+    local path found=""
+    while IFS= read -r path; do dropin_sets_exec "$path" && found=$path; done < <(dropin_paths)
+    printf '%s' "$found"
 }
 
 # Assert the effective unit runs exactly <release dir>, before any restart.
@@ -206,11 +251,19 @@ verify_launcher() {   # verify_launcher <release dir> [expected sha256]
 
 # Migration head of a commit, from its revision files (revision not named as any down_revision).
 migration_head() {   # migration_head <dir> <commit>
-    local files revs downs
+    # Every revision file must declare exactly one revision; the result must be exactly one head.
+    local files f n revs="" downs="" head
     files=$(g "$1" ls-tree --name-only "$2" candidate/migrations/versions/ | grep '\.py$')
-    revs=$(for f in $files; do g "$1" show "$2:$f" | sed -nE 's/^revision = "([^"]+)".*/\1/p'; done | sort -u)
-    downs=$(for f in $files; do g "$1" show "$2:$f" | sed -nE 's/^down_revision = "([^"]+)".*/\1/p'; done | sort -u)
-    comm -23 <(echo "$revs") <(echo "$downs")
+    for f in $files; do
+        n=$(g "$1" show "$2:$f" | grep -cE '^revision = "[^"]+"' || true)
+        [[ $n == 1 ]] || die "migration head: $f declares $n revision lines"
+        revs+=$(g "$1" show "$2:$f" | sed -nE 's/^revision = "([^"]+)".*/\1/p')$'\n'
+        downs+=$(g "$1" show "$2:$f" | sed -nE 's/^down_revision = "([^"]+)".*/\1/p')$'\n'
+    done
+    [[ $(printf '%s' "$revs" | sort | uniq -d | wc -l) -eq 0 ]] || die "migration head: duplicate revision IDs"
+    head=$(comm -23 <(printf '%s' "$revs" | sed '/^$/d' | sort -u) <(printf '%s' "$downs" | sed '/^$/d' | sort -u))
+    [[ -n $head && $(wc -l <<<"$head") -eq 1 ]] || die "migration head: expected exactly one head, found [$(echo $head)]"
+    printf '%s\n' "$head"
 }
 
 # ---------------------------------------------------------------- health and identity
@@ -259,8 +312,17 @@ wait_healthy() {
 # The process actually running is <release dir> at <commit>: cwd, command line, launcher, Git tree.
 verify_running() {   # verify_running <pid> <release dir> <commit> <app blob>
     local pid=$1 release=$2
+    local others
     [[ "$(proc_cwd "$pid")" == "$release/candidate" ]] || die "process $pid cwd is not $release/candidate"
-    [[ "$(proc_cmdline "$pid")" == "$(launch_cmd "$release")" ]] || die "process $pid command line is not the release's launcher"
+    # The launcher exec()s the server, so the main process keeps systemd's PID but carries the
+    # server's argv: the approved invocation, exactly, run by the venv interpreter.
+    proc_argv_ok "$pid" || die "process $pid argv is not exactly the approved invocation: '$PROCESS_ARGV' (actual: '$(proc_cmdline "$pid")')"
+    proc_exe_ok "$pid" || die "process $pid executable is not $(readlink -f -- "$VENV_PYTHON")"
+    others=$(proc_env_other_releases "$pid" "$release")
+    [[ -z $others ]] || die "process $pid environment points into another release directory: $others"
+    # ...and systemd started it through this release's launcher.
+    [[ "$(unit_wd)" == "$release/candidate" && "$(unit_execstart)" == "$(launch_cmd "$release")" ]] \
+        || die "the unit's effective WorkingDirectory/ExecStart are not $release's launcher"
     verify_release_tree "$release" "$3"
     verify_launcher "$release"
     [[ "$(g "$release" rev-parse "$3:candidate/app_fastapi_candidate.py")" == "$4" ]] || die "application blob of $3 is not $4"
@@ -279,6 +341,21 @@ verify_flags() {   # verify_flags <pid>
         model=$(proc_env "$pid" OPENAI_MODEL)
         [[ $model == "$OPENAI_MODEL_ALLOWED" ]] || die "OPENAI_MODEL is not $OPENAI_MODEL_ALLOWED"
     fi
+}
+
+# Provider attempt ceilings in the live process: enabled, every provider limit an explicit integer;
+# ceiling_hash fingerprints all ceiling settings so "unchanged" is proven without printing values.
+readonly CEILING_VARS='^KALILLAC_(PROVIDER_CEILINGS_ENABLED|ANONYMOUS_ABUSE_ENABLED|ANONYMOUS_SESSION_[A-Z_]+|(OPENAI|BRAVE|TAVILY)_(TOTAL_ATTEMPTS|ANONYMOUS_ATTEMPTS|PERIOD_SECONDS))='
+ceiling_hash() { tr '\0' '\n' <"/proc/$1/environ" | { grep -E "$CEILING_VARS" || true; } | LC_ALL=C sort | sha256sum | cut -d' ' -f1; }
+verify_ceilings() {   # verify_ceilings <pid>
+    local provider kind name
+    truthy "$(proc_env "$1" KALILLAC_PROVIDER_CEILINGS_ENABLED)" || die "provider attempt ceilings are not enabled"
+    for provider in OPENAI BRAVE TAVILY; do
+        for kind in TOTAL_ATTEMPTS ANONYMOUS_ATTEMPTS PERIOD_SECONDS; do
+            name=KALILLAC_${provider}_$kind
+            [[ "$(proc_env "$1" "$name")" =~ ^[0-9]{1,10}$ ]] || die "$name is not an explicit integer"
+        done
+    done
 }
 
 flag_report() {   # flag_report <pid>: names with on/off, and the allowlisted non-secret values
@@ -348,14 +425,17 @@ verify_public() {   # public health and /app/ through the edge (GET only, cache-
     body=$(curl -sS --proto '=https' --max-time 20 -H 'Cache-Control: no-cache' "$PUBLIC_BASE$HEALTH_PATH?$bust") || die "public health request failed"
     [[ $body == "$HEALTH_BODY" ]] || die "public health body is not $HEALTH_BODY"
     key=$(grep -m1 -oE 'app\.js\?v=[A-Za-z0-9._-]+' "$WEBROOT/app/index.html")
-    curl -sS --proto '=https' --max-time 20 -H 'Cache-Control: no-cache' "$PUBLIC_BASE/app/?$bust" | grep -qF "$key" \
-        || die "public /app/ does not reference $key"
+    [[ -n $key ]] || die "web root /app/index.html has no app.js cache key"
+    # Body captured first: piping curl into grep -q can fail under pipefail (SIGPIPE) after a match.
+    body=$(curl -sS --proto '=https' --max-time 20 -H 'Cache-Control: no-cache' "$PUBLIC_BASE/app/?$bust") || die "public /app/ request failed"
+    [[ $body == *"$key"* ]] || die "public /app/ does not reference $key"
 }
 
 # ---------------------------------------------------------------- the live release
 # identify_live <expected release dir> <commit> <app blob>
-# Sets LIVE_PID, LIVE_RELEASE. Proves, from the running process and its Git tree (not from health
-# alone), that the service runs exactly the expected release, healthy, with the required flags.
+# Sets LIVE_PID, LIVE_RELEASE, LIVE_POINTER. Proves, from the running process, its Git tree and
+# systemd's loaded drop-ins (not from health alone), that the service runs exactly the expected
+# release through a recognised release pointer, healthy, with the required flags and ceilings.
 identify_live() {
     local unit
     systemctl is-active --quiet "$SERVICE" || die "$SERVICE is not active"
@@ -369,6 +449,14 @@ identify_live() {
     listener_owned_by "$LIVE_PID" || die "port $LISTEN_PORT is not held by the main process $LIVE_PID"
     health_ok || die "local health is not $HEALTH_BODY"
     verify_flags "$LIVE_PID"
+    verify_ceilings "$LIVE_PID"
+    # The effective pointer is found by content, not by position: later drop-ins that assign neither
+    # WorkingDirectory nor ExecStart (such as provider-ceilings.conf) may follow it.
+    LIVE_POINTER=$(effective_pointer)
+    [[ -n $LIVE_POINTER ]] || die "no loaded drop-in assigns WorkingDirectory/ExecStart: no release pointer found"
+    [[ "$(dirname "$LIVE_POINTER")" == "$DROPIN_DIR" ]] || die "the effective release pointer $LIVE_POINTER is outside $DROPIN_DIR"
+    is_pointer_for "$LIVE_POINTER" "$LIVE_RELEASE" \
+        || die "the last drop-in assigning WorkingDirectory/ExecStart, $LIVE_POINTER, is not exactly the release pointer for $LIVE_RELEASE (unknown override)"
 }
 
 # ---------------------------------------------------------------- the release pointer and rollback
@@ -390,7 +478,7 @@ restore_pointer() {
 # Restores the previous drop-ins, reloads systemd, proves the effective unit is the previous release
 # again and then either restarts and proves the previous release is what runs (yes), or proves the
 # original, never-restarted process is still the one serving (no). Returns 0 only when every check
-# holds. Needs OLD_* state, ROLLBACK_DIR, OLD_POINTER, NEW_POINTER.
+# holds. Needs OLD_* state (incl. OLD_CEILING_HASH), ROLLBACK_DIR, OLD_POINTER, NEW_POINTER.
 rollback_to_previous() {
     local restart=$1 ok=1 pid ref
     log "ROLLBACK: restoring drop-ins from $ROLLBACK_DIR"
@@ -421,8 +509,9 @@ rollback_to_previous() {
         log "ROLLBACK: running process $pid is $OLD_RELEASE at $PREVIOUS_COMMIT (tracked files exact)"
     else ok=0; fi
     if ((ok)) && [[ "$(sha256 "$OLD_RELEASE/$LAUNCHER_NAME")" == "$OLD_LAUNCHER_SHA" ]]; then :; else ok=0; fi
-    if ((ok)) && [[ "$(config_hash "$pid")" == "$OLD_CONFIG_HASH" ]] && (verify_flags "$pid"); then
-        log "ROLLBACK: configuration identical to before; feature flags as required"
+    if ((ok)) && [[ "$(config_hash "$pid")" == "$OLD_CONFIG_HASH" ]] && (verify_flags "$pid") \
+        && [[ "$(ceiling_hash "$pid")" == "$OLD_CEILING_HASH" ]] && (verify_ceilings "$pid"); then
+        log "ROLLBACK: configuration identical to before; feature flags as required; provider ceilings enabled and unchanged"
     else ok=0; fi
     if ((ok)) && listener_owned_by "$pid" && health_ok; then log "ROLLBACK: local health $HEALTH_BODY from pid $pid"; else ok=0; fi
     if [[ "$(webroot_hash)" == "$OLD_WEBROOT_HASH" ]]; then log "ROLLBACK: web root unchanged"; else log "ROLLBACK: web root differs"; ok=0; fi

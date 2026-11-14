@@ -5,14 +5,20 @@
 #   bash activate.sh 2>&1 | tee "activate-$(date -u +%Y%m%dT%H%M%SZ).log"
 #
 # Production changes, and nothing else:
-#   * the release pointer drop-in: the current pointer (the last drop-in systemd loads, which must be
-#     exactly "[Service] WorkingDirectory=<previous>/candidate, ExecStart=, ExecStart=<venv python>
-#     <previous>/launch-production.py") is replaced by ONE pointer to the new release. The number of
-#     drop-ins does not grow: the pointer lives at a stable name (<z...>-kalillac-active-release.conf)
-#     that later releases rewrite in place; a legacy per-release pointer is moved into the rollback
-#     directory. No unit file, other drop-in, environment file or flag is edited.
+#   * the release pointer drop-in. The EFFECTIVE pointer is the last loaded drop-in that assigns
+#     WorkingDirectory or ExecStart (not necessarily the last drop-in: production loads
+#     provider-ceilings.conf after it). It must be exactly "[Service] WorkingDirectory=<previous>/
+#     candidate, ExecStart=, ExecStart=<venv python> <previous>/launch-production.py". It is replaced
+#     by ONE pointer to the new release at the same position in the load order: a stable name
+#     (<same z prefix>-kalillac-active-release.conf) that later releases rewrite in place. A legacy
+#     per-release pointer is moved into the rollback directory, so the drop-in count does not grow.
+#     Every other drop-in (including provider-ceilings.conf), unit file, environment file and flag is
+#     left byte-for-byte as it is and verified so.
 #   * one restart of the service.
-# Before the restart, the effective WorkingDirectory and ExecStart are read back from systemd.
+# Before the restart, systemd's drop-in list and the effective WorkingDirectory and ExecStart are read
+# back. After it, the main process (the launcher has exec'd the server in place) must carry exactly
+# the approved argv (PROCESS_ARGV) from the release directory, hold the port, and keep the flags and
+# provider ceilings it had before.
 # The web root, Nginx, the database and its schema are not touched; the previous release directory is
 # kept and verified as the rollback target.
 #
@@ -21,8 +27,8 @@
 #   pointer/reloaded  -> drop-ins restored and reloaded; the original process was never restarted and
 #                        is verified to be still serving.
 #   restarted         -> drop-ins restored, reloaded, previous release restarted, and the running process
-#                        verified (cwd, command line, Git HEAD and every tracked file, launcher,
-#                        configuration hash, flags, health).
+#                        verified (cwd, exact argv, executable, Git HEAD and every tracked file, launcher,
+#                        configuration and provider-ceiling hashes, flags, listener, health).
 # ROLLBACK_RECOVERED is printed only when all of that holds; otherwise ROLLBACK_INCOMPLETE.
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 load_all_conf
@@ -87,29 +93,46 @@ log "staged: $NEW_RELEASE at $RELEASE_COMMIT verified by content; launcher ident
 app_preflight "$OLD_PID" "$NEW_RELEASE"
 db_check
 
-# The current release pointer must be recognised exactly; anything else is not ours to change.
+# The effective release pointer (identify_live: the last drop-in assigning WorkingDirectory or
+# ExecStart, recognised exactly). Drop-ins loaded after it, such as provider-ceilings.conf, assign
+# neither key; they are kept byte-for-byte and must still load after the new pointer.
+OLD_POINTER=$LIVE_POINTER
 mapfile -t DROPINS < <(dropin_paths)
-((${#DROPINS[@]} > 0)) || die "the unit has no drop-ins: no release pointer to replace"
-OLD_POINTER=${DROPINS[-1]}
-[[ "$(dirname "$OLD_POINTER")" == "$DROPIN_DIR" ]] || die "the last drop-in $OLD_POINTER is outside $DROPIN_DIR"
-is_pointer_for "$OLD_POINTER" "$OLD_RELEASE" || die "the last drop-in $OLD_POINTER is not exactly the release pointer for $OLD_RELEASE; refusing to add or change an override"
-if [[ "$(basename "$OLD_POINTER")" =~ ^z+${POINTER_SUFFIX//./\\.}$ ]]; then
+idx=-1
+for i in "${!DROPINS[@]}"; do [[ ${DROPINS[$i]} == "$OLD_POINTER" ]] && idx=$i; done
+((idx >= 0)) || die "the effective pointer is not among the loaded drop-ins"
+for path in "${DROPINS[@]:idx+1}"; do
+    ! dropin_sets_exec "$path" || die "$path assigns WorkingDirectory/ExecStart after the pointer"
+    log "later drop-in kept byte-for-byte and still loaded after the pointer: $(basename "$path") (assigns: $(dropin_keys "$path"))"
+done
+# Stable pointer name at exactly the old pointer's place in the load order: same z prefix, fixed
+# suffix. Later releases rewrite it in place, so no per-release override accumulates.
+old_base=$(basename "$OLD_POINTER")
+if [[ $old_base =~ ^z+${POINTER_SUFFIX//./\\.}$ ]]; then
     NEW_POINTER=$OLD_POINTER
 else
-    longest=0
-    for path in "${DROPINS[@]}"; do
-        base=$(basename "$path"); zs=${base%%[!z]*}
-        ((${#zs} > longest)) && longest=${#zs}
-    done
-    NEW_POINTER=$DROPIN_DIR/$(printf 'z%.0s' $(seq 1 $((longest + 1))))$POINTER_SUFFIX
-    [[ ! -e $NEW_POINTER ]] || die "$NEW_POINTER already exists but is not loaded last"
+    zs=${old_base%%[!z]*}
+    ((${#zs} > 0)) || die "the current pointer name $old_base has no z prefix; no stable name can take its place"
+    NEW_POINTER=$DROPIN_DIR/$zs$POINTER_SUFFIX
+    [[ ! -e $NEW_POINTER ]] || die "$NEW_POINTER already exists but is not the effective pointer"
+    for path in "${DROPINS[@]}"; do [[ $(basename "$path") != "$(basename "$NEW_POINTER")" ]] || die "a drop-in named $(basename "$NEW_POINTER") is already loaded"; done
 fi
+EXPECTED_DROPINS=("${DROPINS[@]}")
+EXPECTED_DROPINS[idx]=$NEW_POINTER
+# systemd applies drop-ins in file-name order. Refuse unless the current order is plain byte order
+# and the new name keeps every drop-in where it was (verified again from systemd after the reload).
+names_in_order() { local p; for p in "$@"; do basename "$p"; done; }
+[[ "$(names_in_order "${DROPINS[@]}")" == "$(names_in_order "${DROPINS[@]}" | LC_ALL=C sort)" ]] \
+    || die "the loaded drop-ins are not in byte order of their names; cannot predict where a new pointer would load"
+[[ "$(names_in_order "${EXPECTED_DROPINS[@]}")" == "$(names_in_order "${EXPECTED_DROPINS[@]}" | LC_ALL=C sort)" ]] \
+    || die "the stable pointer name $(basename "$NEW_POINTER") would not take the current pointer's place in the load order"
 POINTER_TMP=$DROPIN_DIR/.kalillac-active-release-$TS.tmp
 BEFORE_DROPINS=$(dropin_snapshot)
 BEFORE_UNIT_FP=$(unit_fingerprint)
+OLD_CEILING_HASH=$(ceiling_hash "$OLD_PID")
 [[ ! -e $ROLLBACK_DIR && ! -e $POINTER_TMP ]] || die "a target path already exists"
-log "current pointer: $OLD_POINTER -> $OLD_RELEASE"
-log "new pointer:     $NEW_POINTER -> $NEW_RELEASE ($([[ $NEW_POINTER == "$OLD_POINTER" ]] && echo 'rewritten in place' || echo 'replaces the legacy per-release pointer; drop-in count unchanged'))"
+log "effective pointer: $OLD_POINTER -> $OLD_RELEASE (drop-in $((idx + 1)) of ${#DROPINS[@]})"
+log "new pointer:       $NEW_POINTER -> $NEW_RELEASE, same position ($([[ $NEW_POINTER == "$OLD_POINTER" ]] && echo 'rewritten in place' || echo 'replaces the legacy per-release pointer; drop-in count unchanged'))"
 log "Preflight passed: $OLD_RELEASE ($PREVIOUS_SHORT) -> $NEW_RELEASE ($RELEASE_SHORT)"
 
 # ================================================================ backups (no production change)
@@ -129,6 +152,7 @@ printf '%s\n' "$BEFORE_DROPINS" >"$ROLLBACK_DIR/state/dropins.before"
     echo "old_release=$OLD_RELEASE"
     echo "old_launcher_sha256=$OLD_LAUNCHER_SHA"
     echo "old_config_sha256=$OLD_CONFIG_HASH"
+    echo "old_ceiling_sha256=$OLD_CEILING_HASH"
     echo "old_webroot_sha256=$OLD_WEBROOT_HASH"
     echo "old_pointer=$OLD_POINTER"
     echo "new_pointer=$NEW_POINTER"
@@ -158,12 +182,15 @@ log "pointer installed: $NEW_POINTER"
 PHASE=reloaded
 systemctl daemon-reload
 verify_effective_unit "$NEW_RELEASE"
-[[ "$(dropin_paths | tail -n 1)" == "$NEW_POINTER" ]] || die "systemd does not load $NEW_POINTER last"
+[[ "$(dropin_paths)" == "$(printf '%s\n' "${EXPECTED_DROPINS[@]}")" ]] \
+    || die "systemd's loaded drop-ins are not exactly the previous ones with the pointer replaced in place"
+[[ "$(effective_pointer)" == "$NEW_POINTER" ]] || die "the effective pointer is not $NEW_POINTER"
 [[ "$(dropin_snapshot | grep -vF "  $NEW_POINTER" || true)" == "$(printf '%s\n' "$BEFORE_DROPINS" | grep -vF "  $OLD_POINTER" || true)" ]] \
     || die "drop-ins other than the pointer changed"
 [[ "$(unit_fingerprint)" == "$BEFORE_UNIT_FP" ]] || die "unit settings other than WorkingDirectory/ExecStart changed"
 [[ "$(main_pid)" == "$OLD_PID" ]] || die "the main process changed during reload"
-log "effective unit verified BEFORE restart: WorkingDirectory=$NEW_CWD; ExecStart=$(launch_cmd "$NEW_RELEASE") (single entry)"
+log "effective unit verified BEFORE restart: WorkingDirectory=$NEW_CWD; ExecStart=$(launch_cmd "$NEW_RELEASE") (single entry);"
+log "  all other drop-ins byte-identical and in the same order; other unit settings unchanged"
 
 # ================================================================ restart
 PHASE=restarted
@@ -179,6 +206,9 @@ verify_running "$NEW_PID" "$NEW_RELEASE" "$RELEASE_COMMIT" "$APP_BLOB"
 cmp -s "$OLD_RELEASE/$LAUNCHER_NAME" "$NEW_RELEASE/$LAUNCHER_NAME" || die "launchers differ"
 [[ "$(config_hash "$NEW_PID")" == "$OLD_CONFIG_HASH" ]] || die "provider/feature configuration changed across the restart"
 verify_flags "$NEW_PID"
+verify_ceilings "$NEW_PID"
+[[ "$(ceiling_hash "$NEW_PID")" == "$OLD_CEILING_HASH" ]] || die "provider ceiling settings changed across the restart"
+listener_owned_by "$NEW_PID" || die "port $LISTEN_PORT is not held by $NEW_PID"
 [[ "$(webroot_hash)" == "$OLD_WEBROOT_HASH" ]] || die "web root changed"
 verify_inactive_routes
 verify_public
@@ -187,7 +217,8 @@ verify_release_tree "$OLD_RELEASE" "$PREVIOUS_COMMIT"
 [[ "$(sha256 "$OLD_RELEASE/$LAUNCHER_NAME")" == "$OLD_LAUNCHER_SHA" ]] || die "previous release launcher changed"
 wait_healthy "$NEW_CWD" same "$NEW_PID" || die "the new release did not stay healthy"
 log "verified: process $NEW_PID runs $NEW_RELEASE at $RELEASE_COMMIT (tracked files exact, launcher identical);"
-log "  configuration hash unchanged; flags:"
+log "  argv exactly the approved invocation; executable $(readlink -f -- "$VENV_PYTHON"); listener owned by $NEW_PID"
+log "  provider ceilings enabled, settings unchanged (hash); configuration hash unchanged; flags:"
 flag_report "$NEW_PID"
 log "  inactive routes 404; web root unchanged; previous release intact and verified by content"
 

@@ -45,20 +45,41 @@ also requires the operator to pin its sha256 (`LAUNCHER_SHA256`, printed by `che
 `activate.sh` accepts only a directory produced by `stage.sh` (a marker inside `.git`, outside the
 worktree, records the commit, launcher hash and ownership).
 
-The running release is identified from the service's main process (`/proc/<pid>/cwd`, its command
-line, the port's listener) and its Git content, never from a health response alone.
+## Process identity (the launcher execs the server)
+
+systemd starts `<venv>/bin/python3 <release>/launch-production.py`; the launcher replaces itself with
+the server (`exec`), keeping the PID, so the unit's main process carries the server's argv, not the
+launcher's. The running release is proven by all of the following, never by a health response alone:
+
+* the unit's effective `WorkingDirectory` is `<release>/candidate` and its single `ExecStart` is
+  `<venv>/bin/python3 <release>/launch-production.py` (the approved launcher);
+* the main process's argv is **exactly** `PROCESS_ARGV` (`production.env`: the observed
+  `… uvicorn app_fastapi_candidate:api --host 127.0.0.1 --port 8001 --workers 1`), compared argument by
+  argument, never as a substring; its executable is the resolved venv interpreter; its cwd is
+  `<release>/candidate`; no environment variable points into another release directory;
+* the port's listener belongs to that process;
+* the release's Git HEAD and every tracked file, and the launcher's content, mode and owner.
 
 ## The release pointer drop-in
 
-Earlier releases each added a new drop-in (`zzzzzzzz-release-<a>.conf`, `zzzzzzzzzzzzzzzz-release-<b>.conf`,
-...), so the number of overrides grew with every release. `activate.sh` instead:
+Earlier releases each added a new drop-in (`z…z-release-<a>.conf` with a longer z prefix each time),
+so overrides accumulated. Production also loads `z…z-provider-ceilings.conf` (z-run 96) **after** the
+current pointer (z-run 80), so the pointer is not the last drop-in. `activate.sh`:
 
-* requires the last drop-in systemd loads to be **exactly** the pointer for the running release
-  (`[Service]`, `WorkingDirectory=<release>/candidate`, `ExecStart=`, `ExecStart=<venv python> <release>/launch-production.py`);
-  any other last drop-in is an uncontrolled override and is refused;
-* replaces it with one pointer at a stable name, `z…z-kalillac-active-release.conf` (sorting after every
-  other drop-in). A legacy per-release pointer is moved into the rollback directory, so the drop-in
+* finds the **effective** pointer by content: the last loaded drop-in that assigns `WorkingDirectory`
+  or `ExecStart`. It must be **exactly** the pointer for the running release (`[Service]`,
+  `WorkingDirectory=<release>/candidate`, `ExecStart=`, `ExecStart=<venv python> <release>/launch-production.py`);
+  anything else (for example a later override that assigns either key, even to the same value) is an
+  unknown override and is refused. Drop-ins after it that assign neither key, such as
+  `provider-ceilings.conf`, are reported by key name and kept byte-for-byte;
+* replaces it with one pointer at a stable name **at the same position in the load order**: the same
+  z prefix with the suffix `-kalillac-active-release.conf` (in production between the f126a245 pointer and
+  `provider-ceilings.conf`). It refuses if the current order is not byte order of file names or if the
+  name would move. A legacy per-release pointer is moved into the rollback directory, so the drop-in
   count does not grow; later releases rewrite the stable pointer in place;
+* after the reload, requires systemd's drop-in list to be exactly the previous list with only the
+  pointer replaced, and the provider ceilings (enabled, all nine limits, values by hash) to be
+  unchanged in the new process;
 * refuses to start if systemd reports `NeedDaemonReload=yes` (unreviewed unit changes would be applied);
 * after `daemon-reload` and **before restarting**, reads back the effective `WorkingDirectory` and
   `ExecStart` (exactly one entry), confirms every other drop-in is byte-identical and every other unit
@@ -72,7 +93,7 @@ Older, already-overridden pointer drop-ins are left as they are; removing them i
 |---|---|
 | Any preflight check (before the first change) | `FAILED_BEFORE_PRODUCTION_CHANGE`; no reload, no restart. |
 | After the pointer swap, before the restart (including Ctrl-C / SSH drop) | Drop-ins restored byte-for-byte, reload, effective unit verified; the original process was never restarted and is verified still serving. `ROLLBACK_RECOVERED`. |
-| After the restart | Drop-ins restored, reload, effective unit verified before restarting, previous release restarted, and the running process verified: cwd, command line, HEAD and every tracked file, launcher, configuration hash, flags, listener, health. `ROLLBACK_RECOVERED` only if all hold; otherwise `ROLLBACK_INCOMPLETE`. |
+| After the restart | Drop-ins restored, reload, effective unit verified before restarting, previous release restarted, and the running process verified: cwd, exact argv, executable, HEAD and every tracked file, launcher, configuration and provider-ceiling hashes, flags, listener, health. `ROLLBACK_RECOVERED` only if all hold; otherwise `ROLLBACK_INCOMPLETE`. |
 
 Health after a restart means: unit active, a new main PID whose cwd is the release, the port held by
 that PID, and `{"status":"ok"}` for 3 consecutive checks 2 s apart, within `HEALTH_TIMEOUT_SECONDS`
@@ -98,7 +119,8 @@ bash check.sh | tail -n 1                                                 # 6. A
 ```
 
 Step 2 must show: running release `/opt/kalillac-release-f347e50f`, HEAD `f347e50f…`, tracked files
-exact, effective unit = that release, the last drop-in marked `pointer -> /opt/kalillac-release-f347e50f`,
+exact, effective unit = that release, the f347e50f drop-in marked `EFFECTIVE release pointer`, `provider-ceilings.conf`
+after it marked with key names only, `argv = the approved invocation`, provider ceilings enabled,
 every `FLAGS_OFF` flag off and `FLAGS_ON` flag on, database revision `0015_finance_ledger` with three
 empty Financial Safeguards tables, and the launcher line `root:root 600 sha256 <hash>`; compare that
 hash with the one recorded for the f347e50f launcher. The only expected problem is the leftover
@@ -123,6 +145,7 @@ python -m pytest deploy/release/tests/test_preflight.py -v
 ```
 
 The disposable test uses a uniquely named transient unit (`/run/systemd/system/kalillac-deploytest-<id>.service`),
-real Git clones of f347e50f and 54e38ecf from the package bundle, and a stub launcher; the packaged
+real Git clones of f347e50f and 54e38ecf, a launcher that execs a stand-in uvicorn, and drop-ins named
+like production's with provider-ceilings.conf after the pointer; the packaged
 scripts run unmodified, pointed at a `disposable-test` environment file that `lib.sh` refuses to accept
 with production names or paths. `.github/workflows/deploy-tooling-verification.yml` runs both suites.

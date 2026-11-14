@@ -20,12 +20,17 @@ pid=$(main_pid)
 echo "  state=$(active_state) main_pid=$pid need_daemon_reload=$(need_reload)"
 echo "  WorkingDirectory=$(unit_wd)"
 unit_execstart | sed 's/^/  ExecStart: /'
-echo "  drop-ins (load order):"
+echo "  drop-ins (load order; key names only, never values):"
+effective=$(effective_pointer)
 while IFS= read -r path; do
-    kind=other
-    for r in "$RELEASE_PARENT/$RELEASE_PREFIX"*; do is_pointer_for "$path" "$r" && kind="pointer -> $r"; done
+    target=$(pointer_release "$path"); kind=${target:+pointer -> $target}
+    if [[ $path == "$effective" ]]; then kind="EFFECTIVE release ${kind:-override, NOT a recognised pointer}"
+    elif [[ -n $kind ]]; then kind="$kind (overridden)"
+    else kind="assigns: $(dropin_keys "$path")"; fi
     echo "    $(sha256 "$path" | cut -c1-12)  $path  [$kind]"
 done < <(dropin_paths)
+[[ -n $effective ]] && is_pointer_for "$effective" "$(dirname "$(unit_wd)")" \
+    || note "the effective WorkingDirectory/ExecStart drop-in is not a recognised release pointer"
 loaded=$(dropin_paths)
 for path in "$DROPIN_DIR"/* "$DROPIN_DIR"/.[!.]*; do
     [[ -e $path ]] || continue
@@ -36,7 +41,15 @@ for unit in $REQUIRED_UNITS; do echo "  $unit: $(systemctl is-active "$unit")"; 
 echo "== running process"
 cwd=$(proc_cwd "$pid" 2>/dev/null); running=$(dirname "${cwd:-/none/x}")
 echo "  cwd=$cwd"
-[[ "$(proc_cmdline "$pid" 2>/dev/null)" == "$(launch_cmd "$running")" ]] && echo "  command line = the release launcher" || note "command line is not $(launch_cmd "$running")"
+echo "  argv: $(proc_cmdline "$pid" 2>/dev/null)"
+proc_argv_ok "$pid" && echo "  argv = the approved invocation (the launcher exec'd it)" || note "argv is not exactly: $PROCESS_ARGV"
+proc_exe_ok "$pid" && echo "  executable = $(readlink -f -- "$VENV_PYTHON")" || note "executable is not $(readlink -f -- "$VENV_PYTHON")"
+# Informational: variables naming the running release directory itself (values never printed). If
+# the launcher sets them from a fixed path rather than from its working directory, a new release
+# would inherit the old path; activate.sh then refuses after the restart and rolls back.
+self_refs=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | { grep -F -- "$running" || true; } | cut -d= -f1 | sort -u | tr '\n' ' ')
+echo "  environment variables naming the running release directory: ${self_refs:-none}"
+try verify_ceilings "$pid" && echo "  provider ceilings: enabled, openai/brave/tavily limits explicit" || note "provider ceilings not as required"
 listener_owned_by "$pid" && echo "  port $LISTEN_PORT held by pid $pid" || note "port $LISTEN_PORT is not held by pid $pid"
 health_ok && echo "  local health $HEALTH_BODY" || note "local health is not $HEALTH_BODY"
 echo "  flags:"; flag_report "$pid" 2>/dev/null | sed 's/^/  /'
