@@ -7,8 +7,8 @@
 #   * drop-ins named exactly like production's (z-runs 64, 72, 80): legacy pointers for 3ef0956a and
 #     f126a245, the current f347e50f pointer, and provider-ceilings.conf (z-run 96) loaded AFTER the
 #     pointer and carrying the provider attempt ceilings;
-#   * configuration from Environment= drop-ins AND an EnvironmentFile, plus one variable the launcher
-#     adds before exec (approved through LAUNCHER_ENV_VARS);
+#   * configuration from Environment= drop-ins AND an EnvironmentFile, plus BRAVE_API_KEY, which (as in
+#     production) only the launcher sets before exec, approved through LAUNCHER_ENV_VARS=BRAVE_API_KEY;
 #   * the server imports a real release module, so releases hold interpreter-written bytecode.
 #
 #   sudo bash deploy/release/tests/disposable-systemd.sh <package dir> [<evidence dir>]
@@ -166,7 +166,7 @@ LAUNCHER_OWNER=root:root
 LAUNCHER_MODE=600
 DEPLOY_ARTIFACTS=launch-production.py
 PROCESS_ARGV=$ARGV
-LAUNCHER_ENV_VARS=KDT_LAUNCHER_MARK
+LAUNCHER_ENV_VARS=BRAVE_API_KEY
 REQUIRED_UNITS=
 PUBLIC_BASE=
 APP_PREFLIGHT=skip
@@ -190,6 +190,7 @@ RESEND_API_KEY='$SENTINEL'
 KDT_TAMPER_MARK=$T/tamper-executed
 EOF
 chmod 600 "$ENVFILE"; cp -p "$ENVFILE" "$T/service.env.orig"
+(umask 077; echo "$SENTINEL-brave" >"$T/brave.key")   # synthetic credential, read only by the launcher
 mkdir -p "$DROPIN"
 cat >"$UNIT" <<EOF
 [Unit]
@@ -207,7 +208,7 @@ Environment=KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED=true
 Environment=KALILLAC_SEARCH_PRIMARY=brave KALILLAC_SEARCH_FALLBACK=tavily
 Environment=KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED=false KALILLAC_ACCOUNTS_ENABLED=false KALILLAC_BILLING_ENABLED=false
 Environment=OPENAI_API_KEY=$SENTINEL STRIPE_SECRET_KEY=$SENTINEL KALILLAC_DB_PASSWORD=$SENTINEL
-Environment=KDT_VENV=$VENV KDT_PORT=$PORT KDT_FAULT_FILE=$FAULTS KDT_STARTUP_SECONDS=3
+Environment=KDT_VENV=$VENV KDT_PORT=$PORT KDT_FAULT_FILE=$FAULTS KDT_STARTUP_SECONDS=3 KDT_BRAVE_KEY_FILE=$T/brave.key
 EnvironmentFile=$ENVFILE
 EOF
 pointer "$T/opt/kalillac-release-3ef0956a" >"$P3EF"
@@ -219,7 +220,6 @@ Environment=KALILLAC_PROVIDER_CEILINGS_ENABLED=true
 Environment=KALILLAC_OPENAI_TOTAL_ATTEMPTS=500 KALILLAC_OPENAI_ANONYMOUS_ATTEMPTS=200 KALILLAC_OPENAI_PERIOD_SECONDS=86400
 Environment=KALILLAC_BRAVE_TOTAL_ATTEMPTS=300 KALILLAC_BRAVE_ANONYMOUS_ATTEMPTS=100 KALILLAC_BRAVE_PERIOD_SECONDS=86400
 Environment=KALILLAC_TAVILY_TOTAL_ATTEMPTS=200 KALILLAC_TAVILY_ANONYMOUS_ATTEMPTS=50 KALILLAC_TAVILY_PERIOD_SECONDS=86400
-Environment=BRAVE_API_KEY=$SENTINEL
 EOF
 chmod 644 "$DROPIN"/*.conf
 CEIL_SHA=$(sha256sum <"$PCEIL")
@@ -233,7 +233,8 @@ check "ExecStart names the launcher" bash -c "systemctl show -p ExecStart --valu
 check "the main process exec'd into the approved uvicorn argv (same PID as systemd started)" test "$(argv_now)" == "$ARGV"
 check "provider-ceilings.conf loads AFTER the f347e50f pointer (and last)" test "$(loaded | tail -n 2 | tr '\n' ' ')" == "$PF34 $PCEIL "
 check "the provider ceilings come from provider-ceilings.conf and are on" test "$(echo "$CEILINGS0" | wc -l)" -eq 10
-check "the launcher added KDT_LAUNCHER_MARK before exec" test "$(env_of "$P" KDT_LAUNCHER_MARK)" == 1
+check "the launcher set BRAVE_API_KEY before exec (synthetic value)" test "$(env_of "$P" BRAVE_API_KEY)" == "$SENTINEL-brave"
+check "  ...and systemd's next-start configuration does not contain it"     bash -c "! systemctl show -p Environment --value '$SERVICE' | grep -q BRAVE_API_KEY && ! grep -q BRAVE_API_KEY '$ENVFILE' && ! systemctl show-environment | grep -q BRAVE_API_KEY"
 check "EnvironmentFile values reached the process" test "$(env_of "$P" KDT_QUOTED)" == "two words"
 check "the running release holds interpreter-written bytecode" test -f "$(pyc_of "$OLD")"
 
@@ -245,7 +246,7 @@ check "the f347e50f pointer is identified as the EFFECTIVE pointer (not the last
     logged check-initial "$(basename "$PF34")  [EFFECTIVE release pointer -> $OLD]"
 check "provider-ceilings.conf shown with key names only" logged check-initial "$(basename "$PCEIL")  [assigns: Environment]"
 check "argv recognised as the approved invocation" logged check-initial "argv = the approved invocation"
-check "next start = running process, launcher-supplied KDT_LAUNCHER_MARK recognised" logged check-initial "launcher-supplied: KDT_LAUNCHER_MARK"
+check "approved: next start = running process, launcher-supplied BRAVE_API_KEY recognised" logged check-initial "launcher-supplied: BRAVE_API_KEY;"
 check "launcher sha256 printed for pinning" logged check-initial "$LAUNCHER_SHA"
 check "check.sh changed nothing" untouched "$P" "$SNAP0"
 
@@ -355,10 +356,37 @@ restore_envfile
 systemctl set-environment KALILLAC_USAGE_METERING_ENABLED=true
 drift_refused manager-usage "KALILLAC_USAGE_METERING_ENABLED would be ON"
 systemctl unset-environment KALILLAC_USAGE_METERING_ENABLED
-sed 's/^LAUNCHER_ENV_VARS=.*/LAUNCHER_ENV_VARS=/' "$T/test.env" >"$T/test-nolauncher.env"
-KDT_ENV=$T/test-nolauncher.env run act-launcher-var activate.sh
-check "a variable the launcher adds without approval is refused (named)" logged act-launcher-var "added by the launcher without approval): KDT_LAUNCHER_MARK"
-check "  before any change" refused_before_change act-launcher-var "$P" "$SNAP0"
+section "5c-1. launcher-supplied BRAVE_API_KEY passes only when exactly that name is approved"
+for variant in "none:" "other:TAVILY_API_KEY" "lowercase:brave_api_key"; do
+    label=${variant%%:*}
+    sed "s/^LAUNCHER_ENV_VARS=.*/LAUNCHER_ENV_VARS=${variant#*:}/" "$T/test.env" >"$T/test-launcher-$label.env"
+    KDT_ENV=$T/test-launcher-$label.env run "act-brave-$label" activate.sh
+    check "approved [${variant#*:}]: BRAVE_API_KEY refused as added by the launcher without approval"         logged "act-brave-$label" "added by the launcher without approval): BRAVE_API_KEY"
+    check "  before any change" refused_before_change "act-brave-$label" "$P" "$SNAP0"
+done
+for variant in 'BRAVE_*' 'BRAVE_API_KEY*'; do
+    sed "s/^LAUNCHER_ENV_VARS=.*/LAUNCHER_ENV_VARS=$variant/" "$T/test.env" >"$T/test-launcher-glob.env"
+    KDT_ENV=$T/test-launcher-glob.env run check-launcher-glob check.sh
+    check "a wildcard approval ($variant) is not accepted" logged check-launcher-glob "LAUNCHER_ENV_VARS: invalid name $variant"
+done
+for name in OPENAI_API_KEY KALILLAC_BILLING_ENABLED OPENAI_MODEL PYTHONPATH; do
+    sed "s/^LAUNCHER_ENV_VARS=.*/LAUNCHER_ENV_VARS=BRAVE_API_KEY $name/" "$T/test.env" >"$T/test-launcher-forbidden.env"
+    KDT_ENV=$T/test-launcher-forbidden.env run check-launcher-forbidden check.sh
+    check "$name can never be approved as launcher-supplied" logged check-launcher-forbidden "LAUNCHER_ENV_VARS may not contain $name"
+done
+launcher_refused() {   # launcher_refused <fault> <expected text>: the live launcher misbehaves; refused before any change
+    local fault=$1 text=$2 p s
+    echo "$fault kalillac-release-f347e50f" >"$FAULTS"; restart_service; p=$(pid_now); s=$(snap)
+    run "act-launcher-$fault" activate.sh
+    check "launcher $fault (BRAVE_API_KEY approved): refused naming the variable" logged "act-launcher-$fault" "$text"
+    check "  before any change" refused_before_change "act-launcher-$fault" "$p" "$s"
+    : >"$FAULTS"; restart_service
+}
+launcher_refused extraenv "added by the launcher without approval): TAVILY_API_KEY"
+launcher_refused overridekey "pending change) for: OPENAI_API_KEY"
+launcher_refused overrideflag "KALILLAC_BILLING_ENABLED is enabled (must be off)"
+P=$(pid_now)
+check "  service back to the approved state (same drop-ins, ceilings, BRAVE_API_KEY from the launcher)"     test "$(snap)" == "$SNAP0" -a "$(ceilings_of "$P")" == "$CEILINGS0" -a "$(env_of "$P" BRAVE_API_KEY)" == "$SENTINEL-brave"
 sed 's/^LAUNCHER_ENV_VARS=.*/LAUNCHER_ENV_VARS=KALILLAC_PROVIDER_CEILINGS_ENABLED/' "$T/test.env" >"$T/test-badlauncher.env"
 KDT_ENV=$T/test-badlauncher.env run check-badlauncher check.sh
 check "a ceiling name can never be declared launcher-supplied" logged check-badlauncher "LAUNCHER_ENV_VARS may not contain KALILLAC_PROVIDER_CEILINGS_ENABLED"

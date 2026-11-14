@@ -58,8 +58,10 @@ state over D-Bus (`busctl --json`): manager environment, then `Environment=`, th
 * the policy to hold for the next start: every `FLAGS_OFF` flag off, every `FLAGS_ON` flag on,
   `FLAG_VALUES` exact, `OPENAI_MODEL` unset or approved, provider ceilings on with all nine limits;
 * the next-start environment to equal the running process's, except per-start names systemd
-  generates and names in `LAUNCHER_ENV_VARS` (variables the launcher adds before `exec`; empty in
-  production; a flag, ceiling, model, `PYTHON*`, `LD_*` or `PATH` name can never be listed);
+  generates and names in `LAUNCHER_ENV_VARS` (exact names the launcher adds or overrides before
+  `exec`, values not compared; in production exactly `BRAVE_API_KEY`, which the production launcher
+  sets itself (read-only evidence recorded in `production.env`); no wildcard, and a flag, ceiling,
+  model, `PYTHON*`, `LD_*`, `OPENAI_*`, `KALILLAC_*` or `PATH` name can never be listed);
 * during activation and rollback, equality with the snapshot approved at activation
   (`state/env.approved`: names and per-variable SHA-256, no value).
 

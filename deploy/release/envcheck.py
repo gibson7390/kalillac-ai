@@ -182,6 +182,26 @@ def policy(env, args):
         raise Refuse("next start: " + "; ".join(problems))
 
 
+def compare(env, running, launcher):
+    """Next-start environment `env` against a running process's environment `running`.
+
+    Only names in `launcher` (exact names approved through LAUNCHER_ENV_VARS) may be added or
+    overridden by the launcher; their values are not compared. Every other declared name must have
+    the same value in the process (a different or missing value is a pending change, or an
+    unapproved launcher override or removal), and the process may hold no other name except those
+    systemd generates per start. Returns the launcher-supplied names present; raises Refuse naming
+    the offending variables, never their values.
+    """
+    pending = sorted(n for n in env if n not in launcher and running.get(n) != env[n])
+    if pending:
+        raise Refuse("next-start value differs from the running process (pending change) for: " + " ".join(pending))
+    extra = sorted(n for n in running if n not in env and n not in GENERATED and n not in launcher)
+    if extra:
+        raise Refuse("set in the running process but not in the next-start configuration "
+                     "(removed, or added by the launcher without approval): " + " ".join(extra))
+    return sorted(n for n in running if n in launcher)
+
+
 def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument("--service", required=True)
@@ -200,15 +220,7 @@ def main(argv):
         policy(env, args)
         notes = []
         if args.pid:
-            running = running_environment(args.pid)
-            pending = sorted(n for n in env if n not in launcher and running.get(n) != env[n])
-            if pending:
-                raise Refuse("next-start value differs from the running process (pending change) for: " + " ".join(pending))
-            extra = sorted(n for n in running if n not in env and n not in GENERATED and n not in launcher)
-            if extra:
-                raise Refuse("set in the running process but not in the next-start configuration "
-                             "(removed, or added by the launcher without approval): " + " ".join(extra))
-            supplied = sorted(n for n in running if n in launcher)
+            supplied = compare(env, running_environment(args.pid), launcher)
             notes.append("= running process; launcher-supplied: " + (" ".join(supplied) or "none"))
         current = snapshot(env)
         if args.approved:

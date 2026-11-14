@@ -148,3 +148,47 @@ def test_git_directory_is_not_scanned(tmp_path):
     root, _ = release(tmp_path)
     (root / ".git" / "x.pyc").write_bytes(b"\0" * 32)
     assert bytecheck.check(str(root)) == "BYTECODE_OK 0"
+
+
+# ------------------------------------------------------------------ launcher-supplied variables
+# systemd's next-start configuration (no BRAVE_API_KEY) and a process whose launcher added one.
+DECLARED = {"PATH": "/usr/bin", "OPENAI_API_KEY": "sk-declared", "KALILLAC_BILLING_ENABLED": "false",
+            "KALILLAC_PROVIDER_CEILINGS_ENABLED": "true"}
+RUNNING = {**DECLARED, "BRAVE_API_KEY": "brave-synthetic-secret", "INVOCATION_ID": "x", "JOURNAL_STREAM": "1:2"}
+
+
+def refusal(env, running, launcher):
+    with pytest.raises(envcheck.Refuse) as refused:
+        envcheck.compare(env, running, set(launcher))
+    message = str(refused.value)
+    assert "secret" not in message and "sk-" not in message and "synthetic" not in message
+    return message
+
+
+def test_launcher_brave_key_passes_when_exactly_approved():
+    assert envcheck.compare(DECLARED, RUNNING, {"BRAVE_API_KEY"}) == ["BRAVE_API_KEY"]
+
+
+@pytest.mark.parametrize("approved", [set(), {"TAVILY_API_KEY"}, {"brave_api_key"}, {"BRAVE_API"}, {"BRAVE_API_KEY_2"}])
+def test_launcher_brave_key_refused_unless_exactly_approved(approved):
+    assert refusal(DECLARED, RUNNING, approved).endswith("without approval): BRAVE_API_KEY")
+
+
+@pytest.mark.parametrize("change, text", [
+    ({"TAVILY_API_KEY": "tvly-synthetic-secret"}, "without approval): TAVILY_API_KEY"),    # another credential
+    ({"OPENAI_API_KEY": "sk-override"}, "pending change) for: OPENAI_API_KEY"),            # override of a declared one
+    ({"KALILLAC_BILLING_ENABLED": "true"}, "pending change) for: KALILLAC_BILLING_ENABLED"),
+    ({"PYTHONPATH": "/opt/kalillac-release-f126a245/candidate"}, "without approval): PYTHONPATH"),
+])
+def test_other_launcher_additions_and_overrides_still_refused(change, text):
+    assert text in refusal(DECLARED, {**RUNNING, **change}, {"BRAVE_API_KEY"})
+
+
+def test_launcher_removing_a_declared_variable_is_refused():
+    running = {k: v for k, v in RUNNING.items() if k != "KALILLAC_PROVIDER_CEILINGS_ENABLED"}
+    assert "pending change) for: KALILLAC_PROVIDER_CEILINGS_ENABLED" in refusal(DECLARED, running, {"BRAVE_API_KEY"})
+
+
+def test_pending_systemd_change_still_detected_with_brave_approved():
+    pending = {**DECLARED, "KALILLAC_BILLING_ENABLED": "true"}   # reloaded drop-in, not yet in the process
+    assert "pending change) for: KALILLAC_BILLING_ENABLED" in refusal(pending, RUNNING, {"BRAVE_API_KEY"})
