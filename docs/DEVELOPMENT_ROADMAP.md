@@ -53,9 +53,9 @@ discarded, or name anything in it that should be kept.
 | # | Milestone | State | Notes |
 |---|---|---|---|
 | 1 | Financial Safeguards V1 | **DEVELOPMENT VERIFIED**, off in production | Activation proposal written; tooling update and owner decisions outstanding |
-| 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis is the next action |
+| 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part (test-mode foundation), off | Not yet re-verified in this record |
-| 4 | Reasoning toggle controls | Not started | Required Premium milestone; must first verify GPT-6 Luna's actual reasoning parameters |
+| 4 | Reasoning toggle controls | Not started | Required Premium milestone; provider capability verified (six effort levels) |
 | 5 | File creation, uploads, editing | Not started | Required Premium milestone |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
@@ -64,7 +64,7 @@ discarded, or name anything in it that should be kept.
 
 ### Milestone 1: Financial Safeguards V1
 
-Last verified commit: `a5ebb52a0435b7bd86df41bbd84feb9aac6e1604`.
+Last verified commit: `ee1564a6d84497b69509daf5f99ce2b1e38d4fb8` (implementation in `a5ebb52`).
 Reference: `candidate/FINANCIAL_SAFEGUARDS.md` (guarantees, failure matrix, configuration, operator
 command, activation and rollback).
 
@@ -110,9 +110,54 @@ rate limiting, account recovery, email verification through Resend, an unsafe-re
 the V1 security schema with private session revocation and issuance authorities (migrations
 `0012` to `0014`, in production schema, flag off).
 
-To establish next: which of suspension, account deletion, session invalidation on password change,
-enumeration resistance and CSRF coverage are complete end to end, and what a full synthetic
-account-lifecycle test still needs.
+Gap analysis against the directive (read from the code on 2026-11-14, not yet test-verified here):
+
+| Capability | State |
+|---|---|
+| Registration | Present twice. The legacy `/register` answers `409 email_already_registered`, which reveals whether an address is registered. The email-first v2 flow does not. Only v2 should ever be enabled. |
+| Login, logout, password hashing | Present. Argon2 behind a bounded work queue; equal work for unknown addresses; a fresh token on every sign-in; `HttpOnly`, `Secure`, `SameSite=Lax`, `__Host-` cookie; only the token digest is stored. |
+| Rate limiting and abuse prevention | Present for sign-in, registration, recovery and verification. In-process, correct for the single worker production runs. |
+| Password recovery, email verification | Present. Recovery revokes every session of the account. |
+| CSRF | Present: the unsafe-request guard checks origin on every unsafe account, billing and Spaces route (683 tests). |
+| Suspension | Partly. `is_active` is enforced at sign-in and on every session lookup, but **there is no operator command to suspend or reinstate an account**. |
+| Session invalidation by the customer ("sign out everywhere") | **Missing at the HTTP layer.** The database authority exists (`v1_revoke_sessions`, migration `0013`) and is unexposed. |
+| Password change while signed in | **Missing.** |
+| Account deletion | **Missing.** Only the `deletion_requested_at` column exists. Needs a retention decision from the owner. |
+| Full synthetic lifecycle test | **Missing** as one end-to-end test; the parts are tested separately. |
+
+**Dependency that blocks the missing items.** The account-security work follows a slice plan
+(V1-01, V1-02A to V1-02E) that is referenced in code and tests but is not recorded in the
+repository. Slices 02A to 02C are done: the schema and two private `SECURITY DEFINER` authorities,
+owned by an executor role and callable only by a service role, both `NOLOGIN` and
+operator-provisioned. Migration `0014` states that no production-wide guarantee holds "until V1-02E
+removes" the legacy route by which the runtime role writes sessions directly. Every missing item
+above changes session or account state, so each belongs behind those authorities, not on the legacy
+path the plan is retiring. Building them requires the plan for V1-02D and V1-02E (in particular how
+the application is meant to act as the service role) or the owner's agreement to a plan written
+from the code. See "Owner decisions required".
+
+### Milestone 4: reasoning controls (provider capability verified, not started)
+
+Verified on 2026-11-14 from OpenAI's model page for `gpt-6-luna`
+(`developers.openai.com/api/docs/models/gpt-6-luna`):
+
+* `reasoning.effort` accepts `none`, `low`, `medium` (the default), `high`, `xhigh` and `max`. A
+  three-level QUICK / BALANCED / DEEP control is therefore genuinely supported; no simulation is
+  needed. The application already sends `reasoning.effort` on the Responses API and currently
+  configures `low` (`OPENAI_REASONING_EFFORT`).
+* Limits: 1,050,000-token context, 128,000 maximum output tokens.
+* Published prices per million tokens: input $0.10, cached input $0.01, cache writes $0.125, output
+  $0.50; above 272,000 input tokens the whole request is billed at 2x input and cache rates and 1.5x
+  output. These equal the prices the finance tests configure. Batch, Flex, regional and Fast-mode
+  modifiers exist; the application pins the standard tier when Financial Safeguards are on.
+* Not stated on that page: that reasoning tokens are billed as output tokens, and that
+  `max_output_tokens` bounds reasoning and visible tokens together. `kalillac_finance/cost.py`
+  relies on both. Confirm them in the reasoning guide before activating Financial Safeguards.
+
+Design constraints already known: which effort each mode maps to is a product decision (owner);
+higher effort spends more of the same `max_output_tokens` on reasoning, so DEEP needs its own output
+ceiling and therefore a larger worst-case reservation, which the request ceiling must allow; mode
+permission must be checked in the backend from the verified entitlement.
 
 ## Known defects and environment limits
 
@@ -133,13 +178,19 @@ account-lifecycle test still needs.
 * The PostgreSQL suites refuse to run outside the disposable GitHub Actions job by design; there
   is no local PostgreSQL. Dispatch `provider-ceilings-postgres` on the branch instead.
 
-## Open verification
+## Regression evidence for `ee1564a`
 
-* Re-run `subscription-foundation-verification` on the commit that carries the fixture fix and
-  record the result here. Its steps after the failed one (protected registration files, later
-  slices) did not execute in run `43671452813`.
-* Local Windows regression, one file at a time: 100 of 126 files finished when this was written,
-  with no failure other than the environment limits listed above. Record the remainder.
+* `subscription-foundation-verification`, GitHub Actions run `43672294537` on `ee1564a`: **success**,
+  both jobs (Linux suites and the PostgreSQL job, which applies the whole migration chain).
+* `provider-ceilings-postgres`, run `43671417421` on `a5ebb52`: **success** (52 PostgreSQL tests and
+  323 finance tests, none skipped). `ee1564a` changes only a test fixture and this document.
+* Local Windows run of all 126 test files, one file at a time: 8,897 tests passed. Twelve files
+  skip some or all of their tests locally: the seven PostgreSQL suites (CI only, by design) and five
+  browser-driven frontend suites. The only failures are the environment limits listed above (built
+  site, provider configuration, Linux-only diagnostics).
+* Not run: `safety-helpfulness-regression` and `code-structure-frontend-verification` (they trigger
+  on pull requests; no pull request has been opened), and the deploy-tooling suite (no tooling file
+  changed).
 
 ## Owner decisions required
 
@@ -150,15 +201,28 @@ account-lifecycle test still needs.
    plus the OpenAI overhead tokens and Tavily credit maxima.
 3. **Migration `0016`:** approval to apply it to production.
 4. **Activation:** approval of the tooling update once written, and an activation window.
-5. **Uncommitted account worktree:** discard or keep (see above).
-6. **Free Chat smoke test:** the post-activation end-to-end test for `54e38ecf` is still unreported.
-7. Later milestones: subscription price, Stripe product and price IDs, billing interval, trial,
-   refund policy, Premium allowances. Nothing has been assumed.
+5. **Account-security slice plan:** supply the plan for V1-02D and V1-02E, or approve one being
+   written from the code. This is what Milestone 2's missing items wait on.
+6. **Account deletion:** what is deleted, what is retained (billing records, the financial ledger
+   holds no identity), and after how long.
+7. **Uncommitted account worktree:** discard or keep (see above).
+8. **Free Chat smoke test:** the post-activation end-to-end test for `54e38ecf` is still unreported.
+9. **Reasoning modes:** which `reasoning.effort` value QUICK, BALANCED and DEEP each use, and which
+   modes Free and Premium may select.
+10. Later milestones: subscription price, Stripe product and price IDs, billing interval, trial,
+    refund policy, Premium allowances. Nothing has been assumed.
 
 ## Next autonomous action
 
-1. Record the result of run `43671452813` and the local regression; fix anything they show.
-2. Milestone 2 gap analysis against the directive's required capabilities and threat list, then
-   implement the gaps with a full synthetic account-lifecycle test.
-3. In parallel when Milestone 1 activation is approved in principle: the release-tooling change for
-   an enforcement-on release, with its disposable-systemd tests.
+In this order; each is independent of the open owner decisions unless it says otherwise.
+
+1. Milestone 4 backend: a per-request reasoning mode that maps to a configured `reasoning.effort`
+   and output ceiling, validated in the backend, defaulting to today's behaviour, and priced through
+   the existing reservation so it cannot pass the request ceiling. The effort mapping and the
+   Free/Premium permissions stay configuration until owner decision 9.
+2. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
+3. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
+   password change and deletion behind the private authorities, then one end-to-end synthetic
+   lifecycle test.
+4. Milestone 5 generation core (PDF, DOCX, XLSX as real, validated files) can start without
+   accounts; download authorization and quotas need Milestone 2.
