@@ -7,8 +7,9 @@ memory or crash the API process:
 
   * hard wall-clock limit: the child is killed when it expires;
   * memory and CPU limits set by the child on itself before it touches any
-    input (POSIX only: on Windows there is no equivalent here, so the time
-    limit is the only bound; production runs on Linux);
+    input, after which it also forbids itself any new process or thread
+    (POSIX only: on Windows there is no equivalent here, so the time limit
+    is the only bound; production runs on Linux);
   * a concurrency cap: beyond MAX_CONCURRENT the call is refused, not queued;
   * a minimal environment: the child receives no variable of the parent's
     except what Python needs to start, so no provider key, database
@@ -70,7 +71,9 @@ def _command():
 
 
 def _environment():
-    return {name: os.environ[name] for name in _INHERITED if name in os.environ}
+    environment = {name: os.environ[name] for name in _INHERITED if name in os.environ}
+    environment["RAYON_NUM_THREADS"] = "2"  # The typesetter's thread pool: small and fixed.
+    return environment
 
 
 def _frame(header, payload=b""):
@@ -210,9 +213,14 @@ def _limit_self(memory, cpu_seconds):
     resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def _forbid_new_tasks():
+    """From here on the child can start no process and no thread."""
     try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))  # The child starts nothing.
-    except (ValueError, OSError):
+        import resource
+        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+    except (ImportError, ValueError, OSError):
         pass
 
 
@@ -224,9 +232,16 @@ def main():
         header = json.loads(stdin.read(length).decode("utf-8"))
         _limit_self(int(header["memory"]), int(header["cpu"]))
         # openpyxl imports numpy when it is installed, and numpy starts
-        # threads on import, which the limits above forbid (it hangs or
-        # aborts). Nothing here needs numpy: make the import fail cleanly.
+        # threads on import, which is forbidden below (it hangs or aborts).
+        # Nothing here needs numpy: make the import fail cleanly.
         sys.modules["numpy"] = None
+        if header.get("task") == "generate" and header.get("format") in ("pdf", "docx"):
+            # The typesetter runs on a small thread pool. It is started here, on
+            # nothing but a constant, before any customer data is read; after
+            # that no further thread or process can be created.
+            from .typeset import warm_up
+            warm_up()
+        _forbid_new_tasks()
         payload = stdin.read(max(MAX_SPEC_BYTES, MAX_UPLOAD_BYTES) + 1)
         from .intake import IntakeError, inspect
         from .generation import generate

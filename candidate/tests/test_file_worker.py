@@ -16,7 +16,8 @@ import pytest
 pytest.importorskip("pypdf")
 docx = pytest.importorskip("docx")
 openpyxl = pytest.importorskip("openpyxl")
-pytest.importorskip("reportlab")
+pytest.importorskip("typst")
+pytest.importorskip("pypdfium2")
 pytest.importorskip("lxml")
 
 from kalillac_files import generate, intake, worker  # noqa: E402
@@ -81,7 +82,7 @@ def test_intake_through_the_worker_matches_the_core():
 
 
 def test_core_refusals_pass_through_with_their_own_codes():
-    unsupported = {"title": "Plain", "blocks": [{"type": "paragraph", "text": "日本語"}]}
+    unsupported = {"title": "Plain", "blocks": [{"type": "paragraph", "text": "emoji \U0001f600"}]}
     assert refused(run_generate, unsupported, "pdf") == "pdf_unsupported_characters"
     assert refused(run_generate, {"title": "T", "blocks": []}, "docx") == "invalid_blocks"
     assert refused(run_generate, copy.deepcopy(WORKBOOK), "pdf") == "invalid_structure"
@@ -194,14 +195,16 @@ def test_the_child_inherits_no_secret_and_no_unlisted_variable(child, monkeypatc
         "reply({'ok': False, 'code': 'leaked' if leaked else 'clean'})\n")
     assert refused(run_generate, DOCUMENT, "txt") == "clean"
     [(_process, env)] = started
-    assert set(env) <= set(worker._INHERITED) and "synthetic-secret-value" not in env.values()
+    assert set(env) <= set(worker._INHERITED) | {"RAYON_NUM_THREADS"}
+    assert "synthetic-secret-value" not in env.values()
 
 
 def test_the_real_command_is_an_isolated_interpreter():
     command = worker._command()
     assert command[0] == sys.executable and command[1] == "-I" and command[2] == "-c"
     assert "worker.main()" in command[3] and os.path.isdir(os.path.join(command[4], "kalillac_files"))
-    assert set(worker._environment()) <= set(worker._INHERITED)
+    assert set(worker._environment()) <= set(worker._INHERITED) | {"RAYON_NUM_THREADS"}
+    assert worker._environment()["RAYON_NUM_THREADS"] == "2"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="memory limits are set with POSIX resource limits")

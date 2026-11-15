@@ -3,21 +3,20 @@
 The document libraries are imported inside the renderer that needs them, so
 importing this package costs nothing until a file is actually generated.
 
-PDF text coverage: PDF needs a font that contains every character. The only
-fonts available without adding a font file to the repository are the Bitstream
-Vera faces shipped inside reportlab, which cover Western European text. A
-document with any other character is refused (pdf_unsupported_characters)
-rather than rendered with missing glyphs. DOCX, XLSX and the text formats
-carry any Unicode text. A PDF table cell whose text is taller than a page is
-refused as well (pdf_layout_failed): a cell cannot continue on the next page.
+PDF is typeset by Typst through the Kalillac design template (typeset.py) and
+DOCX is written by docx_design.py; both carry the full document vocabulary
+(cover, contents, tables, callouts, metric cards, charts, steps and so on).
+Markdown and plain text are faithful, simpler renderings of the same
+document: a chart becomes its data table, a callout a quoted note.
 """
 import csv
 from datetime import date
 import io
 import json
-from xml.sax.saxutils import escape
 
-from .spec import Formula, Heading, ListBlock, PageBreak, Paragraph, SpecError, Table
+from . import charts
+from .spec import (Callout, Chart, Code, Comparison, Formula, Heading, ListBlock, Metrics, PageBreak, Paragraph,
+                   Quote, SpecError, Steps, Table, plain)
 
 # CSV: a text cell starting with one of these would be read as a formula by a
 # spreadsheet program; it is prefixed with an apostrophe (OWASP CSV injection).
@@ -26,129 +25,14 @@ NUMBER_FORMATS = {"text": "@", "number": "#,##0.00", "integer": "#,##0", "curren
                   "percent": "0.00%", "date": "yyyy-mm-dd"}
 
 
-# --- PDF ------------------------------------------------------------------------------------
-
-_PDF_FONTS = {}
-
-
-def _pdf_fonts():
-    """Register reportlab's bundled Vera faces once; returns the covered code points."""
-    if not _PDF_FONTS:
-        import os
-        import reportlab
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-        folder = os.path.join(os.path.dirname(reportlab.__file__), "fonts")
-        regular = TTFont("KalillacSans", os.path.join(folder, "Vera.ttf"))
-        bold = TTFont("KalillacSans-Bold", os.path.join(folder, "VeraBd.ttf"))
-        pdfmetrics.registerFont(regular)
-        pdfmetrics.registerFont(bold)
-        _PDF_FONTS["covered"] = frozenset(regular.face.charToGlyph) & frozenset(bold.face.charToGlyph)
-    return _PDF_FONTS["covered"]
-
-
-def _pdf_text(text, covered):
-    if any(ord(char) not in covered and char not in "\n\t" for char in text):
-        raise SpecError("pdf_unsupported_characters")
-    return escape(text.replace("\t", "    ")).replace("\n", "<br/>")
-
-
 def render_pdf(document):
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.platypus import ListFlowable, ListItem, PageBreak as Break, Paragraph as Para
-    from reportlab.platypus import SimpleDocTemplate, Spacer, Table as Grid, TableStyle
-    from reportlab.platypus.doctemplate import LayoutError
-    covered = _pdf_fonts()
-    body = ParagraphStyle("body", fontName="KalillacSans", fontSize=10.5, leading=15, spaceAfter=7)
-    cell = ParagraphStyle("cell", parent=body, fontSize=9, leading=12, spaceAfter=0)
-    head = ParagraphStyle("head", parent=cell, fontName="KalillacSans-Bold")
-    headings = {0: ParagraphStyle("title", parent=body, fontName="KalillacSans-Bold", fontSize=20, leading=25,
-                                  spaceAfter=14),
-                1: ParagraphStyle("h1", parent=body, fontName="KalillacSans-Bold", fontSize=15, leading=20,
-                                  spaceBefore=10, spaceAfter=8),
-                2: ParagraphStyle("h2", parent=body, fontName="KalillacSans-Bold", fontSize=12.5, leading=17,
-                                  spaceBefore=8, spaceAfter=6),
-                3: ParagraphStyle("h3", parent=body, fontName="KalillacSans-Bold", fontSize=11, leading=15,
-                                  spaceBefore=6, spaceAfter=5)}
-    story = [Para(_pdf_text(document.title, covered), headings[0])]
-    for block in document.blocks:
-        if type(block) is Heading:
-            story.append(Para(_pdf_text(block.text, covered), headings[block.level]))
-        elif type(block) is Paragraph:
-            story.append(Para(_pdf_text(block.text, covered), body))
-        elif type(block) is ListBlock:
-            items = [ListItem(Para(_pdf_text(item, covered), body), leftIndent=14) for item in block.items]
-            story.append(ListFlowable(items, bulletType="1" if block.ordered else "bullet",
-                                      bulletFontName="KalillacSans", bulletFontSize=10, leftIndent=16))
-            story.append(Spacer(1, 4))
-        elif type(block) is Table:
-            data = [[Para(_pdf_text(value, covered), head) for value in block.header]]
-            data += [[Para(_pdf_text(value, covered), cell) for value in row] for row in block.rows]
-            grid = Grid(data, repeatRows=1, colWidths=[(A4[0] - 40 * mm) / len(block.header)] * len(block.header))
-            grid.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#9aa0a6")),
-                                      ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef0f2")),
-                                      ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                                      ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4)]))
-            story.append(grid)
-            story.append(Spacer(1, 8))
-        elif type(block) is PageBreak:
-            story.append(Break())
-    buffer = io.BytesIO()
-    template = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm, topMargin=20 * mm,
-                                 bottomMargin=20 * mm, title=document.title, author="Kalillac AI",
-                                 creator="Kalillac AI", invariant=1)
-    try:
-        template.build(story)
-    except LayoutError:
-        # A table cell cannot continue on the next page, so a cell taller
-        # than a page has no layout. Refused rather than truncated.
-        raise SpecError("pdf_layout_failed") from None
-    return buffer.getvalue()
-
-
-# --- DOCX -----------------------------------------------------------------------------------
+    from .typeset import typeset
+    return typeset(document)
 
 
 def render_docx(document):
-    from docx import Document as Word
-    from docx.enum.text import WD_BREAK
-    word = Word()
-    word.core_properties.title = document.title
-    word.core_properties.author = "Kalillac AI"
-    word.add_heading(document.title, level=0)
-    for block in document.blocks:
-        if type(block) is Heading:
-            word.add_heading(block.text, level=block.level)
-        elif type(block) is Paragraph:
-            for part in block.text.split("\n\n"):
-                paragraph = word.add_paragraph()
-                lines = part.split("\n")
-                for index, line in enumerate(lines):
-                    run = paragraph.add_run(line)
-                    if index < len(lines) - 1:
-                        run.add_break()
-        elif type(block) is ListBlock:
-            style = "List Number" if block.ordered else "List Bullet"
-            for item in block.items:
-                word.add_paragraph(item.replace("\n", " "), style=style)
-        elif type(block) is Table:
-            table = word.add_table(rows=1, cols=len(block.header))
-            table.style = "Table Grid"
-            for index, value in enumerate(block.header):
-                table.rows[0].cells[index].paragraphs[0].add_run(value).bold = True
-            for row in block.rows:
-                cells = table.add_row().cells
-                for index, value in enumerate(row):
-                    cells[index].text = value
-            word.add_paragraph()
-        elif type(block) is PageBreak:
-            word.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
-    buffer = io.BytesIO()
-    word.save(buffer)
-    return buffer.getvalue()
+    from .docx_design import write_docx
+    return write_docx(document)
 
 
 # --- XLSX -----------------------------------------------------------------------------------
@@ -224,41 +108,131 @@ def _markdown_cell(text):
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
 
 
+def _markdown_runs(runs):
+    out = []
+    for run in runs:
+        text = run.text
+        if run.code:
+            out.append("`" + text.replace("`", "'") + "`")
+            continue
+        for mark in ("\\", "*", "_", "`"):
+            text = text.replace(mark, "\\" + mark)
+        if run.bold and run.italic:
+            text = "***" + text + "***"
+        elif run.bold:
+            text = "**" + text + "**"
+        elif run.italic:
+            text = "*" + text + "*"
+        out.append(text)
+    return "".join(out)
+
+
+def chart_table(chart):
+    """The data of a chart as (header, rows): what a format without graphics can still say exactly."""
+    header = ["", *(series.name for series in chart.series)]
+    rows = [[name, *("" if series.values[index] is None
+                     else charts.format_value(series.values[index], chart.prefix, chart.suffix)
+                     for series in chart.series)] for index, name in enumerate(chart.categories)]
+    return header, rows
+
+
+def _markdown_table(header, rows):
+    lines = ["| " + " | ".join(_markdown_cell(value) for value in header) + " |", "|" + " --- |" * len(header)]
+    lines += ["| " + " | ".join(_markdown_cell(value) for value in row) + " |" for row in rows]
+    return lines
+
+
 def render_markdown(document):
     lines = ["# " + document.title, ""]
+    if document.subtitle:
+        lines += ["*" + document.subtitle + "*", ""]
+    meta = [value for value in (document.organization, document.author, document.date) if value]
+    if meta:
+        lines += [" \u00b7 ".join(meta), ""]
+    if document.summary:
+        lines += ["> " + document.summary.replace("\n", "\n> "), ""]
     for block in document.blocks:
-        if type(block) is Heading:
+        kind = type(block)
+        if kind is Heading:
             lines += ["#" * (block.level + 1) + " " + block.text, ""]
-        elif type(block) is Paragraph:
-            lines += [block.text, ""]
-        elif type(block) is ListBlock:
-            lines += [(f"{index}. " if block.ordered else "- ") + item.replace("\n", " ")
+        elif kind is Paragraph:
+            lines += [_markdown_runs(block.runs), ""]
+        elif kind is ListBlock:
+            lines += [(f"{index}. " if block.ordered else "- ") + _markdown_runs(item).replace("\n", " ")
                       for index, item in enumerate(block.items, start=1)] + [""]
-        elif type(block) is Table:
-            lines.append("| " + " | ".join(_markdown_cell(value) for value in block.header) + " |")
-            lines.append("|" + " --- |" * len(block.header))
-            lines += ["| " + " | ".join(_markdown_cell(value) for value in row) + " |" for row in block.rows]
-            lines.append("")
-        elif type(block) is PageBreak:
+        elif kind is Table:
+            if block.caption:
+                lines += ["*" + block.caption + "*", ""]
+            lines += _markdown_table(block.header, block.rows) + [""]
+        elif kind is Callout:
+            title = f"**{block.title}** " if block.title else ""
+            lines += ["> " + title + _markdown_runs(block.runs).replace("\n", "\n> "), ""]
+        elif kind is Metrics:
+            lines += _markdown_table(["Metric", "Value", "Detail"],
+                                     [[m.label, m.value, m.detail or ""] for m in block.items]) + [""]
+        elif kind is Chart:
+            if block.title:
+                lines += ["**" + block.title + "**", ""]
+            lines += _markdown_table(*chart_table(block)) + [""]
+            if block.caption:
+                lines += ["*" + block.caption + "*", ""]
+        elif kind is Quote:
+            lines += ["> " + block.text.replace("\n", "\n> ")]
+            lines += (["> ", "> \u2014 " + block.attribution] if block.attribution else []) + [""]
+        elif kind is Code:
+            fence = "````" if "```" in block.text else "```"
+            lines += [fence + (block.language or ""), block.text, fence, ""]
+        elif kind is Steps:
+            lines += [f"{index}. **{step.title}**" + (f" {step.text}" if step.text else "")
+                      for index, step in enumerate(block.items, start=1)] + [""]
+        elif kind is Comparison:
+            for column in block.columns:
+                lines += ["**" + column.title + "**", ""] + ["- " + item for item in column.items] + [""]
+        elif kind is PageBreak:
             lines += ["---", ""]
     return "\n".join(lines).rstrip("\n").encode("utf-8") + b"\n"
 
 
+def _text_table(header, rows):
+    return ["\t".join(header)] + ["\t".join(value.replace("\n", " ").replace("\t", " ") for value in row)
+                                  for row in rows]
+
+
 def render_text(document):
     lines = [document.title, "=" * min(len(document.title), 78), ""]
+    if document.subtitle:
+        lines += [document.subtitle, ""]
+    if document.summary:
+        lines += [document.summary, ""]
     for block in document.blocks:
-        if type(block) is Heading:
+        kind = type(block)
+        if kind is Heading:
             lines += [block.text, ("-" if block.level > 1 else "=") * min(len(block.text), 78), ""]
-        elif type(block) is Paragraph:
+        elif kind is Paragraph:
             lines += [block.text, ""]
-        elif type(block) is ListBlock:
+        elif kind is ListBlock:
             lines += [(f"{index}. " if block.ordered else "* ") + item.replace("\n", " ")
-                      for index, item in enumerate(block.items, start=1)] + [""]
-        elif type(block) is Table:
-            lines.append("\t".join(block.header))
-            lines += ["\t".join(value.replace("\n", " ").replace("\t", " ") for value in row) for row in block.rows]
-            lines.append("")
-        elif type(block) is PageBreak:
+                      for index, item in enumerate(block.texts, start=1)] + [""]
+        elif kind is Table:
+            lines += ([block.caption] if block.caption else []) + _text_table(block.header, block.rows) + [""]
+        elif kind is Callout:
+            lines += [(block.title + ": " if block.title else "") + plain(block.runs), ""]
+        elif kind is Metrics:
+            lines += [f"{m.label}: {m.value}" + (f" ({m.detail})" if m.detail else "") for m in block.items] + [""]
+        elif kind is Chart:
+            lines += ([block.title] if block.title else []) + _text_table(*chart_table(block))
+            lines += ([block.caption] if block.caption else []) + [""]
+        elif kind is Quote:
+            lines += ['"' + block.text + '"' + (f" \u2014 {block.attribution}" if block.attribution else ""), ""]
+        elif kind is Code:
+            lines += [block.text, ""]
+        elif kind is Steps:
+            lines += [f"{index}. {step.title}" + (f": {step.text}" if step.text else "")
+                      for index, step in enumerate(block.items, start=1)] + [""]
+        elif kind is Comparison:
+            for column in block.columns:
+                lines += [column.title] + ["* " + item for item in column.items] + [""]
+        elif kind is PageBreak:
             lines += ["", ""]
     return "\n".join(lines).rstrip("\n").encode("utf-8") + b"\n"
 

@@ -13,12 +13,48 @@ Status: **cores and worker implemented and development verified. Not reachable f
 Nothing imports `kalillac_files`, no route exposes it, and the production dependency lock is
 unchanged. Storage, downloads, quotas, editing and the interface are not built (see "Not built").
 
+## Design system
+
+Documents share one design system across PDF and Word: the Kalillac palette (navy, blue, quiet
+greys), Inter for text and headings (Source Serif 4 for the optional "editorial" theme), JetBrains
+Mono for code, and Noto faces for Arabic, Hebrew, Devanagari, Thai, Chinese, Japanese and Korean.
+Every font is SIL Open Font License, pinned to its publisher's release and verified by SHA-256
+(`kalillac_files/fonts/manifest.json`, licenses beside it). Chinese, Japanese and Korean faces are
+too large to commit and are fetched and verified by `tools/fetch_document_fonts.py`.
+
+A document can carry: a cover page; a contents page; a summary panel; three heading levels;
+paragraphs and list items with bold, italic and inline code; tables with captions, right-aligned
+quantities and an emphasised total row; callouts in five tones; rows of metric cards with trend
+marks; charts (column, bar, stacked column, line, area, donut); pull quotes; code blocks;
+numbered steps; side-by-side comparisons; and page breaks.
+
+**PDF** is typeset by Typst (`typeset.py`, `templates/document.typ`): running header with the
+current section, "Page X of Y" footer, bookmarks and a tagged, accessible PDF, subsetted embedded
+fonts, the Unicode bidirectional algorithm with mirrored layout for right-to-left documents, and
+charts as vector art with alternative text. The document arrives as JSON data, never as markup.
+
+**Word** (`docx_design.py`) uses real named styles, a refreshable table-of-contents field, a
+section header that follows the current Heading 1, page-number fields, tables that repeat their
+header and do not split rows, charts as images with alternative text and numbered captions, and the
+Inter faces embedded in the file so it looks the same on any machine. Right-to-left documents are
+mirrored and carry their own complex-script font, also embedded.
+
+**Charts** (`charts.py`) are drawn deterministically: round axis steps that include zero, compact
+values ("$4.2M"), labels measured with the real font so they are shortened rather than overlapping,
+and a bounds check that every mark stays on its canvas.
+
+**Layout inspection** (`quality.py`) reads every generated PDF back with PDFium and refuses one with
+text past a margin, a blank page in the middle or missing glyphs. Hostile content (unbreakable URLs
+and words, twelve-column tables, very long numbers and labels) is made to fit: long tokens get
+invisible break points, tables and metric values step their type down, and code shrinks to fit its
+longest line before anything wraps.
+
 ## Formats
 
 | Format | From | Supported |
 |---|---|---|
-| PDF | document | Title, three heading levels, paragraphs, bulleted and numbered lists, tables that repeat their header across pages, page breaks. **Western European text only** (see limits) |
-| DOCX | document | The same structure as real Word styles (Title, Heading 1 to 3, List Bullet, List Number, Table Grid), editable, any Unicode text |
+| PDF | document | The whole design system above. Text in any bundled script; a character no bundled font has (emoji, historic scripts) is refused as `pdf_unsupported_characters` |
+| DOCX | document | The whole design system above, editable, any Unicode text |
 | XLSX | workbook | Several sheets, bold frozen header row, column widths, number formats (number, integer, currency, percent, date, text), real dates, formulas from an allowlist |
 | CSV | workbook | One sheet, UTF-8 with a byte order mark, formula-injection guard |
 | Markdown, TXT | document | Plain renderings of the same document |
@@ -54,9 +90,10 @@ A refused specification raises `SpecError` with a stable code (`invalid_table`, 
 ## Safety properties, each with a test
 
 * **Valid files.** Every PDF, DOCX and XLSX produced in the tests is opened again with an
-  independent reader (pypdf, python-docx, openpyxl) and its content, structure, styles, formulas,
-  number formats and archive integrity are checked.
-* **No markup or code execution.** PDF text is escaped, so `<b>` appears literally. A spreadsheet
+  independent reader (PDFium, pypdf, python-docx, openpyxl) and its content, structure, styles,
+  formulas, number formats and archive integrity are checked.
+* **No markup or code execution.** Document text is passed to the typesetter as data, so `<b>` or
+  `#set page(...)` appears literally. A spreadsheet
   text cell is stored as text whatever it starts with; only an explicit `{"formula": ...}` becomes a
   formula.
 * **Formula allowlist.** A formula may use cell references, operators and about a hundred functions
@@ -81,19 +118,22 @@ A refused specification raises `SpecError` with a stable code (`invalid_table`, 
 | Cell text / formula | 2,000 / 500 characters |
 | Generated file | 10 MB |
 
-Measured on the development machine at these maxima: PDF 1.6 s, DOCX 2.0 s, XLSX 2.1 s. Earlier,
-looser limits allowed a 71-second PDF and a 96 MB workbook build, which is why they are this tight.
+A six-page illustrated report typesets in about one second; the Word version takes about two.
+Earlier, looser limits allowed a 71-second PDF and a 96 MB workbook build, which is why they are
+this tight. Word files are about 1.2 MB because the Inter faces are embedded in full, so that text
+the reader adds later still uses them.
 
 Known format limits:
 
-* **PDF text coverage.** The only fonts available without adding a font file to the repository are
-  the Bitstream Vera faces inside reportlab (about 280 characters: Western European). Any other
-  character is refused as `pdf_unsupported_characters`; the same document generates as DOCX.
-  Supporting more scripts means bundling a Unicode font, which is a licensing decision for the owner.
-* **PDF table cells** cannot continue on the next page. A cell taller than a page is refused as
-  `pdf_layout_failed`.
+* **Emoji and rare scripts** have no bundled font and are refused in PDF.
+* **Text layers of Arabic, Devanagari and Thai PDFs** do not survive copy-and-paste or search
+  letter-for-letter (the page itself is correct). Word's own PDF exports of the same text have the
+  same problem. Hebrew, Latin, Greek, Cyrillic and CJK extract correctly. The Word file carries the
+  exact text.
+* **Word layout** is computed by the program that opens the file, so pagination differs a little
+  between Word, LibreOffice and others. It has been rendered and inspected in Microsoft Word.
 * **Formulas are stored, not calculated.** The spreadsheet program computes them on opening.
-* No images, charts, hyperlinks, text styling within a paragraph, or page headers and footers.
+* No images supplied by the customer, no hyperlinks.
 
 ## Upload intake
 
@@ -168,9 +208,11 @@ code runs anywhere in this design.
 
 ## Dependencies
 
-`requirements-files.txt` pins reportlab 5.1.0 (BSD), python-docx 1.2.0 (MIT), openpyxl 3.1.5 (MIT),
-pypdf 7.1.0 (BSD, reads uploaded PDFs) and two further dependencies, lxml and et_xmlfile. Shipping
-this needs a new production Python environment built from the lock plus
+`requirements-files.txt` pins Typst 0.15.2 (Apache-2.0), fontTools 4.68.0 (MIT), pypdfium2 5.15.2
+(Apache-2.0/BSD-3, layout inspection and PDF reading), python-docx 1.2.0 (MIT), openpyxl 3.1.5 (MIT),
+pypdf 7.1.0 (BSD) and two further dependencies, lxml and et_xmlfile. The worker starts the
+typesetter's two-thread pool on a constant before it reads any input and only then forbids itself
+new threads. Shipping this needs a new production Python environment built from the lock plus
 `requirements-files.txt`; the current release procedure keeps the environment unchanged.
 
 ## Not built
@@ -181,10 +223,17 @@ this needs a new production Python environment built from the lock plus
 * Storage, download authorization, cleanup, quotas and cost accounting.
 * The model tool and the interface for requesting, uploading and downloading a file.
 * PowerPoint.
+* Spreadsheets in the design system (styled workbooks, charts, conditional formatting, validation):
+  the XLSX writer is still the plain one described above.
 
 ## Tests
 
-`tests/test_file_generation.py` (155), `tests/test_file_intake.py` (63) and
-`tests/test_file_worker.py` (31, with real child processes and real kills), run by
-`.github/workflows/file-generation-verification.yml`, which requires all 249 to run with none
-skipped.
+`tests/test_file_generation.py` (164), `tests/test_file_intake.py` (63),
+`tests/test_file_worker.py` (31, with real child processes and real kills) and
+`tests/test_document_design.py` (98: specification, charts, font integrity and licensing, layout
+soundness on benchmark and hostile content, multilingual and right-to-left output, Word structure),
+run by `.github/workflows/file-generation-verification.yml`, which fetches and verifies the fonts
+and requires all 356 to run with none skipped.
+
+Rendering through Microsoft Word itself is a manual development check (Word is not available in
+CI): the benchmark report and the Arabic document were opened, exported to PDF and inspected.

@@ -1,9 +1,14 @@
 # File generation and upload intake (candidate/kalillac_files). Not installed in
 # production: neither core is wired into the application, and
-# requirements-production-lock.txt is unchanged. Installing these on top of the
-# production lock adds only the six packages below; pillow,
-# charset-normalizer and typing_extensions are already pinned there.
-reportlab==5.1.0
+# requirements-production-lock.txt is unchanged. pillow, charset-normalizer and
+# typing_extensions are already pinned there.
+#
+# Typesetting: Typst renders PDFs through the Kalillac design template.
+typst==0.15.2
+# Reads font tables (coverage, Word font signatures) and draws chart metrics.
+fonttools==4.68.0
+# Reads every generated PDF back for layout inspection, and uploaded PDFs.
+pypdfium2==5.15.2
 python-docx==1.2.0
 openpyxl==3.1.5
 lxml==6.1.3

@@ -1,0 +1,309 @@
+{
+  "about": "Fonts the document generator typesets with. Every file is verified against sha256 before use; see tools/fetch_document_fonts.py. 'core' files are committed; 'cjk' files are fetched.",
+  "fonts": [
+    {
+      "file": "Inter-Regular.ttf",
+      "family": "Inter",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/Inter-Regular.ttf",
+      "sha256": "40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82"
+    },
+    {
+      "file": "Inter-Italic.ttf",
+      "family": "Inter",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/Inter-Italic.ttf",
+      "sha256": "bbc051dd204b5019a1aa0bc0ae2aa8a05ab13e7a3f979fa357631dc7feb6833a"
+    },
+    {
+      "file": "Inter-Medium.ttf",
+      "family": "Inter",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/Inter-Medium.ttf",
+      "sha256": "97ad806f526e41546d46365bb3a393145f75b7b1568913db74549ad8b8dba872"
+    },
+    {
+      "file": "Inter-SemiBold.ttf",
+      "family": "Inter",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/Inter-SemiBold.ttf",
+      "sha256": "78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3"
+    },
+    {
+      "file": "Inter-Bold.ttf",
+      "family": "Inter",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/Inter-Bold.ttf",
+      "sha256": "288316099b1e0a47a4716d159098005eef7c0066921f34e3200393dbdb01947f"
+    },
+    {
+      "file": "Inter-BoldItalic.ttf",
+      "family": "Inter",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/Inter-BoldItalic.ttf",
+      "sha256": "948405a16cdc62701da5f4005ed068ca5f4d27061d98f7974ccfc37831d9581d"
+    },
+    {
+      "file": "InterDisplay-Medium.ttf",
+      "family": "Inter Display",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/InterDisplay-Medium.ttf",
+      "sha256": "99665c256585aeaab2d06950c2d7715cca8fd7883c2d0e7a421b8b287e1f17de"
+    },
+    {
+      "file": "InterDisplay-SemiBold.ttf",
+      "family": "Inter Display",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/InterDisplay-SemiBold.ttf",
+      "sha256": "0310d7a325896129730c6c8cf9a6e0f81ee258bedf77b1ff059b2a7b75f74e02"
+    },
+    {
+      "file": "InterDisplay-Bold.ttf",
+      "family": "Inter Display",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Inter 4.1, The Inter Project Authors (rsms/inter)",
+      "url": "https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+      "member": "extras/ttf/InterDisplay-Bold.ttf",
+      "sha256": "b74c8e0dd744b3347faca4c96bc7b2e32f7d6f62300a79b1d1a99331e44a5bc4"
+    },
+    {
+      "file": "SourceSerif4-Regular.otf",
+      "family": "Source Serif 4",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Source Serif 4.005, Adobe (adobe-fonts/source-serif)",
+      "url": "https://github.com/adobe-fonts/source-serif/releases/download/4.005R/source-serif-4.005_Desktop.zip",
+      "member": "source-serif-4.005_Desktop/OTF/SourceSerif4-Regular.otf",
+      "sha256": "edf160d0d584deee8a3bb2c3371b2a7624ca63580fbe02c57c1f4c91e84d8787"
+    },
+    {
+      "file": "SourceSerif4-It.otf",
+      "family": "Source Serif 4",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Source Serif 4.005, Adobe (adobe-fonts/source-serif)",
+      "url": "https://github.com/adobe-fonts/source-serif/releases/download/4.005R/source-serif-4.005_Desktop.zip",
+      "member": "source-serif-4.005_Desktop/OTF/SourceSerif4-It.otf",
+      "sha256": "f8062257f4693e438a8e317c9fe2b4393f0d4eed84d897edcbfd733c30a1c1a1"
+    },
+    {
+      "file": "SourceSerif4-Semibold.otf",
+      "family": "Source Serif 4",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Source Serif 4.005, Adobe (adobe-fonts/source-serif)",
+      "url": "https://github.com/adobe-fonts/source-serif/releases/download/4.005R/source-serif-4.005_Desktop.zip",
+      "member": "source-serif-4.005_Desktop/OTF/SourceSerif4-Semibold.otf",
+      "sha256": "25e034392847d9965c92f98971b3646436b7ab919ece9118b0c0e5ec94c02efc"
+    },
+    {
+      "file": "SourceSerif4-Bold.otf",
+      "family": "Source Serif 4",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Source Serif 4.005, Adobe (adobe-fonts/source-serif)",
+      "url": "https://github.com/adobe-fonts/source-serif/releases/download/4.005R/source-serif-4.005_Desktop.zip",
+      "member": "source-serif-4.005_Desktop/OTF/SourceSerif4-Bold.otf",
+      "sha256": "f5fb9a7b1611353fdfebcf8b1e46c7d9108470f25999b841816d8b643b1856ff"
+    },
+    {
+      "file": "SourceSerif4-BoldIt.otf",
+      "family": "Source Serif 4",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Source Serif 4.005, Adobe (adobe-fonts/source-serif)",
+      "url": "https://github.com/adobe-fonts/source-serif/releases/download/4.005R/source-serif-4.005_Desktop.zip",
+      "member": "source-serif-4.005_Desktop/OTF/SourceSerif4-BoldIt.otf",
+      "sha256": "ebb5394e1e11e09480619c9bb10f020aded9530833edcbdb735a4702ae6fa09e"
+    },
+    {
+      "file": "JetBrainsMono-Regular.ttf",
+      "family": "JetBrains Mono",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "JetBrains Mono 2.304, The JetBrains Mono Project Authors",
+      "url": "https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
+      "member": "fonts/ttf/JetBrainsMono-Regular.ttf",
+      "sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+    },
+    {
+      "file": "JetBrainsMono-Bold.ttf",
+      "family": "JetBrains Mono",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "JetBrains Mono 2.304, The JetBrains Mono Project Authors",
+      "url": "https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
+      "member": "fonts/ttf/JetBrainsMono-Bold.ttf",
+      "sha256": "5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb"
+    },
+    {
+      "file": "NotoSansArabic-Regular.ttf",
+      "family": "Noto Sans Arabic",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf",
+      "sha256": "bdff3e5659d67e67def05b33f749683b9376ae819d65d3dd62ac4640b3aaef48"
+    },
+    {
+      "file": "NotoSansArabic-Bold.ttf",
+      "family": "Noto Sans Arabic",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Bold.ttf",
+      "sha256": "4e5462d2e8be880317b9f49b5b2da109ddb6a3563d91cc604b67f3535832a555"
+    },
+    {
+      "file": "NotoSansHebrew-Regular.ttf",
+      "family": "Noto Sans Hebrew",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Regular.ttf",
+      "sha256": "cdefaf8efd47045f6820928eba84db5bed7557539328952b5f828315485e02ee"
+    },
+    {
+      "file": "NotoSansHebrew-Bold.ttf",
+      "family": "Noto Sans Hebrew",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Bold.ttf",
+      "sha256": "da9226e886c245a7e11673c24dec82bded64d8574c1e1f03983bf89297d2aaa8"
+    },
+    {
+      "file": "NotoSansDevanagari-Regular.ttf",
+      "family": "Noto Sans Devanagari",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Regular.ttf",
+      "sha256": "4e3c66638958c3e2ab5d37f47a8deb89fffeb7be9985c665a519bbc7ba762313"
+    },
+    {
+      "file": "NotoSansDevanagari-Bold.ttf",
+      "family": "Noto Sans Devanagari",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Bold.ttf",
+      "sha256": "6a09c8d797cfc803d32cdc731e809424d74cbaff59f503de34ade421a08e5bc2"
+    },
+    {
+      "file": "NotoSansThai-Regular.ttf",
+      "family": "Noto Sans Thai",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf",
+      "sha256": "61cf814eec46b294d6ea4401ac295d0cecd5207bd2331dcc5a15e7301d30ee44"
+    },
+    {
+      "file": "NotoSansThai-Bold.ttf",
+      "family": "Noto Sans Thai",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "Noto fonts, The Noto Project Authors (notofonts.github.io at cfa91e3)",
+      "url": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/cfa91e36c7240b622fa7fcd3a90eeff15e28ae1c/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Bold.ttf",
+      "sha256": "2ac6c6e8a478e23b15f76e4894af1fa2210f8f350e4e6e54aad530bec03efbfb"
+    },
+    {
+      "file": "cjk/NotoSansJP-Regular.otf",
+      "family": "Noto Sans JP",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf",
+      "sha256": "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073"
+    },
+    {
+      "file": "cjk/NotoSansJP-Bold.otf",
+      "family": "Noto Sans JP",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/JP/NotoSansJP-Bold.otf",
+      "sha256": "1b0edfb500b73a4fa8a4fcaae1bbbd403994e08e73e3e0da37e70d3853f42c5f"
+    },
+    {
+      "file": "cjk/NotoSansSC-Regular.otf",
+      "family": "Noto Sans SC",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
+      "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9"
+    },
+    {
+      "file": "cjk/NotoSansSC-Bold.otf",
+      "family": "Noto Sans SC",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/SC/NotoSansSC-Bold.otf",
+      "sha256": "c6cb5a93abaa9edc8ee7463b7ebb7f42d618d40e6ed2f7a5371c97b0b64767c0"
+    },
+    {
+      "file": "cjk/NotoSansTC-Regular.otf",
+      "family": "Noto Sans TC",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/TC/NotoSansTC-Regular.otf",
+      "sha256": "5bab0cb3c1cf89dde07c4a95a4054b195afbcfe784d69d75c340780712237537"
+    },
+    {
+      "file": "cjk/NotoSansTC-Bold.otf",
+      "family": "Noto Sans TC",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/TC/NotoSansTC-Bold.otf",
+      "sha256": "55420b259eb119bf5f2a0aadba10cf9d736c12d64ab93e78546d69ef5f43558b"
+    },
+    {
+      "file": "cjk/NotoSansKR-Regular.otf",
+      "family": "Noto Sans KR",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/KR/NotoSansKR-Regular.otf",
+      "sha256": "69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68"
+    },
+    {
+      "file": "cjk/NotoSansKR-Bold.otf",
+      "family": "Noto Sans KR",
+      "group": "cjk",
+      "license": "OFL-1.1",
+      "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/KR/NotoSansKR-Bold.otf",
+      "sha256": "5a6ceb287ed2fc6cfc6213144ebea68cbd94b20fc9eb873d8486493bf02d9bda"
+    }
+  ]
+}

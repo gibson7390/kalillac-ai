@@ -15,7 +15,8 @@ import pytest
 pypdf = pytest.importorskip("pypdf")
 pytest.importorskip("docx")
 pytest.importorskip("openpyxl")
-pytest.importorskip("reportlab")
+pytest.importorskip("typst")
+pytest.importorskip("pypdfium2")
 pytest.importorskip("lxml")
 
 from kalillac_files import generate, intake  # noqa: E402
@@ -137,8 +138,18 @@ def test_size_limit_is_checked_before_anything_is_parsed(monkeypatch):
 # --- hostile archives -----------------------------------------------------------------------
 
 
+def _plain_docx():
+    """A small Word file (no embedded fonts), so the archive ratios below are about the padding."""
+    import docx
+    document = docx.Document()
+    document.add_paragraph("Revenue grew 12% while costs held steady.")
+    out = io.BytesIO()
+    document.save(out)
+    return out.getvalue()
+
+
 def test_decompression_bomb_is_refused_from_its_headers():
-    word = made(DOCUMENT, "docx")
+    word = _plain_docx()
     bomb = rezip(word, add={"word/media/padding.bin": b"\x00" * (60 * 1024 * 1024)})
     assert len(bomb) < 200_000                                        # 60 MB compresses to almost nothing.
     assert refused(bomb, "bomb.docx") == "archive_too_large"

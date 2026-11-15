@@ -21,3 +21,7 @@ site/**/*.png -text
 
 # Release tooling runs on Linux: LF only, whatever core.autocrlf says.
 deploy/** text eol=lf
+
+# Document fonts are verified by SHA-256: never altered by line-ending conversion.
+candidate/kalillac_files/fonts/*.ttf -text
+candidate/kalillac_files/fonts/*.otf -text

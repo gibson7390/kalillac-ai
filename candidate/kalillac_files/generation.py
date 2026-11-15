@@ -62,4 +62,9 @@ def generate(spec, format):
     data = renderer(validated)
     if len(data) > MAX_FILE_BYTES:
         raise SpecError("file_too_large")
+    if format == "pdf":
+        # Read the finished file back: text past a margin or a blank page in the middle is
+        # refused here rather than handed to a customer.
+        from .quality import check_pdf
+        check_pdf(data, full_bleed_first_page=validated.cover)
     return GeneratedFile(safe_filename(validated.title, extension), media_type, data)

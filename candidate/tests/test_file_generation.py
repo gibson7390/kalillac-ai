@@ -19,7 +19,8 @@ import pytest
 pypdf = pytest.importorskip("pypdf")
 docx = pytest.importorskip("docx")
 openpyxl = pytest.importorskip("openpyxl")
-pytest.importorskip("reportlab")
+pytest.importorskip("typst")
+pytest.importorskip("pypdfium2")
 
 from kalillac_files import FORMATS, GeneratedFile, SpecError, generate  # noqa: E402
 from kalillac_files import generation as generate_module, spec as spec_module  # noqa: E402
@@ -86,7 +87,7 @@ def test_pdf_is_a_readable_pdf_with_every_part_of_the_document():
     first = " ".join(pages[0].split())
     for expected in ("Quarterly Review — Café Operations", "Summary", "Revenue grew 12% while costs held steady.",
                      "Second line of the summary.", "Priorities", "Open the second site", "Renegotiate the lease",
-                     "Hire a manager", "Launch", "Figures", "Item", "Coffee", "1,450", "Pastry"):
+                     "Hire a manager", "Launch", "Figures", "ITEM", "Coffee", "1,450", "Pastry"):
         assert expected in first, expected
     assert "Closing remarks on the following page." in " ".join(pages[1].split())
     assert "Closing remarks" not in first
@@ -106,12 +107,24 @@ def test_pdf_is_reproducible():
     assert make(DOCUMENT, "pdf").data == make(DOCUMENT, "pdf").data
 
 
-@pytest.mark.parametrize("text", ["日本語", "Привет", "Łódź", "emoji 😀", "العربية"])
-def test_pdf_refuses_text_its_font_cannot_show(text):
+@pytest.mark.parametrize("text", ["日本語のテキスト", "中文文本", "한국어 텍스트", "Привет, мир", "Łódź i Kraków",
+                                  "Ελληνικά", "Tiếng Việt", "العربية", "עברית", "हिन्दी", "ภาษาไทย"])
+def test_pdf_carries_every_bundled_script(text):
     for spec in ({"title": text, "blocks": [{"type": "paragraph", "text": "plain"}]},
                  {"title": "Plain", "blocks": [{"type": "paragraph", "text": text}]},
                  {"title": "Plain", "blocks": [{"type": "table", "header": ["A"], "rows": [[text]]}]},
                  {"title": "Plain", "blocks": [{"type": "list", "ordered": True, "items": [text]}]}):
+        _reader, pages = _pdf_text(make(spec, "pdf").data)
+        assert "\ufffd" not in pages[0]
+    # The words come back out of the text layer: the glyphs are real text, not pictures or boxes.
+    _reader, pages = _pdf_text(make({"title": "Plain", "blocks": [{"type": "paragraph", "text": text}]}, "pdf").data)
+    assert all(word in pages[0] for word in text.split() if word.isalpha() and word.isascii())
+
+
+@pytest.mark.parametrize("text", ["emoji 😀", "\U0001f680 launch", "cuneiform \U00012000"])
+def test_pdf_refuses_text_no_bundled_font_can_show(text):
+    for spec in ({"title": text, "blocks": [{"type": "paragraph", "text": "plain"}]},
+                 {"title": "Plain", "blocks": [{"type": "table", "header": ["A"], "rows": [[text]]}]}):
         with pytest.raises(SpecError) as refused:
             generate(spec, "pdf")
         assert refused.value.code == "pdf_unsupported_characters" and text not in str(refused.value)
@@ -124,16 +137,17 @@ def test_pdf_handles_a_long_table_across_pages():
     result = make({"title": "Long", "blocks": [{"type": "table", "header": ["Name", "Detail"], "rows": rows}]}, "pdf")
     reader, pages = _pdf_text(result.data)
     assert len(pages) > 5 and "Row 0" in pages[0] and "Row 399" in pages[-1]
-    assert all("Name" in page for page in pages)             # The header repeats on every page.
+    assert all("NAME" in page for page in pages)             # The header repeats on every page.
 
 
-def test_pdf_refuses_a_table_cell_taller_than_a_page():
+def test_pdf_breaks_a_table_cell_taller_than_a_page_across_pages():
+    from kalillac_files import quality
     for cell in ("wordy " * 330, "x" * 2000):
         spec = {"title": "Wide", "blocks": [{"type": "table", "header": ["h"] * 12, "rows": [[cell] * 12]}]}
-        with pytest.raises(SpecError) as refused:
-            generate(spec, "pdf")
-        assert refused.value.code == "pdf_layout_failed"
-        assert make(spec, "docx").data                       # Word can break the cell across pages.
+        result = make(spec, "pdf")
+        report = quality.inspect_pdf(result.data)
+        assert report.sound and report.pages > 1, report       # Continued, never clipped past the margin.
+        assert make(spec, "docx").data
 
 
 # --- DOCX -----------------------------------------------------------------------------------
@@ -159,7 +173,12 @@ def test_docx_is_an_editable_word_document_with_real_structure():
     [table] = document.tables
     assert [[cell.text for cell in row.cells] for row in table.rows] == [
         ["Item", "Q1", "Q2"], ["Coffee", "1,200", "1,450"], ["Pastry", "640", "<b>710</b> & more"]]
-    assert all(run.bold for cell in table.rows[0].cells for run in cell.paragraphs[0].runs)
+    # Headers display in capitals through formatting; the stored text stays as written.
+    assert all(run.font.all_caps for cell in table.rows[0].cells for run in cell.paragraphs[0].runs)
+    # The header row is set in the semibold face of the design system.
+    assert all(run._r.rPr.rFonts.get(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii") == "Inter SemiBold"
+        for cell in table.rows[0].cells for run in cell.paragraphs[0].runs)
     assert "w:br w:type=\"page\"" in document.element.xml    # A real page break, not blank lines.
 
 
@@ -507,6 +526,6 @@ def test_the_application_does_not_reach_the_generation_core_yet():
     import subprocess
     import sys
     probe = ("import sys, kalillac_files; "
-             "print(sorted(m for m in ('reportlab', 'docx', 'openpyxl') if m in sys.modules))")
+             "print(sorted(m for m in ('typst', 'docx', 'openpyxl', 'pypdfium2') if m in sys.modules))")
     result = subprocess.run([sys.executable, "-c", probe], cwd=CANDIDATE, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and result.stdout.strip() == "[]", result.stderr[-500:]

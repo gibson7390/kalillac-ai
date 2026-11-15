@@ -1,0 +1,3 @@
+# Chinese, Japanese and Korean fonts are fetched and verified by
+# candidate/tools/fetch_document_fonts.py; they are too large to commit.
+cjk/
