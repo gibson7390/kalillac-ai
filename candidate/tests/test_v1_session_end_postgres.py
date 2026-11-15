@@ -74,7 +74,10 @@ def present(w):
 
 
 def test_the_head_classifies_as_prepared_with_three_authorities(world):
-    assert classify(world.owner_factory) == classify(world.runtime_factory) == v1_schema.PREPARED
+    assert classify(world.owner_factory) == v1_schema.PREPARED
+    # The runtime role cannot read the activation latch, by design.
+    with pytest.raises(v1_schema.V1SchemaRefused, match="authority_state_unreadable"):
+        classify(world.runtime_factory)
     with world.admin_engine.connect() as c:
         acl = c.scalar(text("SELECT array_agg(pg_get_userbyid(x.grantee) ORDER BY 1) FROM pg_proc p,"
                             " aclexplode(p.proacl) x WHERE p.oid = to_regprocedure(:f)"), {"f": SIGNATURE})

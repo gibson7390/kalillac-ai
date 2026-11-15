@@ -349,7 +349,7 @@ def load_v1_authority(ordinary_factory, environ, *, read_file=None, production=T
         with factory() as session, session.begin():
             ordinary_url = session.get_bind().url
             instance = session.execute(text(
-                "SELECT database_instance_id FROM kalillac.account_registration_activation WHERE id = 1")).scalar_one()
+                "SELECT database_instance_id FROM kalillac.account_registration_activation WHERE singleton_id = 1")).scalar_one()
         if instance is None:
             raise V1AuthorityUnavailable()
         credential = read_file(environ.get(CREDENTIAL_FILE_ENV, ""), CREDENTIAL_MAX_BYTES)
