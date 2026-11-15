@@ -372,9 +372,9 @@ libraries). It was created during this work, lives outside the repository and ca
 
 ## Owner decisions required
 
-1. **Financial budgets:** the fifteen `KALILLAC_FINANCE_*` values (day and month ceilings for
-   GLOBAL, FREE, PAID, OpenAI, Brave, Tavily; the minimum headroom percent; the FREE and PAID
-   request ceilings).
+1. **Financial budgets:** the fifteen `KALILLAC_FINANCE_*` values. A worked proposal with the
+   arithmetic is in `docs/FINANCE_BUDGET_PROPOSAL.md` (cautious launch: $10 a day, $150 a month at
+   most across all providers); the owner chooses.
 2. **Prices:** confirm the configured provider prices against the providers' current price lists,
    plus the OpenAI overhead tokens and Tavily credit maxima.
 3. **Migration `0016`:** approval to apply it to production.
@@ -415,7 +415,12 @@ In this order; each is independent of the open owner decisions unless it says ot
    the chat request (which also gives files and reasoning modes their tier check in the chat).
 4. Milestone 1: proposed budget values with their cost calculations; release tooling for an
    enforcement-on release.
-5. Spaces re-verification, the owner administration dashboard, and a staging design (port 8002
-   checked before it is proposed), with a retention proposal.
-6. Pull requests for the stacked branches, prepared for independent review, when the owner wants
+5. Spaces re-verification and the owner administration dashboard. The staging design is written
+   (`docs/STAGING_ENVIRONMENT_DESIGN.md`): port 8002 was used by an earlier V31 staging and must be
+   checked on the host by an operator first (8003 otherwise); production's unit is named
+   `kalillac-ai-fastapi-staging.service`. The deletion-retention proposal is section 5 of the
+   V1-02D/E plan.
+6. Files under Financial Safeguards: give the file assistant its own request scope with the PAID
+   request ceiling (today it fails closed when provider ceilings are on).
+7. Pull requests for the stacked branches, prepared for independent review, when the owner wants
    them.
