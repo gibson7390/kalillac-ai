@@ -359,7 +359,19 @@ artwork; fixed and tested.
   on Linux locally (see below). The commits after `59ec9d1` add files only; no application module
   changed.
 * Not run on any branch: `code-structure-frontend-verification` (no frontend file changed).
-* `feat/file-assistant-v1`: see "Milestone 5" below for its own evidence once CI has run.
+* `feat/file-assistant-v1` (`36e1053`, then `95573dd` and `f43c61c`): `file-generation-verification`
+  `43742343520` (715 tests, none skipped), `provider-ceilings-postgres` `43742375159`,
+  `safety-helpfulness-regression` `43742382222` and `subscription-foundation-verification`
+  `43744273219` successful. The first subscription run (`43742372419`) failed only on a pinned
+  count: the Slice 3 group ran 917 tests with no failure (818 + 99 guard cases for the new
+  `/api/files` routes), fixed in `95573dd`. `code-structure-frontend-verification` `43742378449`
+  found a real defect (a file input in the app page, which must expose no upload control), fixed in
+  `f43c61c`; its rerun is `43746443932`. Locally: a full Linux run of all 139 test files (9,083
+  passed) whose only failures match the unmodified baseline exactly (no browser, built site or
+  provider configuration in WSL).
+* `feat/billing-cases-v1` (`d4efa40`): `provider-ceilings-postgres` `43745249227` (the whole migration
+  chain through 0017 on PostgreSQL 16) and `subscription-foundation-verification` `43745246171`
+  (1566 tests, none skipped) successful.
 * `feat/document-quality-v1`, `file-generation-verification` (all file suites, none skipped):
   `43684790630` on `b8f4d04` (536 tests), `43691236898` on `c8c2985` (601, PowerPoint),
   `43700356071` on `a822f39` (642, editing), `43701878737` on `5b4259d` (653, benchmark), all
