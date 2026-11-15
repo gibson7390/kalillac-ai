@@ -25,6 +25,10 @@ from .spec import SpecError
 # The design system's page geometry, in points (1 mm = 2.8346 pt).
 MARGIN_X = 22 * 2.8346
 TOLERANCE = 1.5
+# Justified text hangs punctuation and hyphens slightly into the margin so the edge reads straight
+# (optical margin alignment). That overhang is design, not overflow, within this bound.
+HANGING = frozenset(".,:;'\"’”‘“!?-‐‑–—­￾)")
+HANG = 3.0
 HEADER_BAND = 27 * 2.8346
 FOOTER_BAND = 25 * 2.8346
 
@@ -67,14 +71,20 @@ def inspect_pdf(data, full_bleed_first_page=False, front_pages=0):
                 report.blank_pages.append(index + 1)
             left = 0.0 if cover else MARGIN_X
             right = width if cover else width - MARGIN_X
-            for rect_index in range(text.count_rects()):
-                x0, y0, x1, y1 = text.get_rect(rect_index)
-                sample = text.get_text_bounded(x0, y0, x1, y1).strip()[:40]
-                if not sample:
+            flagged = set()
+            for char_index in range(count):
+                # Visible glyphs only: PDFium also reports the space and line break that end a justified
+                # line, placed past the last glyph, which no reader sees.
+                char = content[char_index] if char_index < len(content) else text.get_text_range(char_index, 1)
+                if char.isspace() or char in "\x00﻿":
                     continue
+                x0, y0, x1, y1 = text.get_charbox(char_index)
+                allowance = TOLERANCE + (HANG if char in HANGING else 0.0)
                 for side, distance in (("left", left - x0), ("right", x1 - right), ("bottom", 0.0 - y0),
                                        ("top", y1 - height)):
-                    if distance > TOLERANCE:
+                    if distance > allowance and (side, round(y0)) not in flagged:
+                        flagged.add((side, round(y0)))  # One report per line and side.
+                        sample = text.get_text_range(max(0, char_index - 39), min(40, char_index + 1)).strip()
                         report.overflow.append((index + 1, side, round(distance, 1), sample))
             text.close()
             page.close()

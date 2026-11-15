@@ -166,6 +166,17 @@ def test_axis_scales_are_round_and_include_zero(low, high, expected):
     assert tuple(round(v, 12) for v in charts.nice_scale(low, high)) == expected
 
 
+@pytest.mark.parametrize("low, high, expected", [
+    (68.7, 97.4, (60, 100, 10)),           # A narrow band far from zero: the axis fits the band.
+    (-97.4, -68.7, (-100, -60, 10)),
+    (20, 97, (0, 100, 20)),                # A wide range keeps zero.
+    (-5, 40, (-10, 40, 10)),               # Data crossing zero keeps zero.
+])
+def test_a_line_may_drop_the_zero_baseline_only_for_a_narrow_band(low, high, expected):
+    assert tuple(round(v, 12) for v in charts.nice_scale(low, high, zero=False)) == expected
+    assert charts.nice_scale(low, high)[0] <= 0 <= charts.nice_scale(low, high)[1]   # Bars always include zero.
+
+
 @pytest.mark.parametrize("value, prefix, suffix, expected", [
     (4050000, "$", "", "$4.0M"), (5250000, "$", "", "$5.2M"), (31200, "", "", "31.2K"), (1500, "", "", "1,500"),
     (58.2, "", "%", "58.2%"), (-2.5, "", "", "−2.50"), (3e9, "$", "", "$3B"), (0, "$", "", "$0"),
@@ -268,6 +279,46 @@ def test_the_benchmark_report_is_sound_structured_and_accessible():
                      "Secure the site", "Outsource", "def margin(r, c):"):
         assert expected in body, expected
     assert "Page 1 of" in pages[2] and f"Page {len(pages) - 2} of {len(pages) - 2}" in pages[-1]
+
+
+@pytest.mark.parametrize("name", ["RESEARCH_DOCUMENT", "WORD_PROPOSAL", "MULTILINGUAL_DOCUMENT"])
+def test_every_benchmark_document_is_sound_in_pdf_and_word(name):
+    import quality_benchmark
+    raw = getattr(quality_benchmark, name)
+    data = generate(copy.deepcopy(raw), "pdf").data                 # generate() itself inspects the layout.
+    report = quality.inspect_pdf(data, full_bleed_first_page=raw.get("cover", False))
+    assert report.sound and report.missing_glyphs == 0, report
+    word = docx.Document(io.BytesIO(generate(copy.deepcopy(raw), "docx").data))
+    assert word.core_properties.title == raw["title"]
+
+
+def test_justified_text_may_hang_punctuation_but_not_overflow():
+    import quality_benchmark
+    # The editorial theme justifies and hyphenates: hyphens and punctuation hang into the margin by design.
+    research = quality.inspect_pdf(generate(copy.deepcopy(quality_benchmark.RESEARCH_DOCUMENT), "pdf").data,
+                                   full_bleed_first_page=True)
+    assert research.sound, research.overflow
+    assert quality.HANG < 4 and set(".,-") <= quality.HANGING and not set("abcXYZ019") & quality.HANGING
+
+
+def test_a_long_summary_fits_the_word_file_record_without_losing_the_text():
+    summary = "A summary that runs long. " * 40
+    data = generate({"title": "T", "summary": summary, "blocks": [{"type": "paragraph", "text": "Body."}]},
+                    "docx").data
+    document = docx.Document(io.BytesIO(data))
+    assert len(document.core_properties.comments) <= 255 and document.core_properties.comments.endswith("…")
+    assert summary.strip() in " ".join(p.text for t in document.tables for row in t.rows for c in row.cells
+                                       for p in c.paragraphs) + " ".join(p.text for p in document.paragraphs)
+
+
+def test_a_right_to_left_callout_in_a_left_to_right_word_file_reads_from_the_right():
+    raw = {"title": "Guest information", "blocks": [
+        {"type": "callout", "title": "خدمة الغرف", "text": "اطلب خدمة الغرف على الرقم 9 على مدار الساعة."},
+        {"type": "callout", "title": "Room service", "text": "Dial 9 at any hour."}]}
+    xml = zipfile.ZipFile(io.BytesIO(generate(raw, "docx").data)).read("word/document.xml").decode("utf-8")
+    arabic, english = re.findall(r"<w:tcBorders>.*?</w:tcBorders>", xml, re.S)[:2]
+    assert "<w:right " in arabic and "<w:left " not in arabic
+    assert "<w:left " in english and "<w:right " not in english
 
 
 def test_typesetting_is_reproducible():

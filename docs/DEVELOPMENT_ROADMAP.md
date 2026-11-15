@@ -257,9 +257,16 @@ Quality benchmark (`tests/quality_benchmark.py`), state of the eight owner-named
 | Business report (PDF, DOCX) | Built, rendered and inspected; not owner accepted |
 | Financial workbook, cross-sheet workbook | The forecast workbook (inputs, monthly forecast, summary, loan, dashboard) covers both; verified against Excel; not owner accepted |
 | Executive presentation | Built, rendered in PowerPoint and inspected; not owner accepted |
-| Multilingual document | Arabic PDF, Word and deck, Japanese PDF, rendered; a dedicated benchmark entry is still to write |
-| Research document, Word proposal | Not yet written as benchmark entries |
-| Complex editing | The editing core is built and verified in Word, Excel and PowerPoint (see above); a benchmark entry with a realistic multi-step edit is still to write |
+| Multilingual document | Built (English, Spanish, Arabic, Japanese, Hindi, Russian in one document), PDF and Word rendered and inspected; plus the Arabic report and deck; not owner accepted |
+| Research document, Word proposal | Built, rendered and inspected (editorial theme; US Letter proposal); not owner accepted |
+| Complex editing | Built: the business report restated as tracked changes, and the forecast with a changed input; not owner accepted |
+
+`tools/render_benchmark.py` writes all of it to a folder with a README for the owner. Writing the
+new entries found and fixed: a crash on any Word summary over 255 characters, the PDF inspector
+treating intended hanging punctuation (and invisible line-end spaces) as overflow, line charts
+squeezed by a forced zero baseline, hyphenated cover subtitles, short tables split across pages,
+and right-to-left headings and callouts in a left-to-right document set from the left (PDF and
+Word).
 
 Evidence: `file-generation-verification` run `43684790630` on `b8f4d04` successful (536 tests, none
 skipped); the PowerPoint commit's run is recorded under "Regression evidence" when it completes.
@@ -354,8 +361,8 @@ and retention rules, and a staging design. Still forbidden: anything in producti
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Milestone 5: the remaining benchmark entries (research document, Word proposal, multilingual
-   document, a multi-step edit) and a tool that renders the whole benchmark for the owner.
+1. Milestone 5: the model tool and prompt contract (the model producing specifications and edit
+   operations), still unexposed; then owner review of the rendered benchmark.
 2. Milestone 2: the V1-02D/E plan written from the code, then sign-out-everywhere, password
    change, the operator suspension command and deletion behind the private authorities, and one
    end-to-end synthetic lifecycle test.

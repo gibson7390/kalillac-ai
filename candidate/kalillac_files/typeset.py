@@ -268,6 +268,8 @@ def _block(block, rtl, available):
                 "rows": [[soften(cell, min(14, fits[i]), fits[i]) for i, cell in enumerate(row)] for row in block.rows],
                 "align": list(block.align), "widths": widths, "size": size, "caption": soften(block.caption or "") or None,
                 "total": block.total_row,
+                # Kept on one page when it is short enough that it can never be taller than one.
+                "keep": len(block.rows) <= 15 and sum(len(cell) for row in block.rows for cell in row) <= 1_200,
                 "dirs": [[cell or "" for cell in row] for row in dirs] if any(any(row) for row in dirs) else None}
     if kind is PageBreak:
         return {"t": "pagebreak"}

@@ -42,12 +42,15 @@ header and do not split rows, charts as images with alternative text and numbere
 Inter faces embedded in the file so it looks the same on any machine. Right-to-left documents are
 mirrored and carry their own complex-script font, also embedded.
 
-**Charts** (`charts.py`) are drawn deterministically: round axis steps that include zero, compact
-values ("$4.2M"), labels measured with the real font so they are shortened rather than overlapping,
+**Charts** (`charts.py`) are drawn deterministically: round axis steps that include zero for bars
+and areas (a line whose values sit in a narrow band far from zero gets an axis fitted to the band,
+so its changes show; PowerPoint charts follow the same rule), compact values ("$4.2M"), labels measured with the real font so they are shortened rather than overlapping,
 and a bounds check that every mark stays on its canvas.
 
 **Layout inspection** (`quality.py`) reads every generated PDF back with PDFium and refuses one with
-text past a margin, a blank page in the middle or missing glyphs. Hostile content (unbreakable URLs
+a visible glyph past a margin, a blank page in the middle or missing glyphs. In justified text,
+punctuation and hyphens may hang up to 3 pt into the margin (optical margin alignment, which Typst
+applies on purpose); any other glyph over the 1.5 pt tolerance is a defect. Hostile content (unbreakable URLs
 and words, twelve-column tables, very long numbers and labels) is made to fit: long tokens get
 invisible break points, tables and metric values step their type down, and code shrinks to fit its
 longest line before anything wraps.
@@ -368,15 +371,20 @@ Carlito faces in `fonts/metrics/` (OFL) only measure slide text; they are never 
 `tests/test_workbook_design.py` (178: the engine against Excel, the forecast benchmark, conventions,
 charts, refusals), `tests/test_file_generation.py` (166), `tests/test_file_intake.py` (65),
 `tests/test_file_worker.py` (33, with real child processes and real kills), `tests/test_file_editing.py`
-(38: outlines, faithful edits, tracked changes, preserved parts, recomputed workbooks, refusals),
-`tests/test_document_design.py` (99: specification, charts, font integrity and licensing, layout
+(39: outlines, faithful edits, tracked changes, preserved parts, recomputed workbooks, refusals),
+`tests/test_document_design.py` (109: specification, charts, font integrity and licensing, layout
 soundness on benchmark and hostile content, multilingual and right-to-left output, Word structure
 and package record) and `tests/test_deck_design.py` (63: the deck specification and its refusals,
 package record and reproducibility, native charts and their number formats, every text box
 re-measured from the file, no overlaps, nothing below the footer, every layout at its limits,
 right-to-left mirroring, East Asian text, measurement against the font tables), run by
 `.github/workflows/file-generation-verification.yml`, which fetches and verifies the fonts and
-requires all 642 to run with none skipped.
+requires all 653 to run with none skipped.
+
+`tools/render_benchmark.py OUTPUT_FOLDER` writes the whole quality benchmark (business report,
+research document, financial workbook, Word proposal, executive presentation, a tracked complex
+edit, a multilingual document, Arabic report and deck) with a README, for a person to open and
+judge. It produces files, not a score.
 
 Rendering through Microsoft Word itself is a manual development check (Word is not available in
 CI): the benchmark report and the Arabic document were opened, exported to PDF and inspected.

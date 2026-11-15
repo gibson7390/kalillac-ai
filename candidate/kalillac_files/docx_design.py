@@ -729,12 +729,16 @@ class _Writer:
         table = self.table(1, 1, [self.text_width])
         cell = table.rows[0].cells[0]
         self.shade(cell, soft)
-        self.cell_borders(cell, left=(3.0, accent))
+        text = plain(block.runs)
+        # A right-to-left callout in a left-to-right document is marked, and titled, from the right.
+        against = not self.rtl and direction(text) == "rtl"
+        self.cell_borders(cell, **{"right" if against else "left": (3.0, accent)})
         self.cell_margins(cell, top=8.5, bottom=9.5, left=12, right=12)
         self.row_rules(table.rows[0])
         paragraph = cell.paragraphs[0]
         if block.title:
             self.spacing(paragraph, 0, 3.5)
+            self.direct(paragraph, text)
             self.run(paragraph, block.title, color=deep, font=SEMIBOLD)
             paragraph = cell.add_paragraph()
         self.spacing(paragraph, 0, 0)

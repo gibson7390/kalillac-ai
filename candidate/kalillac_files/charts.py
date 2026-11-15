@@ -49,9 +49,15 @@ def fit(text, width, size=LABEL, weight="regular"):
     return cut.rstrip() + "…"
 
 
-def nice_scale(low, high, target=5):
-    """(minimum, maximum, step) with round tick values covering low..high and including zero."""
-    low, high = min(low, 0.0), max(high, 0.0)
+def nice_scale(low, high, target=5, zero=True):
+    """(minimum, maximum, step) with round tick values covering low..high.
+
+    The scale includes zero, as a bar's or area's length must start there. A line only encodes
+    position, so with zero=False a line whose values sit in a narrow band far from zero (the band
+    less than half the distance from zero) gets an axis fitted to the band, where its changes show."""
+    narrow = not zero and (0 < low and high - low < 0.5 * high or high < 0 and high - low < 0.5 * -low)
+    if not narrow:
+        low, high = min(low, 0.0), max(high, 0.0)
     if high == low:
         high = low + 1.0
     raw = (high - low) / max(1, target)
@@ -146,7 +152,7 @@ def _value_range(chart, stacked=False):
         totals = [sum(s.values[i] or 0.0 for s in chart.series) for i in range(len(chart.categories))]
         return nice_scale(0.0, max(totals))
     known = [v for s in chart.series for v in s.values if v is not None]
-    return nice_scale(min(known), max(known))
+    return nice_scale(min(known), max(known), zero=chart.kind != "line")
 
 
 def _axis_width(chart, low, high, step):

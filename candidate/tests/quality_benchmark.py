@@ -239,3 +239,186 @@ EXECUTIVE_DECK = {
          "subtitle": "$4.2M capital budget and the Riverside lease"},
     ],
 }
+
+
+# --- A research document ----------------------------------------------------------------------
+
+RESEARCH_DOCUMENT = {
+    "title": "Does Delivery Flexibility Reduce Subscription Churn?",
+    "subtitle": "Evidence from a twelve-month field experiment with 6,400 coffee subscribers",
+    "author": "Priya Raman and Tomás Ibarra, Customer Insights", "organization": "Northwind Coffee Roasters",
+    "date": "October 2026", "theme": "editorial", "page": "a4", "cover": True, "contents": True,
+    "summary": "Subscribers offered a choice of delivery day and the option to skip a delivery cancelled 21% less "
+               "often over twelve months than subscribers on a fixed schedule (2.4% against 3.0% a month; "
+               "difference 0.62 points, 95% interval 0.41 to 0.83). The effect was largest among subscribers "
+               "in their first three months and did not reduce order volume.",
+    "blocks": [
+        {"type": "heading", "level": 1, "text": "Background"},
+        {"type": "paragraph", "text": "Subscription churn is the largest single cost in our direct business: at "
+                                      "3.0% a month, half of a year's new subscribers are gone within two years. "
+                                      "Exit surveys name delivery timing as a reason in 38% of cancellations, more "
+                                      "than price (24%) or taste (17%)."},
+        {"type": "paragraph", "text": [{"text": "This study tests one intervention: "},
+                                       {"text": "letting subscribers choose their delivery day and skip a delivery",
+                                        "italic": True},
+                                       {"text": " without contacting support."}]},
+        {"type": "heading", "level": 1, "text": "Method"},
+        {"type": "paragraph", "text": "All 6,400 subscribers who joined between 1 October and 30 November 2025 were "
+                                      "assigned at random, in equal numbers, to the flexible schedule or to the fixed "
+                                      "schedule then in use. Assignment was stratified by plan size. Subscribers were "
+                                      "followed for twelve months; the primary outcome was monthly cancellation."},
+        {"type": "table", "caption": "Characteristics of the two groups at the start", "header":
+            ["Characteristic", "Flexible", "Fixed"],
+         "rows": [["Subscribers", "3,200", "3,200"], ["Median age (years)", "36", "37"],
+                  ["Two-bag plan (%)", "41.2", "40.8"], ["Previous customer (%)", "18.5", "19.1"],
+                  ["Urban address (%)", "62.0", "61.4"]]},
+        {"type": "callout", "tone": "note", "title": "Pre-registration",
+         "text": "The outcome, the analysis and the twelve-month horizon were fixed before the first delivery."},
+        {"type": "heading", "level": 1, "text": "Results"},
+        {"type": "metrics", "items": [
+            {"label": "Monthly churn, flexible", "value": "2.38%", "detail": "0.62 pts lower", "trend": "down"},
+            {"label": "Monthly churn, fixed", "value": "3.00%", "detail": "Control group", "trend": "flat"},
+            {"label": "Bags per subscriber", "value": "1.62", "detail": "No change", "trend": "flat"}]},
+        {"type": "chart", "kind": "line", "title": "Subscribers still active, by month",
+         "caption": "Share of each group still subscribed at the end of each month.", "suffix": "%",
+         "categories": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
+         "series": [{"name": "Flexible", "values": [97.4, 95.0, 92.7, 90.6, 88.5, 86.4, 84.4, 82.4, 80.5, 78.6, 76.8,
+                                                     75.0]},
+                    {"name": "Fixed", "values": [96.6, 93.4, 90.4, 87.6, 84.9, 82.3, 79.8, 77.4, 75.1, 72.9, 70.8,
+                                                  68.7]}]},
+        {"type": "paragraph", "text": "The difference opened early and kept widening. By month twelve, 75.0% of the "
+                                      "flexible group remained against 68.7% of the fixed group: 202 more subscribers "
+                                      "per 3,200 enrolled."},
+        {"type": "table", "caption": "Monthly churn by tenure", "header":
+            ["Months subscribed", "Flexible", "Fixed", "Difference", "95% interval"],
+         "rows": [["1 to 3", "2.61%", "3.43%", "0.82", "0.49 to 1.15"],
+                  ["4 to 6", "2.37%", "3.02%", "0.65", "0.31 to 0.99"],
+                  ["7 to 12", "2.27%", "2.77%", "0.50", "0.18 to 0.82"],
+                  ["All months", "2.38%", "3.00%", "0.62", "0.41 to 0.83"]], "total_row": True},
+        {"type": "chart", "kind": "bar", "title": "Why subscribers used the flexibility",
+         "caption": "Share of flexible-group subscribers using each option at least once.", "suffix": "%",
+         "categories": ["Changed delivery day", "Skipped a delivery", "Both", "Neither"],
+         "series": [{"name": "Subscribers", "values": [46, 31, 19, 42]}]},
+        {"type": "heading", "level": 1, "text": "Discussion"},
+        {"type": "paragraph", "text": "Flexibility lowered churn without lowering volume: skipped deliveries were "
+                                      "made up within the following two months. The effect is concentrated where "
+                                      "churn is highest, among new subscribers."},
+        {"type": "heading", "level": 2, "text": "Limitations"},
+        {"type": "list", "ordered": False, "items": [
+            "One region and one product category; the effect may differ elsewhere.",
+            "Subscribers knew which schedule they had, so some of the effect may come from feeling consulted.",
+            "Twelve months is long enough to measure churn, not lifetime value."]},
+        {"type": "heading", "level": 2, "text": "Recommendation"},
+        {"type": "callout", "tone": "success", "title": "Recommendation",
+         "text": "Offer the flexible schedule to every subscriber from January 2027."},
+        {"type": "heading", "level": 1, "text": "References"},
+        {"type": "list", "ordered": True, "items": [
+            "Customer Insights. Exit survey of cancelled subscribers, January to September 2025. Internal report.",
+            "Kohavi R, Tang D, Xu Y. Trustworthy Online Controlled Experiments. Cambridge University Press; 2020.",
+            "Fader PS, Hardie BGS. How to project customer retention. Journal of Interactive Marketing. 2007;21(1)."]},
+    ],
+}
+
+# --- A Word proposal --------------------------------------------------------------------------
+
+WORD_PROPOSAL = {
+    "title": "Proposal: Café Fit-Out and Opening Support for Harbour Street",
+    "subtitle": "Prepared for Lena Okafor, Managing Director, Okafor Hospitality",
+    "author": "Studio Meridian Design", "organization": "Studio Meridian Design", "date": "12 November 2026",
+    "page": "letter", "cover": True, "contents": False,
+    "summary": "We propose to design, fit out and open your Harbour Street café in 14 weeks for a fixed fee of "
+               "$186,500, with the opening date guaranteed or the final stage fee waived.",
+    "blocks": [
+        {"type": "heading", "level": 1, "text": "Your goals"},
+        {"type": "paragraph", "text": "You want a 60-seat café open before the spring tourist season, with a fit-out "
+                                      "that reflects the harbour setting and a counter that can serve 140 covers an "
+                                      "hour at peak."},
+        {"type": "list", "ordered": False, "items": [
+            [{"text": "Open by 1 March 2027. ", "bold": True}, {"text": "Every week later costs about $9,000 in "
+                                                                          "lost trade."}],
+            [{"text": "Hold the budget. ", "bold": True}, {"text": "A fixed fee, with changes priced before work "
+                                                                     "starts."}],
+            [{"text": "A space people return to. ", "bold": True}, {"text": "Durable materials, warm light, good "
+                                                                              "acoustics."}]]},
+        {"type": "heading", "level": 1, "text": "Our approach"},
+        {"type": "comparison", "columns": [
+            {"title": "What we do", "items": ["Concept and layout", "Permits and contractor management",
+                                              "Furniture, lighting and signage", "Staff training for opening week"]},
+            {"title": "What you provide", "items": ["Access to the site from 4 December", "Decisions within three "
+                                                    "working days", "Your brand guidelines and menu"]}]},
+        {"type": "heading", "level": 1, "text": "Timeline"},
+        {"type": "steps", "items": [
+            {"title": "Weeks 1 to 2: Concept", "text": "Layout, materials board and budget confirmed with you."},
+            {"title": "Weeks 3 to 5: Permits", "text": "Building and food-premises approvals lodged and tracked."},
+            {"title": "Weeks 6 to 12: Build", "text": "Fit-out by our contractor team, weekly site reviews."},
+            {"title": "Weeks 13 to 14: Opening", "text": "Snagging, staff training and a soft opening."}]},
+        {"type": "heading", "level": 1, "text": "Fees"},
+        {"type": "table", "caption": "Fixed fees by stage, in US dollars, excluding sales tax", "total_row": True,
+         "header": ["Stage", "Paid on", "Fee"],
+         "rows": [["Concept and design", "Signing", "$24,500"], ["Permits", "Approval lodged", "$11,000"],
+                  ["Fit-out and furniture", "Weeks 6, 9 and 12", "$138,000"],
+                  ["Opening support", "Opening day", "$13,000"], ["Total", "", "$186,500"]]},
+        {"type": "callout", "tone": "info", "title": "Our guarantee",
+         "text": "If the café is not ready to open on 1 March 2027 for reasons within our control, the opening "
+                 "support fee is waived."},
+        {"type": "heading", "level": 1, "text": "Why Studio Meridian"},
+        {"type": "quote", "text": "They opened our second site three days early and under budget.",
+         "attribution": "Marcus Hale, Owner, Hale & Daughter Bakery"},
+        {"type": "paragraph", "text": "This proposal is valid until 15 December 2026. To accept, reply in writing "
+                                      "and we will schedule the concept workshop within a week."},
+    ],
+}
+
+# --- A multilingual document --------------------------------------------------------------------
+
+MULTILINGUAL_DOCUMENT = {
+    "title": "Guest Information · Información para huéspedes · معلومات للضيوف · ご宿泊のご案内",
+    "subtitle": "Harbour Street Hotel", "organization": "Harbour Street Hotel", "date": "2027",
+    "blocks": [
+        {"type": "heading", "level": 1, "text": "Welcome"},
+        {"type": "paragraph",
+         "text": "Breakfast is served from 7:00 to 10:30 in the Harbour Room on the ground floor."},
+        {"type": "table", "header": ["Service", "Hours", "Extension"],
+         "rows": [["Reception", "24 hours", "0"], ["Breakfast", "7:00–10:30", "21"], ["Spa", "9:00–20:00", "35"]]},
+        {"type": "heading", "level": 1, "text": "Bienvenidos"},
+        {"type": "paragraph", "text": "El desayuno se sirve de 7:00 a 10:30 en el salón Harbour, en la planta baja."},
+        {"type": "heading", "level": 1, "text": "أهلاً وسهلاً"},
+        {"type": "paragraph", "text": "يُقدَّم الإفطار من الساعة 7:00 حتى 10:30 في قاعة هاربر بالطابق الأرضي."},
+        {"type": "callout", "tone": "info", "title": "خدمة الغرف",
+         "text": "اطلب خدمة الغرف على الرقم 9 على مدار الساعة."},
+        {"type": "heading", "level": 1, "text": "ようこそ"},
+        {"type": "paragraph", "text": "朝食は1階のハーバールームにて、7時から10時30分までご用意しております。"},
+        {"type": "heading", "level": 1, "text": "स्वागत है"},
+        {"type": "paragraph", "text": "नाश्ता भूतल पर हार्बर रूम में सुबह 7:00 से 10:30 बजे तक परोसा जाता है।"},
+        {"type": "heading", "level": 1, "text": "Добро пожаловать"},
+        {"type": "paragraph", "text": "Завтрак подаётся с 7:00 до 10:30 в зале Harbour на первом этаже."},
+    ],
+}
+
+# --- A complex edit -----------------------------------------------------------------------------
+#
+# Applied to the business report (tests/test_document_design.py REPORT) as tracked changes, and to the
+# forecast workbook: the figures are restated after an audit, a paragraph explains why, a table row is
+# added, and a workbook input is changed so every dependent figure is recalculated.
+
+
+def report_edit(outline):
+    """The operations of the complex edit, with addresses read from the report's outline."""
+    def paragraph(starts):
+        return next(u.address for u in outline.units if u.kind == "paragraph" and u.text.startswith(starts)
+                    and "\n" not in u.text)
+    table = next(u.address for u in outline.units if u.kind == "cell" and u.text == "Line item").split(".")[0]
+    return [
+        {"op": "replace_text", "find": "$18.4M", "replace": "$18.6M"},
+        {"op": "replace_text", "find": "18,400", "replace": "18,600", "expect": 1},
+        {"op": "insert_paragraph", "after": paragraph("2026 was the strongest year"),
+         "text": "Figures restated on 14 November 2026 after the year-end audit moved $0.2M of December wholesale "
+                 "revenue into 2026."},
+        {"op": "add_row", "after": f"{table}.r3", "cells": ["Audit adjustment", "0", "200", "n/a"]},
+        {"op": "replace_text", "find": "strongest", "replace": "strongest and most profitable", "expect": 1},
+    ]
+
+
+WORKBOOK_EDIT = [{"op": "set_cell", "at": "Inputs!B2", "value": 1500},
+                 {"op": "replace_text", "find": "Paying accounts on 1 January 2027",
+                  "replace": "Paying accounts on 1 January 2027, after the pre-launch campaign"}]

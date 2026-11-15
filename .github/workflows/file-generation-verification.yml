@@ -24,6 +24,7 @@ on:
       - "candidate/tests/formula_zoo.py"
       - "candidate/tests/quality_benchmark.py"
       - "candidate/tools/fetch_document_fonts.py"
+      - "candidate/tools/render_benchmark.py"
       - "requirements-*.txt"
       - ".github/workflows/file-generation-verification.yml"
   push:
@@ -40,6 +41,7 @@ on:
       - "candidate/tests/formula_zoo.py"
       - "candidate/tests/quality_benchmark.py"
       - "candidate/tools/fetch_document_fonts.py"
+      - "candidate/tools/render_benchmark.py"
       - "requirements-*.txt"
       - ".github/workflows/file-generation-verification.yml"
   workflow_dispatch:
@@ -92,7 +94,7 @@ jobs:
 
       # The test modules skip themselves when a document library is missing,
       # so a green run must prove nothing was skipped and the expected number
-      # ran: 166 generation, 65 intake, 33 worker, 99 document-design, 178 workbook, 63 deck and 38 editing
+      # ran: 166 generation, 65 intake, 33 worker, 109 document-design, 178 workbook, 63 deck and 39 editing
       # tests. The
       # worker's memory-limit test runs only on POSIX, so it must run here.
       - name: Require every file test to have run
@@ -104,6 +106,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 642, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 653, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the file verification did not run completely")
           PY

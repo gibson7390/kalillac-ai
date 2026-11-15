@@ -499,7 +499,11 @@ class _Writer:
         data = _chart_data()
         data.categories = list(chart_spec.categories)
         known = [v for s in chart_spec.series for v in s.values if v is not None]
-        step = chart_math.nice_scale(min(known), max(known))[2]
+        if chart_spec.kind == "stacked":
+            totals = [sum(s.values[i] or 0.0 for s in chart_spec.series) for i in range(len(chart_spec.categories))]
+            low, high, step = chart_math.nice_scale(min(0.0, min(totals)), max(totals))
+        else:  # The document charts' scale: zero for bars and areas, fitted to the band for a line.
+            low, high, step = chart_math.nice_scale(min(known), max(known), zero=chart_spec.kind != "line")
         decimals = 0 if all(float(v).is_integer() for v in known) and step >= 1 else (1 if step >= 0.1 else 2)
         def literal(affix):  # Quoted text in a number format; a quote mark itself must be escaped instead.
             if not affix:
@@ -585,6 +589,7 @@ class _Writer:
         value_axis.major_gridlines.format.line.width = Pt(0.75)
         value_axis.format.line.fill.background()
         value_axis.tick_labels.number_format, value_axis.tick_labels.number_format_is_linked = axis_format, False
+        value_axis.minimum_scale, value_axis.maximum_scale, value_axis.major_unit = low, high, step
         value_axis.tick_labels.font.size = Pt(12)
         if len(chart_spec.series) == 1 and len(chart_spec.categories) <= 12 and chart_spec.kind in ("column", "bar"):
             value_axis.visible = False  # The bars carry their own labels; the axis would repeat them.

@@ -15,9 +15,21 @@ import zipfile
 _DCTERMS = "{http://purl.org/dc/terms/}"
 
 
+CORE_TEXT = 255  # The longest text a core property holds (python-docx and python-pptx refuse more).
+
+
+def fitted(text, limit=CORE_TEXT):
+    """Text cut at a word boundary to fit a core property, marked with an ellipsis when cut."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    return (cut[:cut.rfind(" ")] if " " in cut else cut).rstrip(" ,;:") + "…"
+
+
 def own_record(core_properties, author, description=""):
     """The core properties of this file alone: its author, its description, and no template dates."""
-    core_properties.comments = description
+    core_properties.comments = fitted(description)
     core_properties.last_modified_by = author
     element = core_properties._element
     for tag in ("created", "modified"):

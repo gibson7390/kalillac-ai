@@ -104,13 +104,18 @@
 
 #let callout(b) = {
   let tone = tones.at(b.tone)
-  block(width: 100%, above: 1.35em, below: 1.35em, fill: tone.soft, radius: end-radius(5pt),
-    stroke: start-stroke(3pt + tone.accent), inset: (left: 14pt, right: 14pt, top: 11pt, bottom: 12pt), {
+  // A callout written in the other direction from the document reads, and is marked, from its own side.
+  let reversed = if opt(b, "dir") == "rtl" { not rtl-doc } else if opt(b, "dir") == "ltr" { rtl-doc } else { false }
+  let from-right = rtl-doc != reversed
+  directed(opt(b, "dir"), block(width: 100%, above: 1.35em, below: 1.35em, fill: tone.soft,
+    radius: if from-right { (left: 5pt) } else { (right: 5pt) },
+    stroke: if from-right { (right: 3pt + tone.accent) } else { (left: 3pt + tone.accent) },
+    inset: (left: 14pt, right: 14pt, top: 11pt, bottom: 12pt), {
       if opt(b, "title") != none {
         block(below: 0.7em, text(weight: "semibold", fill: tone.deep, b.title))
       }
-      directed(opt(b, "dir"), rich(b.runs))
-    })
+      rich(b.runs)
+    }))
 }
 
 #let trend-mark(trend, color) = box(baseline: -0.5pt, {
@@ -153,7 +158,8 @@
   let cell-dir(i, j) = if dirs == none or dirs.at(i).at(j) == "" { none } else { dirs.at(i).at(j) }
   let count = b.rows.len()
   let total = b.at("total", default: false)
-  block(width: 100%, above: 1.4em, below: 1.4em, {
+  // A short table stays on one page; a long one breaks between rows and repeats its header.
+  block(width: 100%, above: 1.4em, below: 1.4em, breakable: not b.at("keep", default: false), {
     if opt(b, "caption") != none {
       block(below: 0.75em, sticky: true, text(size: 8.5pt, fill: muted, weight: "medium", b.caption))
     }
@@ -245,7 +251,8 @@
   if t == "heading" {
     // The running header reads its section name from this marker: the shortened heading.
     if b.level == 1 { [#metadata(b.short) <section>] }
-    heading(level: b.level, directed(opt(b, "dir"), b.text))
+    // The direction is set before the heading, so its alignment and accent rule follow it too.
+    directed(opt(b, "dir"), heading(level: b.level, b.text))
   }
   else if t == "paragraph" { directed(opt(b, "dir"), par(rich(b.runs))) }
   else if t == "list" {
@@ -285,7 +292,7 @@
       if opt(data, "subtitle") != none {
         block(above: 20pt, {
           set par(leading: 0.62em)
-          text(size: 14.5pt, fill: rgb("#c3d1ee"), data.subtitle)
+          text(size: 14.5pt, fill: rgb("#c3d1ee"), hyphenate: false, data.subtitle)
         })
       }
     }))
@@ -355,7 +362,7 @@
     if opt(data, "subtitle") != none {
       v(9pt, weak: true)
       set par(leading: 0.62em)
-      text(size: 12.5pt, fill: muted, data.subtitle)
+      text(size: 12.5pt, fill: muted, hyphenate: false, data.subtitle)
     }
     v(14pt, weak: true)
     line(length: 100%, stroke: 0.8pt + rule)

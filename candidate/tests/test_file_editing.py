@@ -466,6 +466,18 @@ def test_a_stale_calculation_chain_is_dropped():
     assert b"calcChain" not in edited.read("[Content_Types].xml")
 
 
+def test_the_benchmark_complex_edit_applies_whole(word, book):
+    import quality_benchmark
+    operations = quality_benchmark.report_edit(outline(word, "report.docx"))
+    plain = document_xml(edit(word, "report.docx", operations).data)
+    tracked = document_xml(edit(word, "report.docx", operations, track_changes=True).data)
+    assert accepted(tracked) == accepted(plain) and rejected(tracked) == rejected(document_xml(word))
+    text = accepted(plain)
+    assert "strongest and most profitable" in text and "Audit adjustment" in text and "18,600" in text
+    edited = edit(book, "forecast.xlsx", quality_benchmark.WORKBOOK_EDIT).data
+    assert openpyxl.load_workbook(io.BytesIO(edited))["Inputs"]["B2"].value == 1500
+
+
 # --- requests --------------------------------------------------------------------------------
 
 
