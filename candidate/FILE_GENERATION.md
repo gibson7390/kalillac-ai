@@ -170,7 +170,7 @@ cores return, from a child Python process:
 | Limit | Behaviour | Code |
 |---|---|---|
 | Wall-clock time (default 20 s) | The child is killed and reaped | `timeout` |
-| Memory (default 768 MB) and CPU time | Set by the child on itself before it reads any input. **POSIX only:** on Windows the time limit is the only bound; production runs on Linux | `out_of_memory`, `worker_failed` |
+| Memory (default 768 MB) and CPU time | Set by the child on itself before it reads any input. **POSIX only:** on Windows the time limit is the only bound; production runs on Linux. A starved child usually fails at once; once, on a GitHub runner, it stalled and was killed at the time limit instead | `out_of_memory`, `worker_failed`, `timeout` |
 | Concurrency (2) | A further request is refused immediately, never queued | `busy` |
 | Output size | The parent stops reading and kills the child | `output_too_large` |
 | Environment | The child inherits no variable except the few Python needs to start, and runs as an isolated interpreter (`-I`). No provider key, database credential or other secret exists in the process that parses customer files | |

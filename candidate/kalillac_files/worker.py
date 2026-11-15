@@ -73,6 +73,9 @@ def _command():
 def _environment():
     environment = {name: os.environ[name] for name in _INHERITED if name in os.environ}
     environment["RAYON_NUM_THREADS"] = "2"  # The typesetter's thread pool: small and fixed.
+    # glibc reserves 64 MB of address space per malloc arena; under an address-space limit,
+    # a few arenas on a many-core machine would exhaust it before any real work.
+    environment["MALLOC_ARENA_MAX"] = "2"
     return environment
 
 
