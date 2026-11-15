@@ -1,2 +1,0 @@
-# Test-only: reads generated PDFs back to check them. Never a runtime dependency.
-pypdf==7.1.0

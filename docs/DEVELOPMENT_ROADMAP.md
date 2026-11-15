@@ -62,7 +62,7 @@ discarded, or name anything in it that should be kept.
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part (test-mode foundation), off | Not yet re-verified in this record |
 | 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Generation core IMPLEMENTED and locally verified, not reachable from the application; uploads, editing, storage and downloads not started | `candidate/FILE_GENERATION.md` |
+| 5 | File creation, uploads, editing | Generation and upload-intake cores DEVELOPMENT VERIFIED, not reachable from the application; routes, worker, storage, downloads and editing not started | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -174,17 +174,24 @@ higher effort spends more of the same `max_output_tokens` on reasoning, so DEEP 
 ceiling and therefore a larger worst-case reservation, which the request ceiling must allow; mode
 permission must be checked in the backend from the verified entitlement.
 
-### Milestone 5: file generation (core only)
+### Milestone 5: file generation and upload intake (cores only)
 
 Implemented on `feat/file-generation-v1`: `kalillac_files.generate(spec, format)` produces real PDF,
 DOCX and XLSX files, plus CSV, Markdown, TXT and JSON, from a validated plain-data specification.
 Reference: `candidate/FILE_GENERATION.md`, which also lists the limits and what is not built.
-Evidence: `tests/test_file_generation.py` (155 tests), each generated artifact reopened with an
-independent reader; CI workflow `file-generation-verification`. Nothing in the application imports
-the package and the production dependency lock is unchanged.
+`kalillac_files.intake.inspect(data, name)` validates one uploaded PDF, DOCX, XLSX or text file by
+content and extracts bounded text, refusing archive bombs, path traversal, macros, encrypted files,
+XML entity attacks and malformed files with stable codes.
 
-Not built, and needing customer accounts first: storage, download authorization, quotas, cleanup,
-the worker that renders off the chat path, the model tool, and all of uploads and editing.
+Evidence: `tests/test_file_generation.py` (155 tests, each generated artifact reopened with an
+independent reader) and `tests/test_file_intake.py` (63 tests, hostile files built in the tests);
+CI workflow `file-generation-verification`, run `43675051766` successful for the generation core on
+`8ed456c`. Nothing in the application imports the package and the production dependency lock is
+unchanged.
+
+Not built, and needing customer accounts first: the upload and download routes, storage, quotas,
+cleanup, the worker process (with time and memory limits) that must run both cores off the chat
+path, the model tool, and editing.
 
 ## Known defects and environment limits
 
@@ -248,14 +255,14 @@ the worker that renders off the chat path, the model tool, and all of uploads an
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Record the CI result of `file-generation-verification` for `feat/file-generation-v1`.
+1. Record the CI result of `file-generation-verification` for the intake commit on
+   `feat/file-generation-v1`.
 2. Milestone 4 interface: the mode control in the chat frontend, sending `reasoning_mode` and
    handling `403 reasoning_mode_not_allowed`, shown only when the backend reports modes enabled.
    The frontend suites need a real browser and an idle machine, and the web root is deployed
    separately from the backend release.
-3. Milestone 5 uploads: validation of uploaded PDF, DOCX and XLSX (type by content, size, archive
-   expansion limits, malformed-file handling) as a pure, unexposed core, the same way the generation
-   core was built.
+3. Milestone 5 worker: a subprocess runner with a hard time and memory limit for `generate()` and
+   `inspect()`, still unexposed, so the cores are safe to call once accounts exist.
 4. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
 5. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
    password change and deletion behind the private authorities, then one end-to-end synthetic

@@ -1,11 +1,15 @@
-# File generation
+# File generation and upload intake
 
-Kalillac must hand a customer real files, not text to copy. This is the generation core:
-`kalillac_files.generate(spec, format)` turns a validated specification into a file.
+Kalillac must hand a customer real files, not text to copy, and must be able to read the files a
+customer uploads. This package holds the two cores:
 
-Status: **core implemented and development verified. Not reachable from the application.** Nothing
-imports `kalillac_files`, no route exposes it, and the production dependency lock is unchanged.
-Uploads, editing, storage, downloads and quotas are not built (see "Not built").
+* `kalillac_files.generate(spec, format)` turns a validated specification into a file.
+* `kalillac_files.intake.inspect(data, declared_name)` validates one uploaded file and extracts
+  bounded text from it.
+
+Status: **both cores implemented and development verified. Not reachable from the application.**
+Nothing imports `kalillac_files`, no route exposes it, and the production dependency lock is
+unchanged. Storage, downloads, quotas, editing and the interface are not built (see "Not built").
 
 ## Formats
 
@@ -89,6 +93,34 @@ Known format limits:
 * **Formulas are stored, not calculated.** The spreadsheet program computes them on opening.
 * No images, charts, hyperlinks, text styling within a paragraph, or page headers and footers.
 
+## Upload intake
+
+`inspect(data, declared_name)` accepts PDF, DOCX, XLSX and UTF-8 text (`.txt`, `.md`, `.csv`,
+`.json`), at most 10 MB, and returns the detected kind and up to 400,000 characters of text, with a
+flag when it was cut short. Nothing is written to disk and nothing in the file is executed,
+evaluated or followed. A refusal is an `IntakeError` with a stable code.
+
+| Threat | Defence | Code |
+|---|---|---|
+| Wrong type under a trusted name | The kind is decided from the content; a declared extension that disagrees is refused | `type_mismatch`, `unsupported_type` |
+| Decompression bomb | Declared sizes, the total and the expansion ratio are checked from the headers before any part is read; every part is then read through a hard byte cap | `archive_too_large` |
+| Path traversal in an archive | Absolute, drive, backslash, `..` and duplicate entry names are refused (the stored name is checked, since Windows rewrites backslashes). Nothing is extracted to disk in any case | `archive_unsafe_entry` |
+| Too many entries | 2,000 entries at most | `archive_too_many_entries` |
+| Macros | `vbaProject.bin`, macro sheets and macro-enabled content types are refused | `macros_not_allowed` |
+| Encrypted files | Encrypted archive entries and encrypted PDFs are refused | `encrypted_file` |
+| XML external entities, entity expansion | Any XML part with a DOCTYPE or entity declaration is refused before parsing; parts must be UTF-8 so another encoding cannot hide one; the parser resolves no entity and makes no network access | `xml_declaration_not_allowed`, `xml_encoding_not_allowed` |
+| Malformed files | Parser errors become a refusal, never an unhandled exception | `unreadable_archive`, `unreadable_document` |
+| Resource exhaustion | Size, entry, page (500), cell (200,000) and text caps | `file_too_large`, truncation flag |
+| Embedded objects, external links, nested archives | Never opened or followed | |
+
+Spreadsheet formulas in an upload are reported as text and never evaluated.
+
+**Not covered by this module, required of the caller:** a hostile PDF can make any PDF parser
+spend unbounded time or memory. `inspect()` must run in a separate worker process with a hard time
+and memory limit. There is no malware scanning; refusing macros, encryption and executables by
+type is the control in place. Scanning uploaded files with an external service would be a new paid
+service and needs approval.
+
 ## Architecture requirements for wiring it in
 
 Rendering is synchronous CPU work lasting up to seconds. It must not run inside a request handler
@@ -108,21 +140,23 @@ code runs anywhere in this design.
 
 ## Dependencies
 
-`requirements-files.txt` pins reportlab 5.1.0 (BSD), python-docx 1.2.0 (MIT), openpyxl 3.1.5 (MIT)
-and their two extra dependencies, lxml and et_xmlfile. `requirements-files-test.txt` pins pypdf for
-the tests only. Shipping this needs a new production Python environment built from the lock plus
+`requirements-files.txt` pins reportlab 5.1.0 (BSD), python-docx 1.2.0 (MIT), openpyxl 3.1.5 (MIT),
+pypdf 7.1.0 (BSD, reads uploaded PDFs) and two further dependencies, lxml and et_xmlfile. Shipping
+this needs a new production Python environment built from the lock plus
 `requirements-files.txt`; the current release procedure keeps the environment unchanged.
 
 ## Not built
 
-* File uploads and analysis (validation, type and size limits, decompression-bomb and malformed-file
-  defences, quotas, isolation).
-* Editing an uploaded document into a new file.
+* The upload route, the worker process with time and memory limits that must run `inspect()`, and
+  per-account upload quotas and isolation.
+* Editing an uploaded document into a new file. The two cores are the halves of it: extracted text
+  in, a new specification out. The original is never modified.
 * Storage, download authorization, cleanup, quotas and cost accounting.
-* The model tool and the interface for requesting and downloading a file.
+* The model tool and the interface for requesting, uploading and downloading a file.
 * PowerPoint.
 
 ## Tests
 
-`tests/test_file_generation.py` (155), run by `.github/workflows/file-generation-verification.yml`,
-which requires all 155 to run with none skipped.
+`tests/test_file_generation.py` (155) and `tests/test_file_intake.py` (63), run by
+`.github/workflows/file-generation-verification.yml`, which requires all 218 to run with none
+skipped.
