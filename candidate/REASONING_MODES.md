@@ -77,9 +77,23 @@ not select one, including Spaces sends, which do not carry a mode yet.
 * **Release tooling:** `deploy/release` release facts do not list this flag. A release that
   enables it needs the flag added to its reviewed flag policy.
 
+## The control in the chat
+
+A three-way control (Quick, Balanced, Deep) above the composer: an accessible radio group (arrow keys
+move the choice), Balanced selected when the page opens, the choice sent as `reasoning_mode` with
+every message. It appears only when the deployment marks the page (`<html
+data-kalillac-reasoning="on">`), which a release enabling modes must do; otherwise the page sends no
+mode and behaves exactly as before. The choice lives only as long as the page: the chat script stores
+nothing in the browser (an existing privacy rule its tests enforce). A refused mode shows fixed copy,
+"That reasoning mode isn't available for this account." Tested in a real browser
+(`tests/test_frontend_error_contract.py`, scenario `reasoning_offered`).
+
+Provisional development mapping from the owner (2026-11-15): QUICK `low`, BALANCED `medium`, DEEP
+`high`. Which modes Free and Premium may use is still the owner's decision; until billing entitlements
+reach the chat request, every request is treated as free.
+
 ## Not done
 
-* The control in the chat interface.
 * Saving a signed-in customer's preferred mode (needs accounts).
 * Paid permissions taking effect (needs verified billing entitlements on the chat request).
 * A mode on Spaces sends.

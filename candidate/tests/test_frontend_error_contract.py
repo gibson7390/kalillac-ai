@@ -53,6 +53,7 @@ INCOMPLETE = "Kalillac couldn't complete the request. Please try again."
 UNREADABLE = "Kalillac couldn't read that request. Please try again."
 BUSY = "Kalillac is busy right now. Please try again in a moment."
 STOPPED = "Stopped."
+FILE_FAILED = "Kalillac couldn't finish working on that file. Please try again."
 
 # The anonymous daily allowance (fixed copy; typographic apostrophes).
 DAILY_LIMIT_CODE = "anonymous_daily_limit_reached"
@@ -92,9 +93,20 @@ COPY = {
     # content-type refusal (never expected from /api/chat; mapped so it is fixed copy).
     "session_ended": "This conversation was ended. Your next message starts a new one.",
     "unsupported_media_type": UNREADABLE,
+    # A reasoning mode the account may not use, and the file assistant's refusals (files deployments).
+    "reasoning_mode_not_allowed": "That reasoning mode isn't available for this account.",
+    "files_require_premium": "Files aren't available for this account.",
+    "not_authenticated": "Sign in to use files.",
+    "file_not_found": "An attached file is no longer available. Remove it and try again.",
+    "file_assistant_unavailable": FILE_FAILED,
+    "model_output_unusable": FILE_FAILED,
+    "model_output_incomplete": FILE_FAILED,
+    "model_refused": FILE_FAILED,
+    "tool_limit_exceeded": FILE_FAILED,
 }
 NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached",
-            DAILY_LIMIT_CODE, "session_ended"}
+            DAILY_LIMIT_CODE, "session_ended", "reasoning_mode_not_allowed", "files_require_premium",
+            "not_authenticated", "file_not_found"}
 
 # Text that must never reach the page: raw response fields, HTML error pages,
 # provider names and exception messages.
@@ -126,6 +138,10 @@ DAILY_LIMIT_SCENARIOS = (
     "daily_limit_escape", "daily_limit_backdrop", "daily_limit_reopen",
     "daily_limit_without_show_modal", "daily_limit_layout_360x640", "daily_limit_after_conversation",
 )
+
+# Files: download links in a reply, and the attach control of a files deployment.
+FILE_SCENARIOS = ("files_in_reply", "files_offered", "files_offered_no_access")
+REASONING_SCENARIOS = ("reasoning_offered",)
 
 # Syntax highlighting of rendered fenced code (frontend presentation only).
 CODE_SCENARIOS = ("syntax_highlighting", "syntax_highlighting_360x640")
@@ -182,6 +198,8 @@ SCENARIOS = (
     + list(DAILY_LIMIT_SCENARIOS)
     + list(CODE_SCENARIOS)
     + ["highlight_languages"]
+    + list(FILE_SCENARIOS)
+    + list(REASONING_SCENARIOS)
 )
 
 
@@ -430,6 +448,8 @@ def test_every_scenario_completed(browser_results):
 def test_no_request_left_the_page(browser_results):
     for name, result in browser_results["results"].items():
         for request in result["requests"]:
+            if name.startswith("files_offered") and request["url"] == "/api/files":
+                continue                      # A files deployment's account probe and upload (tested below).
             assert request["url"] == "/api/chat" and request["method"] == "POST", name
 
 
@@ -1351,3 +1371,59 @@ def test_only_app_js_app_css_and_index_html_changed_in_the_frontend():
     assert set(changed) | set(untracked) <= {
         "frontend/app.js", "frontend/app.css", "frontend/index.html",
     } | VENDORED_HIGHLIGHT
+
+
+# --- files ---------------------------------------------------------------------------------------
+
+
+def test_files_in_a_reply_are_download_links_and_malformed_entries_are_dropped(browser_results):
+    result = scenario(browser_results, "files_in_reply")
+    chips = step(result, "reply")["chips"]
+    assert [chip["href"] for chip in chips] == ["/api/files/AbCdEfGhIjKlMnOpQrStUv", "/api/files/AAAAAAAAAAAAAAAAAAAAAA"]
+    first, hostile = chips
+    assert (first["name"], first["download"], first["meta"]) == ("launch-plan.pptx", "launch-plan.pptx",
+                                                                 "PowerPoint · 228 KB")
+    assert hostile["name"] == "<img src=x onerror=alert(1)>.pdf" and hostile["html"] is False   # Text, never HTML.
+    assert step(result, "reply")["attachShown"] is False                 # Not a files deployment.
+    assert [r["url"] for r in result["requests"]] == ["/api/chat"]
+
+
+def test_a_files_deployment_offers_attachments_to_an_account_with_access(browser_results):
+    result = scenario(browser_results, "files_offered")
+    assert step(result, "offered")["attachShown"] is True
+    attached = step(result, "attached")
+    assert attached["attachments"] == ["budget.xlsx"] and attached["attachmentsShown"] is True
+    probe, upload, chat = result["requests"]
+    assert (probe["url"], probe["method"]) == ("/api/files", "GET")
+    assert (upload["url"], upload["method"], upload["contentType"]) == ("/api/files", "POST", "application/octet-stream")
+    assert chat["url"] == "/api/chat" and chat["body"]["file_ids"] == ["CcCcCcCcCcCcCcCcCcCcCc"]
+    sent = step(result, "sent")
+    assert sent["attachments"] == [] and sent["attachmentsShown"] is False   # Cleared once the reply is shown.
+    assert [chip["name"] for chip in sent["chips"]] == ["launch-plan.pptx"]
+
+
+def test_a_files_deployment_offers_nothing_to_an_account_without_access(browser_results):
+    result = scenario(browser_results, "files_offered_no_access")
+    assert step(result, "not-offered")["attachShown"] is False
+    assert [(r["url"], r["method"]) for r in result["requests"]] == [("/api/files", "GET")]
+
+
+# --- reasoning modes -----------------------------------------------------------------------------
+
+
+def test_without_the_deployment_mark_no_mode_is_offered_or_sent(browser_results):
+    result = scenario(browser_results, "success")
+    assert all("reasoning_mode" not in (body or {}) for body in bodies(result))
+
+
+def test_reasoning_modes_are_chosen_with_the_mouse_and_keyboard_and_sent(browser_results):
+    result = scenario(browser_results, "reasoning_offered")
+    start = step(result, "start")
+    assert start["pickerShown"] is True and start["checked"] == ["balanced"]
+    assert step(result, "deep-clicked")["checked"] == ["deep"]
+    right = step(result, "arrow-right")
+    assert right["checked"] == ["quick"] and right["focused"] == "quick"
+    assert step(result, "arrow-left")["checked"] == ["deep"]
+    first, second = bodies(result)
+    assert first["reasoning_mode"] == "balanced" and second["reasoning_mode"] == "deep"
+

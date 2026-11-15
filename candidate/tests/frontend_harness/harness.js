@@ -88,6 +88,19 @@
   var requests = [];
   var deferred = {};
 
+  // Reasoning scenarios: the page is marked as a reasoning-modes deployment before app.js runs.
+  if (scenarioName.indexOf("reasoning_") === 0) {
+    document.documentElement.setAttribute("data-kalillac-reasoning", "on");
+  }
+
+  // Files scenarios: the page is marked as a files deployment before app.js runs, and the account
+  // probe (GET /api/files) app.js then makes is answered first.
+  if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access") {
+    document.documentElement.setAttribute("data-kalillac-files", "on");
+    queue.push(scenarioName === "files_offered" ? { status: 200, json: { files: [] } }
+                                                : { status: 403, json: { error: "files_require_premium" } });
+  }
+
   // ---- scenario page: the End & erase timeout, under the scenario's control --
   // app.js aborts an erase request after 10 seconds. Those timers are held
   // here instead of running, so a scenario fires them when it chooses and
@@ -549,6 +562,49 @@
     },
     respondWith: function () {
       for (var i = 0; i < arguments.length; i++) queue.push(arguments[i]);
+    },
+    // The files a reply shows, the attach control and the attachments row.
+    files: function (label) {
+      var attach = $("attach-btn"), list = $("attachments");
+      steps.push({
+        label: label,
+        chips: Array.prototype.map.call(document.querySelectorAll("#thread .file-chip"), function (chip) {
+          return { href: chip.getAttribute("href"), download: chip.getAttribute("download"),
+                   name: text(chip.querySelector(".file-name")), meta: text(chip.querySelector(".file-meta")),
+                   html: !!chip.querySelector("img, script, iframe, svg") };  // Any element from a name.
+        }),
+        attachShown: !!attach && !attach.hidden,
+        attachments: list ? Array.prototype.map.call(list.querySelectorAll(".attachment span"), text) : null,
+        attachmentsShown: !!list && !list.hidden
+      });
+    },
+    modes: function (label) {
+      var picker = $("mode-picker");
+      steps.push({
+        label: label,
+        pickerShown: !!picker && !picker.hidden,
+        checked: picker ? Array.prototype.map.call(picker.querySelectorAll('[aria-checked="true"]'),
+                                                   function (o) { return o.getAttribute("data-mode"); }) : null,
+        focused: document.activeElement && document.activeElement.getAttribute("data-mode")
+      });
+    },
+    clickMode: function (mode) {
+      document.querySelector('.mode-option[data-mode="' + mode + '"]').click();
+      return wait(20);
+    },
+    keyOnMode: function (mode, key) {
+      var option = document.querySelector('.mode-option[data-mode="' + mode + '"]');
+      option.focus();
+      option.dispatchEvent(new KeyboardEvent("keydown", { key: key, bubbles: true, cancelable: true }));
+      return wait(20);
+    },
+    chooseFile: function (name, content) {
+      var input = $("attach-input");
+      var transfer = new DataTransfer();
+      transfer.items.add(new File([content], name));
+      input.files = transfer.files;
+      input.dispatchEvent(new Event("change"));
+      return wait(60);
     }
   };
 
@@ -564,7 +620,10 @@
     processing_limit_reached: 422, busy: 429, request_cancelled: 499,
     service_unavailable: 503, model_provider_unavailable: 503,
     request_timeout: 504, internal_error: 500,
-    session_ended: 409, unsupported_media_type: 415
+    session_ended: 409, unsupported_media_type: 415,
+    reasoning_mode_not_allowed: 403, files_require_premium: 403, not_authenticated: 401,
+    file_not_found: 404, file_assistant_unavailable: 502, model_output_unusable: 502,
+    model_output_incomplete: 502, model_refused: 502, tool_limit_exceeded: 502
   };
 
   // A failed send, then a deliberate new message that succeeds.
@@ -1242,6 +1301,59 @@
     a.snap("retry-failed");
     await a.clickRetryErase();
     a.snap("final");
+  };
+
+  // A reply carrying files shows them as download links; malformed entries are dropped.
+  var GOOD_FILE = { id: "AbCdEfGhIjKlMnOpQrStUv", filename: "launch-plan.pptx", size: 233472,
+                    media_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" };
+  SCENARIOS.files_in_reply = async function (a) {
+    a.respondWith({ status: 200, json: { reply: "Here is the deck.", session_id: "s-1", files: [
+      GOOD_FILE,
+      { id: "../../api/account/logout", filename: "x.pdf", size: 1, media_type: "application/pdf" },
+      { id: "AAAAAAAAAAAAAAAAAAAAAA", filename: "<img src=x onerror=alert(1)>.pdf", size: 2048,
+        media_type: "application/pdf" },
+      { id: "BBBBBBBBBBBBBBBBBBBBBB", filename: "", size: 1, media_type: "application/pdf" },
+      "not an object"
+    ] } });
+    await a.send("make a deck");
+    a.snap("reply-page");
+    a.files("reply");
+  };
+
+  // A files deployment and an account with access: attach, then send the attachment with a message.
+  SCENARIOS.files_offered = async function (a) {
+    await a.wait(60);
+    a.files("offered");
+    a.respondWith({ status: 201, json: { file: { id: "CcCcCcCcCcCcCcCcCcCcCc", filename: "budget.xlsx", size: 9000,
+                                                 media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" } } },
+                  { status: 200, json: { reply: "Updated.", session_id: "s-1", files: [GOOD_FILE] } });
+    await a.chooseFile("budget.xlsx", "PK fake workbook");
+    a.files("attached");
+    await a.send("raise the rent line by 5%");
+    a.snap("sent-page");
+    a.files("sent");
+  };
+
+  // A files deployment, but this account has no access: nothing is offered.
+  SCENARIOS.files_offered_no_access = async function (a) {
+    await a.wait(60);
+    a.snap("not-offered-page");
+    a.files("not-offered");
+  };
+
+  // Reasoning modes on: Balanced by default, a chosen mode goes with the message, arrows move the choice.
+  SCENARIOS.reasoning_offered = async function (a) {
+    a.modes("start");
+    a.respondWith(ok("Quick answer.", "s-1"), ok("Deep answer.", "s-1"));
+    await a.send("first question");
+    await a.clickMode("deep");
+    a.modes("deep-clicked");
+    await a.keyOnMode("deep", "ArrowRight");     // Wraps to Quick.
+    a.modes("arrow-right");
+    await a.keyOnMode("quick", "ArrowLeft");     // Back to Deep.
+    a.modes("arrow-left");
+    await a.send("second question");
+    a.snap("sent");
   };
 
   // A chat reply of session_ended forgets the ended session id.

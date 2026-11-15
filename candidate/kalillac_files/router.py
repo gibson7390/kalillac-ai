@@ -1,0 +1,246 @@
+"""/api/files: upload, list, download and delete a customer's files, and ask the file assistant.
+
+Installed only when KALILLAC_FILES_ENABLED is set (with accounts and the database). Every route needs
+a signed-in account with the tier the configuration requires (KALILLAC_FILES_TIER, "paid" unless set
+otherwise; the Free/Premium split is an owner decision and stays fail-closed until made). Unsafe
+routes are in the unsafe-request guard's inventory, so a cross-site request is refused before it
+gets here.
+
+    POST   /api/files              upload: the raw file as the body (application/octet-stream), its
+                                   name percent-encoded in X-Kalillac-Filename; checked by intake in
+                                   the isolated worker before anything is stored
+    GET    /api/files              the account's files
+    GET    /api/files/{file_id}    download (attachment, never rendered by the browser)
+    DELETE /api/files/{file_id}
+    POST   /api/files/assist       {"message", "history"?, "file_ids"?}: the file assistant makes or
+                                   edits files; the reply lists them
+
+Responses never contain a path, an owner id or document text beyond what the customer asked for;
+errors are stable codes.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import threading
+from typing import Any, Awaitable, Callable
+from urllib.parse import quote, unquote
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
+
+from .intake import MAX_UPLOAD_BYTES, display_name
+from .store import FileNotFound, QuotaExceeded
+
+MEDIA_BY_KIND = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "txt": "text/plain; charset=utf-8", "md": "text/markdown; charset=utf-8", "csv": "text/csv; charset=utf-8",
+    "json": "application/json",
+}
+MAX_MESSAGE = 20_000
+MAX_HISTORY = 20
+MAX_ATTACHED = 5
+_NO_STORE = {"Cache-Control": "no-store", "Vary": "Cookie"}
+
+
+@dataclass(frozen=True)
+class FileAccount:
+    owner: str          # a stable account id
+    paid: bool
+
+
+def _error(status, code):
+    return JSONResponse(status_code=status, content={"error": code}, headers=_NO_STORE)
+
+
+async def _bounded_body(request, limit):
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > limit:
+                return None
+        except ValueError:
+            return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
+def valid_assist_request(message, history, file_ids):
+    """Whether a file-assistant request is well formed (the same rules for /api/files/assist and /api/chat)."""
+    return (type(message) is str and bool(message.strip()) and len(message) <= MAX_MESSAGE
+            and type(history) is list and len(history) <= MAX_HISTORY
+            and all(type(turn) is dict and set(turn) == {"role", "content"} and turn["role"] in ("user", "assistant")
+                    and type(turn["content"]) is str and len(turn["content"]) <= MAX_MESSAGE for turn in history)
+            and type(file_ids) is list and len(file_ids) <= MAX_ATTACHED
+            and all(type(file_id) is str for file_id in file_ids))
+
+
+class FileService:
+    """Access checks and the file assistant, shared by /api/files and the /api/chat handoff."""
+
+    def __init__(self, *, store, authenticate: Callable[[Request], Awaitable[FileAccount | None]],
+                 call_model: Callable[[list], Any], required_tier: str = "paid", max_concurrent_assists: int = 2,
+                 worker_module=None):
+        if required_tier not in ("paid", "any"):
+            raise ValueError("required_tier must be 'paid' or 'any'")
+        from . import worker as default_worker
+        self.store, self.authenticate, self.call_model = store, authenticate, call_model
+        self.required_tier = required_tier
+        self.worker = worker_module or default_worker
+        self.assists = threading.BoundedSemaphore(max_concurrent_assists)
+
+    async def account(self, request):
+        """(account, None) when the caller may use files, else (None, the refusal response)."""
+        found = await self.authenticate(request)
+        if found is None:
+            return None, _error(401, "not_authenticated")
+        if self.required_tier == "paid" and not found.paid:
+            return None, _error(403, "files_require_premium")
+        return found, None
+
+    async def assist(self, account, message, history, file_ids):
+        """Run the file assistant: ({"reply", "files"}, None) or (None, the refusal response)."""
+        from .assistant import AssistantError, FileRequest, run_file_assistant
+        for file_id in file_ids:
+            try:
+                await run_in_threadpool(self.store.record, account.owner, file_id)
+            except FileNotFound:
+                return None, _error(404, "file_not_found")
+        if not self.assists.acquire(blocking=False):
+            return None, _error(503, "busy")
+        try:
+            file_request = FileRequest(account.owner, self.store, tuple(dict.fromkeys(file_ids)),
+                                       run_generate=self.worker.run_generate, run_outline=self.worker.run_outline,
+                                       run_edit=self.worker.run_edit)
+            result = await run_in_threadpool(run_file_assistant, message, history, file_request, self.call_model)
+        except AssistantError as failed:
+            return None, _error(502, failed.code)
+        except Exception as failed:  # The model provider, a limit or a defect: a class name only, never content.
+            print(f"WARN: FILE_ASSISTANT_FAILED {type(failed).__name__}")
+            return None, _error(502, "file_assistant_unavailable")
+        finally:
+            self.assists.release()
+        return {"reply": result.text, "files": [record.public() for record in result.files]}, None
+
+
+def build_files_router(*, service: FileService | None = None, **options) -> APIRouter:
+    service = service or FileService(**options)
+    store, worker, account = service.store, service.worker, service.account
+    router = APIRouter(prefix="/api/files")
+
+    def no_query(request):
+        return _error(400, "query_not_allowed") if request.url.query else None
+
+    @router.post("")
+    async def upload(request: Request):
+        refusal = no_query(request)
+        if refusal:
+            return refusal
+        found, refusal = await account(request)
+        if refusal:
+            return refusal
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/octet-stream":
+            return _error(415, "octet_stream_required")
+        raw_name = request.headers.get("x-kalillac-filename", "")
+        try:
+            name = display_name(unquote(raw_name, errors="strict")) if raw_name and len(raw_name) <= 765 else None
+        except UnicodeDecodeError:
+            name = None
+        if name is None:
+            return _error(400, "filename_required")
+        data = await _bounded_body(request, MAX_UPLOAD_BYTES)
+        if data is None:
+            return _error(413, "file_too_large")
+        if not data:
+            return _error(400, "empty_file")
+        try:
+            inspected = await run_in_threadpool(worker.run_inspect, data, name)
+        except worker.WorkerError as refused:
+            return _error(422 if refused.code not in ("busy", "timeout", "worker_failed") else 503, refused.code)
+        try:
+            stored = await run_in_threadpool(store.put, found.owner, data, name, MEDIA_BY_KIND[inspected.kind],
+                                             "uploaded")
+        except QuotaExceeded as full:
+            return _error(413 if full.code == "file_too_large" else 409, full.code)
+        return JSONResponse(status_code=201, content={"file": stored.public()}, headers=_NO_STORE)
+
+    @router.get("")
+    async def list_files(request: Request):
+        refusal = no_query(request)
+        if refusal:
+            return refusal
+        found, refusal = await account(request)
+        if refusal:
+            return refusal
+        records = await run_in_threadpool(store.list, found.owner)
+        return JSONResponse(content={"files": [record.public() for record in records]}, headers=_NO_STORE)
+
+    @router.get("/{file_id}")
+    async def download(file_id: str, request: Request):
+        refusal = no_query(request)
+        if refusal:
+            return refusal
+        found, refusal = await account(request)
+        if refusal:
+            return refusal
+        try:
+            record, data = await run_in_threadpool(store.get, found.owner, file_id)
+        except FileNotFound:
+            return _error(404, "file_not_found")
+        ascii_name = record.filename.encode("ascii", "replace").decode("ascii").replace('"', "_").replace("?", "_")
+        return Response(content=data, media_type=record.media_type, headers={
+            **_NO_STORE,
+            "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(record.filename)}",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cross-Origin-Resource-Policy": "same-origin",
+        })
+
+    @router.delete("/{file_id}")
+    async def delete(file_id: str, request: Request):
+        refusal = no_query(request)
+        if refusal:
+            return refusal
+        found, refusal = await account(request)
+        if refusal:
+            return refusal
+        try:
+            await run_in_threadpool(store.delete, found.owner, file_id)
+        except FileNotFound:
+            return _error(404, "file_not_found")
+        return JSONResponse(content={"deleted": True}, headers=_NO_STORE)
+
+    @router.post("/assist")
+    async def assist(request: Request):
+        refusal = no_query(request)
+        if refusal:
+            return refusal
+        found, refusal = await account(request)
+        if refusal:
+            return refusal
+        if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
+            return _error(415, "json_required")
+        body = await _bounded_body(request, 512 * 1024)
+        try:
+            payload = json.loads(body) if body else None
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or not set(payload) <= {"message", "history", "file_ids"}:
+            return _error(422, "invalid_request")
+        message, history, file_ids = payload.get("message"), payload.get("history", []), payload.get("file_ids", [])
+        if not valid_assist_request(message, history, file_ids):
+            return _error(422, "invalid_request")
+        content, refusal = await service.assist(found, message, history, file_ids)
+        if refusal:
+            return refusal
+        return JSONResponse(content=content, headers=_NO_STORE)
+
+    return router

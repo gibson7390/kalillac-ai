@@ -1,0 +1,168 @@
+"""/api/files over HTTP: authentication and tier, uploads checked by intake, owner isolation, safe
+downloads, the assistant route, and the unsafe-request guard in front of every mutation."""
+from __future__ import annotations
+
+import copy
+import json
+from urllib.parse import quote
+
+import pytest
+
+pytest.importorskip("docx")
+pytest.importorskip("pptx")
+openpyxl = pytest.importorskip("openpyxl")
+pytest.importorskip("typst")
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from kalillac_accounts.request_guard import UnsafeRequestGuard, guarded_route  # noqa: E402
+from kalillac_files import generate  # noqa: E402
+from kalillac_files.router import FileAccount, build_files_router  # noqa: E402
+from kalillac_files.store import FileStore  # noqa: E402
+from quality_benchmark import FORECAST_WORKBOOK, WORD_PROPOSAL  # noqa: E402
+
+pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
+ORIGIN = "https://kalillac.test"
+ACCOUNTS = {"paid-a": FileAccount("a", True), "paid-b": FileAccount("b", True), "free-c": FileAccount("c", False)}
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+class Model:
+    def __init__(self, *outputs):
+        self.outputs = list(outputs)
+
+    def __call__(self, items):
+        return {"output": self.outputs.pop(0)}
+
+
+def build(tmp_path, model=None, tier="paid"):
+    async def authenticate(request):
+        return ACCOUNTS.get(request.cookies.get("session", ""))
+    app = FastAPI()
+    store = FileStore(tmp_path / "files")
+    app.include_router(build_files_router(store=store, authenticate=authenticate, call_model=model or Model(),
+                                          required_tier=tier))
+    app.add_middleware(UnsafeRequestGuard, origin=ORIGIN)
+    return TestClient(app), store
+
+
+def headers(account="paid-a", **extra):
+    return {"origin": ORIGIN, "cookie": f"session={account}", **extra}
+
+
+def upload(client, data, name, account="paid-a"):
+    return client.post("/api/files", content=data, headers=headers(
+        account, **{"content-type": "application/octet-stream", "x-kalillac-filename": quote(name)}))
+
+
+@pytest.fixture
+def workbook():
+    return generate(copy.deepcopy(FORECAST_WORKBOOK), "xlsx").data
+
+
+def test_the_unsafe_routes_are_in_the_guard_inventory():
+    for method, path in (("POST", "/api/files"), ("POST", "/api/files/assist"), ("DELETE", "/api/files/abc")):
+        assert guarded_route(method, path).family == "files"
+    assert guarded_route("GET", "/api/files/abc") is None
+
+
+def test_cross_site_and_query_requests_are_refused_before_any_work(tmp_path, workbook):
+    client, store = build(tmp_path)
+    for bad in ({"origin": "https://evil.test"}, {}):
+        reply = client.post("/api/files", content=workbook, headers={**headers(), **bad, "content-type":
+                                                                     "application/octet-stream"} if bad else
+                            {"cookie": "session=paid-a", "content-type": "application/octet-stream"})
+        assert (reply.status_code, reply.json()) == (403, {"error": "origin_rejected"})
+    assert client.post("/api/files?x=1", content=workbook, headers=headers()).json() == {"error": "query_not_allowed"}
+    assert client.get("/api/files?owner=b", headers=headers()).json() == {"error": "query_not_allowed"}
+    assert store.list("a") == []
+
+
+def test_signed_out_and_free_accounts_are_refused_while_files_require_premium(tmp_path, workbook):
+    client, _ = build(tmp_path)
+    assert client.get("/api/files", headers=headers("nobody")).status_code == 401
+    assert (client.get("/api/files", headers=headers("free-c")).json()) == {"error": "files_require_premium"}
+    assert upload(client, workbook, "f.xlsx", "free-c").status_code == 403
+    client, _ = build(tmp_path / "any", tier="any")
+    assert client.get("/api/files", headers=headers("free-c")).status_code == 200
+
+
+def test_an_upload_is_checked_by_intake_stored_and_downloaded_safely(tmp_path, workbook):
+    client, store = build(tmp_path)
+    reply = upload(client, workbook, "Plan 2027 — final.xlsx")
+    assert reply.status_code == 201
+    file = reply.json()["file"]
+    assert file["filename"] == "Plan 2027 _ final.xlsx" and file["media_type"] == XLSX and file["origin"] == "uploaded"
+    assert set(file) == {"id", "filename", "media_type", "size", "origin", "created_at", "expires_at", "parent_id"}
+    listed = client.get("/api/files", headers=headers()).json()["files"]
+    assert [item["id"] for item in listed] == [file["id"]]
+    download = client.get(f"/api/files/{file['id']}", headers=headers())
+    assert download.content == workbook and download.headers["content-type"] == XLSX
+    assert download.headers["content-disposition"].startswith("attachment;")
+    assert download.headers["x-content-type-options"] == "nosniff" and download.headers["cache-control"] == "no-store"
+    assert "sandbox" in download.headers["content-security-policy"]
+    # Another account sees nothing, and cannot tell a file exists.
+    assert client.get(f"/api/files/{file['id']}", headers=headers("paid-b")).json() == {"error": "file_not_found"}
+    assert client.delete(f"/api/files/{file['id']}", headers=headers("paid-b")).status_code == 404
+    assert client.get("/api/files", headers=headers("paid-b")).json() == {"files": []}
+    assert client.delete(f"/api/files/{file['id']}", headers=headers()).json() == {"deleted": True}
+    assert client.get(f"/api/files/{file['id']}", headers=headers()).status_code == 404
+
+
+@pytest.mark.parametrize("data, name, status, code", [
+    (b"MZ\x90\x00", "tool.exe", 422, "unsupported_type"),
+    (b"just text", "x.docx", 422, "type_mismatch"),
+    (b"", "x.txt", 400, "empty_file"),
+])
+def test_unacceptable_uploads_are_refused_and_nothing_is_stored(tmp_path, data, name, status, code):
+    client, store = build(tmp_path)
+    reply = upload(client, data, name)
+    assert (reply.status_code, reply.json()) == (status, {"error": code})
+    assert store.list("a") == []
+
+
+def test_uploads_need_a_name_the_raw_body_and_a_bounded_size(tmp_path, workbook):
+    client, _ = build(tmp_path)
+    assert client.post("/api/files", content=workbook, headers=headers(**{
+        "content-type": "application/octet-stream"})).json() == {"error": "filename_required"}
+    assert client.post("/api/files", files={"file": ("f.xlsx", workbook)}, headers=headers(**{
+        "x-kalillac-filename": "f.xlsx"})).json() == {"error": "octet_stream_required"}
+    assert upload(client, b"x" * (10 * 1024 * 1024 + 1), "big.txt").json() == {"error": "file_too_large"}
+
+
+def test_the_assistant_route_makes_files_for_the_account_and_lists_them(tmp_path):
+    model = Model([{"type": "function_call", "call_id": "c1", "name": "create_file",
+                    "arguments": json.dumps({"format": "pdf", "spec": copy.deepcopy(WORD_PROPOSAL)})}],
+                  [{"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Your proposal is ready."}]}])
+    client, store = build(tmp_path, model)
+    reply = client.post("/api/files/assist", json={"message": "Write the café proposal as a PDF"}, headers=headers())
+    assert reply.status_code == 200
+    body = reply.json()
+    assert body["reply"] == "Your proposal is ready." and len(body["files"]) == 1
+    made = body["files"][0]
+    assert made["media_type"] == "application/pdf" and made["origin"] == "generated"
+    assert client.get(f"/api/files/{made['id']}", headers=headers()).content.startswith(b"%PDF-")
+    assert store.list("b") == []
+
+
+def test_the_assistant_route_checks_its_request_and_the_attached_files(tmp_path, workbook):
+    client, _ = build(tmp_path, Model())
+    theirs = upload(client, workbook, "theirs.xlsx", "paid-b").json()["file"]["id"]
+    for body in ({}, {"message": ""}, {"message": "x", "extra": 1}, {"message": "x" * 20_001},
+                 {"message": "x", "history": [{"role": "system", "content": "x"}]},
+                 {"message": "x", "file_ids": ["a"] * 6}):
+        assert client.post("/api/files/assist", json=body, headers=headers()).json() == {"error": "invalid_request"}
+    assert client.post("/api/files/assist", json={"message": "edit", "file_ids": [theirs]},
+                       headers=headers()).json() == {"error": "file_not_found"}
+    assert client.post("/api/files/assist", content=b"message=x", headers=headers(
+        **{"content-type": "application/x-www-form-urlencoded"})).json() == {"error": "json_required"}
+
+
+def test_a_failing_model_is_a_stable_error_not_a_crash(tmp_path):
+    def broken(items):
+        raise TimeoutError("provider timed out")
+    client, _ = build(tmp_path, broken)
+    reply = client.post("/api/files/assist", json={"message": "Make a report"}, headers=headers())
+    assert (reply.status_code, reply.json()) == (502, {"error": "file_assistant_unavailable"})

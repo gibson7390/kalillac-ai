@@ -1,0 +1,136 @@
+# V1-02D and V1-02E: completing account security (plan, reconstructed from the code)
+
+Status: **plan**. Approved by the owner on 2026-11-15 to be written from the code and then implemented,
+keeping the private database authorities and adding no legacy path. Nothing here is implemented yet;
+nothing here authorizes a production migration, a role or credential change, or activation.
+
+Sources: the code on `feat/file-assistant-v1` (migrations 0012 to 0014, `kalillac_accounts/v1_security.py`,
+the registration authority) and the V1 contract in
+`C:/Kalillac/homepage-app-handoff-logs/account-lifecycle-hardening-v1/v1-stock-postgresql-paid-launch-contract-and-implementation-map`
+(documents 02 to 04), read only.
+
+## 1. What exists
+
+| Piece | State |
+|---|---|
+| V1-01 original-session authorization | Implemented, default off (`KALILLAC_V1_ACCOUNT_SECURITY_ENABLED`): `/me` and `/entitlements` authorize the exact original session under the account row lock with fresh READ COMMITTED reads |
+| 0012 prepared state | `deletion_requested_at`, `password_reset_required`; owner-only tables `account_security_events`, `account_security_admission(_aggregate)`, `account_outbox`, and the activation latch in state `prepared` |
+| 0013 revocation authority | `kalillac.v1_revoke_sessions(...)`: revoke others or all, proven by the original session, with operation ids, admission and an audit event; owned by E, executable by S |
+| 0014 issuance authority | `kalillac.v1_issue_session(...)`: one session after a verified password, under the account lock, strictly after the epoch; revoke-all advances the epoch |
+| Roles | O owner, M migration login, A registration login, R runtime login, E (NOLOGIN executor), S (NOLOGIN service). S holds no credential, so **nothing can call the authorities yet**; the legacy runtime role R still writes sessions directly |
+
+## 2. What remains, in order
+
+Every sub-slice is default off, adds its own tests (SQLite where the behaviour is dialect-free, real
+PostgreSQL 16 in the disposable CI job for every authority, race and privilege property), keeps all
+existing suites unchanged, and is committed separately.
+
+### D1. The application's private S connection
+
+- The operator transition (E2 below) gives S `LOGIN` and a credential; the application reads it from a
+  protected credential file through the existing strict protected-file loader (the one A uses),
+  never from an environment variable. Setting: `KALILLAC_V1_SERVICE_CREDENTIALS_FILE`.
+- A second, small engine (pool of 2 to 4) used only by `kalillac_accounts/v1_authority.py`, which
+  calls the fixed functions with bound parameters and nothing else. No generic SQL path is reachable
+  from it.
+- Startup in V1 mode verifies: the latch is `active` for this database instance and release, the
+  exact function inventory (owner, signature, body hash, `search_path`, SECURITY DEFINER, PUBLIC
+  revoked), and that S has EXECUTE on exactly that inventory and nothing else. Any difference refuses
+  account startup; anonymous service is unaffected.
+- Tests: wrong/missing/loose-permission credential file; S with extra privilege; tampered function
+  body; latch prepared or bound to another instance; pool exhaustion fails closed.
+
+### D2. The remaining authorities (migration 0017, functions and grants only)
+
+E-owned, S-executable SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, static SQL,
+operation ids, admission where the contract requires it, and an audit event in the same transaction:
+
+| Function | Effect |
+|---|---|
+| `v1_end_session(session, token_hash)` | Logout: revoke exactly the presented session; idempotent |
+| `v1_reset_password(token_hash, new_hash, op)` | Recovery completion: lock and re-check the token, replace the hash, invalidate every reset token, revoke every session, advance the epoch, clear `password_reset_required` (only here), audit |
+| `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, advance the epoch, audit |
+| `v1_verify_email(token_hash, op)` | Email verification completion under the account lock |
+| `v1_quarantine(account, reason, op)`, `v1_reinstate(account, op)` | Operator suspension and reinstatement: quarantine revokes every session and advances the epoch; reinstatement never happens as a side effect of anything else |
+| `v1_request_deletion(account, op)` | Sets the deletion marker, revokes every session, advances the epoch; erasure itself follows the retention rules (section 5) |
+
+The operator functions are executable by a separate NOLOGIN operator role P, used only by the operator
+tool (D4), never by S. New event types extend 0012's allowed list in the same migration.
+
+Tests (PostgreSQL): each effect and its audit commit or roll back together; races of reset against
+login, revoke against issuance, change against logout; future-dated and expired sessions are revoked;
+clock rollback cannot lower an epoch; R, A and PUBLIC cannot execute or read through any function;
+hostile `search_path` and role tampering fail.
+
+### D3. Route wiring in V1 mode
+
+| Route | V1 behaviour |
+|---|---|
+| `POST /api/account/login` | Existing gate and password work, then `v1_issue_session` |
+| `POST /api/account/logout` | `v1_end_session`; same bodyless idempotent contract |
+| `POST /api/account/sessions/revoke-others`, `.../revoke-all` (new) | Exact `{}` body (4096-byte bounded, duplicate and extra keys refused); `200 {"ok":true}`; revoke-all clears the cookie; admission `429 too_many_operations` with `Retry-After`, capacity `503 security_unavailable` |
+| `POST /api/account/recovery/confirm` | `v1_reset_password` |
+| `POST /api/account/email-verification/confirm` | `v1_verify_email` |
+| `POST /api/account/password` (new) | `{"current_password", "new_password"}`; existing password policy and work gate; `v1_change_password`; keeps the current session |
+
+All new routes join the unsafe-request guard inventory. Off mode is byte-for-byte unchanged (tests).
+
+### D4. Operator tool
+
+`tools/v1_account_support.py`: suspend, reinstate, request deletion, and a bounded export of what is
+held about an account, each through P with an operator credential that is not the application's,
+with a dry-run mode, a required reason code and an operation id. Tested against fixtures; writing it
+is not permission to run it against production.
+
+### E1. Removing the legacy route (migration 0018, prepared, not self-applied)
+
+Revokes R's direct DML on `users`, `account_sessions`, recovery and verification tokens, entitlements
+and billing, and its reads of credential digests, **only** inside the operator transition. The
+migration itself prepares and verifies; startup never migrates or changes grants.
+
+### E2. The operator transition
+
+`tools/v1_security_transition.py`: with ingress closed, checks the catalog exactly, gives S its login
+and credential, applies E1, moves the latch to `active` bound to the database instance, schema version
+and release, and records it. Dry-run and fixture tested. Once active, a V1-off or older binary refuses
+account startup (an old broad-grant binary is not a rollback).
+
+### E3. The synthetic lifecycle test
+
+One PostgreSQL test through the real routes: register, verify, log in twice, revoke others, change the
+password, log out, request recovery, reset, revoke all, operator quarantine (every session refused),
+reinstate, request deletion (login refused) — asserting sessions, epochs and audit events after each
+step, and that R cannot write any of it.
+
+## 3. Order and checkpoints
+
+D1 and D2 first (no route changes), then D3 route by route, then D4, then E1 to E3. Each commit runs the
+three existing workflows plus the new PostgreSQL group with measured counts and no unexpected skips.
+
+## 4. Decisions and deviations recorded
+
+- **Password change.** The V1 contract lists password change as an optional post-launch item (H1, "no
+  optional password-change API" in V1). The owner's 2026-11-15 directive asks for it; it is built
+  default off as above and needs no other V1 item to change.
+- **S as a login.** The contract describes S as the private application login; 0013 created it NOLOGIN
+  so nothing could call the authorities early. The transition (E2) is where it gains its login.
+- **Operator role P.** The contract places support operations in operator tools, not the application;
+  P keeps them out of S's reach.
+
+## 5. Account deletion: retention proposal (for the owner's decision)
+
+Proposed, not decided. Figures are placeholders for the owner and, where applicable, legal review.
+
+| Data | On a verified deletion request | Kept, and for how long (proposed) |
+|---|---|---|
+| Sessions, recovery and verification tokens | Revoked and deleted at once | Nothing |
+| Login identity (email, password hash) | Login refused at once; erased within 30 days | Nothing after erasure |
+| Conversations, Spaces, files (`/api/files`) | Inaccessible at once; erased within 30 days | Nothing after erasure |
+| Usage counters linked to the account | Erased with the account | Aggregate, unlinked totals only |
+| Subscription | Cancelled through Stripe by the operator; no automatic refund | Stripe keeps its own records |
+| Local billing references (customer and subscription ids, webhook records) | Kept, unlinked from the login identity | As long as tax and accounting law requires (owner to set; often 6 to 10 years) |
+| Financial safeguards ledger | Unchanged (it holds no identity) | Its own retention |
+| Security audit events | Account id kept only as a pseudonymous reference | 12 months, then deleted |
+
+Backups age out on their own schedule; a restore re-applies outstanding deletions before reopening
+(contract document 03, section 6).

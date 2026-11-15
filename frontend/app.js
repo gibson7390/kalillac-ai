@@ -917,6 +917,10 @@
     kind: "notice", action: null
   };
 
+  var OUTCOME_FILE_FAILED = {
+    message: "Kalillac couldn't finish working on that file. Please try again.", kind: "error", action: "retry"
+  };
+
   var ERROR_OUTCOMES = {
     invalid_json: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
     invalid_body: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
@@ -960,7 +964,22 @@
     },
     anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT,
     session_ended: OUTCOME_SESSION_ENDED,
-    unsupported_media_type: { message: COPY_UNREADABLE, kind: "error", action: "retry" }
+    unsupported_media_type: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
+    // A reasoning mode the account's tier may not use (never silently downgraded).
+    reasoning_mode_not_allowed: {
+      message: "That reasoning mode isn't available for this account.", kind: "error", action: null
+    },
+    // Files (a files deployment only).
+    files_require_premium: { message: "Files aren't available for this account.", kind: "error", action: null },
+    not_authenticated: { message: "Sign in to use files.", kind: "error", action: null },
+    file_not_found: {
+      message: "An attached file is no longer available. Remove it and try again.", kind: "error", action: null
+    },
+    file_assistant_unavailable: OUTCOME_FILE_FAILED,
+    model_output_unusable: OUTCOME_FILE_FAILED,
+    model_output_incomplete: OUTCOME_FILE_FAILED,
+    model_refused: OUTCOME_FILE_FAILED,
+    tool_limit_exceeded: OUTCOME_FILE_FAILED
   };
 
   /* An HTTP response arrived but was not a usable reply. A recognized fixed
@@ -1148,13 +1167,183 @@
     restoreDraft(exchange);
   }
 
+  /* --- Files ------------------------------------------------------------
+     Offered only when GET /api/files answers 200: files are enabled and this
+     signed-in account has access. A reply may carry files Kalillac made; they
+     are shown as download links built with DOM APIs (never HTML), each id
+     checked against the server's format. Attachments are uploaded as the raw
+     file body and sent with the next message as file_ids. */
+  var FILE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+  var MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+  var FILE_KINDS = {
+    "application/pdf": "PDF",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint",
+    "text/csv; charset=utf-8": "CSV",
+    "text/markdown; charset=utf-8": "Markdown",
+    "text/plain; charset=utf-8": "Text",
+    "application/json": "JSON"
+  };
+  var attachBtn = document.getElementById("attach-btn");
+  var attachInput = document.getElementById("attach-input");
+  var attachmentList = document.getElementById("attachments");
+  var ATTACHED = [];   // [{id, filename}] for the next message
+
+  function fileSize(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    return Math.max(1, Math.round(bytes / 1024)) + " KB";
+  }
+
+  function filesFrom(data) {
+    if (!data || !Array.isArray(data.files)) return [];
+    return data.files.filter(function (f) {
+      return f && typeof f.id === "string" && FILE_ID_RE.test(f.id) &&
+        typeof f.filename === "string" && f.filename && typeof f.size === "number";
+    });
+  }
+
+  function renderFiles(shell, files) {
+    if (!files.length) return;
+    var list = document.createElement("ul");
+    list.className = "file-list";
+    list.setAttribute("aria-label", "Files from Kalillac");
+    files.forEach(function (f) {
+      var item = document.createElement("li");
+      var link = document.createElement("a");
+      link.className = "file-chip";
+      link.href = "/api/files/" + encodeURIComponent(f.id);
+      link.setAttribute("download", f.filename);
+      var name = document.createElement("span");
+      name.className = "file-name";
+      name.textContent = f.filename;
+      var meta = document.createElement("span");
+      meta.className = "file-meta";
+      meta.textContent = (FILE_KINDS[f.media_type] || "File") + " · " + fileSize(f.size);
+      link.appendChild(name);
+      link.appendChild(meta);
+      item.appendChild(link);
+      list.appendChild(item);
+    });
+    shell.bubble.appendChild(list);
+  }
+
+  function renderAttachments() {
+    if (!attachmentList) return;
+    while (attachmentList.firstChild) attachmentList.removeChild(attachmentList.firstChild);
+    ATTACHED.forEach(function (f, index) {
+      var item = document.createElement("li");
+      item.className = "attachment";
+      var name = document.createElement("span");
+      name.textContent = f.filename;
+      var remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "attachment-remove";
+      remove.setAttribute("aria-label", "Remove " + f.filename);
+      remove.textContent = "×";
+      remove.addEventListener("click", function () {
+        ATTACHED.splice(index, 1);
+        renderAttachments();
+      });
+      item.appendChild(name);
+      item.appendChild(remove);
+      attachmentList.appendChild(item);
+    });
+    attachmentList.hidden = ATTACHED.length === 0;
+  }
+
+  /* --- Reasoning modes ---------------------------------------------------
+     A deployment with reasoning modes on marks the page
+     (<html data-kalillac-reasoning="on">); only then is the picker shown and a
+     mode sent. The server decides what each mode means and who may use it; a
+     refusal arrives as the fixed reasoning_mode_not_allowed copy. The choice
+     lives only as long as the page: nothing is stored in the browser. */
+  var modePicker = document.getElementById("mode-picker");
+  var REASONING_OFFERED = document.documentElement.getAttribute("data-kalillac-reasoning") === "on";
+  var reasoningMode = null;
+
+  function modeOptions() {
+    return modePicker ? Array.prototype.slice.call(modePicker.querySelectorAll(".mode-option")) : [];
+  }
+
+  function selectMode(mode, focus) {
+    var options = modeOptions();
+    var chosen = options.filter(function (o) { return o.getAttribute("data-mode") === mode; })[0];
+    if (!chosen) return;
+    options.forEach(function (o) {
+      var on = o === chosen;
+      o.setAttribute("aria-checked", on ? "true" : "false");
+      o.tabIndex = on ? 0 : -1;
+    });
+    reasoningMode = mode;
+    if (focus) chosen.focus();
+  }
+
+  if (REASONING_OFFERED && modePicker) {
+    modePicker.hidden = false;
+    selectMode("balanced", false);
+    modeOptions().forEach(function (option, index, all) {
+      option.addEventListener("click", function () { selectMode(option.getAttribute("data-mode"), false); });
+      option.addEventListener("keydown", function (event) {
+        var step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 :
+                   event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+        if (!step) return;
+        event.preventDefault();
+        var next = all[(index + step + all.length) % all.length];
+        selectMode(next.getAttribute("data-mode"), true);
+      });
+    });
+  }
+
+  function uploadFile(file) {
+    if (file.size > MAX_UPLOAD_BYTES || ATTACHED.length >= 5) return;
+    attachBtn.disabled = true;
+    fetch("/api/files", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-Kalillac-Filename": encodeURIComponent(file.name)
+      },
+      body: file
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (result) {
+        var f = result.ok && result.data && result.data.file;
+        if (f && typeof f.id === "string" && FILE_ID_RE.test(f.id)) {
+          ATTACHED.push({ id: f.id, filename: typeof f.filename === "string" ? f.filename : file.name });
+          renderAttachments();
+        }
+      }, function () {})
+      .then(function () { attachBtn.disabled = false; });
+  }
+
+  // A deployment with files enabled marks the page (<html data-kalillac-files="on">). Without the mark
+  // nothing here runs and no request is made, so every other visitor's page behaves exactly as before.
+  var FILES_OFFERED = document.documentElement.getAttribute("data-kalillac-files") === "on";
+  if (FILES_OFFERED && attachBtn && attachInput && attachmentList) {
+    attachBtn.addEventListener("click", function () { attachInput.click(); });
+    attachInput.addEventListener("change", function () {
+      if (attachInput.files && attachInput.files[0]) uploadFile(attachInput.files[0]);
+      attachInput.value = "";
+    });
+    // Files are offered only to an account the server says may use them.
+    fetch("/api/files", { method: "GET" }).then(function (res) {
+      if (res.status === 200) attachBtn.hidden = false;
+    }, function () {});
+  }
+
   /* Render the reply and its actions first; only a fully rendered answer
      becomes a completed turn. */
-  function completeExchange(exchange, reply, sessionId, sourceList) {
+  function completeExchange(exchange, reply, sessionId, sourceList, files) {
     var index = TURNS.length;
 
     try {
       renderAssistantText(exchange.shell, reply, sourceList);
+      renderFiles(exchange.shell, files || []);
+      if (exchange.fileIds && exchange.fileIds.length) {
+        ATTACHED = [];
+        renderAttachments();
+      }
       clearActions(exchange.shell);
       addActions(exchange.shell, index);
     } catch (e) {
@@ -1198,7 +1387,7 @@
         return;
       }
 
-      completeExchange(exchange, reply, data.session_id, sourceListMeta(data));
+      completeExchange(exchange, reply, data.session_id, sourceListMeta(data), filesFrom(data));
     }, function (err) {
       if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
       // The response arrived but its body could not be read.
@@ -1220,6 +1409,10 @@
       history: exchange.history,
       session_id: SESSION_ID
     };
+    // Attachments go with this message; they are cleared once its reply is shown.
+    exchange.fileIds = ATTACHED.map(function (f) { return f.id; });
+    if (exchange.fileIds.length) payload.file_ids = exchange.fileIds;
+    if (reasoningMode) payload.reasoning_mode = reasoningMode;
 
     // Same-origin: the frontend is served at /app/ and the API at /api/, so no
     // CORS is involved. fetch's default credentials mode ("same-origin") lets

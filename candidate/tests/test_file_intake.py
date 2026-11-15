@@ -363,9 +363,16 @@ def test_display_names_are_inert_labels(name, expected):
     assert "/" not in label and "\\" not in label and "<" not in label and len(label) <= 120
 
 
-def test_the_application_does_not_reach_the_intake_core_yet():
+def _app_outside_the_files_flag(source):
+    """The application source outside its KALILLAC_FILES_ENABLED block, where kalillac_files is used."""
+    start = source.index('if os.getenv("KALILLAC_FILES_ENABLED"')
+    end = source.index('\n@api.get("/api/health")', start)
+    return (source[:start] + source[end:]).replace("nothing in kalillac_files is imported", "")
+
+
+def test_the_application_reaches_the_intake_core_only_behind_the_files_flag():
     source = (CANDIDATE / "app_fastapi_candidate.py").read_text(encoding="utf-8")
-    assert "kalillac_files" not in source and "intake" not in source.split("kalillac_files")[0][-0:]
+    assert "kalillac_files" not in _app_outside_the_files_flag(source)
     for package in ("kalillac_routing", "kalillac_accounts", "kalillac_billing", "kalillac_spaces", "kalillac_db"):
         for path in (CANDIDATE / package).rglob("*.py"):
             assert "kalillac_files" not in path.read_text(encoding="utf-8"), path.name

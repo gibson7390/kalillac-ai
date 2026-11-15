@@ -463,6 +463,9 @@ TAVILY_EXTRACT_TIMEOUT_SECONDS = 30
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
+# The unbudgeted call timeout; the default is the existing per-call timeout.
+_OPENAI_CALL_TIMEOUT = ContextVar("openai_call_timeout", default=OPENAI_CALL_TIMEOUT_SECONDS)
+
 # The process's bounded transport for request-budgeted OpenAI requests.
 # Created on the first budgeted request only; never with the flag off.
 _OPENAI_TRANSPORT = TransportHolder()
@@ -478,7 +481,9 @@ def _post_openai_for_attempt(payload):
     budget = current_budget()
 
     if budget is None:
-        return _post_openai_responses(payload)
+        # The default is the existing 90 seconds; only the file assistant, which waits for a whole file
+        # specification, widens it for its own calls (_OPENAI_CALL_TIMEOUT, set around those calls).
+        return _post_openai_responses(payload, timeout=_OPENAI_CALL_TIMEOUT.get())
 
     budget.admit_model_attempt()
     provider_usage.admitted()
@@ -14714,6 +14719,9 @@ class ChatRequest(BaseModel):
     # reasoning modes are off it is ignored like any unknown field, whatever
     # it holds; while they are on, reasoning_modes validates it.
     reasoning_mode: object = Field(default=None)
+    # Optional ids of the account's uploaded files. Untyped on purpose: while files are off it is
+    # ignored like any unknown field; while they are on, the file handoff validates it.
+    file_ids: object = Field(default=None)
 
     @field_validator("message")
     @classmethod
@@ -15063,6 +15071,103 @@ if os.getenv("KALILLAC_BILLING_ENABLED", "").strip().lower() in {
             settings=_account_settings,
         )
     )
+
+
+# Optional files: uploads, downloads and the file assistant (GPT-6 Luna planning, generating and
+# editing PDF, Word, Excel and PowerPoint files through the isolated worker). Off unless explicitly
+# enabled; when off, nothing in kalillac_files is imported and /api/chat is unchanged. Requires
+# accounts and the database: every file belongs to a signed-in account.
+FILE_ASSISTANT_MAX_OUTPUT_TOKENS = 32_000
+FILE_ASSISTANT_TIMEOUT_SECONDS = 240
+_file_chat_handoff = None   # Set below only when files are enabled; /api/chat is unchanged while it is None.
+if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise RuntimeError("KALILLAC_FILES_ENABLED requires KALILLAC_ACCOUNTS_ENABLED and KALILLAC_DB_ENABLED.")
+    _files_root = os.getenv("KALILLAC_FILES_ROOT", "").strip()
+    if not _files_root or not os.path.isabs(_files_root):
+        raise RuntimeError("KALILLAC_FILES_ROOT must be an absolute directory path.")
+    _files_tier = os.getenv("KALILLAC_FILES_TIER", "paid").strip().lower()
+    if _files_tier not in {"paid", "any"}:
+        raise RuntimeError("KALILLAC_FILES_TIER must be paid or any.")
+    import importlib.util as _files_importlib
+    _files_missing = [name for name in ("typst", "docx", "pptx", "openpyxl", "xlsxwriter", "pypdfium2", "pypdf",
+                                        "lxml", "fontTools") if _files_importlib.find_spec(name) is None]
+    if _files_missing:
+        raise RuntimeError("KALILLAC_FILES_ENABLED requires the file dependencies; install requirements-files.txt "
+                           "(missing: " + ", ".join(_files_missing) + ").")
+
+    from kalillac_files.account_access import build_authenticator as _files_authenticator
+    from kalillac_files.assistant import FILE_INSTRUCTIONS, FILE_TOOLS
+    from kalillac_files.router import build_files_router
+    from kalillac_files.store import FileStore
+    from kalillac_db.engine import get_session_factory as _files_session_factory
+
+    _file_store = FileStore(_files_root)
+
+    def _file_assistant_model(input_items):
+        """One model call through the application's single OpenAI seam (reasoning mode, financial
+        reservation, provider protection, usage observation), with a timeout long enough for a whole
+        file specification."""
+        _require_openai_configuration()
+        today = datetime.now(timezone.utc).date().isoformat()
+        token = _OPENAI_CALL_TIMEOUT.set(FILE_ASSISTANT_TIMEOUT_SECONDS)
+        try:
+            return _file_assistant_call(input_items, today)
+        finally:
+            _OPENAI_CALL_TIMEOUT.reset(token)
+
+    def _file_assistant_call(input_items, today):
+        return _post_openai_for_attempt({
+            "model": OPENAI_MODEL,
+            "instructions": SHARED_SAFETY_POLICY + "\n\n" + FILE_INSTRUCTIONS
+            + f"\n\nToday's date (UTC) is {today}.",
+            "input": input_items,
+            "store": False,
+            "reasoning": {"effort": OPENAI_REASONING_EFFORT},
+            "tools": FILE_TOOLS,
+            "tool_choice": "auto",
+            "max_output_tokens": FILE_ASSISTANT_MAX_OUTPUT_TOKENS,
+        })
+
+    from kalillac_files.intent import wants_file as _wants_file
+    from kalillac_files.router import FileService, valid_assist_request as _valid_assist_request
+
+    _file_service = FileService(
+        store=_file_store,
+        authenticate=_files_authenticator(settings=_account_settings, v1_security=_v1_account_security,
+                                          session_factory=_files_session_factory),
+        call_model=_file_assistant_model,
+        required_tier=_files_tier,
+    )
+    api.include_router(build_files_router(service=_file_service))
+
+    async def _file_chat_handoff(request, req, history):
+        """/api/chat: a message that asks for a file, or carries attachments, from an account with file
+        access goes to the file assistant. Anything else returns None and the ordinary chat answers."""
+        attached = req.file_ids if req.file_ids is not None else []
+        if type(attached) is not list:
+            return JSONResponse(status_code=422, content={"error": "invalid_request"})
+        if not _wants_file(req.message, attached):
+            return None
+        account, refusal = await _file_service.account(request)
+        if refusal is not None:
+            # Without access, attachments cannot be honoured; a plain request goes to the ordinary chat.
+            return refusal if attached else None
+        # The chat's own limits allow longer turns than the assistant reads; it sees the recent ones, clipped.
+        turns = [{"role": turn["role"], "content": str(turn["content"])[:20_000]} for turn in history[-20:]
+                 if turn.get("role") in ("user", "assistant")]
+        if not _valid_assist_request(req.message, turns, attached):
+            return JSONResponse(status_code=422, content={"error": "invalid_request"})
+        session_id = resolve_session_id(req.session_id)   # May raise SessionEnded, handled by the caller.
+        content, refusal = await _file_service.assist(account, req.message, turns, attached)
+        if refusal is not None:
+            return refusal
+        return JSONResponse(content={"reply": content["reply"], "session_id": session_id, "files": content["files"]})
+
+    async def _purge_expired_files():
+        from starlette.concurrency import run_in_threadpool
+        await run_in_threadpool(_file_store.purge)
+    api.add_event_handler("startup", _purge_expired_files)
 
 
 @api.get("/api/health")
@@ -15884,6 +15989,15 @@ async def _api_chat_response(request):
         # Explicit rejection. The alternative -- silently truncating -- would
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
+
+    # Files (default off): a file request from an account with file access goes to the file assistant.
+    if _file_chat_handoff is not None:
+        try:
+            handed = await _file_chat_handoff(request, req, history)
+        except SessionEnded:
+            return _session_ended_response()
+        if handed is not None:
+            return handed
 
     # session.work is this request's registration under its effective session
     # id, set by the dispatch the moment the id is resolved. The handler's own

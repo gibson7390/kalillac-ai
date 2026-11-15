@@ -62,6 +62,12 @@ def generate(spec, format):
         raise SpecError("unsupported_format")
     kind, renderer, extension, media_type = FORMATS[format]
     validated = _VALIDATORS[kind](spec)
+    # Figures a reader will add up must add up (consistency.py): before any rendering work.
+    from .consistency import check_deck, check_document
+    if kind == "document":
+        check_document(validated)
+    elif kind == "deck":
+        check_deck(validated)
     data = renderer(validated)
     if len(data) > MAX_FILE_BYTES:
         raise SpecError("file_too_large")

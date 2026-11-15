@@ -1,4 +1,4 @@
-"""Pre-authentication guard for unsafe account, billing and Spaces requests.
+"""Pre-authentication guard for unsafe account, billing, Spaces and files requests.
 
 One order, for every route in INVENTORY:
   1. a nonempty raw query string     -> 400 query_not_allowed (account,
@@ -83,6 +83,9 @@ INVENTORY: tuple[GuardedRoute, ...] = (
     _route("PATCH", "/api/spaces/{space_id}/conversations/{conversation_id}", "spaces"),
     _route("DELETE", "/api/spaces/{space_id}/conversations/{conversation_id}", "spaces"),
     _route("POST", "/api/spaces/{space_id}/conversations/{conversation_id}/messages", "spaces"),
+    _route("POST", "/api/files", "files"),
+    _route("POST", "/api/files/assist", "files"),
+    _route("DELETE", "/api/files/{file_id}", "files"),
 )
 
 REGISTRATION_INVENTORY = (

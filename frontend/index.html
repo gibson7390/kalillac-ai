@@ -87,6 +87,17 @@
         <p class="limit-notice-text" id="handoff-notice-text"></p>
       </div>
       <form class="composer" id="composer" autocomplete="off">
+        <!-- Files attached to the next message. Shown only when the server offers files to this account. -->
+        <ul class="attachments" id="attachments" aria-label="Attached files" hidden></ul>
+        <!-- How much reasoning the next message gets. Shown only on a deployment with reasoning modes on. -->
+        <div class="mode-picker" id="mode-picker" role="radiogroup" aria-label="Reasoning" hidden>
+          <button type="button" role="radio" class="mode-option" data-mode="quick" aria-checked="false"
+                  tabindex="-1">Quick</button>
+          <button type="button" role="radio" class="mode-option" data-mode="balanced" aria-checked="true"
+                  tabindex="0">Balanced</button>
+          <button type="button" role="radio" class="mode-option" data-mode="deep" aria-checked="false"
+                  tabindex="-1">Deep</button>
+        </div>
         <div class="composer-shell" id="composer-shell">
           <!-- End & erase: in the composer, next to what it ends. Its label is
                visible text at every width. Always shown; disabled only when
@@ -98,6 +109,16 @@
             </svg>
             <span class="erase-btn-label">End &amp; erase</span>
           </button>
+          <!-- Attach a file: hidden unless GET /api/files answers 200 for this signed-in account. -->
+          <button type="button" class="attach-btn" id="attach-btn" aria-label="Attach a file" title="Attach a file"
+                  hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M21 12.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.7 3.7 0 0 1 5.2 5.2l-9.2 9.2a1.8 1.8 0 0 1-2.6-2.6l8.5-8.5"/>
+            </svg>
+          </button>
+          <input type="file" id="attach-input" hidden
+                 accept=".docx,.xlsx,.pptx,.pdf,.txt,.md,.csv,.json">
           <label for="composer-input" class="sr-only">Message Kalillac AI</label>
           <textarea id="composer-input" rows="1"
             placeholder="Message Kalillac AI…"

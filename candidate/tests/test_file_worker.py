@@ -249,7 +249,14 @@ def test_memory_limit_stops_the_child():
         "out_of_memory", "worker_failed", "timeout")
 
 
-def test_the_application_does_not_reach_the_worker_yet():
+def test_the_application_reaches_files_only_behind_their_flag():
+    """Every reference the application makes to kalillac_files is inside the KALILLAC_FILES_ENABLED block
+    (test_files_chat_handoff.py proves that with the flag off nothing of it is even imported)."""
     from pathlib import Path
     candidate = Path(__file__).resolve().parents[1]
-    assert "kalillac_files" not in (candidate / "app_fastapi_candidate.py").read_text(encoding="utf-8")
+    source = (candidate / "app_fastapi_candidate.py").read_text(encoding="utf-8")
+    start = source.index('if os.getenv("KALILLAC_FILES_ENABLED"')
+    end = source.index('\n@api.get("/api/health")', start)
+    inside, outside = source[start:end], source[:start] + source[end:]
+    assert "from kalillac_files" in inside
+    assert "kalillac_files" not in outside.replace("nothing in kalillac_files is imported", "")

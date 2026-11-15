@@ -8,7 +8,7 @@ States used here, never interchangeable:
 **PRODUCTION READY** (deployment prerequisites verified) · **PRODUCTION ACTIVE** (authorized,
 deployed, enabled and verified in production).
 
-Last updated: 2026-11-15.
+Last updated: 2026-11-15 (file assistant integration).
 
 ## Production baseline (as stated by the owner, checked against Git where possible)
 
@@ -30,9 +30,10 @@ production migration, live Stripe or customer data.
 | `feat/financial-safeguards-v1-completion` | `C:/Kalillac/kalillac-ai-fs-v1-completion` | Milestone 1. Based on `184ee0a`, so it holds the production application and the reviewed tooling. |
 | `feat/reasoning-modes-v1` | same worktree | Milestone 4 backend, stacked on the Milestone 1 branch. |
 | `feat/file-generation-v1` | same worktree | Milestone 5 generation and intake cores and the isolated worker, stacked on the Milestone 4 branch. |
-| `feat/document-quality-v1` | same worktree | **Current development branch.** The document quality system (designed PDF, Word, Excel and PowerPoint output), stacked on the files branch. |
+| `feat/document-quality-v1` | same worktree | The document quality system (designed PDF, Word, Excel and PowerPoint output), stacked on the files branch. **Under independent Codex audit (read-only); not changed while the audit runs.** |
+| `feat/file-assistant-v1` | same worktree | **Current development branch.** GPT-6 Luna file generation and editing integrated into the product (default off), stacked on the document-quality branch. |
 
-The four branches are a stack: each contains the one before it. The worktree has its own `.venv`
+The five branches are a stack: each contains the one before it. The worktree has its own `.venv`
 (ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
 environment was not changed.
 | `product/account-lifecycle-hardening-v1` | `C:/Kalillac/kalillac-ai` | Holds **uncommitted** account work. Not modified. See "Uncommitted account work" below. |
@@ -62,8 +63,8 @@ discarded, or name anything in it that should be kept.
 | 1 | Financial Safeguards V1 | **DEVELOPMENT VERIFIED**, off in production | Activation proposal written; tooling update and owner decisions outstanding |
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI | Gap analysis below; refunds, disputes and the link to financial scopes are missing |
-| 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Designed PDF, DOCX, XLSX and PPTX generation, upload intake (PPTX included), editing of uploaded Word, PowerPoint and Excel files, and the isolated worker DEVELOPMENT VERIFIED, not reachable from the application; **not owner accepted**; routes, storage, downloads and the model tool not started | `candidate/FILE_GENERATION.md` |
+| 4 | Reasoning toggle controls | Backend and chat control DEVELOPMENT VERIFIED, off (page mark and flag); saved preference and paid permissions wait on accounts and billing | `candidate/REASONING_MODES.md` |
+| 5 | File creation, uploads, editing | Generation, intake, editing, the worker, the GPT-6 Luna file assistant, storage, `/api/files` routes and delivery in the chat IMPLEMENTED and DEVELOPMENT VERIFIED behind `KALILLAC_FILES_ENABLED` (default off). **Not owner accepted; not release ready**: owner review found issues, an independent audit is running, and D1-D4 are unresolved (see "Audits") | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -199,7 +200,23 @@ higher effort spends more of the same `max_output_tokens` on reasoning, so DEEP 
 ceiling and therefore a larger worst-case reservation, which the request ceiling must allow; mode
 permission must be checked in the backend from the verified entitlement.
 
-### Milestone 5: file generation and upload intake (cores only)
+### Milestone 5: file generation, editing and delivery
+
+**File assistant integration** (`feat/file-assistant-v1`, default off): a chat message asking for a
+file (or carrying attachments) from a signed-in account with file access goes to GPT-6 Luna with the
+file instructions and three tools (create_file, read_file, edit_file). Every request is validated,
+rendered in the isolated worker, checked (PDF layout, formulas, slide fit, and totals that add up),
+stored for the account (random ids, quotas, 30-day expiry) and delivered as download links in the
+chat reply. `/api/files` adds upload (checked by intake), list, download and delete, all behind the
+unsafe-request guard and owner checks. The tier that may use files is configuration, `paid` by
+default, pending the owner's Free/Premium decision. Verified locally with a scripted model: the real
+`/api/chat` turned a deck request into a stored, downloadable PPTX; refusals are repaired by the
+model in the loop; another account's file is never reachable; the chat page renders file links and
+the attach control in a real browser. Not yet: streaming, web search inside the file path, the
+request budget on the file path, a live run against GPT-6 Luna (needs the owner's API key in a
+non-production environment). Reference: `candidate/FILE_GENERATION.md`.
+
+#### Earlier: cores
 
 Implemented on `feat/file-generation-v1`: `kalillac_files.generate(spec, format)` produces real PDF,
 DOCX and XLSX files, plus CSV, Markdown, TXT and JSON, from a validated plain-data specification.
@@ -275,6 +292,26 @@ exact CI requirements) with none skipped. The PowerPoint Linux run found a real 
 not starting the typesetter's thread pool before forbidding threads when rendering a deck's
 artwork; fixed and tested.
 
+## Audits and owner review
+
+* **Owner review of the document-quality benchmark (2026-11-15):** visual results promising, benchmark
+  **not accepted**. Observations: financial inconsistencies, Word pagination, tracked editing, Arabic
+  text handling, document-content accuracy. An independent, read-only Codex audit of
+  `feat/document-quality-v1` covers them; its findings will be supplied by the owner. That branch is
+  not changed while the audit runs; corrections will follow the findings.
+* **Found here while integrating, recorded for the audit:** the benchmark's complex edit
+  (`quality_benchmark.report_edit`) restates revenue ($18.4M to $18.6M) but leaves gross profit,
+  gross margin and the income statement's change column as they were, and adds the audit-adjustment
+  row between cost of goods sold and gross profit. That is exactly the class of financial
+  inconsistency the owner observed. The file assistant's instructions now require every derived
+  figure to change with its source, and `consistency.py` refuses a total row that does not add up,
+  but neither yet checks derived ratios in prose or in an edited document.
+* **D1-D4 from the previous Codex audit:** these defect identifiers are not recorded anywhere in the
+  repository, the worktrees or the handoff logs (the "D" numbers in the account-security handoff logs
+  are architecture decision ids, not these). The owner is asked to supply the list. Until corrected
+  and independently verified, everything they may affect is treated as not release ready and stays
+  unexposed (every file feature is behind `KALILLAC_FILES_ENABLED`, off by default).
+
 ## Known defects and environment limits
 
 * **Fixed here, present on the production commit:** four cases of
@@ -322,6 +359,7 @@ artwork; fixed and tested.
   on Linux locally (see below). The commits after `59ec9d1` add files only; no application module
   changed.
 * Not run on any branch: `code-structure-frontend-verification` (no frontend file changed).
+* `feat/file-assistant-v1`: see "Milestone 5" below for its own evidence once CI has run.
 * `feat/document-quality-v1`, `file-generation-verification` (all file suites, none skipped):
   `43684790630` on `b8f4d04` (536 tests), `43691236898` on `c8c2985` (601, PowerPoint),
   `43700356071` on `a822f39` (642, editing), `43701878737` on `5b4259d` (653, benchmark), all
@@ -366,16 +404,19 @@ and retention rules, and a staging design. Still forbidden: anything in producti
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Milestone 5: the model tool and prompt contract (the model producing specifications and edit
-   operations), still unexposed; then owner review of the rendered benchmark.
-2. Milestone 2: the V1-02D/E plan written from the code, then sign-out-everywhere, password
-   change, the operator suspension command and deletion behind the private authorities, and one
-   end-to-end synthetic lifecycle test.
-3. Milestone 4 interface: the mode selector in the chat frontend with the provisional mapping.
-4. Milestone 3: refund and dispute webhook handling (no automatic refunds) and the Stripe
-   test-credential procedure; then the link from a verified subscription to the PAID scope.
-5. Milestone 1: proposed budget values with their cost calculations, and the release tooling for
-   an enforcement-on release.
-6. A staging design (port 8002 checked before it is proposed) and a retention proposal.
-7. Pull requests for the stacked branches, prepared for independent review, when the owner wants
-   them; that also runs the workflows that only trigger on pull requests.
+1. Codex audit findings on the document-quality work, when supplied: correct each, with tests and a
+   rendered check, on a branch of its own.
+2. Milestone 2: implement `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` (written 2026-11-15 from the code
+   and the handoff records): D1 the private S connection, D2 migration 0017's remaining authorities,
+   D3 route wiring (sign-out-everywhere, password change), D4 the operator tool (suspension,
+   reinstatement, deletion requests), E1 to E3 the legacy-route removal, the operator transition and
+   the synthetic lifecycle test. Its section 5 is the deletion-retention proposal for the owner.
+3. Milestone 3: refund and dispute webhook handling (no automatic refunds), the Stripe
+   test-credential procedure, and the link from a verified subscription to the PAID scope and
+   Premium entitlements (which also gives files their tier check in the chat).
+4. Milestone 1: proposed budget values with their cost calculations; release tooling for an
+   enforcement-on release.
+5. Spaces re-verification, the owner administration dashboard, and a staging design (port 8002
+   checked before it is proposed), with a retention proposal.
+6. Pull requests for the stacked branches, prepared for independent review, when the owner wants
+   them.

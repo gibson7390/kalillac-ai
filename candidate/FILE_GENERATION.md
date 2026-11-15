@@ -12,9 +12,11 @@ customer uploads. This package holds the two cores and the isolated worker that 
   work in a separate, limited process. This is the only way the application should ever call the
   cores.
 
-Status: **cores and worker implemented and development verified. Not reachable from the application.**
-Nothing imports `kalillac_files`, no route exposes it, and the production dependency lock is
-unchanged. Storage, downloads, quotas and the interface are not built (see "Not built").
+Status: **cores, worker, file assistant, storage, routes and chat delivery implemented and
+development verified; off by default (`KALILLAC_FILES_ENABLED`). Not owner accepted, not release
+ready** (open audit findings; see the roadmap). With the flag off the application imports nothing from
+`kalillac_files`, `/api/files` does not exist and `/api/chat` is unchanged. The production dependency
+lock is unchanged.
 
 ## Design system
 
@@ -331,23 +333,65 @@ Not provided by the worker: operating-system sandboxing (a separate user, filesy
 namespace). The child has no network use and writes no file, but nothing at the OS level prevents
 it. That is a deployment decision for when uploads are exposed.
 
-## Architecture requirements for wiring it in
+## The file assistant and delivery
 
-Rendering is synchronous CPU work lasting up to seconds. It must not run inside a request handler
-or on the chat-serving path. The intended shape; step 2 exists, the rest is not built:
+`assistant.py`, `store.py`, `router.py`, `intent.py`, `account_access.py` and `consistency.py`
+connect the cores to customers. The shape:
 
-1. The model produces a specification through a tool call. It is validated exactly as above.
-2. The isolated worker renders it (or inspects an upload) under its time, memory and concurrency
-   limits, separate from the chat workers. The calling route must run the blocking call off the
-   event loop.
-3. The file is stored under a random identifier owned by the customer's account, with a per-account
-   storage quota and an expiry, and removed by a cleanup job.
-4. Download is an authenticated route that checks ownership in the backend on every request and
-   serves with `Content-Disposition: attachment` and the recorded media type.
-5. Generation is a Premium capability, checked from the verified entitlement.
+1. **Understanding the request.** In `/api/chat`, a message with attachments, or one that asks for
+   a file (a request to make something plus a file deliverable: a named format, a spreadsheet,
+   workbook, deck, slides, presentation or "file"; programming and how-to questions excluded,
+   `intent.py`), from a signed-in account with file access goes to the file assistant. Everything
+   else, including every anonymous request, takes the ordinary chat path unchanged. The same
+   assistant is also reachable directly at `POST /api/files/assist`.
+2. **Planning and generating.** GPT-6 Luna receives the file instructions (`FILE_INSTRUCTIONS`:
+   when to make a file and in which format, how to plan it, accuracy rules, the complete grammar)
+   and three tools: `create_file`, `read_file` (the outline of an attached file) and `edit_file`.
+   Every tool request is validated; files are rendered and edited in the isolated worker.
+3. **Validating the result.** Everything the cores check applies (layout inspection for PDF,
+   formulas that compute, text that fits each slide), plus `consistency.py`: a table whose last row
+   is labelled a total must add up, column by column, or the file is refused with
+   `table_total_mismatch` and the table and column named. A refusal returns to the model as data
+   with its code and a hint; the model corrects the specification and tries again, within the
+   loop's bounds (6 tool rounds, 10 tool calls, 4 files per request).
+4. **Storing.** `FileStore` keeps each file under a random 128-bit identifier in a directory named
+   by a hash of the owning account; quotas (250 MB and 300 files per account by default) are
+   checked before writing; files expire after 30 days and are purged at startup; writes are
+   atomic. Another account's file and a missing file are indistinguishable.
+5. **Delivering.** The chat reply carries `files` (identifier, name, type, size). The chat page
+   shows them as download links (`/api/files/{id}`: authenticated, owner-checked, served as an
+   attachment with `nosniff`, a sandboxing content security policy and `no-store`). A deployment
+   with files enabled marks the page (`<html data-kalillac-files="on">`); only then does the page
+   ask whether the account may attach files and show the attach control.
 
-Items 3 to 5 need customer accounts. No uploaded content is ever executed, and no customer-written
-code runs anywhere in this design.
+Configuration, all required to be explicit when the flag is on (startup fails otherwise):
+`KALILLAC_FILES_ENABLED`, `KALILLAC_FILES_ROOT` (an absolute directory), `KALILLAC_FILES_TIER`
+(`paid` by default: Premium only; `any` admits Free accounts. Which tier may use files is an owner
+decision; the default is fail-closed). Files need accounts and the database.
+
+Security properties, each tested:
+
+* Every `/api/files` route needs a signed-in account (the V1 security authority when configured,
+  otherwise the session lookup with verified email when verification is on) of the configured tier.
+* `POST /api/files`, `POST /api/files/assist` and `DELETE /api/files/{id}` are in the unsafe-request
+  guard's inventory: a cross-site or query-carrying request is refused before any work.
+* Uploads are the raw body (no multipart parser), bounded while reading, and pass intake in the
+  worker before anything is stored; the name is reduced to an inert label.
+* The model can address only files attached to the request or made in it, never a path or another
+  account's file; text read from a file is labelled untrusted data.
+* Model calls go through the same controls as every chat call (reasoning mode, financial
+  reservation, provider protection, usage observation), with a 240-second timeout for long
+  specifications. At GPT-6 Luna's published output price ($0.50 per million tokens) a full
+  32,000-token answer costs at most $0.016; a request makes at most 7 model calls (6 tool rounds and
+  the reply), so about $0.11 of output at most, plus input tokens.
+* At most two assistant requests run at once per process; more are refused with `busy`.
+
+Not yet done, and required before release: the request budget (`KALILLAC_REQUEST_BUDGET`) does not
+yet bound the file path's deadlines (the assistant has its own concurrency cap and timeouts);
+web search is not available inside the file assistant; the reply is not streamed, so a long file
+takes up to a few minutes with only the thinking indicator; the chat's capability statement for
+accounts without file access still says files cannot be made; a browser review of the attach and
+download flow against a real server; a release of `app.js` must bump the asset cache key.
 
 ## Dependencies
 
@@ -362,9 +406,9 @@ Carlito faces in `fonts/metrics/` (OFL) only measure slide text; they are never 
 
 ## Not built
 
-* The upload route and per-account upload quotas and isolation.
-* Storage, download authorization, cleanup, quotas and cost accounting.
-* The model tool and the interface for requesting, uploading and downloading a file.
+* Per-account cost accounting for file requests beyond the existing financial controls.
+* Object storage or a database record of files (the store is a local directory, sized for one server).
+* The release items listed at the end of "The file assistant and delivery".
 
 ## Tests
 

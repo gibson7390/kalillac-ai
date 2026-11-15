@@ -21,6 +21,14 @@ on:
       - "candidate/tests/test_workbook_design.py"
       - "candidate/tests/test_deck_design.py"
       - "candidate/tests/test_file_editing.py"
+      - "candidate/tests/test_file_store.py"
+      - "candidate/tests/test_file_assistant.py"
+      - "candidate/tests/test_files_router.py"
+      - "candidate/tests/test_file_intent.py"
+      - "candidate/tests/test_files_chat_handoff.py"
+      - "candidate/app_fastapi_candidate.py"
+      - "candidate/kalillac_accounts/request_guard.py"
+      - "frontend/**"
       - "candidate/tests/formula_zoo.py"
       - "candidate/tests/quality_benchmark.py"
       - "candidate/tools/fetch_document_fonts.py"
@@ -28,7 +36,7 @@ on:
       - "requirements-*.txt"
       - ".github/workflows/file-generation-verification.yml"
   push:
-    branches: ["feat/file-generation-**", "feat/document-quality-**"]
+    branches: ["feat/file-generation-**", "feat/document-quality-**", "feat/file-assistant-**"]
     paths:
       - "candidate/kalillac_files/**"
       - "candidate/tests/test_file_generation.py"
@@ -38,6 +46,14 @@ on:
       - "candidate/tests/test_workbook_design.py"
       - "candidate/tests/test_deck_design.py"
       - "candidate/tests/test_file_editing.py"
+      - "candidate/tests/test_file_store.py"
+      - "candidate/tests/test_file_assistant.py"
+      - "candidate/tests/test_files_router.py"
+      - "candidate/tests/test_file_intent.py"
+      - "candidate/tests/test_files_chat_handoff.py"
+      - "candidate/app_fastapi_candidate.py"
+      - "candidate/kalillac_accounts/request_guard.py"
+      - "frontend/**"
       - "candidate/tests/formula_zoo.py"
       - "candidate/tests/quality_benchmark.py"
       - "candidate/tools/fetch_document_fonts.py"
@@ -76,6 +92,7 @@ jobs:
           python -m pip install
           -r requirements-production-lock.txt
           -r requirements-dev.txt
+          -r requirements-database.txt
           -r requirements-files.txt
 
       # Chinese, Japanese and Korean fonts are too large to commit: fetched from their pinned
@@ -89,13 +106,14 @@ jobs:
         run: >-
           python -m pytest tests/test_file_generation.py tests/test_file_intake.py tests/test_file_worker.py
           tests/test_document_design.py tests/test_workbook_design.py tests/test_deck_design.py
-          tests/test_file_editing.py -v -rA -p no:cacheprovider
+          tests/test_file_editing.py tests/test_file_store.py tests/test_file_assistant.py tests/test_files_router.py
+          tests/test_file_intent.py tests/test_files_chat_handoff.py -v -rA -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/file-generation.xml"
 
       # The test modules skip themselves when a document library is missing,
       # so a green run must prove nothing was skipped and the expected number
       # ran: 166 generation, 65 intake, 33 worker, 109 document-design, 178 workbook, 63 deck and 39 editing
-      # tests. The
+      # tests, and 12 store, 9 assistant, 11 router, 28 intent and 2 chat-handoff tests. The
       # worker's memory-limit test runs only on POSIX, so it must run here.
       - name: Require every file test to have run
         run: |
@@ -106,6 +124,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 653, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 715, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the file verification did not run completely")
           PY

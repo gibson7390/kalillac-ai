@@ -306,10 +306,12 @@ def test_inventory_is_exactly_the_unsafe_account_billing_and_spaces_routes(stack
     }
     assert ("GET", "/api/spaces") not in registered and len(registered) > 10
     guarded = {(r.method, r.path) for r in INVENTORY}
-    assert registered == guarded | set(EXEMPT)
+    # The files router is not part of this stack; test_files_router.py covers its routes.
+    assert registered == {route for route in guarded if not route[1].startswith("/api/files")} | set(EXEMPT)
     assert not guarded & set(EXEMPT)
-    assert len(INVENTORY) == 17                 # 7 account, 2 billing, 8 Spaces mutations
+    assert len(INVENTORY) == 20                 # 7 account, 2 billing, 8 Spaces, 3 files mutations
     assert sum(r.family == "spaces" for r in INVENTORY) == 8
+    assert sum(r.family == "files" for r in INVENTORY) == 3
 
 
 # --- Origin -----------------------------------------------------------------------------
@@ -1019,8 +1021,10 @@ import app_fastapi_candidate as a
 from kalillac_accounts.request_guard import INVENTORY, EXEMPT, UnsafeRequestGuard
 registered = {(m.upper(), p) for p, ops in a.api.openapi()["paths"].items() for m in ops
               if m.upper() in {"POST", "PUT", "PATCH", "DELETE"}
-              and p.startswith(("/api/account", "/api/billing", "/api/spaces"))}
-assert registered == {(r.method, r.path) for r in INVENTORY} | set(EXEMPT)
+              and p.startswith(("/api/account", "/api/billing", "/api/spaces", "/api/files"))}
+# Files are off here (their dependencies are not installed in this workflow); test_files_chat_handoff.py
+# checks the same with files on.
+assert registered == {(r.method, r.path) for r in INVENTORY if r.family != "files"} | set(EXEMPT)
 assert sum(m.cls is UnsafeRequestGuard for m in a.api.user_middleware) == 1
 print("inventory", len(registered), "attempts", len(attempts))
 """)
