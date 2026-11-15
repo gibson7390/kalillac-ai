@@ -49,6 +49,7 @@ from kalillac_routing.provider_transport import (
 )
 from kalillac_routing import tavily_transport, search_providers, provider_usage, provider_controls
 from kalillac_routing import source_trust
+from kalillac_routing import reasoning_modes
 from kalillac_routing import provider_refusal, untrusted_text
 from kalillac_routing.provider_limits import ControlConfigError, load_controls
 from kalillac_finance.config import load_financial_config
@@ -487,8 +488,10 @@ def _post_openai_for_attempt(payload):
     return _post_openai_bounded(payload, budget, timeout, request_selected)
 
 
-_post_openai_for_attempt = provider_controls.financial_openai(
-    provider_controls.protect(provider_usage.observe_model(_post_openai_for_attempt), "openai"))
+# A request's reasoning mode (default off) is applied outermost, so the
+# financial reservation prices the payload that is actually sent.
+_post_openai_for_attempt = reasoning_modes.apply(provider_controls.financial_openai(
+    provider_controls.protect(provider_usage.observe_model(_post_openai_for_attempt), "openai")))
 
 
 def _post_openai_bounded(payload, budget, timeout, request_selected):
@@ -2818,7 +2821,7 @@ def current_runtime_configuration():
             "billing": {"implemented": True, "enabled": "/api/account/billing/checkout" in registered_paths},
         },
         "model": OPENAI_MODEL,
-        "reasoning_effort": OPENAI_REASONING_EFFORT,
+        "reasoning_effort": reasoning_modes.effective_effort(OPENAI_REASONING_EFFORT),
         "web_search_policy": SEARCH_PROVIDER_POLICY.facts(native_routing_enabled=V31_NATIVE_TOOL_ROUTING),
         "native_tool_routing_enabled": bool(V31_NATIVE_TOOL_ROUTING),
         "native_tool_routes": sorted(V31_NATIVE_TOOL_ROUTES),
@@ -11588,7 +11591,7 @@ def _v31_runtime_facts():
     config = RuntimeConfig(
         primary_provider="OpenAI",
         primary_model=OPENAI_MODEL,
-        reasoning_effort=OPENAI_REASONING_EFFORT,
+        reasoning_effort=reasoning_modes.effective_effort(OPENAI_REASONING_EFFORT),
         web_search_provider=SEARCH_PROVIDER_POLICY.primary.title(),
     )
 
@@ -14707,6 +14710,10 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User message")
     history: list = Field(default_factory=list)
     session_id: str | None = Field(default=None)
+    # Optional "quick" | "balanced" | "deep". Untyped on purpose: while
+    # reasoning modes are off it is ignored like any unknown field, whatever
+    # it holds; while they are on, reasoning_modes validates it.
+    reasoning_mode: object = Field(default=None)
 
     @field_validator("message")
     @classmethod
@@ -14991,6 +14998,9 @@ _provider_control_config = load_controls()
 # Financial Safeguards: None (reading only its flag) unless explicitly enabled;
 # when enabled, complete prices and ceilings or startup refuses.
 _financial_config = load_financial_config()
+# Reasoning modes: None (reading only its flag) unless explicitly enabled;
+# when enabled, a complete and consistent mapping or startup refuses.
+reasoning_modes.CONFIG = reasoning_modes.load_reasoning_modes(os.environ, OPENAI_MODEL, OPENAI_REASONING_EFFORT)
 if _financial_config is not None:
     if _provider_control_config is None:
         raise ControlConfigError("KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED requires KALILLAC_PROVIDER_CEILINGS_ENABLED.")
@@ -15879,12 +15889,21 @@ async def _api_chat_response(request):
     # id, set by the dispatch the moment the id is resolved. The handler's own
     # claim on it is released here, exactly once; a worker that outlives the
     # handler holds its own claim until it really exits.
+    # The request's reasoning mode, refused here before any work, quota or
+    # provider attempt. No request is treated as paid: nothing issues a paid
+    # entitlement yet, so a mode reserved for paid requests is refused for all.
+    try:
+        reasoning_mode = reasoning_modes.begin(req.reasoning_mode, paid=False)
+    except reasoning_modes.ReasoningModeRefused as refused:
+        return JSONResponse(status_code=refused.status, content={"error": refused.code})
+
     session = SimpleNamespace(work=None)
     try:
         response = await _api_chat_dispatch(request, req, history, session)
     except SessionEnded:
         response = _session_ended_response()
     finally:
+        reasoning_modes.end(reasoning_mode)
         if session.work is not None:
             _release_session_work(session.work)
 

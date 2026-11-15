@@ -27,7 +27,8 @@ production migration, live Stripe or customer data.
 
 | Branch | Worktree | Purpose |
 |---|---|---|
-| `feat/financial-safeguards-v1-completion` | `C:/Kalillac/kalillac-ai-fs-v1-completion` | **Current development branch.** Based on `184ee0a`, so it holds the production application and the reviewed tooling. |
+| `feat/financial-safeguards-v1-completion` | `C:/Kalillac/kalillac-ai-fs-v1-completion` | Milestone 1. Based on `184ee0a`, so it holds the production application and the reviewed tooling. |
+| `feat/reasoning-modes-v1` | same worktree | **Current development branch.** Milestone 4 backend, stacked on the Milestone 1 branch. |
 | `product/account-lifecycle-hardening-v1` | `C:/Kalillac/kalillac-ai` | Holds **uncommitted** account work. Not modified. See "Uncommitted account work" below. |
 | `feat/financial-safeguards-v1-batch1`, `ops/fs-v1-deploy-tooling` | their own worktrees | Production baseline and tooling. Not modified. |
 
@@ -55,7 +56,7 @@ discarded, or name anything in it that should be kept.
 | 1 | Financial Safeguards V1 | **DEVELOPMENT VERIFIED**, off in production | Activation proposal written; tooling update and owner decisions outstanding |
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part (test-mode foundation), off | Not yet re-verified in this record |
-| 4 | Reasoning toggle controls | Not started | Required Premium milestone; provider capability verified (six effort levels) |
+| 4 | Reasoning toggle controls | Backend IMPLEMENTED and locally verified, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
 | 5 | File creation, uploads, editing | Not started | Required Premium milestone |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
@@ -136,7 +137,15 @@ path the plan is retiring. Building them requires the plan for V1-02D and V1-02E
 the application is meant to act as the service role) or the owner's agreement to a plan written
 from the code. See "Owner decisions required".
 
-### Milestone 4: reasoning controls (provider capability verified, not started)
+### Milestone 4: reasoning controls (backend implemented, interface not started)
+
+Implemented on `feat/reasoning-modes-v1`: an optional `reasoning_mode` on `/api/chat`, validated
+and permission-checked in the backend, applied at the single OpenAI seam outside the financial
+reservation, default off, with no mapping in source. Reference: `candidate/REASONING_MODES.md`.
+Evidence: `tests/test_reasoning_modes.py` (52 tests) and the nine suites nearest the chat path pass
+locally; CI results for the branch are recorded under "Regression evidence" once run. Remaining:
+the interface control, saved preferences (needs accounts), paid permissions taking effect (needs
+billing entitlements on the chat request), a mode on Spaces sends, and owner decision 9.
 
 Verified on 2026-11-14 from OpenAI's model page for `gpt-6-luna`
 (`developers.openai.com/api/docs/models/gpt-6-luna`):
@@ -216,13 +225,12 @@ permission must be checked in the backend from the verified entitlement.
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Milestone 4 backend: a per-request reasoning mode that maps to a configured `reasoning.effort`
-   and output ceiling, validated in the backend, defaulting to today's behaviour, and priced through
-   the existing reservation so it cannot pass the request ceiling. The effort mapping and the
-   Free/Premium permissions stay configuration until owner decision 9.
-2. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
-3. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
+1. Record the CI results for `feat/reasoning-modes-v1` and fix anything they show.
+2. Milestone 4 interface: the mode control in the chat frontend, sending `reasoning_mode` and
+   handling `403 reasoning_mode_not_allowed`, shown only when the backend reports modes enabled.
+3. Milestone 5 generation core (PDF, DOCX, XLSX as real, validated files) can start without
+   accounts; download authorization and quotas need Milestone 2.
+4. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
+5. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
    password change and deletion behind the private authorities, then one end-to-end synthetic
    lifecycle test.
-4. Milestone 5 generation core (PDF, DOCX, XLSX as real, validated files) can start without
-   accounts; download authorization and quotas need Milestone 2.
