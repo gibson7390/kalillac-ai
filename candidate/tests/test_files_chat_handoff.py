@@ -84,6 +84,30 @@ print(json.dumps({
     "model_calls": len(calls),
     "seam": seam,
 }))
+
+# Under provider ceilings and request budgets, each file request runs in its own control request and
+# budget, as a signed-in account's request in the FREE scope (nothing issues paid evidence yet).
+from kalillac_routing import provider_controls
+from kalillac_routing.request_budget import RequestDeadlineExceeded, current_budget
+provider_controls.SERVICE = object()          # begin_request() only needs it to be set.
+inside, failure = [], [None]
+def controlled(items):
+    budget, control = current_budget(), provider_controls._REQUEST.get()
+    inside.append({"budget": budget is not None, "deadline": round(budget.deadline - __import__("time").monotonic()),
+                   "traffic": control.traffic_class.value})
+    if failure[0] is not None:
+        raise failure[0]
+    return {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]}
+a._file_service.call_model = controlled
+outer = provider_controls.begin_request()
+statuses = [handoff("paid", "Make me a PDF of the plan"), handoff("paid", "Make me a PDF of the plan")]
+for error in (provider_controls.CeilingBusy(), provider_controls.RequestCostCeiling(), RequestDeadlineExceeded(),
+              ValueError("defect")):
+    failure[0] = error
+    statuses.append(handoff("paid", "Make me a PDF of the plan"))
+print(json.dumps({"inside": inside, "statuses": statuses,
+                  "outer_untouched": provider_controls._REQUEST.get() is outer[0]
+                  and outer[0].traffic_class.value == "anonymous"}))
 '''
 
 
@@ -92,8 +116,10 @@ def test_a_file_request_in_the_chat_reaches_the_file_assistant_and_its_file(tmp_
                    "KALILLAC_FILES_ROOT": str(tmp_path / "files"), "OPENAI_API_KEY": "sk-test-not-real"}
     result = _run_app(environment, SCRIPT.replace("ORIGIN_VALUE", ORIGIN))
     assert result.returncode == 0, result.stderr[-3000:]
-    lines = [json.loads(line) for line in result.stdout.strip().splitlines()[-2:]]
-    chat, handoffs = lines
+    # Diagnostic lines (a class name only) may interleave with the results.
+    lines = [json.loads(line) for line in result.stdout.strip().splitlines() if line.startswith("{")][-3:]
+    assert "WARN: FILE_ASSISTANT_FAILED ValueError" in result.stdout   # Only the unmapped defect is logged.
+    chat, handoffs, controls = lines
     assert chat == {"status": 200, "keys": ["files", "reply", "session_id"],
                     "reply": "Here is a two-slide launch deck.",
                     "filename": "launch-plan.pptx", "session_ok": True, "download": 200, "is_pptx": True,
@@ -107,7 +133,17 @@ def test_a_file_request_in_the_chat_reaches_the_file_assistant_and_its_file(tmp_
     assert handoffs["model_calls"] == 2                          # None of those reached the model.
     assert handoffs["seam"] == {"call": {"timeout": 240, "tools": ["create_file", "read_file", "edit_file"],
                                          "max": 32000, "store": False, "instructions": True},
-                                "timeout_after": 90, "same_seam": "_post_openai_for_attempt"}
+                                "timeout_after": None, "same_seam": "_post_openai_for_attempt"}
+    # Every model call of a file request ran under its own budget and control request.
+    assert [call["traffic"] for call in controls["inside"]] == ["free_account"] * 6
+    assert all(call["budget"] and 595 <= call["deadline"] <= 600 for call in controls["inside"])
+    assert [(status, body["reply"], body["files"]) for status, body in controls["statuses"][:2]] == [
+        (200, "ok", []), (200, "ok", [])]
+    assert [status for status, _body in controls["statuses"][2:]] == [429, 422, 504, 502]
+    assert [body for _status, body in controls["statuses"][2:]] == [
+        {"error": "busy"}, {"error": "processing_limit_reached"}, {"error": "request_timeout"},
+        {"error": "file_assistant_unavailable"}]
+    assert controls["outer_untouched"]                           # The chat's own control request is restored.
 
 
 def test_with_files_disabled_nothing_of_files_is_loaded():

@@ -20,6 +20,7 @@ errors are stable codes.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import json
 import threading
@@ -88,11 +89,17 @@ class FileService:
 
     def __init__(self, *, store, authenticate: Callable[[Request], Awaitable[FileAccount | None]],
                  call_model: Callable[[list], Any], required_tier: str = "paid", max_concurrent_assists: int = 2,
-                 worker_module=None):
+                 worker_module=None, request_scope: Callable[[FileAccount], Any] | None = None,
+                 failure_status: Callable[[BaseException], tuple[int, str] | None] | None = None):
+        """request_scope(account) is a context manager entered in the worker thread around one assistant
+        run (the application's request budget and provider controls); failure_status maps an exception
+        those controls raise to (status, stable code)."""
         if required_tier not in ("paid", "any"):
             raise ValueError("required_tier must be 'paid' or 'any'")
         from . import worker as default_worker
         self.store, self.authenticate, self.call_model = store, authenticate, call_model
+        self.request_scope = request_scope or (lambda account: nullcontext())
+        self.failure_status = failure_status or (lambda error: None)
         self.required_tier = required_tier
         self.worker = worker_module or default_worker
         self.assists = threading.BoundedSemaphore(max_concurrent_assists)
@@ -120,10 +127,16 @@ class FileService:
             file_request = FileRequest(account.owner, self.store, tuple(dict.fromkeys(file_ids)),
                                        run_generate=self.worker.run_generate, run_outline=self.worker.run_outline,
                                        run_edit=self.worker.run_edit)
-            result = await run_in_threadpool(run_file_assistant, message, history, file_request, self.call_model)
+            def run():
+                with self.request_scope(account):
+                    return run_file_assistant(message, history, file_request, self.call_model)
+            result = await run_in_threadpool(run)
         except AssistantError as failed:
             return None, _error(502, failed.code)
         except Exception as failed:  # The model provider, a limit or a defect: a class name only, never content.
+            mapped = self.failure_status(failed)
+            if mapped is not None:
+                return None, _error(*mapped)
             print(f"WARN: FILE_ASSISTANT_FAILED {type(failed).__name__}")
             return None, _error(502, "file_assistant_unavailable")
         finally:

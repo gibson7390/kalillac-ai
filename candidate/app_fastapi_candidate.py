@@ -463,8 +463,14 @@ TAVILY_EXTRACT_TIMEOUT_SECONDS = 30
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
-# The unbudgeted call timeout; the default is the existing per-call timeout.
-_OPENAI_CALL_TIMEOUT = ContextVar("openai_call_timeout", default=OPENAI_CALL_TIMEOUT_SECONDS)
+# A wider per-call timeout for the calls made inside one scope (only the file assistant sets it, around
+# its own calls); None everywhere else, where OPENAI_CALL_TIMEOUT_SECONDS applies unchanged.
+_OPENAI_CALL_TIMEOUT = ContextVar("openai_call_timeout", default=None)
+
+
+def _openai_call_timeout():
+    widened = _OPENAI_CALL_TIMEOUT.get()
+    return OPENAI_CALL_TIMEOUT_SECONDS if widened is None else widened
 
 # The process's bounded transport for request-budgeted OpenAI requests.
 # Created on the first budgeted request only; never with the flag off.
@@ -483,12 +489,15 @@ def _post_openai_for_attempt(payload):
     if budget is None:
         # The default is the existing 90 seconds; only the file assistant, which waits for a whole file
         # specification, widens it for its own calls (_OPENAI_CALL_TIMEOUT, set around those calls).
-        return _post_openai_responses(payload, timeout=_OPENAI_CALL_TIMEOUT.get())
+        widened = _OPENAI_CALL_TIMEOUT.get()
+        if widened is None:
+            return _post_openai_responses(payload)   # Exactly the existing call.
+        return _post_openai_responses(payload, timeout=widened)
 
     budget.admit_model_attempt()
     provider_usage.admitted()
     timeout, request_selected = budget.select_call_timeout(
-        OPENAI_CALL_TIMEOUT_SECONDS
+        _openai_call_timeout()
     )
     return _post_openai_bounded(payload, budget, timeout, request_selected)
 
@@ -15079,6 +15088,9 @@ if os.getenv("KALILLAC_BILLING_ENABLED", "").strip().lower() in {
 # accounts and the database: every file belongs to a signed-in account.
 FILE_ASSISTANT_MAX_OUTPUT_TOKENS = 32_000
 FILE_ASSISTANT_TIMEOUT_SECONDS = 240
+# The whole file request's deadline when request budgets or provider ceilings are on: a few long model
+# calls (a plan and a full specification each) plus rendering in the worker.
+FILE_REQUEST_DEADLINE_SECONDS = 600
 _file_chat_handoff = None   # Set below only when files are enabled; /api/chat is unchanged while it is None.
 if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
     if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
@@ -15129,8 +15141,50 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
             "max_output_tokens": FILE_ASSISTANT_MAX_OUTPUT_TOKENS,
         })
 
+    from contextlib import contextmanager as _files_contextmanager
+    from kalillac_files.assistant import MAX_TOOL_ROUNDS as _FILE_MAX_TOOL_ROUNDS
     from kalillac_files.intent import wants_file as _wants_file
     from kalillac_files.router import FileService, valid_assist_request as _valid_assist_request
+
+    @_files_contextmanager
+    def _file_request_scope(account):
+        """The file assistant's provider work runs under the same controls as a chat request. With
+        provider ceilings on: its own control request for a signed-in account, so every model call
+        reserves in the attempt pool and, with Financial Safeguards, in the ledger within the request
+        ceiling of its scope. That scope is FREE, as for every chat request: nothing issues paid
+        evidence until Milestone 3 links a verified subscription through the V1-authenticated identity,
+        so a paying customer's file request is bounded by the FREE request ceiling until then. With
+        ceilings or request budgets on: its own RequestBudget (a longer deadline, one model attempt per
+        tool round plus the reply, no search tool exists). With both off, nothing changes."""
+        control, control_token = provider_controls.begin_request()
+        try:
+            if control is not None:
+                provider_controls.account_status(True)   # Every file request is a signed-in account's.
+            if control is None and _request_limits is None:
+                yield
+                return
+            budget = RequestBudget(duration_seconds=FILE_REQUEST_DEADLINE_SECONDS,
+                                   max_model_attempts=_FILE_MAX_TOOL_ROUNDS + 1, max_search_attempts=1)
+            with budget_scope(budget):
+                yield
+        finally:
+            provider_controls.end_request(control, control_token)
+
+    def _file_failure(error):
+        """The stable response for a stop the controls raised inside the file assistant, or None."""
+        if isinstance(error, provider_controls.CeilingStop):
+            return error.status_code, error.code
+        if isinstance(error, RequestCancelled):
+            return 499, "request_cancelled"
+        if isinstance(error, RequestDeadlineExceeded):
+            return 504, "request_timeout"
+        if isinstance(error, CallBudgetExhausted):
+            return 422, "processing_limit_reached"
+        if isinstance(error, LocalModelServiceUnavailable):
+            return 503, "service_unavailable"
+        if isinstance(error, ModelProviderUnavailable):
+            return 503, "model_provider_unavailable"
+        return None
 
     _file_service = FileService(
         store=_file_store,
@@ -15138,6 +15192,8 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
                                           session_factory=_files_session_factory),
         call_model=_file_assistant_model,
         required_tier=_files_tier,
+        request_scope=_file_request_scope,
+        failure_status=_file_failure,
     )
     api.include_router(build_files_router(service=_file_service))
 

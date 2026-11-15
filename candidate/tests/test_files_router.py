@@ -166,3 +166,42 @@ def test_a_failing_model_is_a_stable_error_not_a_crash(tmp_path):
     client, _ = build(tmp_path, broken)
     reply = client.post("/api/files/assist", json={"message": "Make a report"}, headers=headers())
     assert (reply.status_code, reply.json()) == (502, {"error": "file_assistant_unavailable"})
+
+
+def test_the_assistant_runs_inside_the_request_scope_and_maps_its_stops(tmp_path):
+    """The application's controls wrap each assistant run in the worker thread; a stop they raise becomes
+    its stable code, and the scope is left on every exit."""
+    from contextlib import contextmanager
+    from contextvars import ContextVar
+    scope_var, events = ContextVar("scope", default=None), []
+
+    class Stop(Exception):
+        pass
+
+    @contextmanager
+    def request_scope(account):
+        token = scope_var.set(account.owner)
+        events.append("enter")
+        try:
+            yield
+        finally:
+            scope_var.reset(token)
+            events.append("exit")
+
+    def model(items):
+        events.append(("call", scope_var.get()))
+        if len(events) > 3:
+            raise Stop()
+        return {"output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}]}
+
+    async def authenticate(request):
+        return ACCOUNTS.get(request.cookies.get("session", ""))
+    app = FastAPI()
+    app.include_router(build_files_router(store=FileStore(tmp_path / "files"), authenticate=authenticate,
+                                          call_model=model, request_scope=request_scope,
+                                          failure_status=lambda error: (429, "busy") if isinstance(error, Stop) else None))
+    client = TestClient(app)
+    first = client.post("/api/files/assist", json={"message": "Make a report"}, headers=headers())
+    second = client.post("/api/files/assist", json={"message": "Make a report"}, headers=headers())
+    assert (first.status_code, second.status_code, second.json()) == (200, 429, {"error": "busy"})
+    assert events == ["enter", ("call", "a"), "exit", "enter", ("call", "a"), "exit"]

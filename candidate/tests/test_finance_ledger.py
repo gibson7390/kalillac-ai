@@ -199,7 +199,10 @@ def test_the_application_classifies_signed_in_users_as_free(ledger):
     finally:
         provider_controls.SERVICE = provider_controls_service
     source = (CANDIDATE / "app_fastapi_candidate.py").read_text(encoding="utf-8")
-    assert re.findall(r"provider_controls\.account_status\(([^)]*)\)", source) == ["meter_user_id is not None"]
+    # The chat's classification, and the file assistant's (only ever a signed-in account); neither
+    # passes paid evidence.
+    assert sorted(re.findall(r"provider_controls\.account_status\(([^)]*)\)", source)) == [
+        "True", "meter_user_id is not None"]
     assert "issue_paid_entitlement" not in source
 
 
