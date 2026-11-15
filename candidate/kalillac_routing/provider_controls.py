@@ -8,6 +8,11 @@ also reserves its worst-case micro-USD in the finance ledger in the SAME
 transaction as its attempt-pool reservation, so both commit before dispatch
 is allowed; a dispatched attempt is settled afterwards, a never-dispatched one
 released. Without it every path below is exactly the attempt ceiling alone.
+
+A chat request is also bounded in dollars: the reservations of its provider
+attempts (model calls, tool-loop turns, searches, retries) are counted on its
+ControlRequest, and an attempt that would take the request above its scope's
+request ceiling is refused before anything is reserved or dispatched.
 """
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -36,6 +41,12 @@ class CeilingUnavailable(CeilingStop):
 class CeilingBusy(CeilingStop):
     status_code = 429
     code = "busy"
+
+class RequestCostCeiling(CeilingStop):
+    """This request reached its own dollar authorization: one of Kalillac's
+    per-request processing limits, not a capacity or provider failure."""
+    status_code = 422
+    code = "processing_limit_reached"
 
 @dataclass
 class Lease:
@@ -120,41 +131,48 @@ class ProviderControls:
         return self._transaction(operation)
 
     def release(self, lease):
+        """Refund a never-dispatched attempt. True only when the refund
+        committed (with Financial Safeguards on: the reservation returned)."""
         from kalillac_db.repositories.provider_usage import release
         with lease.lock:
-            if lease.dispatched or lease.released: return
+            if lease.dispatched or lease.released: return False
             lease.released = True  # Exactly one refund attempt, no hidden retry.
         def operation(session):
             release(session, lease)
             if lease.finance is not None:
                 from kalillac_db.repositories import finance_ledger
-                finance_ledger.release(session, lease.finance, self._now(session))
+                return finance_ledger.release(session, lease.finance, self._now(session))
+            return True
         # Cleanup must still run after cancellation; no request-budget admission.
         try:
-            self._transaction(operation, check_budget=False)
+            return self._transaction(operation, check_budget=False) is True
         except Exception as error:
             # Unknown cleanup remains charged; never alter the chat contract.
             print("WARN: PROVIDER_CEILING_REFUND_UNCONFIRMED", type(error).__name__)
+            return False
 
     def settle(self, lease, value, returned):
         """Settle a DISPATCHED attempt's financial reservation exactly once.
 
         A failure leaves the reservation outstanding, so it stays charged.
+        Returns the charged µUSD when the settlement committed, else None.
         """
         finance = lease.finance
         if finance is None:
-            return
+            return None
         with lease.lock:
-            if not lease.dispatched or finance.resolved: return
+            if not lease.dispatched or finance.resolved: return None
             finance.resolved = True
         try:
             from kalillac_finance.runtime import settlement_for
             from kalillac_db.repositories import finance_ledger
             settlement = settlement_for(self.finance.prices, finance.charge, value, returned)
-            self._transaction(lambda session: finance_ledger.settle(
+            settled = self._transaction(lambda session: finance_ledger.settle(
                 session, finance, settlement, self._now(session), self.finance.limits), check_budget=False)
+            return settlement.charged if settled is True else None
         except Exception as error:
             print("WARN: FINANCE_SETTLEMENT_UNCONFIRMED", type(error).__name__)
+            return None
 
 
 class ControlRequest:
@@ -165,12 +183,30 @@ class ControlRequest:
         self.lock = threading.Lock()
         self.closed = self.started = self.finished = False
         self.session = self.session_lock = None
+        self.authorized_microusd = 0  # Financial Safeguards: this request's own exposure.
 
     def ensure_open(self):
         budget = current_budget()
         if budget is not None: budget.ensure_open()
         with self.lock:
             if self.closed: raise CeilingUnavailable()
+
+    def authorize_cost(self, amount, ceiling):
+        """Count one attempt's reservation toward this request, or refuse it
+        before anything is reserved when the request ceiling would be passed."""
+        with self.lock:
+            if self.closed: raise CeilingUnavailable()
+            admitted = (type(amount) is int and type(ceiling) is int and amount >= 0
+                        and self.authorized_microusd + amount <= ceiling)
+            if admitted: self.authorized_microusd += amount
+        if not admitted:
+            print("WARN: FINANCE_REQUEST_CEILING_REFUSED", "traffic=" + self.traffic_class.value)
+            raise RequestCostCeiling()
+
+    def adjust_cost(self, delta):
+        """A confirmed refund (negative) or a confirmed settlement difference."""
+        with self.lock:
+            self.authorized_microusd = max(0, self.authorized_microusd + delta)
 
     def admit_session(self, state, lock):
         limit = self.service.config.abuse
@@ -266,10 +302,17 @@ def protect(function, provider=None):
             from kalillac_finance.runtime import charge_for
             try:
                 charge = charge_for(finance.prices, selected, args, request.traffic_class)
+                ceiling = finance.limits.max_request(charge.scope)
             except Exception:
                 print("WARN: FINANCE_RESERVATION_UNBOUNDED", selected)
                 raise CeilingUnavailable() from None
-            lease = service.reserve(selected, request.anonymous, charge)
+            # The request's own dollar ceiling, before either ledger is touched.
+            request.authorize_cost(charge.reserved, ceiling)
+            try:
+                lease = service.reserve(selected, request.anonymous, charge)
+            except BaseException:
+                request.adjust_cost(-charge.reserved)  # Nothing was reserved.
+                raise
         token = _LEASE.set(lease)
         returned, value = False, None
         try:
@@ -279,9 +322,15 @@ def protect(function, provider=None):
             return value
         finally:
             # Claiming release fences late transport callbacks before refund.
-            service.release(lease)
+            released = service.release(lease)
             if finance is not None:
-                service.settle(lease, value, returned)
+                charged = service.settle(lease, value, returned)
+                # Only a CONFIRMED refund or settlement changes what the request
+                # has authorized; an unconfirmed one stays counted in full.
+                if released is True:
+                    request.adjust_cost(-charge.reserved)
+                elif type(charged) is int:
+                    request.adjust_cost(charged - charge.reserved)
             _LEASE.reset(token)
     return guarded
 

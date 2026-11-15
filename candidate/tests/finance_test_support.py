@@ -44,18 +44,33 @@ def usd(microusd):
     return f"{microusd // 1_000_000}.{microusd % 1_000_000:06d}"
 
 
-def limits_env(day, month, percent=10):
-    """day/month: (global, free, paid) in µUSD."""
+def limits_env(day, month, percent=10, provider_day=None, provider_month=None, max_request=None):
+    """day/month: (global, free, paid) in µUSD.
+
+    provider_day/provider_month: (openai, brave, tavily); by default each is
+    the period's GLOBAL ceiling, the largest value accepted, so it never binds
+    before a scope ceiling. max_request: (free, paid); by default each scope's
+    day ceiling, the largest value accepted.
+    """
     env = {"KALILLAC_FINANCE_MIN_HEADROOM_PERCENT": str(percent)}
     for period, values in (("DAY", day), ("MONTH", month)):
         for scope, value in zip(("GLOBAL", "FREE", "PAID"), values):
             env[f"KALILLAC_FINANCE_{period}_{scope}_LIMIT_USD"] = usd(value)
+    for period, values, ceiling in (("DAY", provider_day, day[0]), ("MONTH", provider_month, month[0])):
+        for provider, value in zip(("OPENAI", "BRAVE", "TAVILY"), values or (ceiling,) * 3):
+            env[f"KALILLAC_FINANCE_{period}_{provider}_LIMIT_USD"] = usd(value)
+    for scope, value in zip(("FREE", "PAID"), max_request or (day[1], day[2])):
+        env[f"KALILLAC_FINANCE_MAX_REQUEST_{scope}_USD"] = usd(value)
     return env
 
 
-def finance_config(day=(BIG, BIG * 4 // 10, BIG * 4 // 10), month=None, percent=10):
+def finance_config(day=(BIG, BIG * 4 // 10, BIG * 4 // 10), month=None, percent=10, provider_day=None,
+                   provider_month=None, max_request=None):
     month = month or tuple(v * 31 for v in day)
-    return load_financial_config({**OFFICIAL_PRICES, **limits_env(day, month, percent)})
+    if provider_day is not None and provider_month is None:
+        provider_month = tuple(v * 31 for v in provider_day)
+    return load_financial_config({**OFFICIAL_PRICES, **limits_env(day, month, percent, provider_day, provider_month,
+                                                                  max_request)})
 
 
 def scopes_for(free, paid):
@@ -86,49 +101,48 @@ class ProviderFailure(Exception):
     """A provider failure after dispatch."""
 
 
-def attempt(service, provider="openai", traffic="anonymous", behavior="ok", value=None, depth="basic",
-            on_event=None, payload=None):
-    """One attempt through protect() exactly as the application wraps it.
+def request(service, steps, traffic="anonymous"):
+    """Several provider attempts inside ONE chat request, each through protect()
+    exactly as the application wraps it.
 
     traffic: "anonymous", "free" (signed in, no paid entitlement) or "paid"
     (signed in WITH an authoritative paid entitlement for this request).
+    steps: dicts with any of provider, behavior, value, depth, payload, on_event.
+    Returns one result per step ({"entered", "dispatched", "outcome",
+    "authorized"}), where "authorized" is the request's authorized µUSD after
+    that step. A refused step does not end the request.
     """
     from kalillac_accounts.entitlements import PAID
     from kalillac_finance.traffic import issue_paid_entitlement
     from kalillac_routing import provider_controls, provider_usage
     from kalillac_routing.request_budget import RequestBudget, budget_scope
-    ledger = {"entered": 0, "dispatched": 0}
 
-    def terminal(*_args, **_kwargs):
-        ledger["entered"] += 1
-        if on_event:
-            on_event("entered")
-        if behavior == "reject_before_dispatch":
-            raise LocalReject()
-        if behavior == "hang_before_dispatch":
-            while True:
-                time.sleep(1)
-        provider_usage.dispatched()
-        ledger["dispatched"] += 1
-        if on_event:
-            on_event("dispatched")
-        if behavior == "hang_after_dispatch":
-            while True:
-                time.sleep(1)
-        if behavior == "exit_after_dispatch":
-            os._exit(0)  # A real process death: no finally, release or settlement runs.
-        if behavior == "fail_after_dispatch":
-            raise ProviderFailure()
-        return value
+    def run(provider="openai", behavior="ok", value=None, depth="basic", payload=None, on_event=None):
+        ledger = {"entered": 0, "dispatched": 0}
 
-    previous = provider_controls.SERVICE
-    provider_controls.SERVICE = service
-    state, token = provider_controls.begin_request()
-    budget = RequestBudget(duration_seconds=30, max_model_attempts=8, max_search_attempts=8)
-    try:
-        proof = issue_paid_entitlement(state, PAID) if traffic == "paid" else None
-        provider_controls.account_status(traffic != "anonymous", proof)
-        with budget_scope(budget):
+        def terminal(*_args, **_kwargs):
+            ledger["entered"] += 1
+            if on_event:
+                on_event("entered")
+            if behavior == "reject_before_dispatch":
+                raise LocalReject()
+            if behavior == "hang_before_dispatch":
+                while True:
+                    time.sleep(1)
+            provider_usage.dispatched()
+            ledger["dispatched"] += 1
+            if on_event:
+                on_event("dispatched")
+            if behavior == "hang_after_dispatch":
+                while True:
+                    time.sleep(1)
+            if behavior == "exit_after_dispatch":
+                os._exit(0)  # A real process death: no finally, release or settlement runs.
+            if behavior == "fail_after_dispatch":
+                raise ProviderFailure()
+            return value
+
+        try:
             if provider == "openai":
                 provider_controls.protect(provider_usage.observe_model(terminal), "openai")(
                     dict(payload or PAYLOAD))
@@ -140,19 +154,40 @@ def attempt(service, provider="openai", traffic="anonymous", behavior="ok", valu
                     budget, "search", {key: depth})
             else:
                 raise ValueError(provider)
-        outcome = "ok"
-    except provider_controls.CeilingBusy:
-        outcome = "busy"
-    except provider_controls.CeilingUnavailable:
-        outcome = "unavailable"
-    except LocalReject:
-        outcome = "local_reject"
-    except ProviderFailure:
-        outcome = "provider_failure"
+            outcome = "ok"
+        except provider_controls.RequestCostCeiling:
+            outcome = "request_ceiling"
+        except provider_controls.CeilingBusy:
+            outcome = "busy"
+        except provider_controls.CeilingUnavailable:
+            outcome = "unavailable"
+        except LocalReject:
+            outcome = "local_reject"
+        except ProviderFailure:
+            outcome = "provider_failure"
+        return dict(ledger, outcome=outcome, authorized=state.authorized_microusd)
+
+    previous = provider_controls.SERVICE
+    provider_controls.SERVICE = service
+    state, token = provider_controls.begin_request()
+    budget = RequestBudget(duration_seconds=30, max_model_attempts=8, max_search_attempts=8)
+    try:
+        proof = issue_paid_entitlement(state, PAID) if traffic == "paid" else None
+        provider_controls.account_status(traffic != "anonymous", proof)
+        with budget_scope(budget):
+            return [run(**step) for step in steps]
     finally:
         provider_controls.end_request(state, token)
         provider_controls.SERVICE = previous
-    return dict(ledger, outcome=outcome)
+
+
+def attempt(service, provider="openai", traffic="anonymous", behavior="ok", value=None, depth="basic",
+            on_event=None, payload=None):
+    """One request making exactly one attempt: {"entered", "dispatched", "outcome"}."""
+    [result] = request(service, [dict(provider=provider, behavior=behavior, value=value, depth=depth,
+                                      on_event=on_event, payload=payload)], traffic)
+    del result["authorized"]
+    return result
 
 
 # --- ledger inspection --------------------------------------------------------------------
@@ -167,6 +202,26 @@ def buckets(factory):
 
 def bucket(factory, kind, start, scope):
     return buckets(factory).get((kind, start, scope), (0, 0, 0))
+
+
+def provider_buckets(factory):
+    from kalillac_db.models import FinanceProviderBucket
+    with factory() as session:
+        return {(r.period_kind, r.period_start, r.provider): (r.reserved_microusd, r.settled_microusd,
+                                                              r.overrun_microusd)
+                for r in session.query(FinanceProviderBucket).all()}
+
+
+def provider_bucket(factory, kind, start, provider):
+    return provider_buckets(factory).get((kind, start, provider), (0, 0, 0))
+
+
+def operator_actions(factory):
+    from kalillac_db.models import FinanceOperatorAction
+    with factory() as session:
+        return [dict(action=r.action, scope=r.scope, reason=r.reason, reservation_id=r.reservation_id,
+                     amount=r.charged_microusd)
+                for r in session.query(FinanceOperatorAction).order_by(FinanceOperatorAction.performed_at).all()]
 
 
 def reservations(factory):
@@ -185,9 +240,19 @@ def latches(factory):
 
 
 def check_invariants(factory, limits, periods=None):
-    """Every bucket equals the sum of its reservations; GLOBAL = FREE + PAID;
-    no bucket's exposure exceeds its ceiling except by its recorded overrun."""
+    """Every scope and provider bucket equals the sum of its reservations;
+    GLOBAL = FREE + PAID = the sum of the provider buckets; no bucket's
+    exposure exceeds its ceiling except by its recorded overrun."""
     rows, held = buckets(factory), reservations(factory)
+    by_provider = provider_buckets(factory)
+    for (kind, start, provider), (reserved, settled, overrun) in by_provider.items():
+        if periods is not None and start not in periods:
+            continue
+        mine = [r for r in held if (r["day"] if kind == "day" else r["month"]) == start and r["provider"] == provider]
+        assert reserved == sum(r["reserved"] for r in mine if r["state"] == "reserved"), (kind, start, provider)
+        assert settled == sum(r["charged"] for r in mine if r["state"] == "settled"), (kind, start, provider)
+        assert overrun == sum(r["overrun"] for r in mine if r["state"] == "settled"), (kind, start, provider)
+        assert reserved + settled <= limits.provider_limit(kind, provider) + overrun, (kind, start, provider)
     for (kind, start, scope), (reserved, settled, overrun) in rows.items():
         if periods is not None and start not in periods:
             continue
@@ -200,6 +265,9 @@ def check_invariants(factory, limits, periods=None):
         if scope == "global":
             parts = [rows.get((kind, start, s), (0, 0, 0)) for s in ("free", "paid")]
             assert (reserved, settled, overrun) == tuple(sum(p[i] for p in parts) for i in range(3))
+            parts = [by_provider.get((kind, start, p), (0, 0, 0)) for p in ("openai", "brave", "tavily")]
+            assert (reserved, settled, overrun) == tuple(sum(p[i] for p in parts) for i in range(3)), \
+                ("providers", kind, start)
     return rows
 
 

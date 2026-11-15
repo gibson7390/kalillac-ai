@@ -330,6 +330,8 @@ def test_account_schema_holds_identity_only():
         "kalillac.finance_ledger_buckets",
         "kalillac.finance_reservations",
         "kalillac.finance_unsafe_latches",
+        "kalillac.finance_provider_buckets",
+        "kalillac.finance_operator_actions",
         *billing_tables,
     }
 
@@ -420,6 +422,8 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "finance_ledger_buckets",
         "finance_reservations",
         "finance_unsafe_latches",
+        "finance_provider_buckets",
+        "finance_operator_actions",
         "account_billing",
         "stripe_webhook_events",
         # Default-off Spaces tables exist in the schema...

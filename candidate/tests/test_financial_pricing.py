@@ -649,7 +649,9 @@ def test_free_traffic_can_never_exhaust_paid_capacity():
 
 
 def test_only_the_provider_control_seam_and_startup_use_the_financial_package():
-    # Batch 2 wires the ledger in at exactly these two places (see test_finance_ledger.py).
+    # Batch 2 wires the ledger in at exactly these two places (see test_finance_ledger.py). The
+    # operator command reads the configured ceilings for its report; it is not application code
+    # and no route or routing module reaches it (see test_finance_budgets.py).
     users = []
     for path in CANDIDATE.rglob("*.py"):
         relative = path.relative_to(CANDIDATE).parts
@@ -657,7 +659,8 @@ def test_only_the_provider_control_seam_and_startup_use_the_financial_package():
             continue
         if "kalillac_finance" in path.read_text(encoding="utf-8", errors="replace"):
             users.append("/".join(relative))
-    assert sorted(users) == ["app_fastapi_candidate.py", "kalillac_routing/provider_controls.py"]
+    assert sorted(users) == ["app_fastapi_candidate.py", "kalillac_routing/provider_controls.py",
+                             "tools/finance_ledger_admin.py"]
 
 
 def test_application_starts_unchanged_when_the_flag_is_unset():

@@ -36,6 +36,8 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+import importlib.util
+import io
 import multiprocessing
 import os
 from pathlib import Path
@@ -51,8 +53,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0015_finance_ledger"
+HEAD = "0016_finance_provider_budgets"
 CHAIN = (
+    "0016_finance_provider_budgets",
     "0015_finance_ledger",
     "0014_v1_session_issuance",
     "0013_v1_session_revocation",
@@ -1150,7 +1153,13 @@ FINANCE_TABLES = {
                              "charged_microusd", "overrun_microusd", "bound_exceeded", "basis", "created_at",
                              "resolved_at"},
     "finance_unsafe_latches": {"scope", "reason", "latched_at", "reservation_id"},
+    "finance_provider_buckets": {"period_kind", "period_start", "provider", "reserved_microusd",
+                                 "settled_microusd", "overrun_microusd"},
+    "finance_operator_actions": {"id", "action", "scope", "reason", "reservation_id", "charged_microusd",
+                                 "performed_at"},
 }
+# The application may insert into these but never change a row.
+FINANCE_APPEND_ONLY = {"finance_unsafe_latches", "finance_operator_actions"}
 
 
 def _fin():
@@ -1194,7 +1203,8 @@ def _finance_worker(spec, barrier, results):
         _recheck_worker_environment()
         fin = _fin()
         engine = _engine(APP, application=f"finance-worker-{index}", pool_size=1, max_overflow=0)
-        finance = fin.finance_config(day=spec["day"], month=spec["month"])
+        finance = fin.finance_config(day=spec["day"], month=spec["month"], provider_day=spec["provider_day"],
+                                     max_request=spec["max_request"])
         service = make_finance_service(_factory(engine), finance, spec["now"])
         with engine.connect():
             pass  # The verified physical connection exists before the race starts.
@@ -1212,10 +1222,11 @@ def _finance_worker(spec, barrier, results):
 
 
 def _finance_spec(index, now, day, month=None, traffic="anonymous", behavior="ok", value="missing",
-                  provider="openai", events=False):
+                  provider="openai", events=False, provider_day=None, max_request=None):
     fin = _fin()
     return {"index": index, "now": now, "day": day, "month": month or tuple(v * 31 for v in day),
             "traffic": traffic, "behavior": behavior, "provider": provider, "events": events,
+            "provider_day": provider_day, "max_request": max_request,
             "value": fin.model_response(usage=False) if value == "missing" else value, "nonce": STATE["nonce"]}
 
 
@@ -1233,7 +1244,7 @@ def test_finance_tables_columns_and_narrow_grants(database):
             assert {r[0] for r in conn.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = 'kalillac' "
                 "AND table_name = %s", [table]).fetchall()} == columns, table
-            allowed = {"SELECT", "INSERT"} | ({"UPDATE"} if table != "finance_unsafe_latches" else set())
+            allowed = {"SELECT", "INSERT"} | ({"UPDATE"} if table not in FINANCE_APPEND_ONLY else set())
             for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
                 assert conn.execute("SELECT has_table_privilege(%s::name, %s::text, %s::text)",
                                     [APP, "kalillac." + table, privilege]).fetchone() == (privilege in allowed,), \
@@ -1246,8 +1257,21 @@ def test_finance_tables_columns_and_narrow_grants(database):
                           "UPDATE kalillac.finance_unsafe_latches SET reason = 'overrun'",
                           "DELETE FROM kalillac.finance_reservations",
                           "DELETE FROM kalillac.finance_ledger_buckets",
-                          "TRUNCATE kalillac.finance_ledger_buckets"):
+                          "TRUNCATE kalillac.finance_ledger_buckets",
+                          "DELETE FROM kalillac.finance_provider_buckets",
+                          "TRUNCATE kalillac.finance_provider_buckets",
+                          "DELETE FROM kalillac.finance_operator_actions",
+                          "UPDATE kalillac.finance_operator_actions SET charged_microusd = 0",
+                          "SELECT scope FROM kalillac.finance_unsafe_latches FOR UPDATE"):
             _expect_sqlstate(conn, statement)
+        _expect_sqlstate(conn, "INSERT INTO kalillac.finance_provider_buckets VALUES "
+                               "('month', DATE '2031-01-02', 'openai', 0, 0, 0)", "23514")
+        _expect_sqlstate(conn, "INSERT INTO kalillac.finance_provider_buckets VALUES "
+                               "('day', DATE '2031-01-02', 'groq', 0, 0, 0)", "23514")
+        _expect_sqlstate(conn, "INSERT INTO kalillac.finance_operator_actions VALUES "
+                               "(gen_random_uuid(), 'clear_latch', 'free', NULL, NULL, 0, now())", "23514")
+        _expect_sqlstate(conn, "INSERT INTO kalillac.finance_operator_actions VALUES "
+                               "(gen_random_uuid(), 'refund', NULL, NULL, NULL, 0, now())", "23514")
         # A calendar month is stored by its first day only.
         _expect_sqlstate(conn, "INSERT INTO kalillac.finance_ledger_buckets VALUES "
                                "('month', DATE '2031-01-02', 'global', 0, 0, 0)", "23514")
@@ -1504,3 +1528,216 @@ def test_finance_and_attempt_ceilings_are_both_required(app_engine, finance_latc
                 for _ in range(2)]
     assert outcomes == ["ok", "busy"] and counts(app_engine) == (3, 2)  # attempt refusal despite money room
     assert fin.bucket(factory, "day", now.date(), "paid") == (0, R, 0)
+
+
+# --- provider budgets, the request ceiling and operator reconciliation (0016) -------------
+
+
+def test_finance_concurrent_reservations_never_exceed_the_provider_ceiling(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(5, year=2032), fin.scopes_for(20 * R, 20 * R)
+    provider_day = (3 * R + R // 2, day[0], day[0])  # Scope ceilings have room: only the provider's binds.
+    specs = [_finance_spec(i, now, day, traffic=("anonymous", "free", "paid")[i % 3], provider_day=provider_day)
+             for i in range(RACERS + 1)]
+    results = _finance_race(specs)
+    assert tally(results) == Counter(ok=3, busy=RACERS + 1 - 3)
+    assert sum(r["entered"] for r in results) == sum(r["dispatched"] for r in results) == 3
+    factory = _ledger(app_engine)
+    assert fin.provider_bucket(factory, "day", now.date(), "openai") == (0, 3 * R, 0)
+    assert fin.provider_bucket(factory, "month", date(2032, 5, 1), "openai") == (0, 3 * R, 0)
+    assert fin.bucket(factory, "day", now.date(), "global") == (0, 3 * R, 0)
+    assert counts(app_engine)[0] == 3  # Refused reservations consumed no attempt either.
+    fin.check_invariants(factory, fin.finance_config(day=day, provider_day=provider_day).limits,
+                         {now.date(), date(2032, 5, 1)})
+
+
+def test_finance_provider_budgets_are_independent_under_concurrency(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(6, year=2032), fin.scopes_for(20 * R, 20 * R)
+    provider_day = (2 * R + R // 2, 3 * 5_000 + 2_500, 0)  # Brave costs 5,000 µUSD a request; Tavily is closed.
+    specs = [_finance_spec(i, now, day, provider=PROVIDERS[i % 3], provider_day=provider_day) for i in range(12)]
+    results = _finance_race(specs)
+    by_provider = Counter((s["provider"], r["outcome"]) for s, r in zip(specs, results))
+    assert by_provider == Counter({("openai", "ok"): 2, ("openai", "busy"): 2, ("brave", "ok"): 3,
+                                   ("brave", "busy"): 1, ("tavily", "busy"): 4})
+    factory = _ledger(app_engine)
+    assert fin.provider_bucket(factory, "day", now.date(), "openai") == (0, 2 * R, 0)
+    assert fin.provider_bucket(factory, "day", now.date(), "brave") == (0, 15_000, 0)
+    assert fin.provider_bucket(factory, "day", now.date(), "tavily") == (0, 0, 0)
+    assert fin.bucket(factory, "day", now.date(), "global") == (0, 2 * R + 15_000, 0)
+    assert (counts(app_engine)[0], counts(app_engine, "brave")[0], counts(app_engine, "tavily")[0]) == (2, 3, 0)
+    fin.check_invariants(factory, fin.finance_config(day=day, provider_day=provider_day).limits,
+                         {now.date(), date(2032, 6, 1)})
+
+
+def test_finance_request_ceiling_holds_on_postgres(app_engine, finance_latches):
+    fin, R = _fin(), _r()
+    now, day = _when(9, year=2032), fin.scopes_for(20 * R, 20 * R)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(day=day, max_request=(2 * R + R // 2, day[2])), now)
+    missing = fin.model_response(usage=False)
+    results = fin.request(service, [dict(behavior="reject_before_dispatch"), dict(value=missing),
+                                    dict(value=missing), dict(value=missing)])
+    assert [(r["outcome"], r["authorized"]) for r in results] == [
+        ("local_reject", 0), ("ok", R), ("ok", 2 * R), ("request_ceiling", 2 * R)]
+    assert results[3]["entered"] == 0 and counts(app_engine) == (2, 2)
+    assert sorted(r["state"] for r in fin.reservations(factory) if r["day"] == now.date()) == \
+        ["released", "settled", "settled"]
+    assert fin.bucket(factory, "day", now.date(), "free") == (0, 2 * R, 0)
+
+
+def test_finance_operator_resolves_a_stranded_reservation_with_application_privileges(app_engine, finance_latches):
+    from kalillac_db.repositories import finance_admin
+    fin, R = _fin(), _r()
+    now = _when(7, year=2032)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    service.release = lambda lease: None  # A process death after dispatch: no cleanup ran.
+    service.settle = lambda lease, value, returned: None
+    fin.attempt(service, value=fin.model_response(1, 1))
+    [stranded] = [r for r in fin.reservations(factory) if r["day"] == now.date()]
+    assert stranded["state"] == "reserved"
+    later = now + timedelta(hours=2)
+    with factory() as session, session.begin():
+        assert finance_admin.resolve_stale(session, stranded["id"], now + timedelta(minutes=30), 3600) is None
+    with factory() as session, session.begin():
+        assert stranded["id"] in finance_admin.stale_ids(session, later, 3600, batch=1000)
+    with factory() as session, session.begin():
+        assert finance_admin.resolve_stale(session, stranded["id"], later, 3600) == R
+    with factory() as session, session.begin():
+        assert finance_admin.resolve_stale(session, stranded["id"], later, 3600) is None  # Exactly once.
+    [row] = [r for r in fin.reservations(factory) if r["id"] == stranded["id"]]
+    assert (row["state"], row["charged"], row["basis"], row["overrun"]) == ("settled", R, "unknown", 0)
+    assert fin.bucket(factory, "day", now.date(), "free") == (0, R, 0)
+    assert fin.provider_bucket(factory, "day", now.date(), "openai") == (0, R, 0)
+    assert [a for a in fin.operator_actions(factory) if a["reservation_id"] == stranded["id"]] == [
+        dict(action="resolve_stale", scope="free", reason=None, reservation_id=stranded["id"], amount=R)]
+    with factory() as session, session.begin():
+        mine = {now.date().isoformat(), "2032-07-01"}
+        assert [v for v in finance_admin.verify(session) if v[2] in mine] == []
+
+
+def test_finance_only_the_owner_role_can_clear_a_latch(app_engine, finance_latches, monkeypatch):
+    from sqlalchemy import pool
+    from kalillac_db import migration_roles
+    from kalillac_db.repositories import finance_admin
+    fin = _fin()
+    now = _when(8, year=2032)
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    fin.attempt(service, value=fin.model_response(10**6, 3200))  # FREE overrun.
+    assert fin.latches(factory) == {"free": "overrun"}
+    [overrun] = [r for r in fin.reservations(factory) if r["day"] == now.date()]
+    spec = importlib.util.spec_from_file_location("finance_ledger_admin",
+                                                  CANDIDATE_DIR / "tools" / "finance_ledger_admin.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    monkeypatch.setenv(migration_roles.OWNER_ROLE_ENV, OWNER)
+    monkeypatch.delenv("KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED", raising=False)
+    argv = ["clear-latch", "--scope", "free", "--expect-reason", "overrun", "--apply"]
+
+    # The application login is not a member of the owner role and cannot lock or delete a latch.
+    out = io.StringIO()
+    assert tool.run(argv, factory=factory, out=out) == tool.EXIT_PRIVILEGE
+    assert out.getvalue().strip() == "insufficient_privilege"
+    with pytest.raises(Exception) as denied:
+        with factory() as session, session.begin():
+            finance_admin.clear_latch(session, "free", "overrun", now)
+    assert getattr(getattr(denied.value, "orig", None), "sqlstate", None) == INSUFFICIENT_PRIVILEGE
+    assert fin.latches(factory) == {"free": "overrun"}
+    assert fin.attempt(service)["entered"] == 0
+
+    migrator = _engine(MIGRATE, application="finance-operator", poolclass=pool.NullPool)
+    try:
+        operator = _factory(migrator)
+        out = io.StringIO()  # The wrong reason clears nothing.
+        wrong = ["clear-latch", "--scope", "free", "--expect-reason", "bound_exceeded", "--apply"]
+        assert tool.run(wrong, factory=operator, out=out) == tool.EXIT_NO_LATCH
+        assert fin.latches(factory) == {"free": "overrun"}
+        out = io.StringIO()
+        assert tool.run(argv, factory=operator, out=out) == tool.EXIT_OK
+        assert out.getvalue().strip() == "latch_cleared free overrun"
+        assert tool.run(argv, factory=operator, out=io.StringIO()) == tool.EXIT_NO_LATCH
+        with migrator.connect() as conn:  # The owner role was assumed for that transaction only.
+            assert tuple(conn.exec_driver_sql("SELECT session_user::text, current_user::text").one()) == \
+                (MIGRATE, MIGRATE)
+    finally:
+        migrator.dispose()
+    assert fin.latches(factory) == {}
+    cleared = [a for a in fin.operator_actions(factory) if a["action"] == "clear_latch"]
+    assert cleared[-1] == dict(action="clear_latch", scope="free", reason="overrun",
+                               reservation_id=overrun["id"], amount=0)
+    assert fin.attempt(service, value=fin.model_response(usage=False))["outcome"] == "ok"
+
+    # The read-only report runs with the application's own privileges.
+    out = io.StringIO()
+    assert tool.run(["report", "--json"], factory=factory, out=out) in (tool.EXIT_OK, tool.EXIT_INCONSISTENT)
+    text = out.getvalue()
+    report = __import__("json").loads(text[:text.rindex("finance_ledger_")])
+    assert report["configuration"] == "off" and report["latches"] == {}
+    mine = {now.date().isoformat(), "2032-08-01"}
+    assert [v for v in report["violations"] if v[2] in mine] == []
+
+
+def _migrate(revision, downgrade=False):
+    """Alembic to `revision` as the migration login assuming the owner, exactly as the fixture migrates."""
+    from sqlalchemy import pool
+    from alembic import command
+    from kalillac_db import migration_roles
+    settings = {migration_roles.OWNER_ROLE_ENV: OWNER, migration_roles.APP_ROLE_ENV: APP,
+                "KALILLAC_MIGRATION_REGISTRATION_ROLE": REGISTRATION,
+                migration_roles.V1_SECURITY_SERVICE_ROLE_ENV: SERVICE,
+                migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV: EXECUTOR}
+    saved = {name: os.environ.get(name) for name in settings}
+    os.environ.update(settings)
+    migrator = _engine(MIGRATE, poolclass=pool.NullPool)
+    try:
+        with migrator.begin() as conn:
+            (command.downgrade if downgrade else command.upgrade)(_alembic_config(connection=conn), revision)
+    finally:
+        migrator.dispose()
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _revision(admin):
+    with _connect(admin) as conn:
+        return conn.execute("SELECT version_num FROM kalillac.alembic_version").fetchall()
+
+
+def test_finance_provider_budget_migration_refuses_a_ledger_with_reservations(app_engine, database, finance_latches):
+    """Keep this the LAST test of the file: it moves the schema below head and back.
+
+    Provider buckets start at zero, which is only exact for an empty ledger,
+    so 0016 must refuse to run once any reservation exists."""
+    fin = _fin()
+    service = make_finance_service(_ledger(app_engine), fin.finance_config(), _when(10, year=2032))
+    assert fin.attempt(service, value=fin.model_response(usage=False))["outcome"] == "ok"
+    app_engine.dispose()  # No pooled application connection is left inside the schema.
+    _migrate("0015_finance_ledger", downgrade=True)
+    try:
+        assert _revision(database) == [("0015_finance_ledger",)]
+        with _connect(database) as conn:
+            assert conn.execute("SELECT to_regclass('kalillac.finance_provider_buckets') IS NULL, "
+                                "to_regclass('kalillac.finance_operator_actions') IS NULL").fetchone() == (True, True)
+            assert conn.execute("SELECT count(*) FROM kalillac.finance_reservations").fetchone()[0] > 0
+        with pytest.raises(RuntimeError, match="finance_reservations is not empty"):
+            _migrate(HEAD)
+        assert _revision(database) == [("0015_finance_ledger",)]  # Refused and rolled back.
+        with _connect(database) as conn:
+            assert conn.execute("SELECT to_regclass('kalillac.finance_provider_buckets') IS NULL").fetchone() == (True,)
+            # The precondition production has: Financial Safeguards were never enabled, so the ledger is empty.
+            conn.execute("TRUNCATE kalillac.finance_reservations, kalillac.finance_ledger_buckets, "
+                         "kalillac.finance_unsafe_latches")
+    finally:
+        _migrate(HEAD)
+    assert _revision(database) == [(HEAD,)]
+    with _connect(database) as conn:
+        for table, privileges in (("finance_provider_buckets", ("SELECT", "INSERT", "UPDATE")),
+                                  ("finance_operator_actions", ("SELECT", "INSERT"))):
+            for privilege in privileges:
+                assert conn.execute("SELECT has_table_privilege(%s::name, %s::text, %s::text)",
+                                    [APP, "kalillac." + table, privilege]).fetchone() == (True,), (table, privilege)

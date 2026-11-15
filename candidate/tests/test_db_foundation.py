@@ -58,6 +58,9 @@ def test_only_approved_account_tables_exist():
         "kalillac.finance_ledger_buckets",
         "kalillac.finance_reservations",
         "kalillac.finance_unsafe_latches",
+        # Provider budgets and operator actions (0016): the same kind of metadata.
+        "kalillac.finance_provider_buckets",
+        "kalillac.finance_operator_actions",
         "kalillac.account_billing",
         "kalillac.stripe_webhook_events",
     }

@@ -2,13 +2,16 @@
 
 Invariants (every bucket, every period, every scope):
   * exposure = reserved + settled, in µUSD; admission requires
-    exposure + amount <= the scope's ceiling for EVERY charged bucket (the
-    scope's day and month, and GLOBAL's day and month), checked and
-    incremented under row locks in one transaction that commits before
-    the provider attempt may dispatch;
-  * a charge lands in GLOBAL and exactly one of FREE or PAID, in the day and
-    month of its reservation, and is settled or released in those same
-    buckets even after a period rollover;
+    exposure + amount <= the ceiling for EVERY charged bucket (the scope's
+    day and month, GLOBAL's day and month, and the provider's day and
+    month), checked and incremented under row locks in one transaction that
+    commits before the provider attempt may dispatch;
+  * a charge lands in GLOBAL, in exactly one of FREE or PAID and in its
+    provider's buckets, in the day and month of its reservation, and is
+    settled or released in those same buckets even after a period rollover;
+  * a provider bucket equals the sum of that provider's reservations in the
+    period, whatever their scope; the three provider buckets of a period
+    therefore add up to its GLOBAL bucket;
   * a reservation leaves `reserved` only by release (never dispatched: the
     whole amount returns) or settlement (dispatched: the actual cost, or the
     full reservation when the cost is unknown, moves to `settled`). An
@@ -24,17 +27,20 @@ Lock order, the same in every transaction (no deadlock):
   -> this attempt's finance_reservations row (release/settle only)
   -> finance_ledger_buckets in (period kind: day < month, period start,
      scope: global < free < paid) order
+  -> finance_provider_buckets in (period kind: day < month) order; a
+     transaction locks only its own provider's two rows
   -> finance_unsafe_latches (read after the bucket locks; inserted last).
 A latch is inserted while holding GLOBAL bucket locks that every admission
 also takes, so any admission ordered after it reads it.
 """
 from dataclasses import dataclass, field
 import threading
+from types import SimpleNamespace
 import uuid
 
 from sqlalchemy import select
 
-from ..models import FinanceLedgerBucket, FinanceReservation, FinanceUnsafeLatch
+from ..models import FinanceLedgerBucket, FinanceProviderBucket, FinanceReservation, FinanceUnsafeLatch
 
 _KIND_ORDER = {"day": 0, "month": 1}
 _SCOPE_ORDER = {"global": 0, "free": 1, "paid": 2}
@@ -79,6 +85,20 @@ def lock_buckets(session, keys):
     return rows
 
 
+def lock_provider_buckets(session, day, month, provider):
+    """Create-if-absent then lock the provider's day and month bucket, in that order."""
+    insert = _insert(session)
+    rows = {}
+    for kind, start in (("day", day), ("month", month)):
+        session.execute(insert(FinanceProviderBucket).values(
+            period_kind=kind, period_start=start, provider=provider, reserved_microusd=0, settled_microusd=0,
+            overrun_microusd=0).on_conflict_do_nothing(index_elements=["period_kind", "period_start", "provider"]))
+        rows[kind] = session.scalar(select(FinanceProviderBucket).where(
+            FinanceProviderBucket.period_kind == kind, FinanceProviderBucket.period_start == start,
+            FinanceProviderBucket.provider == provider).with_for_update().execution_options(populate_existing=True))
+    return rows
+
+
 def latched_scopes(session):
     return {row[0]: row[1] for row in session.execute(select(FinanceUnsafeLatch.scope, FinanceUnsafeLatch.reason))}
 
@@ -98,7 +118,10 @@ def reserve(session, charge, now, limits):
     scope = charge.scope.value
     if scope not in ("free", "paid") or type(charge.reserved) is not int or charge.reserved < 0:
         raise CeilingUnavailable()
+    if charge.provider not in ("openai", "brave", "tavily"):
+        raise CeilingUnavailable()
     rows = lock_buckets(session, bucket_keys(day, month, scope))
+    provider_rows = lock_provider_buckets(session, day, month, charge.provider)
     latched = latched_scopes(session)
     if "global" in latched or scope in latched:
         print("WARN: FINANCE_ADMISSION_REFUSED", "scope=" + scope, "reason=latched")
@@ -106,7 +129,11 @@ def reserve(session, charge, now, limits):
     for (kind, _start, bucket_scope), row in rows.items():
         if row.reserved_microusd + row.settled_microusd + charge.reserved > limits.limit(kind, bucket_scope):
             raise CeilingBusy()
-    for row in rows.values():
+    for kind, row in provider_rows.items():
+        if row.reserved_microusd + row.settled_microusd + charge.reserved > limits.provider_limit(
+                kind, charge.provider):
+            raise CeilingBusy()
+    for row in (*rows.values(), *provider_rows.values()):
         row.reserved_microusd += charge.reserved
     reservation_id = uuid.uuid4()
     session.add(FinanceReservation(
@@ -118,6 +145,9 @@ def reserve(session, charge, now, limits):
 
 
 def _outstanding(session, lease):
+    """The reservation, row-locked, only while it is still outstanding. A
+    second release or settlement of the same reservation therefore finds
+    nothing and changes nothing: every resolution is applied exactly once."""
     return session.scalar(select(FinanceReservation).where(
         FinanceReservation.id == lease.reservation_id, FinanceReservation.state == "reserved",
     ).with_for_update().execution_options(populate_existing=True))
@@ -129,7 +159,8 @@ def release(session, lease, now):
     if reservation is None:
         return False
     rows = lock_buckets(session, bucket_keys(reservation.day, reservation.month, reservation.scope))
-    for row in rows.values():
+    provider_rows = lock_provider_buckets(session, reservation.day, reservation.month, reservation.provider)
+    for row in (*rows.values(), *provider_rows.values()):
         row.reserved_microusd -= reservation.reserved_microusd
     reservation.state, reservation.resolved_at = "released", now
     session.flush()
@@ -144,7 +175,8 @@ def settle(session, lease, settlement, now, limits):
     if settlement.reserved != reservation.reserved_microusd:
         raise ValueError("settlement does not match the reservation")
     rows = lock_buckets(session, bucket_keys(reservation.day, reservation.month, reservation.scope))
-    for row in rows.values():
+    provider_rows = lock_provider_buckets(session, reservation.day, reservation.month, reservation.provider)
+    for row in (*rows.values(), *provider_rows.values()):
         row.reserved_microusd -= reservation.reserved_microusd
         row.settled_microusd += settlement.charged
         row.overrun_microusd += settlement.overrun
@@ -163,3 +195,24 @@ def settle(session, lease, settlement, now, limits):
                 break
     session.flush()
     return True
+
+
+def settle_at_reservation(session, reservation_id, now):
+    """Operator reconciliation of one outstanding reservation whose outcome
+    will never be known (for example after a process death): it is finalised
+    at its FULL reserved amount, exactly as an unknown-cost settlement, so
+    exposure is unchanged and nothing is ever refunded on a guess.
+
+    Returns (scope, amount), or None when it is no longer outstanding.
+    """
+    reservation = session.scalar(select(FinanceReservation).where(
+        FinanceReservation.id == reservation_id, FinanceReservation.state == "reserved",
+    ).with_for_update().execution_options(populate_existing=True))
+    if reservation is None:
+        return None
+    amount = reservation.reserved_microusd
+    lease = FinanceLease(reservation.id, reservation.scope, reservation.day, reservation.month, amount, None)
+    full = SimpleNamespace(reserved=amount, charged=amount, basis="unknown", overrun=0, bound_exceeded=False)
+    if not settle(session, lease, full, now, None):
+        return None
+    return reservation.scope, amount

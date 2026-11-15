@@ -272,7 +272,7 @@ def _failure(error):
         return "cancelled"
     if name in {"RequestDeadlineExceeded", "TransportDeadlineExceeded"}:
         return "deadline"
-    if name in {"CallBudgetExhausted", "CeilingBusy"}:
+    if name in {"CallBudgetExhausted", "CeilingBusy", "RequestCostCeiling"}:
         return "allowance"
     if name in {"TransportUnavailable", "ProviderTransportUnavailable", "SearchTransportUnavailable", "OpenAIConfigurationUnavailable", "CeilingUnavailable"}:
         return "local_unavailable"

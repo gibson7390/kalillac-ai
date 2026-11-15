@@ -19,7 +19,8 @@ from .account_usage_daily import AccountUsageDaily
 from .account_usage_slot import AccountUsageSlot
 from .anonymous_usage import AnonymousUsageDay, AnonymousUsageSlot
 from .provider_usage_pool import ProviderUsagePool
-from .finance_ledger import FinanceLedgerBucket, FinanceReservation, FinanceUnsafeLatch
+from .finance_ledger import (FinanceLedgerBucket, FinanceOperatorAction, FinanceProviderBucket,
+                             FinanceReservation, FinanceUnsafeLatch)
 from .base import Base
 from .stripe_webhook_event import StripeWebhookEvent
 from .user import User
@@ -37,6 +38,8 @@ __all__ = [
     "AnonymousUsageSlot",
     "ProviderUsagePool",
     "FinanceLedgerBucket",
+    "FinanceOperatorAction",
+    "FinanceProviderBucket",
     "FinanceReservation",
     "FinanceUnsafeLatch",
     "Base",
