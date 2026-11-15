@@ -158,10 +158,12 @@ from the code. See "Owner decisions required".
   exactly the presented session and answers `ended` for every well-formed call. The upgrade proves the
   exact 0014 catalog first and the exact three-function result after; the downgrade proves both ways.
 * **Remaining in D2:** password reset, password change, email verification, quarantine and
-  reinstatement, deletion request, and the operator role P. Password reset and change need a third
-  identity-guard version (the guard currently forbids E from changing `password_hash`), and the new
-  audit event types need the 0012 event-type constraint and the classifier's exact copy of it to
-  change together.
+  reinstatement, deletion request, and the operator role P. Password reset fits the existing schema
+  (0012 already reserved the `password_reset` event type and the `recovery` admission class) and
+  needs only column grants to E. Quarantine and email verification need a third identity-guard
+  version (the guard protects `quarantined_at`, and refuses `email_verified_at` changes once
+  registration is active). New audit event types (password change, quarantine, deletion) need the
+  0012 event-type constraint and the classifier's exact copy of it to change together.
 * Then D3 (routes), D4 (operator tool), E1 to E3.
 
 ### Milestone 3: Stripe billing (starting point)
