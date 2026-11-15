@@ -322,6 +322,11 @@ artwork; fixed and tested.
   on Linux locally (see below). The commits after `59ec9d1` add files only; no application module
   changed.
 * Not run on any branch: `code-structure-frontend-verification` (no frontend file changed).
+* `feat/document-quality-v1`, `file-generation-verification` (all file suites, none skipped):
+  `43684790630` on `b8f4d04` (536 tests), `43691236898` on `c8c2985` (601, PowerPoint),
+  `43700356071` on `a822f39` (642, editing), `43701878737` on `5b4259d` (653, benchmark), all
+  successful. These commits change only `candidate/kalillac_files`, its tests and tools, the
+  workflow and documents; no application module.
 
 A disposable Linux environment for reproducing Linux-only failures exists in WSL at
 `~/kalillac-files-venv` (Python 3.12 managed by `uv`, the production lock plus the document
