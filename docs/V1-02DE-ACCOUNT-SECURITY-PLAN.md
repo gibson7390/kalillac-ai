@@ -1,8 +1,9 @@
 # V1-02D and V1-02E: completing account security (plan, reconstructed from the code)
 
-Status: **plan**. Approved by the owner on 2026-11-15 to be written from the code and then implemented,
-keeping the private database authorities and adding no legacy path. Nothing here is implemented yet;
-nothing here authorizes a production migration, a role or credential change, or activation.
+Status: **in progress**. Approved by the owner on 2026-11-15 to be written from the code and then
+implemented, keeping the private database authorities and adding no legacy path. Implemented so far
+(default off, unexposed): D1, and the sign-out authority of D2 (migration 0018). Nothing here
+authorizes a production migration, a role or credential change, or activation.
 
 Sources: the code on `feat/file-assistant-v1` (migrations 0012 to 0014, `kalillac_accounts/v1_security.py`,
 the registration authority) and the V1 contract in
@@ -25,7 +26,7 @@ Every sub-slice is default off, adds its own tests (SQLite where the behaviour i
 PostgreSQL 16 in the disposable CI job for every authority, race and privilege property), keeps all
 existing suites unchanged, and is committed separately.
 
-### D1. The application's private S connection
+### D1. The application's private S connection (implemented: `kalillac_accounts/v1_authority.py`)
 
 - The operator transition (E2 below) gives S `LOGIN` and a credential; the application reads it from a
   protected credential file through the existing strict protected-file loader (the one A uses),
@@ -47,7 +48,7 @@ operation ids, admission where the contract requires it, and an audit event in t
 
 | Function | Effect |
 |---|---|
-| `v1_end_session(session, token_hash)` | Logout: revoke exactly the presented session; idempotent |
+| `v1_end_session(session, token_hash)` | Logout: revoke exactly the presented session; idempotent. **Implemented, migration 0018**: answers `ended` for every well-formed call, writes no audit event (sign-out is not an audited V1 operation), locks only the session row |
 | `v1_reset_password(token_hash, new_hash, op)` | Recovery completion: lock and re-check the token, replace the hash, invalidate every reset token, revoke every session, advance the epoch, clear `password_reset_required` (only here), audit |
 | `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, advance the epoch, audit |
 | `v1_verify_email(token_hash, op)` | Email verification completion under the account lock |

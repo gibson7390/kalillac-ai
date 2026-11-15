@@ -144,6 +144,26 @@ path the plan is retiring. Building them requires the plan for V1-02D and V1-02E
 the application is meant to act as the service role) or the owner's agreement to a plan written
 from the code. See "Owner decisions required".
 
+**Progress on the V1-02D/E plan** (`feat/file-controls-v1`, all default off, nothing exposed):
+
+* **D1, the private S connection: implemented** (`2d33196`). `kalillac_accounts/v1_authority.py` owns
+  the only engine logged in as S, calls the fixed authorities with bound parameters and nothing else,
+  validates every result against the function's contract, and discards any connection whose
+  transaction failed. Building it requires a strict credential bound to the role, database instance
+  and deployment (protected-file loader), checks S's identity on every checkout and verifies S's
+  boundary (no attribute but LOGIN, no membership, no table or column right, exactly the reviewed
+  functions by owner, `search_path`, body digest and ACL, no other SECURITY DEFINER function). Not
+  wired into startup: S stays NOLOGIN until the operator transition (E2).
+* **D2, first part: the sign-out authority, migration 0018** (`211c337`). `v1_end_session` revokes
+  exactly the presented session and answers `ended` for every well-formed call. The upgrade proves the
+  exact 0014 catalog first and the exact three-function result after; the downgrade proves both ways.
+* **Remaining in D2:** password reset, password change, email verification, quarantine and
+  reinstatement, deletion request, and the operator role P. Password reset and change need a third
+  identity-guard version (the guard currently forbids E from changing `password_hash`), and the new
+  audit event types need the 0012 event-type constraint and the classifier's exact copy of it to
+  change together.
+* Then D3 (routes), D4 (operator tool), E1 to E3.
+
 ### Milestone 3: Stripe billing (starting point)
 
 Read from the code on 2026-11-14. Its test suites (billing, concurrency, reconciliation, the
@@ -212,9 +232,19 @@ unsafe-request guard and owner checks. The tier that may use files is configurat
 default, pending the owner's Free/Premium decision. Verified locally with a scripted model: the real
 `/api/chat` turned a deck request into a stored, downloadable PPTX; refusals are repaired by the
 model in the loop; another account's file is never reachable; the chat page renders file links and
-the attach control in a real browser. Not yet: streaming, web search inside the file path, the
-request budget on the file path, a live run against GPT-6 Luna (needs the owner's API key in a
-non-production environment). Reference: `candidate/FILE_GENERATION.md`.
+the attach control in a real browser. Not yet: streaming, web search inside the file path, a live
+run against GPT-6 Luna (needs the owner's API key in a non-production environment), counting a file
+request against the account's daily chat allowance (an owner decision: whether a file request counts
+as one chat), and the PAID scope for paying customers' file requests (Milestone 3). Reference:
+`candidate/FILE_GENERATION.md`.
+
+**File requests under the controls** (`a0df0fc`, `feat/file-controls-v1`): with provider ceilings or
+request budgets on, each file request runs its model calls in its own control request and
+RequestBudget (600-second deadline, one model attempt per tool round plus the reply). It is classed
+as a signed-in account's request in the FREE scope, like every chat request until Milestone 3 issues
+paid evidence, so a paying customer's file request is bounded by the FREE request ceiling for now.
+Before this, the file path failed closed whenever provider ceilings were on. Stops raised by the
+controls answer with the chat's stable codes.
 
 #### Earlier: cores
 
@@ -313,6 +343,14 @@ artwork; fixed and tested.
   unexposed (every file feature is behind `KALILLAC_FILES_ENABLED`, off by default).
 
 ## Known defects and environment limits
+
+* **Regression found and fixed here:** `feat/file-assistant-v1` (`f43c61c`) and
+  `feat/billing-cases-v1` made every unbudgeted chat call pass an explicit `timeout` to
+  `_post_openai_responses`, which changed the existing call; 33 Linux tests in the provider-usage,
+  request-budget and search-policy suites caught it (those suites are in no CI workflow, which is why
+  CI stayed green). Fixed in `a0df0fc`: the existing call is made unchanged, and only the file
+  assistant passes its wider timeout. Those two branch tips still carry it; use
+  `feat/file-controls-v1` or later.
 
 * **Fixed here, present on the production commit:** four cases of
   `test_unsafe_request_guard.py::test_signed_in_bodyless_routes_never_read_a_body` began failing on
@@ -418,11 +456,11 @@ In this order; each is independent of the open owner decisions unless it says ot
 
 1. Codex audit findings on the document-quality work, when supplied: correct each, with tests and a
    rendered check, on a branch of its own.
-2. Milestone 2: implement `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` (written 2026-11-15 from the code
-   and the handoff records): D1 the private S connection, D2 the remaining authorities,
-   D3 route wiring (sign-out-everywhere, password change), D4 the operator tool (suspension,
-   reinstatement, deletion requests), E1 to E3 the legacy-route removal, the operator transition and
-   the synthetic lifecycle test. Its section 5 is the deletion-retention proposal for the owner.
+2. Milestone 2: continue `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md`. D1 and the sign-out authority
+   (0018) are implemented; next the rest of D2 (reset, change, verification, quarantine,
+   reinstatement, deletion request, role P), then D3 route wiring, D4 the operator tool, and E1 to E3
+   (legacy-route removal, operator transition, synthetic lifecycle test). Its section 5 is the
+   deletion-retention proposal for the owner.
 3. Milestone 3: the link from a verified subscription to the PAID scope and Premium entitlements on
    the chat request (which also gives files and reasoning modes their tier check in the chat).
 4. Milestone 1: proposed budget values with their cost calculations; release tooling for an
@@ -432,7 +470,6 @@ In this order; each is independent of the open owner decisions unless it says ot
    checked on the host by an operator first (8003 otherwise); production's unit is named
    `kalillac-ai-fastapi-staging.service`. The deletion-retention proposal is section 5 of the
    V1-02D/E plan.
-6. Files under Financial Safeguards: give the file assistant its own request scope with the PAID
-   request ceiling (today it fails closed when provider ceilings are on).
+6. ~~Files under Financial Safeguards~~: done (`a0df0fc`), in the FREE scope until Milestone 3.
 7. Pull requests for the stacked branches, prepared for independent review, when the owner wants
    them.
