@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import socket
@@ -25,7 +26,7 @@ import uuid
 from argon2 import PasswordHasher
 from fastapi import FastAPI
 import pytest
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, update
 import uvicorn
 
 from kalillac_accounts.email_verification_router import build_email_verification_router
@@ -44,7 +45,7 @@ from kalillac_accounts.verification_rate_limit import VerificationRateLimiter
 from kalillac_accounts.router import AccountSettings, build_account_router
 from kalillac_billing.config import BillingConfig
 from kalillac_billing.router import build_billing_router
-from kalillac_db.models import Message, Space, User
+from kalillac_db.models import AccountSession, Message, Space, User
 from kalillac_spaces.router import build_spaces_router
 
 from spaces_test_support import ORIGIN, make_world, token_for
@@ -154,6 +155,12 @@ class Stack:
 
 def build_stack(tmp_path, monkeypatch, origin: str | None = ORIGIN) -> Stack:
     world = make_world(tmp_path)
+    # The shared world seeds sessions that expire 14 days after its fixed clock,
+    # but the billing router reads the real clock. Keep every seeded session
+    # valid on both clocks, so these tests cannot expire with the calendar
+    # (they did, on 2026-11-13).
+    with world.factory() as session, session.begin():
+        session.execute(update(AccountSession).values(expires_at=datetime.now(timezone.utc) + timedelta(days=14)))
     effects = Effects()
     email = RecordingEmail(effects)
 
