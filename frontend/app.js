@@ -1186,8 +1186,18 @@
     "application/json": "JSON"
   };
   var attachBtn = document.getElementById("attach-btn");
-  var attachInput = document.getElementById("attach-input");
   var attachmentList = document.getElementById("attachments");
+  // The file chooser exists only on a files deployment: the page itself carries no file input, so
+  // an ordinary visitor's page exposes no upload control at all.
+  var attachInput = null;
+  if (document.documentElement.getAttribute("data-kalillac-files") === "on" && attachBtn) {
+    attachInput = document.createElement("input");
+    attachInput.type = "file";
+    attachInput.id = "attach-input";
+    attachInput.hidden = true;
+    attachInput.accept = ".docx,.xlsx,.pptx,.pdf,.txt,.md,.csv,.json";
+    attachBtn.parentNode.insertBefore(attachInput, attachBtn.nextSibling);
+  }
   var ATTACHED = [];   // [{id, filename}] for the next message
 
   function fileSize(bytes) {
