@@ -40,9 +40,14 @@ MAX_TEXT_CHARS = 400_000
 MAX_PDF_PAGES = 500
 MAX_SHEET_CELLS = 200_000
 TEXT_EXTENSIONS = ("txt", "md", "csv", "json")
-EXTENSIONS = ("pdf", "docx", "xlsx", *TEXT_EXTENSIONS)
+EXTENSIONS = ("pdf", "docx", "xlsx", "pptx", *TEXT_EXTENSIONS)
+MAX_SLIDES = 500
 
 _WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DRAWING = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_PRESENTATION = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_RELATIONSHIPS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 _DECLARATION = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 _ENCODING = re.compile(rb"""encoding\s*=\s*["']([^"']{1,40})["']""")
 _CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -59,10 +64,10 @@ class IntakeError(ValueError):
 
 @dataclass(frozen=True)
 class Inspected:
-    kind: str            # "pdf", "docx", "xlsx" or one of TEXT_EXTENSIONS
+    kind: str            # "pdf", "docx", "xlsx", "pptx" or one of TEXT_EXTENSIONS
     text: str
     truncated: bool
-    units: int           # pages (pdf), paragraphs and table rows (docx), cells (xlsx), characters (text)
+    units: int           # pages (pdf), paragraphs (docx), cells (xlsx), slides (pptx), characters (text)
 
 
 def declared_extension(name):
@@ -207,6 +212,61 @@ def _docx(archive):
     return collector.text(), collector.truncated, units
 
 
+def _relationships(archive, names, part):
+    """Relationship id -> target part name, for one part, resolved inside the archive only."""
+    folder, file_name = part.rsplit("/", 1)
+    rels = f"{folder}/_rels/{file_name}.rels"
+    if rels not in names:
+        return {}
+    targets = {}
+    for rel in _parse_xml(_read_part(archive, rels)).iter(_RELATIONSHIPS + "Relationship"):
+        if rel.get("TargetMode") == "External":
+            continue                                    # Never followed.
+        parts = folder.split("/")
+        for piece in (rel.get("Target") or "").split("/"):
+            if piece == "..":
+                parts = parts[:-1]
+            elif piece not in ("", "."):
+                parts.append(piece)
+        targets[rel.get("Id")] = "/".join(parts)
+    return targets
+
+
+def slide_parts(archive, names):
+    """The slide part names in presentation order (the order of the slide list, not of the files)."""
+    presentation = _parse_xml(_read_part(archive, "ppt/presentation.xml"))
+    targets = _relationships(archive, names, "ppt/presentation.xml")
+    order = [targets.get(item.get(_R_ID)) for item in presentation.iter(_PRESENTATION + "sldId")]
+    return [name for name in order if name in names]
+
+
+def _paragraphs(root):
+    for paragraph in root.iter(_DRAWING + "p"):
+        text = "".join(node.text or "" for node in paragraph.iter(_DRAWING + "t")).strip()
+        if text:
+            yield text
+
+
+def _pptx(archive, names):
+    collector, slides = _Collector(), slide_parts(archive, names)
+    for number, part in enumerate(slides[:MAX_SLIDES], start=1):
+        if not collector.add(f"# Slide {number}"):
+            break
+        for text in _paragraphs(_parse_xml(_read_part(archive, part))):
+            if not collector.add(text):
+                break
+        notes = [target for target in _relationships(archive, names, part).values()
+                 if target.startswith("ppt/notesSlides/") and target in names]
+        for note_part in notes[:1]:
+            # The notes page repeats the slide image placeholder; only its body text is the speaker's.
+            spoken = list(_paragraphs(_parse_xml(_read_part(archive, note_part))))
+            if spoken and not collector.add("Notes: " + " ".join(spoken)):
+                break
+        if collector.truncated:
+            break
+    return collector.text(), collector.truncated or len(slides) > MAX_SLIDES, len(slides)
+
+
 def _xlsx(data):
     from openpyxl import load_workbook
     try:
@@ -301,6 +361,8 @@ def inspect(data, declared_name=None):
                 kind, result = "docx", _docx(archive)
             elif "[Content_Types].xml" in names and "xl/workbook.xml" in names:
                 kind, result = "xlsx", None
+            elif "[Content_Types].xml" in names and "ppt/presentation.xml" in names:
+                kind, result = "pptx", _pptx(archive, names)
             else:
                 raise IntakeError("unsupported_type")
         finally:

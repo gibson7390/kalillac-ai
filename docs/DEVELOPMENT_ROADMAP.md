@@ -63,7 +63,7 @@ discarded, or name anything in it that should be kept.
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI | Gap analysis below; refunds, disputes and the link to financial scopes are missing |
 | 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Designed PDF, DOCX, XLSX and PPTX generation, upload intake and the isolated worker DEVELOPMENT VERIFIED, not reachable from the application; **not owner accepted**; routes, storage, downloads, the model tool and editing not started | `candidate/FILE_GENERATION.md` |
+| 5 | File creation, uploads, editing | Designed PDF, DOCX, XLSX and PPTX generation, upload intake (PPTX included), editing of uploaded Word, PowerPoint and Excel files, and the isolated worker DEVELOPMENT VERIFIED, not reachable from the application; **not owner accepted**; routes, storage, downloads and the model tool not started | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -220,7 +220,7 @@ library imports numpy, which starts threads the child forbids itself; fixed in `
 in the application imports the package and the production dependency lock is unchanged.
 
 Not built, and needing customer accounts first: the upload and download routes, storage, quotas,
-cleanup, the model tool, and editing.
+cleanup and the model tool.
 
 **Document quality system** (`feat/document-quality-v1`, after the owner's 2026-11-15 directive that
 output must be exceptional, not merely functional). Each format has a design system and is checked
@@ -239,7 +239,16 @@ by reading the file back and, in development, by rendering it in the Microsoft a
   and cell on the test decks), balanced headings, right-to-left mirroring, speaker notes;
   rendered and inspected in Microsoft PowerPoint.
 * Word and PowerPoint packages carry only the file's own record and are byte-for-byte
-  reproducible.
+  reproducible (`c8c2985`; `file-generation-verification` run `43691236898` successful, 601 tests,
+  none skipped).
+* Editing (the commit after `c8c2985`): `editing.outline()` addresses what an uploaded Word,
+  PowerPoint or Excel file contains and `editing.edit()` applies replace, set, insert, delete,
+  add-row and set-cell operations to a copy, keeping the customer's formatting; Word edits can be
+  tracked changes; Excel is edited in its XML (charts, styles and shared strings byte for byte)
+  and every stored formula value is recomputed or cleared, never stale. Verified in the
+  applications: Word listed and accepted 9 tracked revisions; Excel's recalculation of an edited
+  forecast agreed with all 438 recomputed values; PowerPoint opened and rendered the edited deck.
+  Worker tasks `run_outline` and `run_edit`; intake now reads PPTX.
 
 Quality benchmark (`tests/quality_benchmark.py`), state of the eight owner-named tasks:
 
@@ -250,7 +259,7 @@ Quality benchmark (`tests/quality_benchmark.py`), state of the eight owner-named
 | Executive presentation | Built, rendered in PowerPoint and inspected; not owner accepted |
 | Multilingual document | Arabic PDF, Word and deck, Japanese PDF, rendered; a dedicated benchmark entry is still to write |
 | Research document, Word proposal | Not yet written as benchmark entries |
-| Complex editing | Not built (needs the editing workflow) |
+| Complex editing | The editing core is built and verified in Word, Excel and PowerPoint (see above); a benchmark entry with a realistic multi-step edit is still to write |
 
 Evidence: `file-generation-verification` run `43684790630` on `b8f4d04` successful (536 tests, none
 skipped); the PowerPoint commit's run is recorded under "Regression evidence" when it completes.
@@ -345,9 +354,8 @@ and retention rules, and a staging design. Still forbidden: anything in producti
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Milestone 5: the document editing workflow (upload, analyse, change, new file; the original is
-   never modified), the remaining benchmark entries (research document, Word proposal,
-   multilingual document, editing), and a tool that renders the whole benchmark for the owner.
+1. Milestone 5: the remaining benchmark entries (research document, Word proposal, multilingual
+   document, a multi-step edit) and a tool that renders the whole benchmark for the owner.
 2. Milestone 2: the V1-02D/E plan written from the code, then sign-out-everywhere, password
    change, the operator suspension command and deletion behind the private authorities, and one
    end-to-end synthetic lifecycle test.

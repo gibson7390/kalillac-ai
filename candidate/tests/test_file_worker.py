@@ -73,6 +73,28 @@ def test_generation_through_the_worker_matches_the_core():
     assert openpyxl.load_workbook(io.BytesIO(sheet.data))["Inputs"]["B5"].value == "=SUM(B2:B4)"
 
 
+def test_outline_and_edit_through_the_worker_match_the_core():
+    pytest.importorskip("pptx")
+    from kalillac_files.editing import edit, outline
+    from kalillac_files.worker import run_edit, run_outline
+    word = generate(copy.deepcopy(DOCUMENT), "docx").data
+    assert run_outline(word, "report.docx") == outline(word, "report.docx")
+    operations = [{"op": "replace_text", "find": "Revenue grew 12%", "replace": "Revenue grew 14%"}]
+    isolated = run_edit(word, "report.docx", operations, track_changes=True, revision_date="2026-11-15T09:00:00Z")
+    assert isolated == edit(word, "report.docx", operations, track_changes=True,
+                            revision_date="2026-11-15T09:00:00Z")
+    assert isolated.filename == "report-edited.docx"
+    sheet = generate(copy.deepcopy(WORKBOOK), "xlsx").data
+    edited = run_edit(sheet, "model.xlsx", [{"op": "set_cell", "at": "Inputs!B2", "value": 300000}])
+    assert openpyxl.load_workbook(io.BytesIO(edited.data))["Inputs"]["B2"].value == 300000
+    # A refusal by the core passes through with its own code; a malformed request never starts a process.
+    assert refused(run_edit, word, "report.docx", [{"op": "replace_text", "find": "absent", "replace": "x"}]) \
+        == "edit_no_match"
+    assert refused(run_outline, generate(copy.deepcopy(DOCUMENT), "pdf").data, "r.pdf") == "edit_unsupported_type"
+    assert refused(run_edit, word, "report.docx", [{"op": "replace_text", "find": float("nan")}]) == "invalid_edit"
+    assert refused(run_edit, "text", "x.docx", []) == "invalid_upload"
+
+
 def test_a_presentation_through_the_worker_matches_the_core():
     pptx = pytest.importorskip("pptx")
     from quality_benchmark import EXECUTIVE_DECK

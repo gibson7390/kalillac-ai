@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import io
+import re
 from pathlib import Path
 import struct
 import zipfile
@@ -81,6 +82,37 @@ def test_generated_documents_are_identified_by_content_and_their_text_extracted(
     assert "Total\t=SUM(B2:B4)\t=AVERAGE(C2:C4)" in result.text and result.units == 6 * 5 + 5
 
 
+def test_a_deck_is_read_slide_by_slide_in_presentation_order_with_its_notes():
+    pytest.importorskip("pptx")
+    from quality_benchmark import EXECUTIVE_DECK
+    deck = made(EXECUTIVE_DECK, "pptx")
+    for name in ("board.pptx", None, "BOARD.PPTX"):
+        result = inspect(deck, name)
+        assert (result.kind, result.units, result.truncated) == ("pptx", 14, False)
+    lines = result.text.split("\n")
+    assert lines[:4] == ["# Slide 1", "NORTHWIND COFFEE ROASTERS", "Northwind 2027: From One Roastery to Two",
+                         "The case for doubling capacity, and how we will do it"]
+    assert "Notes: " + EXECUTIVE_DECK["slides"][0]["notes"] in lines
+    assert lines.index("# Slide 2") < lines.index("# Slide 14") and "$4.2M" in result.text
+    assert "Building wins on every measure that lasts" in result.text and "Contractual" in result.text
+    # Slide order is the presentation's list, not the order of the files in the archive.
+    def swap_first_two(xml):
+        first, second = re.findall(rb"<p:sldId [^>]*/>", xml)[:2]
+        return xml.replace(first + second, second + first)
+    reordered = inspect(rezip(deck, change={"ppt/presentation.xml": swap_first_two}), "x.pptx").text.split("\n")
+    assert reordered[:3] == ["# Slide 1", "THE DECISION", EXECUTIVE_DECK["slides"][1]["text"]]
+    assert refused(deck, "deck.docx") == "type_mismatch"
+    assert refused(made(DOCUMENT, "docx"), "x.pptx") == "type_mismatch"
+    macro = rezip(deck, change={"[Content_Types].xml": lambda xml: xml.replace(
+        b"presentationml.presentation.main+xml", b"presentation.macroEnabled.main+xml")})
+    assert refused(macro, "x.pptx") == "macros_not_allowed"
+    hostile = rezip(deck, change={"ppt/slides/slide2.xml": lambda xml: b'<!DOCTYPE x [<!ENTITY a "b">]>' + xml})
+    assert refused(hostile, "x.pptx") == "xml_declaration_not_allowed"
+    outside = rezip(deck, change={"ppt/_rels/presentation.xml.rels": lambda xml: xml.replace(
+        b'Target="slides/slide2.xml"', b'Target="../../../etc/slide2.xml"')})
+    assert inspect(outside, "x.pptx").units == 13                    # A target outside the package is not read.
+
+
 def test_text_files_need_a_text_name_and_valid_utf8():
     assert inspect(b"plain \xe2\x9c\x93 text\r\nline two\rline three", "notes.txt") == Inspected(
         "txt", "plain \u2713 text\nline two\nline three", False, 32)
@@ -99,7 +131,8 @@ def test_text_files_need_a_text_name_and_valid_utf8():
 # --- type confusion -------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["tool.exe", "page.html", "macro.docm", "deck.pptx", "legacy.doc", "x.zip",
+@pytest.mark.parametrize("name", ["tool.exe", "page.html", "macro.docm", "deck.pptm", "legacy.ppt", "legacy.doc",
+                                  "x.zip",
                                   "archive.tar.gz", "script.py", "image.png", "noextension", "trailingdot.",
                                   "x.pdf\x00.txt", "a.verylongextension"])
 def test_only_supported_extensions_are_accepted(name):

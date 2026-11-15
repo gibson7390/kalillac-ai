@@ -6,12 +6,15 @@ customer uploads. This package holds the two cores and the isolated worker that 
 * `kalillac_files.generate(spec, format)` turns a validated specification into a file.
 * `kalillac_files.intake.inspect(data, declared_name)` validates one uploaded file and extracts
   bounded text from it.
-* `kalillac_files.worker.run_generate(...)` and `run_inspect(...)` do the same work in a separate,
-  limited process. This is the only way the application should ever call the cores.
+* `kalillac_files.editing.outline(data, name)` and `edit(data, name, operations)` turn an uploaded
+  Word, PowerPoint or Excel file into an edited copy; the upload itself is never changed.
+* `kalillac_files.worker.run_generate`, `run_inspect`, `run_outline` and `run_edit` do the same
+  work in a separate, limited process. This is the only way the application should ever call the
+  cores.
 
 Status: **cores and worker implemented and development verified. Not reachable from the application.**
 Nothing imports `kalillac_files`, no route exposes it, and the production dependency lock is
-unchanged. Storage, downloads, quotas, editing and the interface are not built (see "Not built").
+unchanged. Storage, downloads, quotas and the interface are not built (see "Not built").
 
 ## Design system
 
@@ -221,9 +224,57 @@ Known format limits:
   roomy, never short.
 * No images supplied by the customer, no hyperlinks.
 
+## Editing an uploaded file
+
+`editing.py` edits the customer's own Word, PowerPoint or Excel file and returns a new file named
+`<name>-edited.<ext>`. The upload is never modified, so the original stays available beside the
+result. The workflow is: intake checks the upload, `outline()` lists what can be changed, each
+piece with an address (`p4`, `t1.r2.c3`; `s2.sh3`, `s2.notes`; `Inputs!B5`), the model chooses
+operations, and `edit()` applies them.
+
+| Operation | Word | PowerPoint | Excel |
+|---|---|---|---|
+| `replace_text` (optionally case-insensitive, within an address, with an expected count) | yes | yes, notes included | text cells only, never formulas |
+| `set_text` | paragraph, cell | paragraph, shape, table cell, notes | |
+| `insert_paragraph` (after or before, optional style), `delete` (paragraph, row), `add_row` | yes | | |
+| `set_cell` (number, text, true/false, empty, or an allowlisted formula) | | | yes |
+
+What makes an edit faithful:
+
+* **The customer's formatting is kept.** A replacement takes the formatting of the text it
+  replaces, even when the match spans differently formatted runs; inserted paragraphs and rows
+  copy their neighbour's formatting; everything not addressed is untouched (byte for byte in the
+  tests).
+* **No silent edits.** An operation that matches nothing, or a different number of times than
+  `expect`, is refused (`edit_no_match`, `edit_match_count`). Addresses always refer to the
+  uploaded file, so the operations of one edit cannot shift one another; touching something an
+  earlier operation deleted is refused (`edit_conflict`).
+* **Tracked changes in Word.** With `track_changes`, every insertion and deletion (text,
+  paragraphs, rows, paragraph marks) is a revision by "Kalillac AI" that the reader accepts or
+  rejects in Word. The tests prove that accepting everything gives exactly the plain edit and
+  rejecting everything gives exactly the upload; Microsoft Word listed the 9 revisions of a test
+  edit and, once they were accepted, showed the edited text.
+* **Excel edited in its XML**, not loaded and re-saved by a spreadsheet library (which drops
+  charts, shapes and unknown features): only the parts an edit changes are rewritten; charts,
+  drawings, styles and shared strings stay byte for byte. Shared formulas are written out in full
+  before a cell changes; a cell inside an array formula or a merged range (other than its first
+  cell) is refused; renaming an Excel table's header updates the table, as Excel requires; a
+  stale calculation chain is removed.
+* **No stale numbers.** After an Excel edit every formula's stored value is recomputed with the
+  formula engine. Changing an input of the benchmark forecast gives exactly the values of a
+  workbook generated fresh with that input, and Microsoft Excel's own recalculation of the edited
+  file agreed with all 438. When a workbook holds formulas the engine does not compute (array
+  formulas, defined names, functions outside the allowlist), stored values are cleared instead of
+  left stale, and Excel is told to recalculate on opening in every case.
+* **Checked on the way out.** The result must pass intake again and stay within 10 MB.
+
+Limits of editing: `replace_text` in Word covers the body (paragraphs and tables), not headers,
+footers, footnotes, text boxes or document properties; numbers drawn inside chart pictures do not
+change; PowerPoint has no tracked changes; Excel edits do not add rows or sheets.
+
 ## Upload intake
 
-`inspect(data, declared_name)` accepts PDF, DOCX, XLSX and UTF-8 text (`.txt`, `.md`, `.csv`,
+`inspect(data, declared_name)` accepts PDF, DOCX, XLSX, PPTX and UTF-8 text (`.txt`, `.md`, `.csv`,
 `.json`), at most 10 MB, and returns the detected kind and up to 400,000 characters of text, with a
 flag when it was cut short. Nothing is written to disk and nothing in the file is executed,
 evaluated or followed. A refusal is an `IntakeError` with a stable code.
@@ -241,7 +292,10 @@ evaluated or followed. A refusal is an `IntakeError` with a stable code.
 | Resource exhaustion | Size, entry, page (500), cell (200,000) and text caps | `file_too_large`, truncation flag |
 | Embedded objects, external links, nested archives | Never opened or followed | |
 
-Spreadsheet formulas in an upload are reported as text and never evaluated.
+Intake reports spreadsheet formulas as text and never evaluates them. Editing recomputes a
+workbook's formulas only when every one of them is in the allowlist, with Kalillac's own engine,
+which reads cells of that workbook and nothing else. A deck's text is read slide by slide in the
+presentation's order, with its speaker notes.
 
 A hostile PDF can still make any PDF parser spend unbounded time or memory, which is why intake
 must be called through the isolated worker below, never directly. There is no malware scanning;
@@ -306,17 +360,15 @@ Carlito faces in `fonts/metrics/` (OFL) only measure slide text; they are never 
 ## Not built
 
 * The upload route and per-account upload quotas and isolation.
-* Editing an uploaded document into a new file. The two cores are the halves of it: extracted text
-  in, a new specification out. The original is never modified.
 * Storage, download authorization, cleanup, quotas and cost accounting.
 * The model tool and the interface for requesting, uploading and downloading a file.
-* Reading uploaded PowerPoint files (intake accepts PDF, DOCX, XLSX and text).
 
 ## Tests
 
 `tests/test_workbook_design.py` (178: the engine against Excel, the forecast benchmark, conventions,
-charts, refusals), `tests/test_file_generation.py` (166), `tests/test_file_intake.py` (63),
-`tests/test_file_worker.py` (32, with real child processes and real kills),
+charts, refusals), `tests/test_file_generation.py` (166), `tests/test_file_intake.py` (65),
+`tests/test_file_worker.py` (33, with real child processes and real kills), `tests/test_file_editing.py`
+(38: outlines, faithful edits, tracked changes, preserved parts, recomputed workbooks, refusals),
 `tests/test_document_design.py` (99: specification, charts, font integrity and licensing, layout
 soundness on benchmark and hostile content, multilingual and right-to-left output, Word structure
 and package record) and `tests/test_deck_design.py` (63: the deck specification and its refusals,
@@ -324,7 +376,7 @@ package record and reproducibility, native charts and their number formats, ever
 re-measured from the file, no overlaps, nothing below the footer, every layout at its limits,
 right-to-left mirroring, East Asian text, measurement against the font tables), run by
 `.github/workflows/file-generation-verification.yml`, which fetches and verifies the fonts and
-requires all 601 to run with none skipped.
+requires all 642 to run with none skipped.
 
 Rendering through Microsoft Word itself is a manual development check (Word is not available in
 CI): the benchmark report and the Arabic document were opened, exported to PDF and inspected.

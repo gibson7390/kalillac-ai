@@ -1,7 +1,8 @@
 """Run file generation and upload intake in a separate, limited process.
 
-Not reachable from the application. run_generate() and run_inspect() do the
-work of generate() and intake.inspect() in a child Python process so that a
+Not reachable from the application. run_generate(), run_inspect(), run_outline()
+and run_edit() do the work of generate(), intake.inspect(), editing.outline()
+and editing.edit() in a child Python process so that a
 slow or hostile document can never hold a chat worker, exhaust the server's
 memory or crash the API process:
 
@@ -186,14 +187,7 @@ def run_generate(spec, format, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, max_memo
 def run_inspect(data, declared_name=None, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
                 max_memory_bytes=MAX_MEMORY_BYTES):
     """intake.inspect(data, declared_name) in an isolated process: Inspected, or WorkerError."""
-    if type(data) is not bytes:
-        raise WorkerError("invalid_upload")
-    if not data:
-        raise WorkerError("empty_file")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise WorkerError("file_too_large")
-    if declared_name is not None and (type(declared_name) is not str or len(declared_name) > 255):
-        raise WorkerError("unsupported_type")
+    _upload_checks(data, declared_name)
     reply = _run({"task": "inspect", "name": declared_name}, data, timeout_seconds, max_memory_bytes)
     kind, truncated, units = reply.header.get("kind"), reply.header.get("truncated"), reply.header.get("units")
     try:
@@ -203,6 +197,61 @@ def run_inspect(data, declared_name=None, timeout_seconds=DEFAULT_TIMEOUT_SECOND
     if type(kind) is not str or type(truncated) is not bool or type(units) is not int or len(text) > MAX_TEXT_CHARS:
         raise WorkerError("worker_failed")
     return Inspected(kind, text, truncated, units)
+
+
+def _upload_checks(data, declared_name):
+    if type(data) is not bytes:
+        raise WorkerError("invalid_upload")
+    if not data:
+        raise WorkerError("empty_file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise WorkerError("file_too_large")
+    if declared_name is not None and (type(declared_name) is not str or len(declared_name) > 255):
+        raise WorkerError("unsupported_type")
+
+
+def run_outline(data, declared_name=None, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+                max_memory_bytes=MAX_MEMORY_BYTES):
+    """editing.outline(data, declared_name) in an isolated process: Outline, or WorkerError."""
+    from .editing import MAX_OUTLINE_UNITS, Outline, Unit
+    _upload_checks(data, declared_name)
+    reply = _run({"task": "outline", "name": declared_name}, data, timeout_seconds, max_memory_bytes)
+    try:
+        body = json.loads(reply.data.decode("utf-8"))
+        units = tuple(Unit(*unit) for unit in body["units"])
+        kind, truncated = body["kind"], body["truncated"]
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        raise WorkerError("worker_failed") from None
+    if kind not in ("docx", "pptx", "xlsx") or type(truncated) is not bool or len(units) > MAX_OUTLINE_UNITS \
+            or not all(type(field) is str for unit in units for field in (unit.address, unit.kind, unit.text,
+                                                                          unit.detail)):
+        raise WorkerError("worker_failed")
+    return Outline(kind, units, truncated)
+
+
+def run_edit(data, declared_name, operations, track_changes=False, revision_date=None,
+             timeout_seconds=DEFAULT_TIMEOUT_SECONDS, max_memory_bytes=MAX_MEMORY_BYTES):
+    """editing.edit(...) in an isolated process: a GeneratedFile (the edited copy), or WorkerError."""
+    from .editing import MEDIA
+    _upload_checks(data, declared_name)
+    try:
+        encoded = json.dumps(operations, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        raise WorkerError("invalid_edit") from None
+    if len(encoded) > MAX_SPEC_BYTES:
+        raise WorkerError("invalid_edit")
+    if type(track_changes) is not bool or (revision_date is not None and (type(revision_date) is not str
+                                                                          or len(revision_date) > 40)):
+        raise WorkerError("invalid_edit")
+    # The operations travel ahead of the file in the payload; the header only says where they end.
+    reply = _run({"task": "edit", "name": declared_name, "operations": len(encoded), "track": track_changes,
+                  "date": revision_date}, encoded + data, timeout_seconds, max_memory_bytes)
+    filename, media_type = reply.header.get("filename"), reply.header.get("media_type")
+    extension = {media: kind for kind, media in MEDIA.items()}.get(media_type)
+    if extension is None or type(filename) is not str or not filename.endswith("-edited." + extension) \
+            or not reply.data or len(reply.data) > MAX_FILE_BYTES:
+        raise WorkerError("worker_failed")
+    return GeneratedFile(filename, media_type, reply.data)
 
 
 # --- the child ------------------------------------------------------------------------------
@@ -246,7 +295,7 @@ def main():
             from .typeset import warm_up
             warm_up()
         _forbid_new_tasks()
-        payload = stdin.read(max(MAX_SPEC_BYTES, MAX_UPLOAD_BYTES) + 1)
+        payload = stdin.read(MAX_SPEC_BYTES + MAX_UPLOAD_BYTES + 1)
         from .intake import IntakeError, inspect
         from .generation import generate
         from .spec import SpecError
@@ -258,6 +307,19 @@ def main():
                 found = inspect(payload, header.get("name"))
                 reply = _frame({"ok": True, "kind": found.kind, "truncated": found.truncated, "units": found.units},
                                found.text.encode("utf-8", "replace"))
+            elif header["task"] == "outline":
+                from .editing import outline
+                found = outline(payload, header.get("name"))
+                body = {"kind": found.kind, "truncated": found.truncated,
+                        "units": [[u.address, u.kind, u.text, u.detail] for u in found.units]}
+                reply = _frame({"ok": True}, json.dumps(body, ensure_ascii=False).encode("utf-8"))
+            elif header["task"] == "edit":
+                from .editing import edit
+                split = int(header["operations"])
+                operations = json.loads(payload[:split].decode("utf-8"))
+                result = edit(payload[split:], header.get("name"), operations, header.get("track") is True,
+                              header.get("date"))
+                reply = _frame({"ok": True, "filename": result.filename, "media_type": result.media_type}, result.data)
             else:
                 reply = _frame({"ok": False, "code": "worker_failed"})
         except (SpecError, IntakeError) as refused:
