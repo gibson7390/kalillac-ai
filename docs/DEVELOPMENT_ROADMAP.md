@@ -62,7 +62,7 @@ discarded, or name anything in it that should be kept.
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part (test-mode foundation), off | Not yet re-verified in this record |
 | 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Generation and upload-intake cores DEVELOPMENT VERIFIED, not reachable from the application; routes, worker, storage, downloads and editing not started | `candidate/FILE_GENERATION.md` |
+| 5 | File creation, uploads, editing | Generation core, upload-intake core and isolated worker DEVELOPMENT VERIFIED, not reachable from the application; routes, storage, downloads and editing not started | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -183,15 +183,17 @@ Reference: `candidate/FILE_GENERATION.md`, which also lists the limits and what 
 content and extracts bounded text, refusing archive bombs, path traversal, macros, encrypted files,
 XML entity attacks and malformed files with stable codes.
 
+`kalillac_files.worker` runs both in a separate process with a hard time limit, memory and CPU
+limits (POSIX), a concurrency cap, bounded output and an environment that carries no secret.
+
 Evidence: `tests/test_file_generation.py` (155 tests, each generated artifact reopened with an
-independent reader) and `tests/test_file_intake.py` (63 tests, hostile files built in the tests);
-CI workflow `file-generation-verification`, run `43675051766` successful for the generation core on
-`8ed456c`. Nothing in the application imports the package and the production dependency lock is
-unchanged.
+independent reader), `tests/test_file_intake.py` (63 tests, hostile files built in the tests) and
+`tests/test_file_worker.py` (31 tests with real child processes); CI workflow
+`file-generation-verification`, run `43675678292` successful for the two cores on `3073bab`. Nothing
+in the application imports the package and the production dependency lock is unchanged.
 
 Not built, and needing customer accounts first: the upload and download routes, storage, quotas,
-cleanup, the worker process (with time and memory limits) that must run both cores off the chat
-path, the model tool, and editing.
+cleanup, the model tool, and editing.
 
 ## Known defects and environment limits
 
@@ -255,14 +257,16 @@ path, the model tool, and editing.
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Record the CI result of `file-generation-verification` for the intake commit on
-   `feat/file-generation-v1`.
+1. Record the CI result of `file-generation-verification` for the worker commit on
+   `feat/file-generation-v1` (it is the first run of the POSIX memory-limit test).
 2. Milestone 4 interface: the mode control in the chat frontend, sending `reasoning_mode` and
    handling `403 reasoning_mode_not_allowed`, shown only when the backend reports modes enabled.
    The frontend suites need a real browser and an idle machine, and the web root is deployed
    separately from the backend release.
-3. Milestone 5 worker: a subprocess runner with a hard time and memory limit for `generate()` and
-   `inspect()`, still unexposed, so the cores are safe to call once accounts exist.
+3. Milestone 5 model tool: the tool definition and prompt contract by which GPT-6 Luna produces a
+   file specification, validated by the generation core, still unexposed. It also requires
+   changing what Kalillac tells the model about its capabilities, which today says it cannot create
+   files.
 4. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
 5. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
    password change and deletion behind the private authorities, then one end-to-end synthetic

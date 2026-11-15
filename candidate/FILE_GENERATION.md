@@ -1,13 +1,15 @@
 # File generation and upload intake
 
 Kalillac must hand a customer real files, not text to copy, and must be able to read the files a
-customer uploads. This package holds the two cores:
+customer uploads. This package holds the two cores and the isolated worker that runs them:
 
 * `kalillac_files.generate(spec, format)` turns a validated specification into a file.
 * `kalillac_files.intake.inspect(data, declared_name)` validates one uploaded file and extracts
   bounded text from it.
+* `kalillac_files.worker.run_generate(...)` and `run_inspect(...)` do the same work in a separate,
+  limited process. This is the only way the application should ever call the cores.
 
-Status: **both cores implemented and development verified. Not reachable from the application.**
+Status: **cores and worker implemented and development verified. Not reachable from the application.**
 Nothing imports `kalillac_files`, no route exposes it, and the production dependency lock is
 unchanged. Storage, downloads, quotas, editing and the interface are not built (see "Not built").
 
@@ -115,20 +117,41 @@ evaluated or followed. A refusal is an `IntakeError` with a stable code.
 
 Spreadsheet formulas in an upload are reported as text and never evaluated.
 
-**Not covered by this module, required of the caller:** a hostile PDF can make any PDF parser
-spend unbounded time or memory. `inspect()` must run in a separate worker process with a hard time
-and memory limit. There is no malware scanning; refusing macros, encryption and executables by
-type is the control in place. Scanning uploaded files with an external service would be a new paid
-service and needs approval.
+A hostile PDF can still make any PDF parser spend unbounded time or memory, which is why intake
+must be called through the isolated worker below, never directly. There is no malware scanning;
+refusing macros, encryption and executables by type is the control in place. Scanning uploaded
+files with an external service would be a new paid service and needs approval.
+
+## Isolated worker
+
+`worker.run_generate(spec, format)` and `worker.run_inspect(data, name)` return exactly what the
+cores return, from a child Python process:
+
+| Limit | Behaviour | Code |
+|---|---|---|
+| Wall-clock time (default 20 s) | The child is killed and reaped | `timeout` |
+| Memory (default 768 MB) and CPU time | Set by the child on itself before it reads any input. **POSIX only:** on Windows the time limit is the only bound; production runs on Linux | `out_of_memory`, `worker_failed` |
+| Concurrency (2) | A further request is refused immediately, never queued | `busy` |
+| Output size | The parent stops reading and kills the child | `output_too_large` |
+| Environment | The child inherits no variable except the few Python needs to start, and runs as an isolated interpreter (`-I`). No provider key, database credential or other secret exists in the process that parses customer files | |
+| Child failure | A crash, a malformed reply or a reply that does not match the request (wrong media type, wrong extension, invalid text) | `worker_failed` |
+
+A refusal by a core (`pdf_unsupported_characters`, `macros_not_allowed`, ...) passes through with
+its own code. The child's stderr is discarded, so no document content reaches a log.
+
+Not provided by the worker: operating-system sandboxing (a separate user, filesystem or network
+namespace). The child has no network use and writes no file, but nothing at the OS level prevents
+it. That is a deployment decision for when uploads are exposed.
 
 ## Architecture requirements for wiring it in
 
 Rendering is synchronous CPU work lasting up to seconds. It must not run inside a request handler
-or on the chat-serving path. The intended shape, not yet built:
+or on the chat-serving path. The intended shape; step 2 exists, the rest is not built:
 
 1. The model produces a specification through a tool call. It is validated exactly as above.
-2. A bounded worker pool renders it with its own time limit and concurrency cap, separate from the
-   chat workers.
+2. The isolated worker renders it (or inspects an upload) under its time, memory and concurrency
+   limits, separate from the chat workers. The calling route must run the blocking call off the
+   event loop.
 3. The file is stored under a random identifier owned by the customer's account, with a per-account
    storage quota and an expiry, and removed by a cleanup job.
 4. Download is an authenticated route that checks ownership in the backend on every request and
@@ -147,8 +170,7 @@ this needs a new production Python environment built from the lock plus
 
 ## Not built
 
-* The upload route, the worker process with time and memory limits that must run `inspect()`, and
-  per-account upload quotas and isolation.
+* The upload route and per-account upload quotas and isolation.
 * Editing an uploaded document into a new file. The two cores are the halves of it: extracted text
   in, a new specification out. The original is never modified.
 * Storage, download authorization, cleanup, quotas and cost accounting.
@@ -157,6 +179,7 @@ this needs a new production Python environment built from the lock plus
 
 ## Tests
 
-`tests/test_file_generation.py` (155) and `tests/test_file_intake.py` (63), run by
-`.github/workflows/file-generation-verification.yml`, which requires all 218 to run with none
+`tests/test_file_generation.py` (155), `tests/test_file_intake.py` (63) and
+`tests/test_file_worker.py` (31, with real child processes and real kills), run by
+`.github/workflows/file-generation-verification.yml`, which requires all 249 to run with none
 skipped.

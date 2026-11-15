@@ -1,9 +1,10 @@
-# Verification of the file generation and upload intake cores
-# (candidate/kalillac_files).
+# Verification of the file generation and upload intake cores and their
+# isolated worker (candidate/kalillac_files).
 #
 # Every generated PDF, DOCX and XLSX is opened again with an independent
-# reader and checked, and the intake core is driven with hostile files built
-# in the tests. The run needs no PostgreSQL, provider, credential,
+# reader and checked, the intake core is driven with hostile files built in
+# the tests, and the worker's time, memory and output limits are exercised
+# with real child processes. The run needs no PostgreSQL, provider, credential,
 # application server or deployment: candidate/tests/conftest.py refuses every
 # non-loopback connection for the whole run. Installing the pinned
 # dependencies may contact the Python package index (pip).
@@ -15,6 +16,7 @@ on:
       - "candidate/kalillac_files/**"
       - "candidate/tests/test_file_generation.py"
       - "candidate/tests/test_file_intake.py"
+      - "candidate/tests/test_file_worker.py"
       - "requirements-*.txt"
       - ".github/workflows/file-generation-verification.yml"
   push:
@@ -23,6 +25,7 @@ on:
       - "candidate/kalillac_files/**"
       - "candidate/tests/test_file_generation.py"
       - "candidate/tests/test_file_intake.py"
+      - "candidate/tests/test_file_worker.py"
       - "requirements-*.txt"
       - ".github/workflows/file-generation-verification.yml"
   workflow_dispatch:
@@ -59,15 +62,17 @@ jobs:
           -r requirements-dev.txt
           -r requirements-files.txt
 
-      - name: Run the file generation and upload intake tests
+      - name: Run the file generation, upload intake and worker tests
         working-directory: candidate
         run: >-
-          python -m pytest tests/test_file_generation.py tests/test_file_intake.py -v -rA -p no:cacheprovider
+          python -m pytest tests/test_file_generation.py tests/test_file_intake.py tests/test_file_worker.py
+          -v -rA -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/file-generation.xml"
 
       # The test modules skip themselves when a document library is missing,
       # so a green run must prove nothing was skipped and the expected number
-      # ran: 155 generation tests and 63 intake tests.
+      # ran: 155 generation tests, 63 intake tests and 31 worker tests. The
+      # worker's memory-limit test runs only on POSIX, so it must run here.
       - name: Require every file test to have run
         run: |
           python - "$RUNNER_TEMP/file-generation.xml" <<'PY'
@@ -77,6 +82,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 218, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 249, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the file verification did not run completely")
           PY
