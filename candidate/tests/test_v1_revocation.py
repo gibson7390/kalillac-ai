@@ -53,8 +53,8 @@ def _render(revisions, downgrade=False):
 
 def test_0013_sits_directly_after_0012_and_below_0014():
     script = ScriptDirectory.from_config(_config())
-    # 0014 (V1-02C) is directly above this revision; the finance ledger (0015, 0016) is the head.
-    assert script.get_heads() == ["0016_finance_provider_budgets"]
+    # 0014 (V1-02C) is directly above this revision; billing cases (0017) is the head.
+    assert script.get_heads() == ["0017_billing_cases"]
     assert script.get_revision("0014_v1_session_issuance").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()

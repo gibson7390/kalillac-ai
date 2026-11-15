@@ -7,13 +7,13 @@ no HTTP request handler writes it.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import AccountBilling, StripeWebhookEvent, User
+from ..models import AccountBilling, BillingCase, StripeWebhookEvent, User
 
 
 def account_lock_statement(user_id: uuid.UUID):
@@ -124,3 +124,40 @@ def record_webhook_event(
 
     session.add(StripeWebhookEvent(event_id=event_id, event_type=event_type))
     session.flush()
+
+
+def upsert_billing_case(
+    session: Session,
+    *,
+    user_id: uuid.UUID | None,
+    kind: str,
+    provider_object_id: str,
+    charge_id: str | None,
+    customer_id: str | None,
+    provider_status: str,
+    reason: str | None,
+    event_id: str,
+) -> tuple[BillingCase, bool]:
+    """Create or update the case for one refunded charge or dispute. Returns the case and whether it
+    is new or its provider facts changed, in which case it is (re)opened for review."""
+    case = session.scalar(select(BillingCase).where(BillingCase.kind == kind,
+                                              BillingCase.provider_object_id == provider_object_id))
+    facts = dict(charge_id=charge_id, customer_id=customer_id, provider_status=provider_status, reason=reason)
+    if case is None:
+        case = BillingCase(user_id=user_id, kind=kind, provider_object_id=provider_object_id, review_status="open",
+                    last_event_id=event_id, **facts)
+        session.add(case)
+        session.flush()
+        return case, True
+    changed = any(getattr(case, name) != value for name, value in facts.items())
+    for name, value in facts.items():
+        setattr(case, name, value)
+    if user_id is not None:
+        case.user_id = user_id
+    case.last_event_id = event_id
+    case.updated_at = datetime.now(timezone.utc)
+    if changed:
+        case.review_status = "open"   # New facts from Stripe need a fresh look.
+    session.flush()
+    return case, changed
+

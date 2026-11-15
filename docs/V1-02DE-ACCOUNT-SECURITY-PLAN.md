@@ -40,7 +40,7 @@ existing suites unchanged, and is committed separately.
 - Tests: wrong/missing/loose-permission credential file; S with extra privilege; tampered function
   body; latch prepared or bound to another instance; pool exhaustion fails closed.
 
-### D2. The remaining authorities (migration 0017, functions and grants only)
+### D2. The remaining authorities (the next migration, functions and grants only)
 
 E-owned, S-executable SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, static SQL,
 operation ids, admission where the contract requires it, and an audit event in the same transaction:
@@ -82,7 +82,7 @@ held about an account, each through P with an operator credential that is not th
 with a dry-run mode, a required reason code and an operation id. Tested against fixtures; writing it
 is not permission to run it against production.
 
-### E1. Removing the legacy route (migration 0018, prepared, not self-applied)
+### E1. Removing the legacy route (a later migration, prepared, not self-applied)
 
 Revokes R's direct DML on `users`, `account_sessions`, recovery and verification tokens, entitlements
 and billing, and its reads of credential digests, **only** inside the operator transition. The

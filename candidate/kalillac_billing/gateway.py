@@ -51,10 +51,37 @@ class CheckoutSessionState:
 
 
 @dataclass(frozen=True)
+class ChargeState:
+    """A charge's refund facts as the provider reports them now. Amounts are in
+    the currency's minor unit (cents)."""
+
+    charge_id: str
+    customer_id: str | None
+    amount: int
+    amount_refunded: int
+    currency: str
+    refunded: bool
+
+
+@dataclass(frozen=True)
+class DisputeState:
+    """A dispute (chargeback) as the provider reports it now."""
+
+    dispute_id: str
+    charge_id: str | None
+    customer_id: str | None
+    amount: int
+    currency: str
+    status: str
+    reason: str | None
+
+
+@dataclass(frozen=True)
 class WebhookEvent:
     """Only the fields needed to check the event's mode and to locate the
     subscription and the account. livemode is None when the event did not
-    carry a boolean, which never matches either mode."""
+    carry a boolean, which never matches either mode. object_id is the
+    charge or dispute an event is about (None for other events)."""
 
     event_id: str
     event_type: str
@@ -62,6 +89,7 @@ class WebhookEvent:
     customer_id: str | None
     kalillac_user_id: str | None
     livemode: bool | None
+    object_id: str | None = None
 
 
 class BillingGateway(Protocol):
@@ -86,6 +114,12 @@ class BillingGateway(Protocol):
 
     def retrieve_subscription(self, subscription_id: str) -> SubscriptionState:
         """Fetch the subscription's current state from the provider."""
+
+    def retrieve_charge(self, charge_id: str) -> ChargeState:
+        """Fetch a charge's current refund state from the provider."""
+
+    def retrieve_dispute(self, dispute_id: str) -> DisputeState:
+        """Fetch a dispute's current state from the provider."""
 
     def parse_webhook(self, payload: bytes, signature: str) -> WebhookEvent:
         """Verify the signature, then return the event's minimal fields.

@@ -62,7 +62,7 @@ discarded, or name anything in it that should be kept.
 |---|---|---|---|
 | 1 | Financial Safeguards V1 | **DEVELOPMENT VERIFIED**, off in production | Activation proposal written; tooling update and owner decisions outstanding |
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
-| 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI | Gap analysis below; refunds, disputes and the link to financial scopes are missing |
+| 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI. Refunds and disputes now recorded for operator review (`feat/billing-cases-v1`) | The link to financial scopes and Premium entitlements on the chat request is still missing; `docs/STRIPE_TEST_MODE_SETUP.md` is the test-credential procedure |
 | 4 | Reasoning toggle controls | Backend and chat control DEVELOPMENT VERIFIED, off (page mark and flag); saved preference and paid permissions wait on accounts and billing | `candidate/REASONING_MODES.md` |
 | 5 | File creation, uploads, editing | Generation, intake, editing, the worker, the GPT-6 Luna file assistant, storage, `/api/files` routes and delivery in the chat IMPLEMENTED and DEVELOPMENT VERIFIED behind `KALILLAC_FILES_ENABLED` (default off). **Not owner accepted; not release ready**: owner review found issues, an independent audit is running, and D1-D4 are unresolved (see "Audits") | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
@@ -160,10 +160,10 @@ operator tool, the Stripe gateway, and the PostgreSQL billing verification) pass
 | Payment failure | Present as policy: `past_due` stays paid during dunning, every other non-paying status is free |
 | Status reconciliation | Present: webhooks plus an operator command for one account |
 | Customer billing status | Present: `GET /api/account/billing` |
-| **Refunds and disputes** | **Missing.** No `charge.refunded` or `charge.dispute.*` handling. Needs the owner's refund policy |
+| **Refunds and disputes** | **Implemented, default off with billing** (`feat/billing-cases-v1`): `charge.refunded` and `charge.dispute.*` become billing cases (migration 0017) with facts fetched from Stripe under the account lock, deduplicated, reopened when Stripe's facts change; `tools/billing_cases.py` lists, acknowledges and closes them. No automatic refund and no entitlement change (owner decision 2026-11-15); what a refund or a lost dispute should do to access stays the owner's policy decision. No amount or currency is stored, by the existing data rule |
 | **Link to Financial Safeguards** | **Missing.** Nothing issues the request-bound paid entitlement, so every chat request is charged to the FREE scope and Premium-only reasoning modes are refused for everyone. This is the one seam that turns a verified subscription into the PAID scope, its request ceiling and its modes |
 | **Per-customer dollar budget** | **Missing** (deferred here from Milestone 1) |
-| **Lifecycle run against Stripe test mode** | **Not done.** Needs test-mode keys, a test Price and a webhook secret from the owner |
+| **Lifecycle run against Stripe test mode** | **Not done.** The procedure is written (`docs/STRIPE_TEST_MODE_SETUP.md`); it needs the owner's test-mode keys, a test Price and a webhook secret on the staging server |
 
 The link to Financial Safeguards depends on Milestone 2, because the chat request must first
 authenticate the account through the V1 authority.
@@ -407,13 +407,12 @@ In this order; each is independent of the open owner decisions unless it says ot
 1. Codex audit findings on the document-quality work, when supplied: correct each, with tests and a
    rendered check, on a branch of its own.
 2. Milestone 2: implement `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` (written 2026-11-15 from the code
-   and the handoff records): D1 the private S connection, D2 migration 0017's remaining authorities,
+   and the handoff records): D1 the private S connection, D2 the remaining authorities,
    D3 route wiring (sign-out-everywhere, password change), D4 the operator tool (suspension,
    reinstatement, deletion requests), E1 to E3 the legacy-route removal, the operator transition and
    the synthetic lifecycle test. Its section 5 is the deletion-retention proposal for the owner.
-3. Milestone 3: refund and dispute webhook handling (no automatic refunds), the Stripe
-   test-credential procedure, and the link from a verified subscription to the PAID scope and
-   Premium entitlements (which also gives files their tier check in the chat).
+3. Milestone 3: the link from a verified subscription to the PAID scope and Premium entitlements on
+   the chat request (which also gives files and reasoning modes their tier check in the chat).
 4. Milestone 1: proposed budget values with their cost calculations; release tooling for an
    enforcement-on release.
 5. Spaces re-verification, the owner administration dashboard, and a staging design (port 8002

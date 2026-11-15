@@ -305,7 +305,8 @@ def test_logout_without_session_is_idempotent(client):
 
 
 def test_account_schema_holds_identity_only():
-    billing_tables = {"kalillac.account_billing", "kalillac.stripe_webhook_events"}
+    # Billing: Stripe linkage, processed events, and refunds and disputes for operator review (0017).
+    billing_tables = {"kalillac.account_billing", "kalillac.stripe_webhook_events", "kalillac.billing_cases"}
     # Spaces (default-off) are the one deliberate store of conversation
     # content: account-owned Spaces, their conversations and completed
     # messages. Every other table keeps the original identity-only rules below.
@@ -426,6 +427,7 @@ def test_account_creation_creates_no_conversation_state(client, db):
         "finance_operator_actions",
         "account_billing",
         "stripe_webhook_events",
+        "billing_cases",
         # Default-off Spaces tables exist in the schema...
         "spaces",
         "conversations",
@@ -437,6 +439,8 @@ def test_account_creation_creates_no_conversation_state(client, db):
     from kalillac_db.models import Conversation, Message, Space
     for model in (Space, Conversation, Message):
         assert _count(db, model) == 0, model.__tablename__
+    from kalillac_db.models import BillingCase
+    assert _count(db, BillingCase) == 0                     # Accounts never create billing cases.
     from kalillac_db.models import AccountUsageSlot, AnonymousUsageDay, AnonymousUsageSlot
     assert _count(db, AccountUsageSlot) == 0
     # Registering and signing in never creates anonymous allowance rows.

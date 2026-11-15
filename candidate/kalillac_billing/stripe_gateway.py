@@ -19,7 +19,9 @@ import stripe
 from .config import BillingConfig
 from .gateway import (
     BillingProviderError,
+    ChargeState,
     CheckoutSessionState,
+    DisputeState,
     InvalidWebhookSignature,
     SubscriptionState,
     WebhookEvent,
@@ -146,6 +148,14 @@ def webhook_event_from_stripe(event: Any) -> WebhookEvent:
         subscription_id = None
         kalillac_user_id = None
 
+    # Refunds and disputes: the charge or dispute the event is about. Its facts are
+    # fetched from Stripe when the event is processed, never taken from the payload.
+    object_id = None
+    if event_type == "charge.refunded" or (
+        isinstance(event_type, str) and event_type.startswith("charge.dispute.")
+    ):
+        object_id = _field(obj, "id")
+
     livemode = _field(event, "livemode")
 
     return WebhookEvent(
@@ -156,6 +166,35 @@ def webhook_event_from_stripe(event: Any) -> WebhookEvent:
         kalillac_user_id=kalillac_user_id,
         # Only a real boolean counts; anything else fails the mode check.
         livemode=livemode if isinstance(livemode, bool) else None,
+        object_id=object_id if isinstance(object_id, str) else None,
+    )
+
+
+def _minor_units(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else -1
+
+
+def charge_state_from_stripe(charge: Any) -> ChargeState:
+    return ChargeState(
+        charge_id=_field(charge, "id"),
+        customer_id=_id_of(_field(charge, "customer")),
+        amount=_minor_units(_field(charge, "amount")),
+        amount_refunded=_minor_units(_field(charge, "amount_refunded")),
+        currency=str(_field(charge, "currency") or ""),
+        refunded=_field(charge, "refunded") is True,
+    )
+
+
+def dispute_state_from_stripe(dispute: Any) -> DisputeState:
+    charge = _field(dispute, "charge")
+    return DisputeState(
+        dispute_id=_field(dispute, "id"),
+        charge_id=_id_of(charge),
+        customer_id=_id_of(_field(charge, "customer")) if not isinstance(charge, str) else None,
+        amount=_minor_units(_field(dispute, "amount")),
+        currency=str(_field(dispute, "currency") or ""),
+        status=str(_field(dispute, "status") or ""),
+        reason=_field(dispute, "reason") if isinstance(_field(dispute, "reason"), str) else None,
     )
 
 
@@ -231,6 +270,21 @@ class StripeGateway:
             raise BillingProviderError()
 
         return url
+
+    def retrieve_charge(self, charge_id: str) -> ChargeState:
+        try:
+            charge = self._client.v1.charges.retrieve(charge_id)
+        except stripe.StripeError as exc:
+            raise _provider_error(exc) from exc
+        return charge_state_from_stripe(charge)
+
+    def retrieve_dispute(self, dispute_id: str) -> DisputeState:
+        try:
+            # The charge is expanded so the dispute names its customer.
+            dispute = self._client.v1.disputes.retrieve(dispute_id, params={"expand": ["charge"]})
+        except stripe.StripeError as exc:
+            raise _provider_error(exc) from exc
+        return dispute_state_from_stripe(dispute)
 
     def retrieve_subscription(self, subscription_id: str) -> SubscriptionState:
         try:

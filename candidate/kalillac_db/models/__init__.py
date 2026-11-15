@@ -8,6 +8,7 @@ its product/privacy design is approved.
 """
 
 from .account_billing import AccountBilling
+from .billing_case import BillingCase
 from .conversation import Conversation
 from .message import Message
 from .space import Space
@@ -28,6 +29,7 @@ from .account_registration import AccountRegistrationIntent, AccountRegistration
 
 __all__ = [
     "AccountBilling",
+    "BillingCase",
     "AccountEntitlement",
     "AccountSession",
     "AccountEmailVerificationToken",

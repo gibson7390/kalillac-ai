@@ -80,6 +80,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+import re
 import uuid
 
 from sqlalchemy import text
@@ -96,6 +97,7 @@ from kalillac_db.repositories.billing import (
     get_or_create_billing,
     lock_account,
     record_webhook_event,
+    upsert_billing_case,
     upsert_billing_state,
     webhook_event_processed,
 )
@@ -110,7 +112,7 @@ from .gateway import (
 )
 
 
-RELEVANT_EVENT_TYPES = frozenset(
+SUBSCRIPTION_EVENT_TYPES = frozenset(
     {
         "checkout.session.completed",
         "customer.subscription.created",
@@ -118,6 +120,21 @@ RELEVANT_EVENT_TYPES = frozenset(
         "customer.subscription.deleted",
     }
 )
+
+# Refunds and disputes. Each is recorded as a billing case for an operator to review; Kalillac issues
+# no refund and changes no entitlement because of one (access keeps following the subscription).
+CASE_EVENT_TYPES = frozenset(
+    {
+        "charge.refunded",
+        "charge.dispute.created",
+        "charge.dispute.updated",
+        "charge.dispute.closed",
+        "charge.dispute.funds_withdrawn",
+        "charge.dispute.funds_reinstated",
+    }
+)
+
+RELEVANT_EVENT_TYPES = SUBSCRIPTION_EVENT_TYPES | CASE_EVENT_TYPES
 
 PAID_STATUSES = frozenset({"active", "trialing", "past_due"})
 
@@ -461,7 +478,7 @@ def start_checkout(
 
 @dataclass(frozen=True)
 class WebhookOutcome:
-    """ignored | duplicate | processed | unmatched | ignored_historical"""
+    """ignored | duplicate | processed | unmatched | ignored_historical | case_recorded"""
 
     result: str
 
@@ -662,6 +679,9 @@ def process_webhook(
     if event.event_type not in RELEVANT_EVENT_TYPES:
         return WebhookOutcome("ignored")
 
+    if event.event_type in CASE_EVENT_TYPES:
+        return _process_case(event, gateway=gateway, session_factory=session_factory)
+
     with session_factory() as session:
         if webhook_event_processed(session, event.event_id):
             return WebhookOutcome("duplicate")
@@ -716,6 +736,83 @@ def process_webhook(
             if webhook_event_processed(session, event.event_id):
                 return WebhookOutcome("duplicate")
 
+        raise
+
+
+# --- refunds and disputes ---------------------------------------------------------------
+
+
+class CaseStateInvalid(Exception):
+    """Stripe reported a refund or dispute that is not usable (a different object than requested, a
+    negative or missing amount, an unknown currency). Raised before any write, so the event stays
+    unrecorded and Stripe retries. Carries no details."""
+
+
+_CURRENCY = re.compile(r"[a-z]{3}")
+
+
+def _case_facts(kind: str, object_id: str, state) -> dict:
+    """The validated facts of a case, or CaseStateInvalid. Amounts and currency are checked here but
+    never stored: Stripe is billing truth for them."""
+    if kind == "refund":
+        if (state.charge_id != object_id or state.amount < 0 or state.amount_refunded < 0
+                or state.amount_refunded > state.amount or not _CURRENCY.fullmatch(state.currency)):
+            raise CaseStateInvalid()
+        return dict(charge_id=state.charge_id, customer_id=state.customer_id,
+                    provider_status="refunded" if state.refunded else "partially_refunded", reason=None)
+    if (state.dispute_id != object_id or state.amount < 0 or not _CURRENCY.fullmatch(state.currency)
+            or not state.status or len(state.status) > 40):
+        raise CaseStateInvalid()
+    reason = state.reason if state.reason and len(state.reason) <= 60 else None
+    return dict(charge_id=state.charge_id, customer_id=state.customer_id, provider_status=state.status,
+                reason=reason)
+
+
+def _process_case(event: WebhookEvent, *, gateway: BillingGateway,
+                  session_factory: sessionmaker[Session]) -> WebhookOutcome:
+    """Record a refund or dispute as a billing case. Its facts come from Stripe, fetched once to find
+    the account and again under that account's lock; the case and the event record commit together."""
+    kind = "refund" if event.event_type == "charge.refunded" else "dispute"
+    fetch = gateway.retrieve_charge if kind == "refund" else gateway.retrieve_dispute
+
+    with session_factory() as session:
+        if webhook_event_processed(session, event.event_id):
+            return WebhookOutcome("duplicate")
+
+    if event.object_id is None:
+        with session_factory() as session, session.begin():
+            if webhook_event_processed(session, event.event_id):
+                return WebhookOutcome("duplicate")
+            return _unmatched(session, event)
+
+    facts = _case_facts(kind, event.object_id, fetch(event.object_id))
+    with session_factory() as session:
+        located = _locate_user(session, WebhookEvent(
+            event_id=event.event_id, event_type=event.event_type, subscription_id=None,
+            customer_id=facts["customer_id"] or event.customer_id, kalillac_user_id=None, livemode=event.livemode))
+
+    try:
+        with session_factory() as session, session.begin():
+            user_id = located if located is not None and lock_account(session, located) else None
+            if webhook_event_processed(session, event.event_id):
+                return WebhookOutcome("duplicate")
+            if user_id is not None:
+                # Authoritative facts, fetched again while holding the account lock.
+                facts = _case_facts(kind, event.object_id, fetch(event.object_id))
+            _case, changed = upsert_billing_case(session, user_id=user_id, kind=kind,
+                                                 provider_object_id=event.object_id, event_id=event.event_id,
+                                                 **facts)
+            record_webhook_event(session, event.event_id, event.event_type)
+            if changed:
+                # Kind and status only: never an amount, an id, an email or a reason.
+                print(f"WARN: STRIPE_BILLING_CASE {kind} {facts['provider_status']}"
+                      f"{'' if user_id is not None else ' unmatched'}")
+            return WebhookOutcome("case_recorded")
+    except IntegrityError:
+        # A concurrent delivery of this event, or of another event for the same object, won the insert.
+        with session_factory() as session:
+            if webhook_event_processed(session, event.event_id):
+                return WebhookOutcome("duplicate")
         raise
 
 

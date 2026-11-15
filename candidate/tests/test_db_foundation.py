@@ -63,6 +63,8 @@ def test_only_approved_account_tables_exist():
         "kalillac.finance_operator_actions",
         "kalillac.account_billing",
         "kalillac.stripe_webhook_events",
+        # Refunds and disputes for operator review (0017): Stripe ids, amounts, statuses; no card data.
+        "kalillac.billing_cases",
     }
 
 
