@@ -157,6 +157,9 @@ jobs:
           -q -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/slice-3-security.xml"
 
+      # 917 = the earlier 818 plus 99 measured on feat/file-assistant-v1: the unsafe-request guard's
+      # parametrized cases now also cover the three /api/files mutations in its inventory. No earlier
+      # case was removed or weakened.
       - name: Require every Slice 3 security test
         run: |
           python - "$RUNNER_TEMP/slice-3-security.xml" <<'PY'
@@ -165,7 +168,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 818, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 917, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       - name: Verify Linux protected registration files
