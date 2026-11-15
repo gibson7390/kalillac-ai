@@ -41,7 +41,7 @@ FUNCTIONS = frozenset({
 _STRING = re.compile(r'"(?:[^"]|"")*"')
 _SHEET = re.compile(r"'(?:[^'\[\]:*?/\\]|''){1,31}'!")
 _ALLOWED = re.compile(r"[A-Za-z0-9_.$:,()+\-*/^&=<>% !]*")
-_NAME_CALL = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\s*\(")
+_NAME_CALL = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\(")  # Excel allows no space before the parenthesis.
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 _REFERENCE = re.compile(r"\$?[A-Za-z]{1,3}\$?[0-9]{1,7}|\$?[A-Za-z]{1,3}|[A-Za-z_][A-Za-z0-9_]{0,30}!")
 
@@ -65,11 +65,21 @@ def is_safe_formula(text):
     # Every remaining word must be a function just checked, a cell or column
     # reference, an unquoted sheet name before "!", or TRUE / FALSE.
     remainder = _NAME_CALL.sub("(", body)
-    for word in _NAME.findall(remainder):
+    for match in _NAME.finditer(remainder):
+        word = match.group(0)
         if word.upper() in ("TRUE", "FALSE"):
             continue
-        if _REFERENCE.fullmatch(word) is None and _REFERENCE.fullmatch(word + "!") is None:
+        sheet = remainder[match.end():match.end() + 1] == "!"
+        if sheet:
+            if _REFERENCE.fullmatch(word + "!") is None:
+                return False
+            continue
+        if _REFERENCE.fullmatch(word) is None:
             return False
-        if _REFERENCE.fullmatch(word) is None and (word + "!") not in remainder:
-            return False
+        # A bare column ("A", "SUM") is only a reference as one end of a column range ("A:A").
+        if word.isalpha():
+            before = remainder[:match.start()].rstrip("$")[-1:]
+            after = remainder[match.end():match.end() + 2]
+            if before != ":" and after[:1] != ":" and re.match(r"\$[0-9]", after) is None:
+                return False
     return True

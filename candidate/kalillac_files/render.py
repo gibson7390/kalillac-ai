@@ -16,7 +16,7 @@ import json
 
 from . import charts
 from .spec import (Callout, Chart, Code, Comparison, Formula, Heading, ListBlock, Metrics, PageBreak, Paragraph,
-                   Quote, SpecError, Steps, Table, plain)
+                   Quote, SpecError, Steps, Table, Typed, plain)
 
 # CSV: a text cell starting with one of these would be read as a formula by a
 # spreadsheet program; it is prefixed with an apostrophe (OWASP CSV injection).
@@ -39,44 +39,16 @@ def render_docx(document):
 
 
 def render_xlsx(workbook):
-    from openpyxl import Workbook as Book
-    from openpyxl.styles import Font
-    from openpyxl.utils import get_column_letter
-    book = Book()
-    book.remove(book.active)
-    book.properties.title = workbook.title
-    book.properties.creator = "Kalillac AI"
-    for sheet in workbook.sheets:
-        page = book.create_sheet(title=sheet.name)
-        for index, column in enumerate(sheet.columns, start=1):
-            header = page.cell(row=1, column=index, value=column.header)
-            header.data_type = "s"  # A header is text even when it starts with "=".
-            header.font = Font(bold=True)
-            page.column_dimensions[get_column_letter(index)].width = column.width or max(10, min(40, len(column.header) + 2))
-        page.freeze_panes = "A2"
-        for row_index, row in enumerate(sheet.rows, start=2):
-            for index, value in enumerate(row, start=1):
-                if value is None:
-                    continue
-                column = sheet.columns[index - 1]
-                cell = page.cell(row=row_index, column=index)
-                if type(value) is Formula:
-                    cell.value = value.text  # openpyxl stores a leading "=" as a formula.
-                elif type(value) is str:
-                    cell.value = value
-                    cell.data_type = "s"  # Never a formula, whatever the text starts with.
-                else:
-                    cell.value = value
-                cell.number_format = NUMBER_FORMATS[column.format]
-    buffer = io.BytesIO()
-    book.save(buffer)
-    return buffer.getvalue()
+    from .xlsx_design import write_xlsx
+    return write_xlsx(workbook)
 
 
 # --- text formats ---------------------------------------------------------------------------
 
 
 def _csv_value(value):
+    if isinstance(value, Typed):
+        value = value.value
     if value is None:
         return ""
     if type(value) is Formula:
@@ -240,11 +212,13 @@ def render_text(document):
 def render_json(workbook):
     """Each sheet as a list of records keyed by column header."""
     def plain(value):
+        if type(value) is Typed:
+            value = value.value
         if type(value) is Formula:
             return {"formula": value.text}
         return value.isoformat() if type(value) is date else value
     sheets = []
-    for sheet in workbook.sheets:
+    for sheet in (sheet for sheet in workbook.sheets if sheet.kind == "table"):
         headers = [column.header for column in sheet.columns]
         if len(set(headers)) != len(headers):
             raise SpecError("json_requires_unique_headers")

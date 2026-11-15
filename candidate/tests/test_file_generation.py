@@ -208,21 +208,24 @@ def test_xlsx_is_a_real_workbook_with_formulas_formats_and_sheets():
     assert book.properties.title == "Loan Model" and book.properties.creator == "Kalillac AI"
     page = book["Inputs"]
     assert [cell.value for cell in page[1]] == ["Name", "Value", "Share", "Starts", "Units", "Cost"]
-    assert all(cell.font.bold for cell in page[1]) and page.freeze_panes == "A2"
-    assert page.column_dimensions["A"].width == 24
+    # Header frozen, and the label column too once a table is wide enough to scroll sideways.
+    assert all(cell.font.bold for cell in page[1]) and page.freeze_panes == "B2"
+    assert int(page.column_dimensions["A"].width) == 24      # Stored with Excel's padding (24.71).
 
     # Formulas are formulas.
     for address, formula in (("B5", "=SUM(B2:B4)"), ("C5", "=AVERAGE(C2:C4)"), ("F5", "=ROUND(PMT(B3/12,E3,-B2),2)")):
         assert (page[address].value, page[address].data_type) == (formula, "f"), address
     # Numbers are numbers, with the column's number format.
-    assert (page["B2"].value, page["B2"].data_type, page["B2"].number_format) == (250000, "n", "#,##0.00")
-    assert (page["C2"].value, page["C2"].number_format) == (0.8, "0.00%")
-    assert (page["E3"].value, page["E3"].number_format) == (360, "#,##0")
-    assert (page["F2"].value, page["F2"].number_format) == (1999.5, "#,##0.00")
+    # Two decimals, because the same column holds 0.045: whole-number display would show it as 0.
+    assert (page["B2"].value, page["B2"].data_type) == (250000, "n")
+    assert page["B2"].number_format.startswith("#,##0.00") and page["B3"].number_format.startswith("#,##0.00")
+    assert (page["C2"].value, page["C2"].number_format) == (0.8, "0.0%")
+    assert (page["E3"].value, page["E3"].number_format) == (360, "#,##0;[Red]-#,##0")       # Negatives in red.
+    assert (page["F2"].value, page["F2"].number_format) == (1999.5, '"$"#,##0.00_);[Red]("$"#,##0.00)')
     assert page["E5"].value is True and page["C3"].value is None and page["D5"].value is None
     # Dates are dates.
     assert page["D2"].value.date() == date(2031, 1, 15) and page["D4"].value.date() == date(2032, 2, 29)
-    assert page["D2"].is_date and page["D2"].number_format == "yyyy-mm-dd"
+    assert page["D2"].is_date and page["D2"].number_format == "d mmm yyyy"
     # Text is text, whatever it starts with: never a formula.
     assert (page["A4"].value, page["A4"].data_type) == ("=not a formula", "s")
     notes = book["Notes & Sources"]
@@ -400,7 +403,7 @@ def test_invalid_documents_are_refused_with_a_stable_code(spec, code):
     (_book([NUMBER], [[{"formula": "=WEBSERVICE(\"http://example.test\")"}]]), "invalid_formula"),
     (_book([NUMBER], [[{"formula": "SUM(A1:A2)"}]]), "invalid_formula"),
     (_book([NUMBER], [[{"formula": "=SUM(A1:A2)", "cached": 3}]]), "invalid_formula"),
-    (_book([NUMBER], [[{"value": 3}]]), "invalid_formula"),
+    (_book([NUMBER], [[{"value": 3}]]), "invalid_cell"),           # A typed value needs its format.
 ])
 def test_invalid_workbooks_are_refused_with_a_stable_code(spec, code):
     with pytest.raises(SpecError) as refused:
@@ -460,11 +463,29 @@ def test_the_largest_accepted_workbook_generates(monkeypatch):
     "=SUM(B2:B4)", "=A1+B1", "=-A1*2", "=$A$1/B$2", "=ROUND(PMT(B3/12,E3,-B2),2)", "=IF(A1>0,\"yes\",\"no\")",
     "=IFERROR(VLOOKUP(A2,D:E,2,FALSE),0)", "=SUMIF(A:A,\">=10\",B:B)", "=A1&\" units\"", "=A1^2", "=B2*15%",
     "=Sheet2!A1", "='Notes & Sources'!A2", "=SUM(Inputs!B2:B4)", "=AND(A1<>B1,A1<=10)", "=NPV(0.05,B2:B6)+B1",
-    "=IF(A1=\"=cmd|x\",1,0)", "=TODAY()", "=sum(a1:a3)", "=TRUE", "=COUNTIF(A:A,\"*x*\")", "=SUM (A1:A2)",
+    "=IF(A1=\"=cmd|x\",1,0)", "=TODAY()", "=sum(a1:a3)", "=TRUE", "=COUNTIF(A:A,\"*x*\")",
 ])
 def test_safe_formulas_are_accepted(formula):
     assert is_safe_formula(formula)
-    make(_book([NUMBER], [[{"formula": formula}]]), "xlsx")
+    # The formula sits in column F, outside every range it reads, beside the sheets it names.
+    numbers = [{"header": name, "format": "number"} for name in "ABCDE"]
+    workbook = {"title": "T", "sheets": [
+        {"name": "S", "columns": numbers + [{"header": "F", "format": "number"}],
+         "rows": [[1, 2, 3, 4, 5, {"formula": formula}]] + [[n, n, n, n, n, None] for n in range(6, 10)]},
+        {"name": "Sheet2", "columns": [TEXT], "rows": [["x"]]},
+        {"name": "Inputs", "columns": [TEXT, NUMBER], "rows": [["a", 1], ["b", 2], ["c", 3]]},
+        {"name": "Notes & Sources", "columns": [TEXT], "rows": [["note"]]}]}
+    make(workbook, "xlsx")
+
+
+@pytest.mark.parametrize("formula, code", [
+    ("=Nowhere!A1", "formula_reference_error"),      # A sheet that does not exist.
+    ("=SUM(A2:A3)", "formula_circular"),             # Reads its own cell.
+])
+def test_structurally_broken_models_are_refused(formula, code):
+    with pytest.raises(SpecError) as refused:
+        generate(_book([NUMBER], [[{"formula": formula}], [1]]), "xlsx")
+    assert refused.value.code == code
 
 
 @pytest.mark.parametrize("formula", [
@@ -474,6 +495,7 @@ def test_safe_formulas_are_accepted(formula):
     "=RTD(\"prog\",,\"x\")", "=FILTERXML(A1,\"//x\")", "=EXEC(\"calc\")", "=[book.xlsx]Sheet1!A1",
     "='C:\\[book.xlsx]Sheet1'!A1", "=SUM(A1:A2", "=SUM(A1:A2))", "=\"unterminated", "SUM(A1:A2)", "=", "",
     "=A1;B1", "=A1 #", "={1,2}", "=@SUM(A1)", "=Total*2", "=SUM(A1:A2)\n", "=" + "1+" * 300 + "1",
+    "=SUM (A1:A2)",
     None, 7, ["=SUM(A1)"], "=LAMBDA(x,x)(1)", "=STDEV.S(A1:A3)", "=A1`", "=A1\\B1",
 ])
 def test_unsafe_formulas_are_refused(formula):

@@ -49,13 +49,41 @@ and words, twelve-column tables, very long numbers and labels) is made to fit: l
 invisible break points, tables and metric values step their type down, and code shrinks to fit its
 longest line before anything wraps.
 
+## Spreadsheets
+
+`xlsx_design.py` writes workbooks with XlsxWriter, after `formula_engine.py` has evaluated every
+formula:
+
+* **Computed values in the file.** Every formula is stored with its result, so mail clients, phones
+  and cloud previews that do not recalculate still show the numbers. Excel recalculates on opening.
+* **Correctness against Excel.** The engine implements every function the allowlist accepts (about
+  a hundred), with Excel's semantics for blanks, text, booleans, errors, dates and rounding. 147 edge
+  cases were recalculated by Microsoft Excel and recorded (`tests/formula_zoo.py`,
+  `tools/record_formula_zoo.py`); the engine matches all of them. The benchmark forecast's 438
+  formulas match Excel's recalculation and an independent computation in Python.
+* **Broken models are refused**, not delivered: a reference to a sheet that does not exist, an
+  unknown function, or a circular chain (`formula_reference_error`, `formula_circular`). Value
+  errors such as `#DIV/0!` are kept, because they can be legitimate before inputs are filled in.
+* **Financial-model conventions.** Typed constants in blue, formulas in black, formulas reading
+  another sheet in green, editable inputs on a pale yellow fill, a bold total row between a rule and
+  a double rule, negatives in red parentheses, whole amounts without cents, years without
+  separators, readable dates.
+* **Usable sheets.** Widths measured from the content, frozen header and label column, filters,
+  print setup one page wide with the header repeated and "Page X of Y", gridlines on screen only.
+* **Features.** Per-cell formats for mixed input sheets, conditional formatting (negatives, data
+  bars, colour scales, thresholds, top and bottom), drop-down and range validation, native Excel
+  charts linked to the cells (date axes for time series), dashboard sheets with metric tiles and
+  charts, and an optional About sheet with links to each sheet and a colour legend.
+* **Future functions** (IFS, XLOOKUP, CONCAT, DAYS, ...) are stored with the `_xlfn.` prefix Excel
+  requires; without it Excel shows `#NAME?`. Found by the Excel comparison, fixed and tested.
+
 ## Formats
 
 | Format | From | Supported |
 |---|---|---|
 | PDF | document | The whole design system above. Text in any bundled script; a character no bundled font has (emoji, historic scripts) is refused as `pdf_unsupported_characters` |
 | DOCX | document | The whole design system above, editable, any Unicode text |
-| XLSX | workbook | Several sheets, bold frozen header row, column widths, number formats (number, integer, currency, percent, date, text), real dates, formulas from an allowlist |
+| XLSX | workbook | Designed workbooks with computed values (see "Spreadsheets") |
 | CSV | workbook | One sheet, UTF-8 with a byte order mark, formula-injection guard |
 | Markdown, TXT | document | Plain renderings of the same document |
 | JSON | workbook | Each sheet as records keyed by column header |
@@ -223,17 +251,17 @@ new threads. Shipping this needs a new production Python environment built from 
 * Storage, download authorization, cleanup, quotas and cost accounting.
 * The model tool and the interface for requesting, uploading and downloading a file.
 * PowerPoint.
-* Spreadsheets in the design system (styled workbooks, charts, conditional formatting, validation):
-  the XLSX writer is still the plain one described above.
 
 ## Tests
 
-`tests/test_file_generation.py` (164), `tests/test_file_intake.py` (63),
+`tests/test_workbook_design.py` (178: the engine against Excel, the forecast benchmark, conventions,
+charts, refusals), `tests/test_file_generation.py` (166), `tests/test_file_intake.py` (63),
 `tests/test_file_worker.py` (31, with real child processes and real kills) and
 `tests/test_document_design.py` (98: specification, charts, font integrity and licensing, layout
 soundness on benchmark and hostile content, multilingual and right-to-left output, Word structure),
 run by `.github/workflows/file-generation-verification.yml`, which fetches and verifies the fonts
-and requires all 356 to run with none skipped.
+and requires all 536 to run with none skipped.
 
 Rendering through Microsoft Word itself is a manual development check (Word is not available in
 CI): the benchmark report and the Arabic document were opened, exported to PDF and inspected.
+The forecast workbook was recalculated and exported by Microsoft Excel the same way.

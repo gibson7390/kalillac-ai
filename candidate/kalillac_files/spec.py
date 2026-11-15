@@ -26,10 +26,19 @@ Document:  {"title": str, "blocks": [block, ...],
            {"type": "comparison", "columns": [{"title": str, "items": [str, ...]}, ...]}
            {"type": "page_break"}
 
-Workbook:  {"title": str, "sheets": [sheet, ...]}
-  sheet:   {"name": str, "columns": [column, ...], "rows": [[cell, ...], ...]}
+Workbook:  {"title": str, "sheets": [sheet, ...], "author"?: str, "summary"?: str}
+  sheet:   {"name": str, "columns": [column, ...], "rows": [[cell, ...], ...],      (header row 1, data from 2)
+            "description"?: str, "total_row"?: bool,
+            "conditional"?: [{"column": header, "rule": "negative" | "data_bar" | "color_scale" | "above" | "below"
+                              | "top" | "bottom", "value"?: number}],
+            "validation"?: [{"column": header, "list": [str, ...]} | {"column": header, "min"?: n, "max"?: n}],
+            "charts"?: [{"kind": "column" | "bar" | "stacked" | "line" | "area" | "pie" | "doughnut",
+                         "category": header, "series": [header, ...], "title"?: str, "y_title"?: str}]}
+           {"name": str, "kind": "dashboard", "title": str, "description"?: str,
+            "metrics"?: [{"label": str, "formula": "=...", "format": column format, "symbol"?: str}],
+            "charts"?: [chart with "sheet": the data sheet's name]}
   column:  {"header": str, "format": "text" | "number" | "integer" | "currency" | "percent" | "date",
-            "width": 4..80 (optional)}
+            "width"?: 4..80, "role"?: "input" | "calculated", "symbol"?: "$" | "€" | ..., "decimals"?: 0..6}
   cell:    None | str | int | float | bool | {"formula": "=..."}   (dates are ISO "YYYY-MM-DD" strings)
 """
 from dataclasses import dataclass
@@ -481,10 +490,28 @@ def validate_document(value):
 
 # --- workbooks ------------------------------------------------------------------------------
 
+ROLES = ("input", "calculated")
+CONDITIONAL_RULES = ("negative", "data_bar", "color_scale", "above", "below", "top", "bottom")
+SHEET_CHART_KINDS = ("column", "bar", "stacked", "line", "area", "pie", "doughnut")
+SYMBOLS = ("$", "€", "£", "¥", "₹", "CHF", "A$", "C$", "R$", "kr", "₩", "₪", "R")
+MAX_SHEET_CHARTS = 4
+MAX_RULES = 12
+MAX_METRICS = 8
+
 
 @dataclass(frozen=True)
 class Formula:
     text: str
+    format: str | None = None   # Overrides the column's number format for this cell.
+    symbol: str | None = None
+
+
+@dataclass(frozen=True)
+class Typed:
+    """A constant with its own number format (an input sheet mixes amounts, rates and counts)."""
+    value: object
+    format: str
+    symbol: str | None = None
 
 
 @dataclass(frozen=True)
@@ -492,6 +519,42 @@ class Column:
     header: str
     format: str
     width: int | None
+    role: str | None = None
+    symbol: str = "$"
+    decimals: int | None = None
+
+
+@dataclass(frozen=True)
+class Rule:
+    column: int        # 0-based column index
+    rule: str
+    value: float | None = None
+
+
+@dataclass(frozen=True)
+class Validation:
+    column: int
+    options: tuple | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+
+
+@dataclass(frozen=True)
+class SheetChart:
+    kind: str
+    title: str | None
+    category: int            # 0-based column index of the category labels
+    series: tuple            # 0-based column indexes
+    sheet: str | None = None  # The data sheet, for a chart on a dashboard
+    y_title: str | None = None
+
+
+@dataclass(frozen=True)
+class DashboardMetric:
+    label: str
+    formula: Formula
+    format: str
+    symbol: str = "$"
 
 
 @dataclass(frozen=True)
@@ -499,31 +562,70 @@ class Sheet:
     name: str
     columns: tuple
     rows: tuple  # of tuples of None | str | int | float | bool | date | Formula
+    kind: str = "table"
+    description: str | None = None
+    total_row: bool = False
+    rules: tuple = ()
+    validations: tuple = ()
+    charts: tuple = ()
+    metrics: tuple = ()       # dashboard only
+    title: str | None = None  # dashboard only
 
 
 @dataclass(frozen=True)
 class Workbook:
     title: str
     sheets: tuple
+    author: str | None = None
+    summary: str | None = None
 
 
 def _column(value):
-    _keys(value, ("header", "format"), ("width",))
+    _keys(value, ("header", "format"), ("width", "role", "symbol", "decimals"))
     if type(value["format"]) is not str or value["format"] not in COLUMN_FORMATS:
         raise SpecError("invalid_column")
     width = value.get("width")
     if width is not None and (type(width) is not int or not 4 <= width <= 80):
         raise SpecError("invalid_column")
-    return Column(_text(value["header"], 200, "invalid_column", single_line=True), value["format"], width)
+    role = value.get("role")
+    if role is not None and role not in ROLES:
+        raise SpecError("invalid_column")
+    symbol = value.get("symbol", "$")
+    if symbol not in SYMBOLS:
+        raise SpecError("invalid_column")
+    decimals = value.get("decimals")
+    if decimals is not None and (type(decimals) is not int or not 0 <= decimals <= 6):
+        raise SpecError("invalid_column")
+    return Column(_text(value["header"], 200, "invalid_column", single_line=True), value["format"], width, role,
+                  symbol, decimals)
+
+
+def _cell_format(value):
+    found = value.get("format")
+    if found is not None and found not in COLUMN_FORMATS:
+        raise SpecError("invalid_cell")
+    symbol = value.get("symbol")
+    if symbol is not None and symbol not in SYMBOLS:
+        raise SpecError("invalid_cell")
+    return found, symbol
 
 
 def _cell(value, column):
     if value is None or type(value) is bool:
         return value
     if type(value) is dict:
-        if set(value) != {"formula"} or not is_safe_formula(value["formula"]):
-            raise SpecError("invalid_formula")
-        return Formula(value["formula"])
+        if "formula" in value:
+            if not set(value) <= {"formula", "format", "symbol"} or not is_safe_formula(value["formula"]):
+                raise SpecError("invalid_formula")
+            found, symbol = _cell_format(value)
+            return Formula(value["formula"], found, symbol)
+        if not set(value) <= {"value", "format", "symbol"} or "value" not in value or "format" not in value:
+            raise SpecError("invalid_formula" if "value" not in value else "invalid_cell")
+        found, symbol = _cell_format(value)
+        inner = _cell(value["value"], Column("", found, None))
+        if isinstance(inner, (Formula, Typed)):
+            raise SpecError("invalid_cell")
+        return Typed(inner, found, symbol)
     if type(value) in (int, float):
         if type(value) is float and not math.isfinite(value) or abs(value) > MAX_NUMBER:
             raise SpecError("invalid_cell")
@@ -547,21 +649,131 @@ def _cell(value, column):
     raise SpecError("invalid_cell")
 
 
-def _sheet(value):
-    _keys(value, ("name", "columns", "rows"))
-    name = _text(value["name"], 31, "invalid_sheet_name", single_line=True)
+def _sheet_name(value):
+    name = _text(value, 31, "invalid_sheet_name", single_line=True)
     if _SHEET_NAME_FORBIDDEN.search(name) or name != name.strip():
         raise SpecError("invalid_sheet_name")
-    columns = tuple(_column(item) for item in _list(value["columns"], MAX_SHEET_COLUMNS, "invalid_column", minimum=1))
+    return name
+
+
+def _column_index(columns, header, code):
+    if type(header) is not str:
+        raise SpecError(code)
+    for index, column in enumerate(columns):
+        if column.header == header:
+            return index
+    raise SpecError(code)
+
+
+def _chart_spec(value, columns_by_sheet, own):
+    _keys(value, ("kind", "category", "series"), ("title", "sheet", "y_title"))
+    if value["kind"] not in SHEET_CHART_KINDS:
+        raise SpecError("invalid_sheet_chart")
+    source = value.get("sheet", own)
+    if source is None or type(source) is not str or source.lower() not in columns_by_sheet:
+        raise SpecError("invalid_sheet_chart")
+    columns = columns_by_sheet[source.lower()]
+    category = _column_index(columns, value["category"], "invalid_sheet_chart")
+    series = tuple(_column_index(columns, header, "invalid_sheet_chart")
+                   for header in _list(value["series"], 6, "invalid_sheet_chart", minimum=1))
+    if any(columns[index].format in ("text", "date") for index in series):
+        raise SpecError("invalid_sheet_chart")
+    if value["kind"] in ("pie", "doughnut") and len(series) != 1:
+        raise SpecError("invalid_sheet_chart")
+    return SheetChart(value["kind"], _optional(value, "title", 120, "invalid_sheet_chart"), category, series,
+                      None if "sheet" not in value else source, _optional(value, "y_title", 60, "invalid_sheet_chart"))
+
+
+def _table_sheet(value, columns_by_sheet):
+    _keys(value, ("name", "columns", "rows"), ("kind", "description", "total_row", "conditional", "validation",
+                                               "charts"))
+    name = _sheet_name(value["name"])
+    columns = columns_by_sheet[name.lower()]
     rows = _list(value["rows"], MAX_SHEET_ROWS, "invalid_rows")
     width = len(columns)
     if any(type(row) is not list or len(row) != width for row in rows):
         raise SpecError("invalid_rows")
-    return Sheet(name, columns, tuple(tuple(_cell(cell, columns[i]) for i, cell in enumerate(row)) for row in rows))
+    total_row = _flag(value, "total_row", "invalid_rows")
+    if total_row and not rows:
+        raise SpecError("invalid_rows")
+
+    def checked(cell, index, last):
+        # A total row may carry its label ("Total") in a numeric column; no other row may hold text there.
+        if last and total_row and type(cell) is str and columns[index].format != "date":
+            return _text(cell, 60, "invalid_cell", single_line=True)
+        return _cell(cell, columns[index])
+    cells = tuple(tuple(checked(cell, i, r == len(rows) - 1) for i, cell in enumerate(row))
+                  for r, row in enumerate(rows))
+    rules = []
+    for item in _list(value.get("conditional", []), MAX_RULES, "invalid_conditional"):
+        _keys(item, ("column", "rule"), ("value",))
+        index = _column_index(columns, item["column"], "invalid_conditional")
+        if item["rule"] not in CONDITIONAL_RULES or columns[index].format in ("text", "date"):
+            raise SpecError("invalid_conditional")
+        threshold = item.get("value")
+        needs = item["rule"] in ("above", "below", "top", "bottom")
+        if needs != (threshold is not None):
+            raise SpecError("invalid_conditional")
+        if threshold is not None:
+            threshold = _number(threshold, "invalid_conditional")
+            if item["rule"] in ("top", "bottom") and not (threshold.is_integer() and 1 <= threshold <= 1000):
+                raise SpecError("invalid_conditional")
+        rules.append(Rule(index, item["rule"], threshold))
+    validations = []
+    for item in _list(value.get("validation", []), MAX_RULES, "invalid_validation"):
+        _keys(item, ("column",), ("list", "min", "max"))
+        index = _column_index(columns, item["column"], "invalid_validation")
+        if "list" in item:
+            if "min" in item or "max" in item or columns[index].format != "text":
+                raise SpecError("invalid_validation")
+            options = tuple(_text(option, 60, "invalid_validation", single_line=True)
+                            for option in _list(item["list"], 30, "invalid_validation", minimum=1))
+            if any("," in option for option in options) or sum(len(o) + 1 for o in options) > 250:
+                raise SpecError("invalid_validation")
+            validations.append(Validation(index, options))
+        else:
+            if columns[index].format == "text" or ("min" not in item and "max" not in item):
+                raise SpecError("invalid_validation")
+            low = _number(item["min"], "invalid_validation") if "min" in item else None
+            high = _number(item["max"], "invalid_validation") if "max" in item else None
+            if low is not None and high is not None and low > high:
+                raise SpecError("invalid_validation")
+            validations.append(Validation(index, None, low, high))
+    charts = tuple(_chart_spec(item, columns_by_sheet, name)
+                   for item in _list(value.get("charts", []), MAX_SHEET_CHARTS, "invalid_sheet_chart"))
+    if any(chart.sheet is not None and chart.sheet.lower() != name.lower() for chart in charts):
+        raise SpecError("invalid_sheet_chart")  # A table sheet charts its own data; dashboards chart any sheet.
+    return Sheet(name, columns, cells, "table", _optional(value, "description", 500, "invalid_rows", False),
+                 total_row, tuple(rules), tuple(validations), charts)
+
+
+def _dashboard(value, columns_by_sheet):
+    _keys(value, ("name", "kind", "title"), ("description", "metrics", "charts"))
+    name = _sheet_name(value["name"])
+    metrics = []
+    for item in _list(value.get("metrics", []), MAX_METRICS, "invalid_dashboard"):
+        _keys(item, ("label", "formula", "format"), ("symbol",))
+        if item["format"] not in COLUMN_FORMATS or item["format"] == "date" or not is_safe_formula(item["formula"]):
+            raise SpecError("invalid_dashboard")
+        symbol = item.get("symbol", "$")
+        if symbol not in SYMBOLS:
+            raise SpecError("invalid_dashboard")
+        metrics.append(DashboardMetric(_text(item["label"], 60, "invalid_dashboard", single_line=True),
+                                       Formula(item["formula"]), item["format"], symbol))
+    charts = []
+    for item in _list(value.get("charts", []), MAX_SHEET_CHARTS, "invalid_sheet_chart"):
+        if type(item) is not dict or "sheet" not in item:
+            raise SpecError("invalid_sheet_chart")
+        charts.append(_chart_spec(item, columns_by_sheet, None))
+    if not metrics and not charts:
+        raise SpecError("invalid_dashboard")
+    return Sheet(name, (), (), "dashboard", _optional(value, "description", 500, "invalid_dashboard", False),
+                 charts=tuple(charts), metrics=tuple(metrics),
+                 title=_text(value["title"], 120, "invalid_dashboard", single_line=True))
 
 
 def validate_workbook(value):
-    _keys(value, ("title", "sheets"))
+    _keys(value, ("title", "sheets"), ("author", "summary"))
     title = _text(value["title"], MAX_TITLE, "invalid_title", single_line=True)
     raw = _list(value["sheets"], MAX_SHEETS, "invalid_sheets", minimum=1)
     cells = 0
@@ -570,8 +782,25 @@ def validate_workbook(value):
             cells += len(item["rows"]) * max(1, len(item["columns"]))
     if cells > MAX_WORKBOOK_CELLS:
         raise SpecError("workbook_too_large")
-    sheets = tuple(_sheet(item) for item in raw)
-    names = [sheet.name.lower() for sheet in sheets]
-    if len(set(names)) != len(names):
-        raise SpecError("invalid_sheet_name")
-    return Workbook(title, sheets)
+    columns_by_sheet = {}
+    for item in raw:
+        if type(item) is not dict or type(item.get("name")) is not str:
+            raise SpecError("invalid_structure")
+        name = _sheet_name(item["name"])
+        if name.lower() in columns_by_sheet:
+            raise SpecError("invalid_sheet_name")
+        if item.get("kind", "table") == "dashboard":
+            columns_by_sheet[name.lower()] = ()
+        elif item.get("kind", "table") == "table":
+            if "columns" not in item:
+                raise SpecError("invalid_structure")
+            columns_by_sheet[name.lower()] = tuple(
+                _column(column) for column in _list(item["columns"], MAX_SHEET_COLUMNS, "invalid_column", minimum=1))
+        else:
+            raise SpecError("invalid_structure")
+    sheets = tuple(_dashboard(item, columns_by_sheet) if item.get("kind") == "dashboard"
+                   else _table_sheet(item, columns_by_sheet) for item in raw)
+    if all(sheet.kind == "dashboard" for sheet in sheets):
+        raise SpecError("invalid_sheets")
+    return Workbook(title, sheets, _optional(value, "author", 120, "invalid_options"),
+                    _optional(value, "summary", 1_500, "invalid_options", single_line=False))
