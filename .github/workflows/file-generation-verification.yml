@@ -113,7 +113,7 @@ jobs:
       # The test modules skip themselves when a document library is missing,
       # so a green run must prove nothing was skipped and the expected number
       # ran: 166 generation, 65 intake, 33 worker, 109 document-design, 178 workbook, 63 deck and 39 editing
-      # tests, and 12 store, 9 assistant, 11 router, 28 intent and 2 chat-handoff tests. The
+      # tests, and 12 store, 9 assistant, 12 router, 28 intent and 2 chat-handoff tests. The
       # worker's memory-limit test runs only on POSIX, so it must run here.
       - name: Require every file test to have run
         run: |
@@ -124,6 +124,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 715, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 716, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the file verification did not run completely")
           PY
