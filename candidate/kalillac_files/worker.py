@@ -223,6 +223,10 @@ def main():
         (length,) = struct.unpack(">I", stdin.read(4))
         header = json.loads(stdin.read(length).decode("utf-8"))
         _limit_self(int(header["memory"]), int(header["cpu"]))
+        # openpyxl imports numpy when it is installed, and numpy starts
+        # threads on import, which the limits above forbid (it hangs or
+        # aborts). Nothing here needs numpy: make the import fail cleanly.
+        sys.modules["numpy"] = None
         payload = stdin.read(max(MAX_SPEC_BYTES, MAX_UPLOAD_BYTES) + 1)
         from .intake import IntakeError, inspect
         from .generation import generate

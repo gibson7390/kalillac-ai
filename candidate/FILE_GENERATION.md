@@ -139,6 +139,11 @@ cores return, from a child Python process:
 A refusal by a core (`pdf_unsupported_characters`, `macros_not_allowed`, ...) passes through with
 its own code. The child's stderr is discarded, so no document content reaches a log.
 
+On POSIX the child also forbids itself from starting any process or thread. The spreadsheet
+library would import numpy when it is installed, and numpy starts threads on import, so the child
+blocks that import; nothing in the cores needs it. A future dependency that starts threads would
+fail the Linux tests rather than slip through.
+
 Not provided by the worker: operating-system sandboxing (a separate user, filesystem or network
 namespace). The child has no network use and writes no file, but nothing at the OS level prevents
 it. That is a deployment decision for when uploads are exposed.
