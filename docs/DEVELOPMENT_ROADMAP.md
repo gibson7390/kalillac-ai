@@ -60,7 +60,7 @@ discarded, or name anything in it that should be kept.
 |---|---|---|---|
 | 1 | Financial Safeguards V1 | **DEVELOPMENT VERIFIED**, off in production | Activation proposal written; tooling update and owner decisions outstanding |
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
-| 3 | Stripe billing and subscriptions | IMPLEMENTED in part (test-mode foundation), off | Not yet re-verified in this record |
+| 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI | Gap analysis below; refunds, disputes and the link to financial scopes are missing |
 | 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
 | 5 | File creation, uploads, editing | Generation core, upload-intake core and isolated worker DEVELOPMENT VERIFIED, not reachable from the application; routes, storage, downloads and editing not started | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
@@ -142,6 +142,30 @@ path the plan is retiring. Building them requires the plan for V1-02D and V1-02E
 the application is meant to act as the service role) or the owner's agreement to a plan written
 from the code. See "Owner decisions required".
 
+### Milestone 3: Stripe billing (starting point)
+
+Read from the code on 2026-11-14. Its test suites (billing, concurrency, reconciliation, the
+operator tool, the Stripe gateway, and the PostgreSQL billing verification) pass in
+`subscription-foundation-verification`; nothing here was exercised against Stripe itself.
+
+| Capability | State |
+|---|---|
+| Checkout, customer mapping | Present. Server-generated attempt id as the Stripe idempotency key; pinned parameters; nothing read from the request body |
+| Subscription creation, renewal, cancellation | Present, driven by `checkout.session.completed` and `customer.subscription.created/updated/deleted`. Cancellation and payment methods go through the Stripe customer portal |
+| Verified signatures, replay and duplicate protection | Present. Signature checked upstream; processed event ids recorded in the same transaction; live/test mode mismatch refused |
+| Out-of-order events | Present. Arrival order is never trusted: the current subscription is fetched from Stripe under the account lock |
+| Entitlement update and revocation | Present. Paid only while Stripe reports active, trialing or past_due for an allowed Price; a paid entitlement always expires at the period end plus a grace period, so a lost cancellation cannot leave access open |
+| Payment failure | Present as policy: `past_due` stays paid during dunning, every other non-paying status is free |
+| Status reconciliation | Present: webhooks plus an operator command for one account |
+| Customer billing status | Present: `GET /api/account/billing` |
+| **Refunds and disputes** | **Missing.** No `charge.refunded` or `charge.dispute.*` handling. Needs the owner's refund policy |
+| **Link to Financial Safeguards** | **Missing.** Nothing issues the request-bound paid entitlement, so every chat request is charged to the FREE scope and Premium-only reasoning modes are refused for everyone. This is the one seam that turns a verified subscription into the PAID scope, its request ceiling and its modes |
+| **Per-customer dollar budget** | **Missing** (deferred here from Milestone 1) |
+| **Lifecycle run against Stripe test mode** | **Not done.** Needs test-mode keys, a test Price and a webhook secret from the owner |
+
+The link to Financial Safeguards depends on Milestone 2, because the chat request must first
+authenticate the account through the V1 authority.
+
 ### Milestone 4: reasoning controls (backend implemented, interface not started)
 
 Implemented on `feat/reasoning-modes-v1`: an optional `reasoning_mode` on `/api/chat`, validated
@@ -189,7 +213,9 @@ limits (POSIX), a concurrency cap, bounded output and an environment that carrie
 Evidence: `tests/test_file_generation.py` (155 tests, each generated artifact reopened with an
 independent reader), `tests/test_file_intake.py` (63 tests, hostile files built in the tests) and
 `tests/test_file_worker.py` (31 tests with real child processes); CI workflow
-`file-generation-verification`, run `43675678292` successful for the two cores on `3073bab`. Nothing
+`file-generation-verification`, run `43676934103` successful on `337cb88` with all 249 tests and
+none skipped. Its first Linux run (`43676033805`) failed and found a real defect: the spreadsheet
+library imports numpy, which starts threads the child forbids itself; fixed in `337cb88`. Nothing
 in the application imports the package and the production dependency lock is unchanged.
 
 Not built, and needing customer accounts first: the upload and download routes, storage, quotas,
@@ -204,9 +230,10 @@ cleanup, the model tool, and editing.
   checks them against the real clock. It is a test-fixture defect, not a product defect: no
   application code changed. `subscription-foundation-verification` is red on any commit without
   the fix. Other tests with hardcoded 2026 dates use an injected clock and still pass.
-* `candidate/tests/test_frontend_trust_presentation.py` drives a real browser and is sensitive to
-  load: it passed alone (215 tests) and failed intermittently with "unknown scenario" while another
-  full test run was using the same machine and browser. Run it on an otherwise idle machine.
+* `candidate/tests/test_frontend_trust_presentation.py` drives a real browser and fails
+  intermittently on this machine with "unknown scenario" (a few of 215 cases). It is not caused by
+  the work here: with byte-identical frontend files, harness and fixtures, the untouched baseline
+  worktree failed 1 of 6 runs and this worktree 2 of 6. Re-run it; treat CI as authoritative.
 * `candidate/tests/test_product_identity_aroge.py` fails locally (16 cases, same on the untouched
   baseline) without provider configuration in the environment.
 * `candidate/tests/test_v1_schema.py` (five `hostile_diagnostics` cases) uses `/proc` and
@@ -227,9 +254,24 @@ cleanup, the model tool, and editing.
   skip some or all of their tests locally: the seven PostgreSQL suites (CI only, by design) and five
   browser-driven frontend suites. The only failures are the environment limits listed above (built
   site, provider configuration, Linux-only diagnostics).
-* Not run: `safety-helpfulness-regression` and `code-structure-frontend-verification` (they trigger
-  on pull requests; no pull request has been opened), and the deploy-tooling suite (no tooling file
-  changed).
+* Not run for `ee1564a`: `safety-helpfulness-regression` and `code-structure-frontend-verification`
+  (they trigger on pull requests; no pull request has been opened), and the deploy-tooling suite (no
+  tooling file changed).
+
+## Regression evidence for `59ec9d1` (reasoning modes) and `337cb88` (files)
+
+* `59ec9d1`: `provider-ceilings-postgres` `43673630186`, `subscription-foundation-verification`
+  `43673633447` and `safety-helpfulness-regression` `43673636732`, all successful. Local Windows run
+  of all 126 test files: 8,765 passed, with only the environment limits above and the intermittent
+  browser test failing.
+* `337cb88`: `file-generation-verification` `43676934103` successful. The three file suites also pass
+  on Linux locally (see below). The commits after `59ec9d1` add files only; no application module
+  changed.
+* Not run on any branch: `code-structure-frontend-verification` (no frontend file changed).
+
+A disposable Linux environment for reproducing Linux-only failures exists in WSL at
+`~/kalillac-files-venv` (Python 3.12 managed by `uv`, the production lock plus the document
+libraries). It was created during this work, lives outside the repository and can be deleted.
 
 ## Owner decisions required
 
@@ -257,12 +299,12 @@ cleanup, the model tool, and editing.
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Record the CI result of `file-generation-verification` for the worker commit on
-   `feat/file-generation-v1` (it is the first run of the POSIX memory-limit test).
+1. Open pull requests for the three stacked branches when the owner wants them reviewed; that also
+   runs the two workflows that only trigger on pull requests.
 2. Milestone 4 interface: the mode control in the chat frontend, sending `reasoning_mode` and
    handling `403 reasoning_mode_not_allowed`, shown only when the backend reports modes enabled.
-   The frontend suites need a real browser and an idle machine, and the web root is deployed
-   separately from the backend release.
+   The frontend suites need a real browser and are intermittent on this machine, the change needs
+   to be looked at in a browser, and the web root is deployed separately from the backend release.
 3. Milestone 5 model tool: the tool definition and prompt contract by which GPT-6 Luna produces a
    file specification, validated by the generation core, still unexposed. It also requires
    changing what Kalillac tells the model about its capabilities, which today says it cannot create
