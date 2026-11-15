@@ -8,7 +8,7 @@ States used here, never interchangeable:
 **PRODUCTION READY** (deployment prerequisites verified) · **PRODUCTION ACTIVE** (authorized,
 deployed, enabled and verified in production).
 
-Last updated: 2026-11-14.
+Last updated: 2026-11-15.
 
 ## Production baseline (as stated by the owner, checked against Git where possible)
 
@@ -29,9 +29,10 @@ production migration, live Stripe or customer data.
 |---|---|---|
 | `feat/financial-safeguards-v1-completion` | `C:/Kalillac/kalillac-ai-fs-v1-completion` | Milestone 1. Based on `184ee0a`, so it holds the production application and the reviewed tooling. |
 | `feat/reasoning-modes-v1` | same worktree | Milestone 4 backend, stacked on the Milestone 1 branch. |
-| `feat/file-generation-v1` | same worktree | **Current development branch.** Milestone 5 generation core, stacked on the Milestone 4 branch. |
+| `feat/file-generation-v1` | same worktree | Milestone 5 generation and intake cores and the isolated worker, stacked on the Milestone 4 branch. |
+| `feat/document-quality-v1` | same worktree | **Current development branch.** The document quality system (designed PDF, Word, Excel and PowerPoint output), stacked on the files branch. |
 
-The three branches are a stack: each contains the one before it. The worktree has its own `.venv`
+The four branches are a stack: each contains the one before it. The worktree has its own `.venv`
 (ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
 environment was not changed.
 | `product/account-lifecycle-hardening-v1` | `C:/Kalillac/kalillac-ai` | Holds **uncommitted** account work. Not modified. See "Uncommitted account work" below. |
@@ -62,7 +63,7 @@ discarded, or name anything in it that should be kept.
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI | Gap analysis below; refunds, disputes and the link to financial scopes are missing |
 | 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Generation core, upload-intake core and isolated worker DEVELOPMENT VERIFIED, not reachable from the application; routes, storage, downloads and editing not started | `candidate/FILE_GENERATION.md` |
+| 5 | File creation, uploads, editing | Designed PDF, DOCX, XLSX and PPTX generation, upload intake and the isolated worker DEVELOPMENT VERIFIED, not reachable from the application; **not owner accepted**; routes, storage, downloads, the model tool and editing not started | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -221,6 +222,43 @@ in the application imports the package and the production dependency lock is unc
 Not built, and needing customer accounts first: the upload and download routes, storage, quotas,
 cleanup, the model tool, and editing.
 
+**Document quality system** (`feat/document-quality-v1`, after the owner's 2026-11-15 directive that
+output must be exceptional, not merely functional). Each format has a design system and is checked
+by reading the file back and, in development, by rendering it in the Microsoft application itself:
+
+* PDF (`7f7bc9f`): Typst with a designed template, bundled OFL fonts for Latin, Greek, Cyrillic,
+  Arabic, Hebrew, Devanagari, Thai and CJK (owner decision 11, resolved), vector charts, tagged PDF,
+  right-to-left mirroring, and a PDFium layout inspector that refuses overflow, blank pages and
+  missing glyphs.
+* Word (`7f7bc9f`): real styles, contents and page fields, embedded fonts, complex-script runs;
+  rendered and inspected in Microsoft Word, including Arabic.
+* Excel (`b8f4d04`): a formula engine matching 147 Excel-recorded cases and all 438 formulas of the
+  benchmark forecast, financial-model conventions, native charts, dashboards.
+* PowerPoint (this commit): eleven layouts, native editable charts and tables, text measured with
+  Calibri's metrics so it never overflows (PowerPoint's own line counts agree for every text box
+  and cell on the test decks), balanced headings, right-to-left mirroring, speaker notes;
+  rendered and inspected in Microsoft PowerPoint.
+* Word and PowerPoint packages carry only the file's own record and are byte-for-byte
+  reproducible.
+
+Quality benchmark (`tests/quality_benchmark.py`), state of the eight owner-named tasks:
+
+| Task | State |
+|---|---|
+| Business report (PDF, DOCX) | Built, rendered and inspected; not owner accepted |
+| Financial workbook, cross-sheet workbook | The forecast workbook (inputs, monthly forecast, summary, loan, dashboard) covers both; verified against Excel; not owner accepted |
+| Executive presentation | Built, rendered in PowerPoint and inspected; not owner accepted |
+| Multilingual document | Arabic PDF, Word and deck, Japanese PDF, rendered; a dedicated benchmark entry is still to write |
+| Research document, Word proposal | Not yet written as benchmark entries |
+| Complex editing | Not built (needs the editing workflow) |
+
+Evidence: `file-generation-verification` run `43684790630` on `b8f4d04` successful (536 tests, none
+skipped); the PowerPoint commit's run is recorded under "Regression evidence" when it completes.
+Locally on this commit: all 601 file tests pass on Windows, and on Linux (WSL, Python 3.12.15, the
+exact CI requirements) with none skipped. The PowerPoint Linux run found a real defect, the worker
+not starting the typesetter's thread pool before forbidding threads when rendering a deck's
+artwork; fixed and tested.
+
 ## Known defects and environment limits
 
 * **Fixed here, present on the production commit:** four cases of
@@ -292,24 +330,32 @@ libraries). It was created during this work, lives outside the repository and ca
    modes Free and Premium may select.
 10. Later milestones: subscription price, Stripe product and price IDs, billing interval, trial,
     refund policy, Premium allowances. Nothing has been assumed.
-11. **PDF fonts:** whether to bundle a Unicode font so generated PDFs can carry text beyond Western
-    European. Until then such documents are refused as PDF and generate as DOCX.
+11. ~~PDF fonts~~: resolved 2026-11-15 (approved); bundled as described under Milestone 5.
+
+Resolved by the owner on 2026-11-15, recorded so they are not asked again: decision 5 (write the
+V1-02D/E plan from the code, keeping the private database authorities and adding no legacy path),
+decision 7 (keep the uncommitted worktree untouched), and the provisional reasoning mapping for
+development (QUICK low, BALANCED medium, DEEP high; which modes Free and Premium may use stays
+open). Also approved: refund and dispute webhook handling with no automatic refunds, Stripe work
+against mocks with a written test-credential procedure, proposals (not decisions) for budget values
+and retention rules, and a staging design. Still forbidden: anything in production, applying
+`0016` there, enabling enforcement, live billing, unapproved paid infrastructure.
 
 ## Next autonomous action
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Open pull requests for the three stacked branches when the owner wants them reviewed; that also
-   runs the two workflows that only trigger on pull requests.
-2. Milestone 4 interface: the mode control in the chat frontend, sending `reasoning_mode` and
-   handling `403 reasoning_mode_not_allowed`, shown only when the backend reports modes enabled.
-   The frontend suites need a real browser and are intermittent on this machine, the change needs
-   to be looked at in a browser, and the web root is deployed separately from the backend release.
-3. Milestone 5 model tool: the tool definition and prompt contract by which GPT-6 Luna produces a
-   file specification, validated by the generation core, still unexposed. It also requires
-   changing what Kalillac tells the model about its capabilities, which today says it cannot create
-   files.
-4. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
-5. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
-   password change and deletion behind the private authorities, then one end-to-end synthetic
-   lifecycle test.
+1. Milestone 5: the document editing workflow (upload, analyse, change, new file; the original is
+   never modified), the remaining benchmark entries (research document, Word proposal,
+   multilingual document, editing), and a tool that renders the whole benchmark for the owner.
+2. Milestone 2: the V1-02D/E plan written from the code, then sign-out-everywhere, password
+   change, the operator suspension command and deletion behind the private authorities, and one
+   end-to-end synthetic lifecycle test.
+3. Milestone 4 interface: the mode selector in the chat frontend with the provisional mapping.
+4. Milestone 3: refund and dispute webhook handling (no automatic refunds) and the Stripe
+   test-credential procedure; then the link from a verified subscription to the PAID scope.
+5. Milestone 1: proposed budget values with their cost calculations, and the release tooling for
+   an enforcement-on release.
+6. A staging design (port 8002 checked before it is proposed) and a retention proposal.
+7. Pull requests for the stacked branches, prepared for independent review, when the owner wants
+   them; that also runs the workflows that only trigger on pull requests.

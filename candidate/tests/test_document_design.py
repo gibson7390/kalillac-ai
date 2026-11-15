@@ -212,7 +212,7 @@ def test_chart_text_is_escaped():
 def test_every_bundled_font_matches_its_recorded_hash_and_has_its_license():
     manifest = json.loads((typeset.FONTS / "manifest.json").read_text(encoding="utf-8"))
     licenses = sorted(path.name for path in (typeset.FONTS / "licenses").iterdir())
-    assert licenses == ["Inter-OFL.txt", "JetBrainsMono-OFL.txt", "NotoSansArabic-OFL.txt", "NotoSansCJK-OFL.txt",
+    assert licenses == ["Carlito-OFL.txt", "Inter-OFL.txt", "JetBrainsMono-OFL.txt", "NotoSansArabic-OFL.txt", "NotoSansCJK-OFL.txt",
                         "NotoSansDevanagari-OFL.txt", "NotoSansHebrew-OFL.txt", "NotoSansThai-OFL.txt",
                         "SourceSerif4-OFL.md"]
     for path in (typeset.FONTS / "licenses").iterdir():
@@ -226,6 +226,11 @@ def test_every_bundled_font_matches_its_recorded_hash_and_has_its_license():
             "https://raw.githubusercontent.com/notofonts/")
     on_disk = {path.name for path in typeset.FONTS.glob("*.[ot]tf")}
     assert on_disk == {entry["file"] for entry in core}       # Nothing unlisted is ever typeset with.
+    metrics = [entry for entry in manifest["fonts"] if entry["group"] == "metrics"]
+    assert sorted(entry["file"] for entry in metrics) == ["metrics/Carlito-Bold.ttf", "metrics/Carlito-Regular.ttf"]
+    for entry in metrics:                                      # Measures slide text; never embedded or typeset.
+        data = (typeset.FONTS / entry["file"]).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == entry["sha256"], entry["file"]
 
 
 def test_only_bundled_fonts_reach_the_pdf_and_they_are_subsetted():
@@ -396,6 +401,21 @@ def test_word_report_has_real_navigation_fields_and_styles():
     settings = archive.read("word/settings.xml").decode()
     assert 'w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"' in settings
     assert "<w:embedTrueTypeFonts/>" in settings
+
+
+def test_word_carries_only_this_documents_record_and_is_reproducible():
+    data, archive, _xml = docx_parts(REPORT)
+    names = archive.namelist()
+    assert not [name for name in names if "thumbnail" in name or name.startswith("customXml/")]
+    core = docx.Document(io.BytesIO(data)).core_properties
+    assert core.author == core.last_modified_by == REPORT.get("author", "Kalillac AI")
+    assert core.comments == REPORT.get("summary", "") and core.created is None and core.modified is None
+    app = archive.read("docProps/app.xml").decode("utf-8")
+    assert "<Application>Kalillac AI</Application>" in app and "Macintosh" not in app
+    everything = b"".join(archive.read(name) for name in names if name.endswith(".xml"))
+    assert b"python-docx" not in everything
+    assert {item.date_time for item in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+    assert generate(copy.deepcopy(REPORT), "docx").data == data
 
 
 def test_word_tables_repeat_headers_keep_rows_together_and_align_numbers():

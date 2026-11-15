@@ -23,5 +23,5 @@ site/**/*.png -text
 deploy/** text eol=lf
 
 # Document fonts are verified by SHA-256: never altered by line-ending conversion.
-candidate/kalillac_files/fonts/*.ttf -text
-candidate/kalillac_files/fonts/*.otf -text
+candidate/kalillac_files/fonts/**/*.ttf -text
+candidate/kalillac_files/fonts/**/*.otf -text

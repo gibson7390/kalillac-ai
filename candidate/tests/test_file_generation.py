@@ -300,12 +300,13 @@ def test_markdown_text_and_json_outputs():
 
 
 def test_formats_are_exactly_the_supported_set_and_a_spec_fits_its_kind():
-    assert sorted(FORMATS) == ["csv", "docx", "json", "md", "pdf", "txt", "xlsx"]
-    for format in ("pptx", "PDF", "html", "exe", "", None, 3, ["pdf"]):
+    assert sorted(FORMATS) == ["csv", "docx", "json", "md", "pdf", "pptx", "txt", "xlsx"]
+    for format in ("ppt", "PDF", "html", "exe", "", None, 3, ["pdf"]):
         with pytest.raises(SpecError) as refused:
             generate(copy.deepcopy(DOCUMENT), format)
         assert refused.value.code == "unsupported_format"
-    for spec, format in ((WORKBOOK, "pdf"), (WORKBOOK, "docx"), (DOCUMENT, "xlsx"), (DOCUMENT, "csv")):
+    for spec, format in ((WORKBOOK, "pdf"), (WORKBOOK, "docx"), (DOCUMENT, "xlsx"), (DOCUMENT, "csv"),
+                         (DOCUMENT, "pptx"), (WORKBOOK, "pptx")):
         with pytest.raises(SpecError) as refused:
             generate(copy.deepcopy(spec), format)
         assert refused.value.code == "invalid_structure"

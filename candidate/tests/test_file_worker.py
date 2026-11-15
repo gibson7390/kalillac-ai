@@ -73,6 +73,15 @@ def test_generation_through_the_worker_matches_the_core():
     assert openpyxl.load_workbook(io.BytesIO(sheet.data))["Inputs"]["B5"].value == "=SUM(B2:B4)"
 
 
+def test_a_presentation_through_the_worker_matches_the_core():
+    pptx = pytest.importorskip("pptx")
+    from quality_benchmark import EXECUTIVE_DECK
+    isolated = run_generate(copy.deepcopy(EXECUTIVE_DECK), "pptx")
+    assert isolated.filename == "northwind-2027-from-one-roastery-to-two.pptx"
+    assert isolated.data == generate(copy.deepcopy(EXECUTIVE_DECK), "pptx").data   # Deterministic, and the same.
+    assert len(pptx.Presentation(io.BytesIO(isolated.data)).slides) == 14
+
+
 def test_intake_through_the_worker_matches_the_core():
     for data, name in ((generate(copy.deepcopy(DOCUMENT), "docx").data, "report.docx"),
                        (generate(copy.deepcopy(DOCUMENT), "pdf").data, None),
@@ -94,7 +103,7 @@ def test_core_refusals_pass_through_with_their_own_codes():
 
 def test_requests_are_refused_in_the_parent_before_any_process_starts(child):
     started = child("raise SystemExit('a process was started')")
-    assert refused(run_generate, DOCUMENT, "pptx") == "unsupported_format"
+    assert refused(run_generate, DOCUMENT, "ppt") == "unsupported_format"
     assert refused(run_generate, {"title": "T", "blocks": [float("nan")]}, "pdf") == "invalid_structure"
     assert refused(run_generate, {"title": {1, 2}}, "pdf") == "invalid_structure"
     huge = {"title": "T", "blocks": [{"type": "paragraph", "text": "x" * (worker.MAX_SPEC_BYTES + 1)}]}

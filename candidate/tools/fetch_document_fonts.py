@@ -59,7 +59,7 @@ def _content(entry: dict) -> bytes:
 
 def _path(entry: dict) -> Path:
     name = entry["file"]
-    if "/" in name.replace("cjk/", "", 1) or "\\" in name or ".." in name:
+    if "/" in name.replace("cjk/", "", 1).replace("metrics/", "", 1) or "\\" in name or ".." in name:
         raise ValueError("unsafe font file name in the manifest")
     return FONTS / name
 

@@ -238,8 +238,9 @@ def main():
         # threads on import, which is forbidden below (it hangs or aborts).
         # Nothing here needs numpy: make the import fail cleanly.
         sys.modules["numpy"] = None
-        if header.get("task") == "generate" and header.get("format") in ("pdf", "docx"):
-            # The typesetter runs on a small thread pool. It is started here, on
+        if header.get("task") == "generate" and header.get("format") in ("pdf", "docx", "pptx"):
+            # The typesetter (documents, and the cover artwork of Word files and decks) runs on a
+            # small thread pool. It is started here, on
             # nothing but a constant, before any customer data is read; after
             # that no further thread or process can be created.
             from .typeset import warm_up

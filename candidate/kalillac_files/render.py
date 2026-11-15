@@ -38,6 +38,11 @@ def render_docx(document):
 # --- XLSX -----------------------------------------------------------------------------------
 
 
+def render_pptx(deck):
+    from .pptx_design import write_pptx
+    return write_pptx(deck)
+
+
 def render_xlsx(workbook):
     from .xlsx_design import write_xlsx
     return write_xlsx(workbook)

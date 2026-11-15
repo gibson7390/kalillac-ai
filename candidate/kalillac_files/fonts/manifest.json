@@ -1,5 +1,5 @@
 {
-  "about": "Fonts the document generator typesets with. Every file is verified against sha256 before use; see tools/fetch_document_fonts.py. 'core' files are committed; 'cjk' files are fetched.",
+  "about": "Fonts the document generator typesets with or measures with. Every file is verified against sha256 before use; see tools/fetch_document_fonts.py. 'core' and 'metrics' files are committed; 'cjk' files are fetched.",
   "fonts": [
     {
       "file": "Inter-Regular.ttf",
@@ -304,6 +304,24 @@
       "source": "Noto Sans CJK, Adobe and Google (notofonts/noto-cjk at f8d1575)",
       "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/SubsetOTF/KR/NotoSansKR-Bold.otf",
       "sha256": "5a6ceb287ed2fc6cfc6213144ebea68cbd94b20fc9eb873d8486493bf02d9bda"
+    },
+    {
+      "file": "metrics/Carlito-Regular.ttf",
+      "family": "Carlito",
+      "group": "metrics",
+      "license": "OFL-1.1",
+      "source": "Carlito, metric-compatible with Calibri, Google (google/fonts at cc39c4c); used to measure slide text, never embedded",
+      "url": "https://raw.githubusercontent.com/google/fonts/cc39c4c2c304bc368c9b7c311ea2bcc6013299fe/ofl/carlito/Carlito-Regular.ttf",
+      "sha256": "f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595"
+    },
+    {
+      "file": "metrics/Carlito-Bold.ttf",
+      "family": "Carlito",
+      "group": "metrics",
+      "license": "OFL-1.1",
+      "source": "Carlito, metric-compatible with Calibri, Google (google/fonts at cc39c4c); used to measure slide text, never embedded",
+      "url": "https://raw.githubusercontent.com/google/fonts/cc39c4c2c304bc368c9b7c311ea2bcc6013299fe/ofl/carlito/Carlito-Bold.ttf",
+      "sha256": "bb5d20f79b82599ec72983597437373a80f2d2085fa91fc144fd74e876a594db"
     }
   ]
 }

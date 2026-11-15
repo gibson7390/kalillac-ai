@@ -10,6 +10,7 @@ import re
 import unicodedata
 
 from . import render
+from .deck import validate_deck
 from .spec import SpecError, validate_document, validate_workbook
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -25,8 +26,10 @@ FORMATS = {
              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     "csv": ("workbook", render.render_csv, "csv", "text/csv; charset=utf-8"),
     "json": ("workbook", render.render_json, "json", "application/json"),
+    "pptx": ("deck", render.render_pptx, "pptx",
+             "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
 }
-_VALIDATORS = {"document": validate_document, "workbook": validate_workbook}
+_VALIDATORS = {"document": validate_document, "workbook": validate_workbook, "deck": validate_deck}
 _UNSAFE = re.compile(r"[^A-Za-z0-9]+")
 
 

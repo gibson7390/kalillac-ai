@@ -25,6 +25,7 @@ import uuid
 import zipfile
 
 from . import charts
+from .package import application_record, drop_relationships, fixed_dates, own_record
 from .spec import (_NUMERIC, Callout, Chart, Code, Comparison, Heading, ListBlock, Metrics, PageBreak, Paragraph,
                    Quote, Steps, Table, plain)
 from .typeset import FONTS, LABELS, RTL, cover_art_png, direction, svg_png
@@ -915,6 +916,12 @@ class _Writer:
         for section in self.word.sections:
             normalize(section.header._element)
             normalize(section.footer._element)
+        # This document's own record in place of python-docx's starter template (see package.py).
+        package = self.word.part.package
+        own_record(properties, spec.author or "Kalillac AI", spec.summary or "")
+        drop_relationships(package.rels, "thumbnail")
+        drop_relationships(self.word.part.rels, "customXml")
+        application_record(package.rels, Company=spec.organization)
         buffer = io.BytesIO()
         self.word.save(buffer)
         return buffer.getvalue()
@@ -1021,4 +1028,4 @@ def embed_fonts(docx, complex_font=None):
 
 def write_docx(document):
     writer = _Writer(document)
-    return embed_fonts(writer.build(), writer.complex)
+    return fixed_dates(embed_fonts(writer.build(), writer.complex))
