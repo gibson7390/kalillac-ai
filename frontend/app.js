@@ -1185,12 +1185,17 @@
     "text/plain; charset=utf-8": "Text",
     "application/json": "JSON"
   };
-  var attachBtn = document.getElementById("attach-btn");
   var attachmentList = document.getElementById("attachments");
-  // The file chooser exists only on a files deployment: the page itself carries no file input, so
-  // an ordinary visitor's page exposes no upload control at all.
+  // The attach button and its file chooser exist only on a files deployment: the page itself carries
+  // neither, so an ordinary visitor's page exposes no upload control at all. The button stays hidden
+  // until the server says this account may use files.
+  var attachBtn = null;
   var attachInput = null;
-  if (document.documentElement.getAttribute("data-kalillac-files") === "on" && attachBtn) {
+  var attachTemplate = document.getElementById("attach-template");
+  if (document.documentElement.getAttribute("data-kalillac-files") === "on" && attachTemplate
+      && attachTemplate.content && attachTemplate.content.firstElementChild) {
+    attachBtn = attachTemplate.content.firstElementChild.cloneNode(true);
+    attachTemplate.parentNode.insertBefore(attachBtn, attachTemplate);
     attachInput = document.createElement("input");
     attachInput.type = "file";
     attachInput.id = "attach-input";
