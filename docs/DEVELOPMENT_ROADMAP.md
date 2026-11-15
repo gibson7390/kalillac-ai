@@ -28,7 +28,12 @@ production migration, live Stripe or customer data.
 | Branch | Worktree | Purpose |
 |---|---|---|
 | `feat/financial-safeguards-v1-completion` | `C:/Kalillac/kalillac-ai-fs-v1-completion` | Milestone 1. Based on `184ee0a`, so it holds the production application and the reviewed tooling. |
-| `feat/reasoning-modes-v1` | same worktree | **Current development branch.** Milestone 4 backend, stacked on the Milestone 1 branch. |
+| `feat/reasoning-modes-v1` | same worktree | Milestone 4 backend, stacked on the Milestone 1 branch. |
+| `feat/file-generation-v1` | same worktree | **Current development branch.** Milestone 5 generation core, stacked on the Milestone 4 branch. |
+
+The three branches are a stack: each contains the one before it. The worktree has its own `.venv`
+(ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
+environment was not changed.
 | `product/account-lifecycle-hardening-v1` | `C:/Kalillac/kalillac-ai` | Holds **uncommitted** account work. Not modified. See "Uncommitted account work" below. |
 | `feat/financial-safeguards-v1-batch1`, `ops/fs-v1-deploy-tooling` | their own worktrees | Production baseline and tooling. Not modified. |
 
@@ -56,8 +61,8 @@ discarded, or name anything in it that should be kept.
 | 1 | Financial Safeguards V1 | **DEVELOPMENT VERIFIED**, off in production | Activation proposal written; tooling update and owner decisions outstanding |
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part (test-mode foundation), off | Not yet re-verified in this record |
-| 4 | Reasoning toggle controls | Backend IMPLEMENTED and locally verified, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Not started | Required Premium milestone |
+| 4 | Reasoning toggle controls | Backend DEVELOPMENT VERIFIED, off; interface and saved preference not started | `candidate/REASONING_MODES.md` |
+| 5 | File creation, uploads, editing | Generation core IMPLEMENTED and locally verified, not reachable from the application; uploads, editing, storage and downloads not started | `candidate/FILE_GENERATION.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -142,8 +147,9 @@ from the code. See "Owner decisions required".
 Implemented on `feat/reasoning-modes-v1`: an optional `reasoning_mode` on `/api/chat`, validated
 and permission-checked in the backend, applied at the single OpenAI seam outside the financial
 reservation, default off, with no mapping in source. Reference: `candidate/REASONING_MODES.md`.
-Evidence: `tests/test_reasoning_modes.py` (52 tests) and the nine suites nearest the chat path pass
-locally; CI results for the branch are recorded under "Regression evidence" once run. Remaining:
+Evidence, all on `59ec9d1`: `provider-ceilings-postgres` run `43673630186` (52 PostgreSQL tests and
+375 finance and reasoning-mode tests), `subscription-foundation-verification` run `43673633447` and
+`safety-helpfulness-regression` run `43673636732`, all successful. Remaining:
 the interface control, saved preferences (needs accounts), paid permissions taking effect (needs
 billing entitlements on the chat request), a mode on Spaces sends, and owner decision 9.
 
@@ -168,6 +174,18 @@ higher effort spends more of the same `max_output_tokens` on reasoning, so DEEP 
 ceiling and therefore a larger worst-case reservation, which the request ceiling must allow; mode
 permission must be checked in the backend from the verified entitlement.
 
+### Milestone 5: file generation (core only)
+
+Implemented on `feat/file-generation-v1`: `kalillac_files.generate(spec, format)` produces real PDF,
+DOCX and XLSX files, plus CSV, Markdown, TXT and JSON, from a validated plain-data specification.
+Reference: `candidate/FILE_GENERATION.md`, which also lists the limits and what is not built.
+Evidence: `tests/test_file_generation.py` (155 tests), each generated artifact reopened with an
+independent reader; CI workflow `file-generation-verification`. Nothing in the application imports
+the package and the production dependency lock is unchanged.
+
+Not built, and needing customer accounts first: storage, download authorization, quotas, cleanup,
+the worker that renders off the chat path, the model tool, and all of uploads and editing.
+
 ## Known defects and environment limits
 
 * **Fixed here, present on the production commit:** four cases of
@@ -177,6 +195,9 @@ permission must be checked in the backend from the verified entitlement.
   checks them against the real clock. It is a test-fixture defect, not a product defect: no
   application code changed. `subscription-foundation-verification` is red on any commit without
   the fix. Other tests with hardcoded 2026 dates use an injected clock and still pass.
+* `candidate/tests/test_frontend_trust_presentation.py` drives a real browser and is sensitive to
+  load: it passed alone (215 tests) and failed intermittently with "unknown scenario" while another
+  full test run was using the same machine and browser. Run it on an otherwise idle machine.
 * `candidate/tests/test_product_identity_aroge.py` fails locally (16 cases, same on the untouched
   baseline) without provider configuration in the environment.
 * `candidate/tests/test_v1_schema.py` (five `hostile_diagnostics` cases) uses `/proc` and
@@ -220,16 +241,21 @@ permission must be checked in the backend from the verified entitlement.
    modes Free and Premium may select.
 10. Later milestones: subscription price, Stripe product and price IDs, billing interval, trial,
     refund policy, Premium allowances. Nothing has been assumed.
+11. **PDF fonts:** whether to bundle a Unicode font so generated PDFs can carry text beyond Western
+    European. Until then such documents are refused as PDF and generate as DOCX.
 
 ## Next autonomous action
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Record the CI results for `feat/reasoning-modes-v1` and fix anything they show.
+1. Record the CI result of `file-generation-verification` for `feat/file-generation-v1`.
 2. Milestone 4 interface: the mode control in the chat frontend, sending `reasoning_mode` and
    handling `403 reasoning_mode_not_allowed`, shown only when the backend reports modes enabled.
-3. Milestone 5 generation core (PDF, DOCX, XLSX as real, validated files) can start without
-   accounts; download authorization and quotas need Milestone 2.
+   The frontend suites need a real browser and an idle machine, and the web root is deployed
+   separately from the backend release.
+3. Milestone 5 uploads: validation of uploaded PDF, DOCX and XLSX (type by content, size, archive
+   expansion limits, malformed-file handling) as a pure, unexposed core, the same way the generation
+   core was built.
 4. Milestone 1 release tooling for an enforcement-on release, with its disposable-systemd tests.
 5. Milestone 2: once decision 5 is answered, the operator suspension command, sign-out-everywhere,
    password change and deletion behind the private authorities, then one end-to-end synthetic
