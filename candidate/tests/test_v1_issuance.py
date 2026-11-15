@@ -67,9 +67,10 @@ def _statements(sql):
 # --- graph -----------------------------------------------------------------------------------
 
 def test_0014_is_the_sole_head_directly_after_0013():
-    # Only the Financial Safeguards ledger (0015, its provider budgets 0016) and billing cases (0017) sit above.
+    # Only the Financial Safeguards ledger (0015, its provider budgets 0016), billing cases (0017) and
+    # the sign-out authority (0018) sit above.
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0017_billing_cases"]
+    assert script.get_heads() == ["0018_v1_session_end"]
     assert script.get_revision("0015_finance_ledger").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()
@@ -372,9 +373,14 @@ def test_runtime_never_imports_the_migration_or_calls_issuance():
             a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         assert not any(module and ("alembic" in module or "migrations" in module) for module in imported)
     # No application module calls either function or uses the service role: both stay unexposed.
+    # Only the D1 authority module, which the application does not import, calls them.
     for path in CANDIDATE.rglob("*.py"):
         parts = path.relative_to(CANDIDATE).parts
         if parts[0] in ("tests", "migrations") or "__pycache__" in parts:
+            continue
+        if parts == ("kalillac_accounts", "v1_authority.py"):
+            # V1-02D D1: the single sanctioned caller, as S. The application does not import it
+            # (test_v1_authority), so the authorities stay unexposed until the operator transition.
             continue
         source = path.read_text(encoding="utf-8", errors="replace")
         assert "v1_issue_session(:" not in source and "FROM kalillac.v1_issue_session" not in source, path

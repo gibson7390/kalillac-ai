@@ -53,8 +53,8 @@ def _render(revisions, downgrade=False):
 
 def test_0013_sits_directly_after_0012_and_below_0014():
     script = ScriptDirectory.from_config(_config())
-    # 0014 (V1-02C) is directly above this revision; billing cases (0017) is the head.
-    assert script.get_heads() == ["0017_billing_cases"]
+    # 0014 (V1-02C) is directly above this revision; the sign-out authority (0018) is the head.
+    assert script.get_heads() == ["0018_v1_session_end"]
     assert script.get_revision("0014_v1_session_issuance").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()
@@ -240,10 +240,15 @@ def test_runtime_never_imports_the_migration_or_names_its_sql():
         a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert not any(name and ("alembic" in name or "migrations" in name) for name in imported)
     # No application module calls the function or uses the service role: it
-    # stays unexposed. Only the classifier reads the role names, to qualify them.
+    # stays unexposed. Only the classifier reads the role names, to qualify them,
+    # and only the D1 authority module (not imported by the application) calls it.
     for path in CANDIDATE.rglob("*.py"):
         parts = path.relative_to(CANDIDATE).parts
         if parts[0] in ("tests", "migrations") or "__pycache__" in parts:
+            continue
+        if parts == ("kalillac_accounts", "v1_authority.py"):
+            # V1-02D D1: the single sanctioned caller, as S. The application does not import it
+            # (test_v1_authority), so the authorities stay unexposed until the operator transition.
             continue
         source = path.read_text(encoding="utf-8", errors="replace")
         assert "FROM kalillac.v1_revoke_sessions" not in source and "v1_revoke_sessions(:" not in source, path

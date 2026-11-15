@@ -161,3 +161,11 @@ def test_the_application_does_not_load_the_authority_yet():
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / "app_fastapi_candidate.py").read_text(encoding="utf-8")
     assert "v1_authority" not in source
+
+
+@pytest.mark.parametrize("change", [{"session_id": str(uuid.uuid4())}, {"token_hash": "a" * 65}, {"token_hash": None}])
+def test_end_session_arguments_outside_the_contract_send_nothing(change):
+    log = []
+    with pytest.raises(V1AuthorityUnavailable):
+        authority(log).end_session(**{"session_id": uuid.uuid4(), "token_hash": "c" * 64, **change})
+    assert log == []

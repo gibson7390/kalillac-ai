@@ -43,6 +43,7 @@ LOCK_TIMEOUT = "3s"
 MAX_LIFETIME_DAYS = 366
 
 ISSUE_OUTCOMES = frozenset({"issued", "not_authenticated", "security_unavailable"})
+END_OUTCOMES = frozenset({"ended", "security_unavailable"})
 REVOKE_OUTCOMES = frozenset({"revoked", "not_authenticated", "account_unavailable", "too_many_operations",
                              "security_unavailable"})
 REVOKE_SCOPES = ("others", "all")
@@ -51,6 +52,7 @@ REVOKE_SCOPES = ("others", "all")
 # catalog checks. Function arguments are bound, never interpolated.
 _ISSUE = "SELECT outcome, issued_at, valid_until, replayed FROM kalillac.v1_issue_session(:s, :t, :u, :h, :d)"
 _REVOKE = "SELECT outcome, retry_after_seconds, replayed FROM kalillac.v1_revoke_sessions(:o, :s, :t, :c)"
+_END = "SELECT outcome FROM kalillac.v1_end_session(:s, :t)"
 _TOKEN_HASH = re.compile(r"[0-9a-f]{64}")
 
 
@@ -77,10 +79,12 @@ class SessionsRevoked:
 
 
 def _reviewed_functions():
-    """{signature: SHA-256 of the reviewed body} for the authorities S may execute, as 0014 left them."""
-    from .v1_schema import (ISSUANCE_SIGNATURE, ISSUANCE_SOURCE_SHA256, REVOCATION_SIGNATURE,
-                            REVOCATION_SOURCE_SHA256_V2)
-    return {REVOCATION_SIGNATURE: REVOCATION_SOURCE_SHA256_V2, ISSUANCE_SIGNATURE: ISSUANCE_SOURCE_SHA256}
+    """{signature: SHA-256 of the reviewed body} for the authorities S may execute at this release's
+    head (0018): revocation v2, issuance and sign-out."""
+    from .v1_schema import (END_SESSION_SIGNATURE, END_SESSION_SOURCE_SHA256, ISSUANCE_SIGNATURE,
+                            ISSUANCE_SOURCE_SHA256, REVOCATION_SIGNATURE, REVOCATION_SOURCE_SHA256_V2)
+    return {REVOCATION_SIGNATURE: REVOCATION_SOURCE_SHA256_V2, ISSUANCE_SIGNATURE: ISSUANCE_SOURCE_SHA256,
+            END_SESSION_SIGNATURE: END_SESSION_SOURCE_SHA256}
 
 
 def parse_service_credential(raw, *, role, database_instance_id, deployment_id, forbidden_passwords=()):
@@ -247,6 +251,18 @@ class V1Authority:
             elif issued_at is not None or valid_until is not None or replayed:
                 raise V1AuthorityUnavailable()
             return SessionIssued(outcome, issued_at, valid_until, replayed)
+
+    def end_session(self, *, session_id, token_hash):
+        """Sign out: revoke exactly the presented session. Always 'ended' for a well-formed call,
+        whether or not anything matched (idempotent, and it reveals nothing)."""
+        from sqlalchemy import text
+        if type(session_id) is not uuid.UUID or type(token_hash) is not str or not _TOKEN_HASH.fullmatch(token_hash):
+            raise V1AuthorityUnavailable()
+        with self._transaction() as session:
+            found = session.execute(text(_END), {"s": session_id, "t": token_hash}).all()
+            if len(found) != 1 or found[0][0] != "ended":
+                raise V1AuthorityUnavailable()
+            return "ended"
 
     def revoke_sessions(self, *, operation_id, session_id, token_hash, scope):
         """Revoke the account's other sessions, or all of them, proven by the exact original session."""

@@ -1,6 +1,6 @@
 """V1-02D step D1 on real disposable PostgreSQL 16: the application's private S connection.
 
-The disposable world stands on 0014 (the shared registration harness; CI's REQUIRE_POSTGRES switch
+The disposable world stands on the head revision (the shared registration harness; CI's REQUIRE_POSTGRES switch
 turns an absent database into a failure). Here, and only here, the test plays the operator's
 transition for S: it gives the disposable S role LOGIN, a generated password and CONNECT on the
 disposable database, then builds the authority exactly as the application would and calls the
@@ -21,15 +21,16 @@ from sqlalchemy import text
 
 import kalillac_accounts.v1_authority as v1_authority
 from kalillac_accounts.v1_authority import V1AuthorityUnavailable, build_v1_authority, load_v1_authority
-from test_v1_issuance_postgres import _world, account, epoch, key, sessions
+from test_v1_issuance_postgres import account, epoch, key, sessions
 from test_v1_revocation_postgres import admin_sql
+from test_v1_session_end_postgres import head_world
 
 DEPLOYMENT = "d1-test"
 
 
 @pytest.fixture
 def world(monkeypatch):
-    with _world(monkeypatch) as w:
+    with head_world(monkeypatch) as w:
         w.service_password = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
         # The operator transition's part for S, in the disposable database only. Generated
         # base64url passwords cannot contain SQL delimiters; never print SQL.
@@ -99,6 +100,15 @@ def test_s_logs_in_with_its_own_credential_and_issues_and_revokes_sessions(world
                                      scope="all")
     assert gone.outcome == "not_authenticated"
 
+    # Sign-out ends exactly the presented session, and answers the same for anything else.
+    third = key()
+    authority.issue_session(session_id=third[0], token_hash=third[1], user_id=user,
+                            verified_password_hash=stored, lifetime_days=14)
+    assert authority.end_session(session_id=third[0], token_hash=secrets.token_hex(32)) == "ended"
+    assert [row[4] for row in sessions(w, user) if row[0] == third[0]] == [None]
+    assert authority.end_session(session_id=third[0], token_hash=third[1]) == "ended"
+    assert all(row[4] is not None for row in sessions(w, user))
+
 
 def test_the_connection_is_s_itself_and_can_do_nothing_but_call_the_authorities(world):
     w = world
@@ -134,6 +144,8 @@ def test_a_wrong_credential_is_refused(world, changes):
     ("ALTER ROLE {service} CREATEDB", "ALTER ROLE {service} NOCREATEDB"),
     ("REVOKE EXECUTE ON FUNCTION kalillac.v1_issue_session(uuid,text,uuid,text,integer) FROM {service}",
      "GRANT EXECUTE ON FUNCTION kalillac.v1_issue_session(uuid,text,uuid,text,integer) TO {service}"),
+    ("REVOKE EXECUTE ON FUNCTION kalillac.v1_end_session(uuid,text) FROM {service}",
+     "GRANT EXECUTE ON FUNCTION kalillac.v1_end_session(uuid,text) TO {service}"),
 ])
 def test_any_extra_or_missing_right_refuses_the_authority(world, grant, undo):
     w = world
