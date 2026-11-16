@@ -288,3 +288,93 @@ def test_an_expired_confirmation_authorizes_nothing(tmp_path, monkeypatch):
     now[0] += router.CONFIRMATION_SECONDS + 1
     model.outputs += [_edit_call(file_id, operations), DONE]
     assert _assist(client, file_id, [confirmation]).json()["files"] == []
+
+
+# --- a confirmation authorizes exactly one attempt (Codex reverification 3, finding 1) ---------------
+
+class Stateless:
+    """A thread-safe scripted model: an exact edit, then a closing message once the tool has answered."""
+
+    def __init__(self, file_id, operations, fail_after_tool=False):
+        self.file_id, self.operations, self.fail_after_tool = file_id, operations, fail_after_tool
+
+    def __call__(self, items):
+        if any(item.get("type") == "function_call_output" for item in items):
+            if self.fail_after_tool:
+                raise TimeoutError("provider timed out")
+            return {"output": DONE}
+        return {"output": _edit_call(self.file_id, self.operations)}
+
+
+def _offer(tmp_path):
+    """A client and store, the uploaded proposal, the fee edit, and a confirmation the service offered."""
+    holder = {}
+    client, store = build(tmp_path, lambda items: holder["model"](items))
+    file_id, operations = _proposal_and_fee_edit(client)
+    holder["model"] = Stateless(file_id, operations)
+    confirmation = _assist(client, file_id).json()["confirmations"][0]["id"]
+    return client, store, file_id, operations, confirmation, holder
+
+
+def test_two_concurrent_requests_cannot_both_use_one_confirmation(tmp_path):
+    import threading
+    client, store, file_id, operations, confirmation, holder = _offer(tmp_path)
+    start, replies = threading.Barrier(2), []
+
+    def send():
+        start.wait(10)
+        replies.append(_assist(client, file_id, [confirmation]).json())
+    threads = [threading.Thread(target=send) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(120)
+    assert sorted(len(reply["files"]) for reply in replies) == [0, 1]     # Exactly one exact edit.
+    assert len(store.list("a")) == 2                                       # The upload and one edit.
+
+
+def test_a_provider_failure_after_the_edit_is_stored_does_not_free_the_confirmation(tmp_path):
+    client, store, file_id, operations, confirmation, holder = _offer(tmp_path)
+    holder["model"] = Stateless(file_id, operations, fail_after_tool=True)
+    reply = _assist(client, file_id, [confirmation])
+    assert (reply.status_code, reply.json()) == (502, {"error": "file_assistant_unavailable"})
+    assert len(store.list("a")) == 2                                       # The edit was stored before the failure.
+    holder["model"] = Stateless(file_id, operations)
+    retry = _assist(client, file_id, [confirmation]).json()
+    assert retry["files"] == [] and retry["confirmations"][0]["id"] != confirmation
+    assert len(store.list("a")) == 2                                       # Not applied a second time.
+
+
+@pytest.mark.parametrize("failure", ["cancelled", "storage"])
+def test_a_failed_attempt_consumes_the_confirmation_and_a_retry_needs_a_new_one(tmp_path, monkeypatch, failure):
+    from kalillac_files import worker
+    from kalillac_files.store import QuotaExceeded
+    client, store, file_id, operations, confirmation, holder = _offer(tmp_path)
+    if failure == "cancelled":                       # The worker is killed at its time limit.
+        def killed(*args, **kwargs):
+            raise worker.WorkerError("timeout")
+        monkeypatch.setattr(worker, "run_edit", killed)
+    else:                                            # The account's storage refuses the edited copy.
+        def full(*args, **kwargs):
+            raise QuotaExceeded("storage_quota_exceeded")
+        monkeypatch.setattr(store, "put", full)
+    assert _assist(client, file_id, [confirmation]).json()["files"] == []
+    monkeypatch.undo()
+    retry = _assist(client, file_id, [confirmation]).json()
+    assert retry["files"] == [] and retry["confirmations"][0]["id"] != confirmation
+    assert len(store.list("a")) == 1
+
+
+def test_a_confirmation_stays_bound_to_tracked_mode(tmp_path):
+    client, store, file_id, operations, confirmation, holder = _offer(tmp_path)
+
+    class Tracked(Stateless):
+        def __call__(self, items):
+            if any(item.get("type") == "function_call_output" for item in items):
+                return {"output": DONE}
+            call = _edit_call(self.file_id, self.operations)
+            arguments = json.loads(call[0]["arguments"])
+            call[0]["arguments"] = json.dumps({**arguments, "track_changes": True})
+            return {"output": call}
+    holder["model"] = Tracked(file_id, operations)
+    assert _assist(client, file_id, [confirmation]).json()["files"] == []   # Confirmed untracked, asked tracked.

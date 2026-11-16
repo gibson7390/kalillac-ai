@@ -180,13 +180,13 @@ class FileRequest:
     run_edit: Callable | None = None
     created: list = field(default_factory=list)
     calls: int = 0
-    # Customer confirmations of exact edits, presented with this request: {id: (file id, edit digest)}.
-    # Only the product's interface sends them; the model never sees or chooses one.
-    confirmed: Mapping[str, tuple] = field(default_factory=dict)
+    # claim(file id, edit digest) -> True when a confirmation the customer presented with this request
+    # matched and was atomically consumed by the service (one exact-edit attempt). Only the product's
+    # interface sends confirmations; the model never sees or chooses one.
+    claim: Callable | None = None
     # offer(file id, edit digest) -> confirmation id, minted by the service when a precise edit is refused.
     offer: Callable | None = None
     offered: list = field(default_factory=list)
-    used: set = field(default_factory=set)
 
     def __post_init__(self):
         from . import worker
@@ -315,12 +315,12 @@ def execute(request: FileRequest, name: str, arguments: Mapping[str, Any]):
         # honoured only when the customer confirmed this very edit (same file, operations and mode) in the
         # product, which the service proves with a single-use confirmation it issued.
         digest = edit_digest(file_id, operations, track)
-        confirmation = next((key for key, (confirmed_file, confirmed_digest) in request.confirmed.items()
-                             if confirmed_file == file_id and confirmed_digest == digest and key not in request.used),
-                            None) if exact else None
+        # Claimed before the edit runs, and never given back: one confirmation, one attempt, whatever
+        # happens next (a worker or storage failure, a cancellation, a provider failure after the file is
+        # stored, or a concurrent request presenting the same confirmation). A retry needs a fresh one.
+        confirmed = bool(exact and request.claim is not None and request.claim(file_id, digest))
         try:
-            edited = request.run_edit(data, record.filename, operations, track_changes=track,
-                                      exact=confirmation is not None)
+            edited = request.run_edit(data, record.filename, operations, track_changes=track, exact=confirmed)
         except WorkerError as error:
             if error.code in ("table_total_mismatch", "dependent_figure_unchanged") and request.offer is not None:
                 offered = request.offer(file_id, digest)
@@ -329,8 +329,6 @@ def execute(request: FileRequest, name: str, arguments: Mapping[str, Any]):
                                             "in the product; say which total would no longer add up and offer to "
                                             "update it instead")
             return _refused(error.code)
-        if confirmation is not None:
-            request.used.add(confirmation)
         stored, problem = _store_result(request, edited, "edited", parent=file_id)
         if problem:
             return problem

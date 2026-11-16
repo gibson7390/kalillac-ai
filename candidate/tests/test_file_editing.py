@@ -1019,3 +1019,64 @@ def test_a_restated_total_must_be_restated_wherever_the_document_states_it(propo
     text = accepted(document_xml(edit(proposal, "p.docx", everywhere, track_changes=True).data))
     assert "$186,500" not in text and text.count("$187,500") >= 2
     edit(proposal, "p.docx", table_only, exact=True)                       # The customer's confirmed choice.
+
+
+# --- a stated total is matched as a whole figure (Codex reverification 3, finding 2) ----------------
+
+def _insurance(prose, extra=()):
+    """Codex's reproduction: a sentence with an unrelated figure, and a fee table A $100, B $200, Total $300."""
+    return generate({"title": "Cover", "blocks": [
+        {"type": "paragraph", "text": prose},
+        {"type": "table", "caption": "Fees", "total_row": True, "header": ["Item", "Fee"],
+         "rows": [["A", "$100"], ["B", "$200"], ["Total", "$300"]]}, *extra]}, "docx").data
+
+
+def _restate(data):
+    """Edit A to $200 and the total to $400, leaving the prose alone."""
+    found = outline(data, "c.docx")
+    return [{"op": "set_text", "at": _fee_cell(found, "$100"), "text": "$200"},
+            {"op": "set_text", "at": _fee_cell(found, "$300"), "text": "$400"}]
+
+
+@pytest.mark.parametrize("prose", [
+    "Separate insurance coverage is $3000.",                 # Codex's case: "$300" is inside "$3000".
+    "Separate insurance coverage is $3,000.",
+    "Separate insurance coverage is $1,300.",
+    "Separate insurance coverage is $300.5 a month.",
+    "Separate insurance coverage is $3005.",
+    "Separate insurance coverage is $300K.",
+    "Separate insurance coverage is A$300.",                 # Another currency.
+    "Separate insurance coverage is €300.",
+    "The venue holds 300 seats.",                            # A count, not money.
+    "Reference 300-B applies.",
+])
+def test_an_unrelated_figure_that_contains_the_old_total_does_not_block_the_restatement(prose):
+    data = _insurance(prose)
+    text = document_xml(edit(data, "c.docx", _restate(data)).data)
+    assert "$400" in text and prose.replace("€", "€") in text      # Nothing else changed automatically.
+
+
+@pytest.mark.parametrize("prose", [
+    "The total fee is $300.",
+    "The total fee is $300, payable on signing.",
+    "The total fee is $300.00.",                             # The same figure, formatted differently.
+    "The total fee is $ 300.",
+    "The total fee ($300) is fixed.",
+    "Fees: $300; insurance: $3000.",                         # The stale total beside an unrelated figure.
+])
+def test_the_old_total_left_in_prose_is_still_refused(prose):
+    data = _insurance(prose)
+    assert refused(data, "c.docx", _restate(data)) == "dependent_figure_unchanged"
+    assert refused(data, "c.docx", _restate(data), track_changes=True) == "dependent_figure_unchanged"
+    edit(data, "c.docx", _restate(data), exact=True)                       # The customer's confirmed choice.
+
+
+def test_the_old_total_left_in_another_table_is_still_refused():
+    data = _insurance("Separate insurance coverage is $3000.", extra=[
+        {"type": "table", "caption": "Summary", "header": ["Measure", "Value"],
+         "rows": [["Fees", "$300"], ["Insurance", "$3000"]]}])
+    assert refused(data, "c.docx", _restate(data)) == "dependent_figure_unchanged"
+    found = outline(data, "c.docx")
+    summary = next(u.address for u in found.units if u.kind == "cell" and u.text == "$300"
+                   and u.address != _fee_cell(found, "$300"))
+    edit(data, "c.docx", _restate(data) + [{"op": "set_text", "at": summary, "text": "$400"}])

@@ -134,14 +134,24 @@ class FileService:
                 return key
         return offer
 
-    def _presented(self, owner, confirmations):
-        """{id: (file id, digest)} for the presented ids this owner may use now; anything else is ignored
-        (it authorizes nothing)."""
-        with self.confirmations_lock:
-            now = self.clock()
-            return {key: (value[1], value[2]) for key in dict.fromkeys(confirmations or ())
-                    for value in [self.confirmations.get(key)]
-                    if value is not None and value[0] == owner and value[3] > now}
+    def _claimer(self, owner, presented):
+        """claim(file id, digest): atomically consume one confirmation this owner presented with this
+        request that is bound to exactly that file and edit digest (operations and tracked mode) and not
+        expired. Under the lock, so two requests presenting the same confirmation cannot both claim it;
+        a claimed confirmation is gone before the edit runs and is never restored."""
+        presented = tuple(dict.fromkeys(presented or ()))
+
+        def claim(file_id, digest):
+            with self.confirmations_lock:
+                now = self.clock()
+                for key in presented:
+                    value = self.confirmations.get(key)
+                    if (value is not None and value[0] == owner and value[1] == file_id and value[2] == digest
+                            and value[3] > now):
+                        del self.confirmations[key]
+                        return True
+                return False
+        return claim
 
     async def account(self, request):
         """(account, None) when the caller may use files, else (None, the refusal response)."""
@@ -167,7 +177,7 @@ class FileService:
             file_request = FileRequest(account.owner, self.store, tuple(dict.fromkeys(file_ids)),
                                        run_generate=self.worker.run_generate, run_outline=self.worker.run_outline,
                                        run_edit=self.worker.run_edit,
-                                       confirmed=self._presented(account.owner, confirmations),
+                                       claim=self._claimer(account.owner, confirmations),
                                        offer=self._offer(account.owner))
             def run():
                 with self.request_scope(account):
@@ -183,9 +193,6 @@ class FileService:
             return None, _error(502, "file_assistant_unavailable")
         finally:
             self.assists.release()
-        with self.confirmations_lock:
-            for key in file_request.used:                 # Single use.
-                self.confirmations.pop(key, None)
         content = {"reply": result.text, "files": [record.public() for record in result.files]}
         if result.confirmations:
             content["confirmations"] = list(result.confirmations)

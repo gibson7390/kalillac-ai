@@ -1,8 +1,14 @@
 # Corrections for the Codex audits: evidence for independent verification
 
-**Checkpoint for reverification:** the tag `codex-reverify-2026-11-16` marks the exact commit that
-contains this file in this form (`feat/account-security-d2-change`). It contains every correction
-below and the work stacked after them; nothing in it was changed to make CI pass without investigation.
+**Checkpoints (provenance).** Three different commits have been handed to Codex; they are not the same:
+
+| Checkpoint | Full SHA | What it is |
+|---|---|---|
+| Tag `codex-reverify-2026-11-16` (historical, published, unchanged) | `d3081a96f4fc20d711dbc8d094cab8c576b1bdc1` | The first reverification checkpoint, on `feat/account-security-d2-change`. It predates the corrections for findings A to D. An earlier version of this header said the tag marks "the commit that contains this file in this form"; that was wrong after this file changed, and the tag was never moved. |
+| Second reverification handoff | `53869d73a509df07643e91dde7dff18ba6bbf984` (`feat/account-security-d2-quarantine`) | The checkpoint Codex reviewed on 2026-11-16: A to D corrected, migration 0022's 19 PostgreSQL tests passed independently; the confirmation lifecycle and the prose-total check had defects (below). |
+| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-3` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The corrections for the third reverification findings, stacked on `53869d7`. |
+
+Nothing in any checkpoint was changed to make CI pass without investigation.
 
 Branch `fix/codex-audit-corrections`, stacked on `feat/account-security-d2` (which is on
 `feat/file-controls-v1`). The audited snapshot `6191b53` (`feat/document-quality-v1`) is unchanged.
@@ -68,6 +74,40 @@ prototype evaluated in `docs/DECISION-12-WORD-FINALIZATION.md`, not adopted); Ar
 cross-viewer presentation checks (only Microsoft Word and PowerPoint were available here); broader
 semantic dependencies (derived figures such as growth rates and margins stated in prose and metrics are
 not checked; totals and table totals are).
+
+### Codex's review of `53869d73a509df07643e91dde7dff18ba6bbf984` and the corrections (branch `fix/codex-reverification-3`)
+
+**Independently verified by Codex at `53869d7`:** the original failures of findings A, B, C and D are
+corrected, and migration 0022's 19 PostgreSQL tests passed in Codex's own run. These are not changed here.
+
+**New findings at `53869d7`, now corrected (implemented; awaiting Codex):**
+
+| Finding | Source location (at the current checkpoint) | Original failure (new tests run against the `53869d7` modules, then restored) | Corrected behaviour and regression coverage |
+|---|---|---|---|
+| 1. A confirmation was copied, not claimed, and consumed only after the assistant finished: two concurrent requests could both apply it, and an edit stored before a provider failure (HTTP 502) left it usable for a second edit | `kalillac_files/router.py`: `FileService._claimer` (137), used by `assist` (180); `kalillac_files/assistant.py`: `FileRequest.claim` (186), the claim in `edit_file` (321). The post-run consumption block is removed | Fail on `53869d7`: concurrent replay (both requests applied the edit), provider failure after persistence (the same confirmation applied a second edit), cancellation (worker killed at its time limit; the confirmation stayed usable). Pass on both: storage failure (`53869d7` already consumed it after the worker returned), tracked-mode binding | The service atomically claims (under its lock, deleting it) one presented confirmation bound to the same account, file, operations, tracked mode and an unexpired lifetime, **before** the edit runs; it is never given back. `test_files_router.py`: `test_two_concurrent_requests_cannot_both_use_one_confirmation` (319), `test_a_provider_failure_after_the_edit_is_stored_does_not_free_the_confirmation` (336), `test_a_failed_attempt_consumes_the_confirmation_and_a_retry_needs_a_new_one[cancelled, storage]` (349), `test_a_confirmation_stays_bound_to_tracked_mode` (368); the existing tests for operations, account, expiry and malformed values (246 to 290) are kept |
+| 2. The prose check counted substrings: "$300" was found inside "$3000", so restating a $300 total refused with `dependent_figure_unchanged` | `kalillac_files/editing.py`: `_FIGURE` (1810), `_figure_key` (1814), `_figures` (1825), `_check_restated_totals` (1830) | Codex's case and 4 other boundary cases (`$300.5`, `$3005`, `$300K`, `A$300`) refused on `53869d7`; `$ 300` (a true stale total with a space) was accepted there; a correctly restated second table was refused because "$3000" remained | Figures are matched as complete tokens (never inside a longer number, decimal, thousands group, scaled figure or other currency) and compared by value, currency and scale, so `$300.00` and `$ 300` are the old total and `300 seats` is not. Nothing is changed automatically; the customer's confirmed exact edit still bypasses it. `test_file_editing.py`: `test_an_unrelated_figure_that_contains_the_old_total_does_not_block_the_restatement` (10 cases, 1053), `test_the_old_total_left_in_prose_is_still_refused` (6 cases, tracked and untracked, 1067), `test_the_old_total_left_in_another_table_is_still_refused` (1074) |
+| 3. The evidence header said the tag marks this file's current form | This file's header | The tag resolves to `d3081a96f4fc20d711dbc8d094cab8c576b1bdc1` | The header separates the historical tag, the reviewed checkpoint and the current checkpoint; the published tag is unchanged |
+
+**Retry and idempotency (defined).** One confirmation authorizes exactly one exact-edit attempt. It is
+consumed when the attempt starts, whatever happens next: success, a worker failure or time-limit kill,
+a storage refusal, a provider failure after the edited file was stored, or a concurrent request
+presenting the same confirmation (which then runs as an unconfirmed edit and is refused by the total
+checks, with a fresh offer). A retry therefore never replays the edit silently: it is checked again
+from the start, and if the edit still breaks a total the customer gets a new confirmation to accept.
+If a file was stored before a later failure, it stays in the customer's files (it counts against
+storage and is visible in the file list); the service does not deduplicate or roll it back. Exact
+requests are not idempotent by request key; there is no request key.
+
+The CI runs for the current checkpoint are listed in the handoff (they run on the commit after it
+exists, so this file cannot name them).
+
+**Still open after these corrections, unchanged:**
+
+- **The exact-confirmation interface.** The backend only; the chat interface has no control to accept an offer.
+- **Word finalization.** Pagination and contents (decision 12).
+- **Arabic PDF interoperability.** Ligature order, diacritics, mixed-direction reading order, search and word splitting.
+- **Broader semantic dependencies.** Derived figures such as growth rates and margins stated in prose are not checked; totals and table totals are.
+- **Native and cross-viewer presentation checks.**
 
 ## Findings from the first audit (CODEX-D1 to CODEX-D4)
 
