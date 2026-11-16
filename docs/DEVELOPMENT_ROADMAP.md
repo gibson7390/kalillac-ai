@@ -5,10 +5,13 @@ planned to be true. Update it whenever a milestone's state changes.
 
 States used here, never interchangeable:
 **IMPLEMENTED** (code exists) · **DEVELOPMENT VERIFIED** (passes the required development tests) ·
-**PRODUCTION READY** (deployment prerequisites verified) · **PRODUCTION ACTIVE** (authorized,
-deployed, enabled and verified in production).
+**INTEGRATED** (wired into the application behind its flag) · **STAGING READY** (verified in a
+staging environment) · **OWNER ACCEPTED** (the owner accepted the result) · **PRODUCTION READY**
+(deployment prerequisites verified) · **PRODUCTION ACTIVE** (authorized, deployed, enabled and
+verified in production). A Codex finding is "corrected, awaiting verification" until Codex verifies
+the correction commit; green CI never stands in for that.
 
-Last updated: 2026-11-15 (file assistant integration).
+Last updated: 2026-11-15 (Codex audit corrections, password-reset authority).
 
 ## Production baseline (as stated by the owner, checked against Git where possible)
 
@@ -31,9 +34,12 @@ production migration, live Stripe or customer data.
 | `feat/reasoning-modes-v1` | same worktree | Milestone 4 backend, stacked on the Milestone 1 branch. |
 | `feat/file-generation-v1` | same worktree | Milestone 5 generation and intake cores and the isolated worker, stacked on the Milestone 4 branch. |
 | `feat/document-quality-v1` | same worktree | The document quality system (designed PDF, Word, Excel and PowerPoint output), stacked on the files branch. **Under independent Codex audit (read-only); not changed while the audit runs.** |
-| `feat/file-assistant-v1` | same worktree | **Current development branch.** GPT-6 Luna file generation and editing integrated into the product (default off), stacked on the document-quality branch. |
+| `feat/file-assistant-v1` | same worktree | GPT-6 Luna file generation and editing integrated into the product (default off), stacked on the document-quality branch. |
+| `feat/billing-cases-v1`, `feat/file-controls-v1` | same worktree | Refund and dispute records; file requests under the provider controls; V1-02D D1 and the sign-out authority (0018). |
+| `feat/account-security-d2` | same worktree | The password-reset authority (0019) and the frontend count-gate correction. |
+| `fix/codex-audit-corrections` | same worktree | **Current development branch.** Corrections for both Codex audits; evidence in `docs/CODEX-AUDIT-CORRECTIONS.md`. |
 
-The five branches are a stack: each contains the one before it. The worktree has its own `.venv`
+The branches are a stack: each contains the one before it. The worktree has its own `.venv`
 (ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
 environment was not changed.
 | `product/account-lifecycle-hardening-v1` | `C:/Kalillac/kalillac-ai` | Holds **uncommitted** account work. Not modified. See "Uncommitted account work" below. |
@@ -64,7 +70,7 @@ discarded, or name anything in it that should be kept.
 | 2 | Secure customer accounts | IMPLEMENTED in part, off in production | Gap analysis done; remaining items wait on the V1 slice plan (owner decision 5) |
 | 3 | Stripe billing and subscriptions | IMPLEMENTED in part, off; its suites pass in CI. Refunds and disputes now recorded for operator review (`feat/billing-cases-v1`) | The link to financial scopes and Premium entitlements on the chat request is still missing; `docs/STRIPE_TEST_MODE_SETUP.md` is the test-credential procedure |
 | 4 | Reasoning toggle controls | Backend and chat control DEVELOPMENT VERIFIED, off (page mark and flag); saved preference and paid permissions wait on accounts and billing | `candidate/REASONING_MODES.md` |
-| 5 | File creation, uploads, editing | Generation, intake, editing, the worker, the GPT-6 Luna file assistant, storage, `/api/files` routes and delivery in the chat IMPLEMENTED and DEVELOPMENT VERIFIED behind `KALILLAC_FILES_ENABLED` (default off). **Not owner accepted; not release ready**: owner review found issues, an independent audit is running, and D1-D4 are unresolved (see "Audits") | `candidate/FILE_GENERATION.md` |
+| 5 | File creation, uploads, editing | Generation, intake, editing, the worker, the GPT-6 Luna file assistant, storage, `/api/files` routes and delivery in the chat IMPLEMENTED, DEVELOPMENT VERIFIED and INTEGRATED behind `KALILLAC_FILES_ENABLED` (default off). **Not owner accepted; not release ready**: the Codex findings are corrected but not yet independently verified, two are partly open (Arabic ligature extraction, Word field caches), and the customer workflow is incomplete (see "Audits") | `candidate/FILE_GENERATION.md`, `docs/CODEX-AUDIT-CORRECTIONS.md` |
 | 6 | Spaces and persistent conversations | IMPLEMENTED in part, off | Not yet re-verified in this record |
 | 7 | Owner administration dashboard | Not started | |
 | 8 | Premium product integration | Not started | |
@@ -157,10 +163,18 @@ from the code. See "Owner decisions required".
 * **D2, first part: the sign-out authority, migration 0018** (`211c337`). `v1_end_session` revokes
   exactly the presented session and answers `ended` for every well-formed call. The upgrade proves the
   exact 0014 catalog first and the exact three-function result after; the downgrade proves both ways.
-* **Remaining in D2:** password reset, password change, email verification, quarantine and
-  reinstatement, deletion request, and the operator role P. Password reset fits the existing schema
-  (0012 already reserved the `password_reset` event type and the `recovery` admission class) and
-  needs only column grants to E. Quarantine and email verification need a third identity-guard
+* **D2, second part: the password-reset authority, migration 0019** (`03cbf97`,
+  `feat/account-security-d2`). `v1_reset_password` takes a reset-token digest, an Argon2id hash the
+  caller computed and an operation id; it locks the account then the token, charges the reserved
+  `recovery` admission class with revocation's windows, replaces the hash, clears
+  `password_reset_required`, consumes every open reset token, revokes every session, advances the
+  epoch and records the reserved `password_reset` event at one effective time; replays apply nothing.
+  E gains only the reset's column grants. `v1_schema` classifies the fourth function exactly and
+  `V1Authority.reset_password` calls it. DEVELOPMENT VERIFIED on PostgreSQL 16:
+  `subscription-foundation-verification` `43781961163` (130 V1-02D tests, none skipped) and
+  `provider-ceilings-postgres` `43781963838` (whole chain through 0019).
+* **Remaining in D2:** password change, email verification, quarantine and reinstatement, deletion
+  request, and the operator role P. Quarantine and email verification need a third identity-guard
   version (the guard protects `quarantined_at`, and refuses `email_verified_at` changes once
   registration is active). New audit event types (password change, quarantine, deletion) need the
   0012 event-type constraint and the classifier's exact copy of it to change together.
@@ -326,6 +340,17 @@ artwork; fixed and tested.
 
 ## Audits and owner review
 
+* **Codex audits, findings supplied 2026-11-15** (the first audit's CODEX-D1 to CODEX-D4, and the
+  document-quality audit of `6191b53`). Every correction, with the commit, how the original failure is
+  reproduced, how the correction is verified and its CI run, is in `docs/CODEX-AUDIT-CORRECTIONS.md`.
+  State: CODEX-D1 to D4, the 1904 date system, chart caches, PowerPoint fitting, the About sheet and
+  the benchmark content (Q1, Q4, Q7, Q8, Q10) **corrected, awaiting Codex verification**. Arabic PDF
+  extraction **partly corrected** (letters now exact; ligature order still reversed by PDFium and
+  pypdf). Word page-field caches and the update prompt (Q3): **cause verified in Word, correction
+  waits on an owner decision**. Arabic Word mirroring: **not reproduced in Word**; other viewers
+  unverified. Codex's G1 to G3 (account authorization convergence, paid entitlements, refund and
+  dispute handling) are the Milestone 2 and 3 work below.
+
 * **Owner review of the document-quality benchmark (2026-11-15):** visual results promising, benchmark
   **not accepted**. Observations: financial inconsistencies, Word pagination, tracked editing, Arabic
   text handling, document-content accuracy. An independent, read-only Codex audit of
@@ -338,13 +363,22 @@ artwork; fixed and tested.
   inconsistency the owner observed. The file assistant's instructions now require every derived
   figure to change with its source, and `consistency.py` refuses a total row that does not add up,
   but neither yet checks derived ratios in prose or in an edited document.
-* **D1-D4 from the previous Codex audit:** these defect identifiers are not recorded anywhere in the
-  repository, the worktrees or the handoff logs (the "D" numbers in the account-security handoff logs
-  are architecture decision ids, not these). The owner is asked to supply the list. Until corrected
-  and independently verified, everything they may affect is treated as not release ready and stays
-  unexposed (every file feature is behind `KALILLAC_FILES_ENABLED`, off by default).
+* **D1-D4 from the previous Codex audit:** supplied by the owner on 2026-11-15 (see the first item).
+  Until Codex verifies the corrections, everything they may affect is treated as not release ready and
+  stays unexposed (every file feature is behind `KALILLAC_FILES_ENABLED`, off by default).
 
 ## Known defects and environment limits
+
+* **Arabic PDF ligature order (open):** PDFium (Chrome's viewer) and pypdf reverse the two letters of
+  a required two-letter ligature glyph inside right-to-left runs, so words containing lam-alef or
+  another `rlig` pair are not found by search. Letters are otherwise exact since `dee4831`. Typst's
+  `/ActualText` is not used by PDFium; a different export approach is needed. Clipboard and
+  screen-reader behaviour not yet verified.
+* **Word field caches (open, owner decision 12):** cached `PAGE`/`SECTIONPAGES` results are `1`; Word
+  desktop recalculates them, viewers that do not show stale totals. The contents field is marked
+  dirty, which is what makes Word ask to update fields on opening (verified in Word 16).
+* **Cross-viewer checks unavailable here:** no LibreOffice (installing needs administrator rights), so
+  Word, PowerPoint and Excel output is verified in the Microsoft applications only.
 
 * **Regression found and fixed here:** `feat/file-assistant-v1` (`f43c61c`) and
   `feat/billing-cases-v1` made every unbudgeted chat call pass an explicit `timeout` to
@@ -442,6 +476,16 @@ libraries). It was created during this work, lives outside the repository and ca
 10. Later milestones: subscription price, Stripe product and price IDs, billing interval, trial,
     refund policy, Premium allowances. Nothing has been assumed.
 11. ~~PDF fonts~~: resolved 2026-11-15 (approved); bundled as described under Milestone 5.
+12. **Word contents and page fields** (verified in Word 16; details in `docs/CODEX-AUDIT-CORRECTIONS.md`):
+    (a) keep the dirty contents field: Word asks to update fields on opening, then shows exact page
+    numbers; (b) remove the prompt and ship page numbers from the PDF engine's pagination: no prompt,
+    but some page numbers can be off by one in Word until the reader updates the table (three of
+    eighteen headings in the benchmark); (c) add a pagination engine such as LibreOffice to the
+    worker image (a new dependency, larger worker) and verify it against Word. Recommendation: (b) for
+    business documents if the owner accepts the one-click update, otherwise (a).
+13. **Arabic font:** the PDF now uses IBM Plex Sans Arabic (OFL-1.1) for correct text extraction;
+    Word and PowerPoint still use Noto Sans Arabic. Approve Plex for all three formats (consistent
+    look), or keep the split.
 
 Resolved by the owner on 2026-11-15, recorded so they are not asked again: decision 5 (write the
 V1-02D/E plan from the code, keeping the private database authorities and adding no legacy path),
@@ -456,8 +500,10 @@ and retention rules, and a staging design. Still forbidden: anything in producti
 
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
-1. Codex audit findings on the document-quality work, when supplied: correct each, with tests and a
-   rendered check, on a branch of its own.
+1. Codex findings still open: Arabic PDF ligature order; the Word fields once decision 12 is made;
+   the semantic-editing contract (an explicit dependency plan for restatements and consistency checks
+   of edited documents beyond table totals). Then ask Codex to verify the corrections against
+   `fix/codex-audit-corrections`.
 2. Milestone 2: continue `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md`. D1 and the sign-out authority
    (0018) are implemented; next the rest of D2 (reset, change, verification, quarantine,
    reinstatement, deletion request, role P), then D3 route wiring, D4 the operator tool, and E1 to E3
