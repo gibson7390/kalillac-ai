@@ -1809,17 +1809,20 @@ def _document_text(data, kind):
 # followed by a space, digits with thousands separators and an optional decimal part, an optional K/M/B or
 # bn scale, and an optional closing parenthesis. Never part of a longer number or word: "$300" is not
 # found inside "$3000", "$3,000", "$300.5" or "A$300", and "$100-$300" holds "$100" and "$300" (a range,
-# not a negative). Spaces are ordinary or no-break spaces only, so a figure never spans two lines.
-_GAP = "[ \u00a0]"
+# not a negative). Between the parts, any run of horizontal whitespace the table check accepts there
+# (ordinary, no-break, thin and other spaces, tabs, in any number and mix: Codex reverification of
+# 856d9a5), but never a line or paragraph break, so a figure never spans two lines or two containers
+# (paragraphs, cells and text bodies are joined by line breaks). An ISO code still needs at least one.
+_GAP = "[^\\S\\n\\r\\v\\f\\x1c-\\x1f\\x85\\u2028\\u2029]"
 _FIGURE = re.compile(
     rf"(?<![\w.,$€£¥₹])"
-    rf"(?P<open>\({_GAP}?)?"
-    rf"(?P<sign>[-\u2212\u2013](?P<spaced>{_GAP})?)?"
-    rf"(?P<currency>[$€£¥₹]|[A-Z]{{3}}(?={_GAP}))?{_GAP}?"
+    rf"(?P<open>\({_GAP}*)?"
+    rf"(?P<sign>[-\u2212\u2013](?P<spaced>{_GAP}+)?)?"
+    rf"(?:(?P<currency>[$€£¥₹]|[A-Z]{{3}}(?={_GAP})){_GAP}*)?"
     rf"(?P<number>\d{{1,3}}(?:,\d{{3}})+(?:\.\d+)?|\d+(?:\.\d+)?)"
-    rf"(?:{_GAP}?(?P<scale>[KMB]|bn)(?![A-Za-z]))?"
+    rf"(?:{_GAP}*(?P<scale>[KMB]|bn)(?![A-Za-z]))?"
     rf"(?![\w$€£¥₹])(?!\.\d)(?!,\d)"
-    rf"(?P<close>{_GAP}?\))?")
+    rf"(?P<close>{_GAP}*\))?")
 
 
 def _figure_keys(match):

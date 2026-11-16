@@ -1084,8 +1084,8 @@ def test_the_old_total_left_in_another_table_is_still_refused():
 
 # --- signed, accounting and ISO-currency totals (Codex reverification of c5291b4, R1) ---------------
 
-STYLES = {"signed": lambda n: f"-${n}", "minus": lambda n: f"−${n}", "accounting": lambda n: f"(${n})",
-          "iso": lambda n: f"USD {n}", "iso_no_break": lambda n: f"USD {n}", "positive": lambda n: f"${n}"}
+STYLES = {"signed": lambda n: f"-${n}", "minus": lambda n: f"\u2212${n}", "accounting": lambda n: f"(${n})",
+          "iso": lambda n: f"USD {n}", "iso_no_break": lambda n: f"USD\u00a0{n}", "positive": lambda n: f"${n}"}
 
 
 def _styled(kind, cell, prose):
@@ -1141,11 +1141,11 @@ def test_a_stale_signed_accounting_or_iso_total_is_refused_and_a_full_restatemen
 @pytest.mark.parametrize("kind,tracked", FORMATS)
 @pytest.mark.parametrize("cell_style,prose", [
     ("accounting", "The net result was -$300."),      # The same negative amount, written another way.
-    ("accounting", "The net result was −$300."),
+    ("accounting", "The net result was \u2212$300."),
     ("signed", "The net result was ($300)."),         # Parentheses in prose may be accounting notation.
-    ("signed", "The net result –$300 is final."),  # An en dash may be a minus sign.
+    ("signed", "The net result \u2013$300 is final."),  # An en dash may be a minus sign.
     ("positive", "The total fee ($300) is fixed."),   # ... or punctuation around a positive amount.
-    ("positive", "Fees – $300 in all."),         # A dash before a positive amount.
+    ("positive", "Fees \u2013 $300 in all."),         # A dash before a positive amount.
     ("positive", "Quotes ranged $100-$300."),         # A range, not a negative "-$300".
     ("iso", "The total is USD 300.00."),
 ])
@@ -1166,7 +1166,7 @@ def test_an_amount_that_may_be_the_old_total_is_refused(kind, tracked, cell_styl
     ("iso", "The fee is USD 3000."),
     ("iso", "The fee is USD 300K."),                          # Another scale.
     ("iso", "The venue holds 300 seats."),                    # A count.
-    ("minus", "The loss was −$300.5 per unit."),
+    ("minus", "The loss was \u2212$300.5 per unit."),
 ])
 def test_an_unrelated_signed_or_iso_amount_does_not_block_the_restatement(kind, tracked, cell_style, prose):
     cell = STYLES[cell_style]
@@ -1175,3 +1175,141 @@ def test_an_unrelated_signed_or_iso_amount_does_not_block_the_restatement(kind, 
     options = {"track_changes": True} if tracked else {}
     text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
     assert prose in text                                               # Nothing else changed automatically.
+
+
+# --- repeated and mixed horizontal spaces (Codex reverification of 856d9a5) -------------------------
+
+NB, THIN = "\u00a0", "\u202f"
+SPACED = {
+    "iso_two_spaces": lambda n: f"USD  {n}",                 # Codex's five reproductions.
+    "iso_two_no_break": lambda n: f"USD{NB}{NB}{n}",
+    "signed_two_spaces": lambda n: f"-  ${n}",
+    "currency_two_spaces": lambda n: f"$  {n}",
+    "scale_two_spaces": lambda n: f"${n}  K",
+    "iso_mixed_run": lambda n: f"USD {NB}{THIN} {n}",         # Mixed runs.
+    "accounting_mixed_run": lambda n: f"( {NB}${n}{NB} )",
+    "minus_mixed_run": lambda n: f"\u2212{NB} $ {NB}{n}",
+}
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("style", list(SPACED))
+def test_a_stale_total_with_repeated_spaces_is_refused_and_a_full_restatement_accepted(kind, tracked, style):
+    cell = SPACED[style]
+    name = f"t.{kind}"
+    options = {"track_changes": True} if tracked else {}
+    data = _styled(kind, cell, f"The total is {cell(300)}.")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    everywhere = table_only + [{"op": "replace_text", "find": f"The total is {cell(300)}.",
+                                "replace": f"The total is {cell(400)}.", "expect": 1}]
+    text = _text(edit(data, name, everywhere, **options).data, kind)
+    assert f"The total is {cell(400)}." in text and f"The total is {cell(300)}." not in text
+    edit(data, name, table_only, exact=True, **options)                    # The customer's confirmed choice.
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,summary", [
+    ("iso_two_spaces", f"The total is USD{NB}300."),               # The same amount spaced differently.
+    ("iso_two_no_break", "The total is USD 300.00."),
+    ("scale_two_spaces", "The total is $300K."),
+    ("currency_two_spaces", "The total is $300."),
+    ("signed_two_spaces", "The total is -$300."),
+    ("signed", f"The total is -{NB} {NB}$300."),
+    ("iso", f"The total is USD {NB} 300."),
+    ("accounting", "The total is (  $300  )."),
+])
+def test_the_old_total_spaced_differently_in_the_summary_is_refused(kind, tracked, table, summary):
+    cell = {**STYLES, **SPACED}[table]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, summary)
+    options = {"track_changes": True} if tracked else {}
+    assert refused(data, name, _restated(data, name, cell), **options) == "dependent_figure_unchanged"
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,old_summary,new_summary", [
+    ("iso_two_spaces", "The total is USD 300.", f"The total is USD{NB}400."),   # Restated in another spacing.
+    ("scale_two_spaces", "The total is $300K.", "The total is $400 K."),
+    ("signed_two_spaces", "The total is -$300.", "The total is -  $400."),
+])
+def test_a_restatement_in_another_spacing_is_accepted(kind, tracked, table, old_summary, new_summary):
+    cell = SPACED[table]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, old_summary)
+    options = {"track_changes": True} if tracked else {}
+    everywhere = _restated(data, name, cell) + [{"op": "replace_text", "find": old_summary,
+                                                 "replace": new_summary, "expect": 1}]
+    text = _text(edit(data, name, everywhere, **options).data, kind)
+    assert new_summary in text and old_summary not in text
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,respaced", [
+    ("iso_two_spaces", "USD 300"), ("iso_two_no_break", f"USD{NB}300.00"), ("scale_two_spaces", "$300K"),
+    ("signed_two_spaces", "-$300"), ("accounting_mixed_run", "($300)"),
+])
+def test_respacing_the_total_alone_is_not_a_change_of_total(kind, tracked, table, respaced):
+    """Formatting only: the summary still states the same amount, so nothing is stale."""
+    cell = SPACED[table]
+    name = f"t.{kind}"
+    summary = f"The total is {cell(300)}."
+    data = _styled(kind, cell, summary)
+    options = {"track_changes": True} if tracked else {}
+    found = outline(data, name)
+    total = next(u.address for u in found.units if u.kind == "cell" and u.text == cell(300))
+    text = _text(edit(data, name, [{"op": "set_text", "at": total, "text": respaced}], **options).data, kind)
+    assert summary in text
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,prose", [
+    ("iso_two_spaces", "The fee is EUR  300."),                    # Another currency.
+    ("iso_two_spaces", "The fee is USD  3000."),
+    ("scale_two_spaces", "The fee is $300  M."),                   # Another scale.
+    ("scale_two_spaces", "The fee is $  300."),                    # No scale: another amount.
+    ("signed_two_spaces", f"A deposit of ${NB} 300 is refundable."),  # Positive, not the negative total.
+    ("currency_two_spaces", "The venue holds  300  seats."),       # A count.
+    ("currency_two_spaces", "Insurance is $  3,000  a year."),
+])
+def test_an_unrelated_spaced_amount_does_not_block_the_restatement(kind, tracked, table, prose):
+    cell = SPACED[table]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, prose)
+    options = {"track_changes": True} if tracked else {}
+    text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert prose in text                                               # Nothing else changed automatically.
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+def test_an_amount_is_never_joined_across_paragraphs_points_or_cells(kind, tracked):
+    """A currency code ending one paragraph (or point) and a number starting the next are not "USD 300"."""
+    cell = SPACED["iso_two_spaces"]
+    name = f"t.{kind}"
+    rows = [["A", cell(100)], ["B", cell(200)], ["Total", cell(300)]]
+    first, second = "All prices are in USD", "300 seats remain."
+    if kind == "docx":
+        raw = {"title": "Total test", "blocks": [{"type": "paragraph", "text": first},
+               {"type": "paragraph", "text": second},
+               {"type": "table", "header": ["Item", "Amount"], "total_row": True, "rows": rows}]}
+    else:
+        raw = {"title": "Total test", "slides": [
+            {"layout": "points", "title": "Summary", "points": [first, second]},
+            {"layout": "table", "title": "Breakdown", "total_row": True, "header": ["Item", "Amount"],
+             "rows": rows}]}
+    data = generate(raw, kind).data
+    options = {"track_changes": True} if tracked else {}
+    text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert first in text and second in text
+
+
+def test_horizontal_space_runs_never_cross_a_line():
+    from kalillac_files.editing import _figures
+    assert _figures("USD  300\u00a0\u00a0and\t$ \u00a0300  K") == {(300.0, "USD", ""): 1, (300.0, "$", "K"): 1}
+    # Broken by a line or paragraph break, the parts are separate: a bare number, or a figure without
+    # the currency or scale on the other line.
+    for broken, read in [("USD\n300", (300.0, "", "")), ("USD \n 300", (300.0, "", "")),
+                         ("USD\u2028300", (300.0, "", "")), ("USD\r\n300", (300.0, "", "")),
+                         ("$\n300", (300.0, "", "")), ("$300\nK", (300.0, "$", "")),
+                         ("-\n$300", (300.0, "$", ""))]:
+        assert _figures(broken) == {read: 1}, broken

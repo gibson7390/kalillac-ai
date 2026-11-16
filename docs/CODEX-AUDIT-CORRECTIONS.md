@@ -1,13 +1,14 @@
 # Corrections for the Codex audits: evidence for independent verification
 
-**Checkpoints (provenance).** Four different commits have been handed to Codex; they are not the same:
+**Checkpoints (provenance).** Five different commits have been handed to Codex; they are not the same:
 
 | Checkpoint | Full SHA | What it is |
 |---|---|---|
 | Tag `codex-reverify-2026-11-16` (historical, published, unchanged) | `d3081a96f4fc20d711dbc8d094cab8c576b1bdc1` | The first reverification checkpoint, on `feat/account-security-d2-change`. It predates the corrections for findings A to D. An earlier version of this header said the tag marks "the commit that contains this file in this form"; that was wrong after this file changed, and the tag was never moved. |
 | Second reverification handoff | `53869d73a509df07643e91dde7dff18ba6bbf984` (`feat/account-security-d2-quarantine`) | The checkpoint Codex reviewed on 2026-11-16: A to D corrected, migration 0022's 19 PostgreSQL tests passed independently; the confirmation lifecycle and the prose-total check had defects (below). |
 | Third reverification handoff | `c5291b4a732ec87a72fdbe3c39caebb339ce0452` (`fix/codex-reverification-3`) | Codex verified the confirmation lifecycle and the provenance corrections there, and found regression R1 in the amount matcher (below). |
-| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-4` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The bounded correction of R1, stacked on `c5291b4`. |
+| Fourth reverification handoff | `856d9a53c25f6b3424326cb8d68532112d8b39e7` (`fix/codex-reverification-4`, unchanged) | The R1 correction. Codex verified its original examples and its 30-fail/33-pass comparison, and found that repeated horizontal spaces still escaped the prose matcher (below). |
+| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-5` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The bounded correction of the repeated-space gap, stacked on `856d9a5`. |
 
 Nothing in any checkpoint was changed to make CI pass without investigation.
 
@@ -135,7 +136,9 @@ Ordinary Word (plain and tracked) and PowerPoint edits were therefore accepted w
 | Original failure | Run against the `c5291b4` editor (restored from that commit, then put back): **30 of the 63 new tests fail**. These are all 15 stale-total reproductions (5 styles × DOCX plain, DOCX tracked, PPTX) and the 15 equivalent-representation cases (negative written as `-`, `−`, `()` and `–`, and `USD 300.00`). The 33 others pass on both versions: the positive parenthetical, dash and range cases (which `c5291b4` already matched as `$300`) and the 24 unrelated-amount cases. They guard the new matcher against false refusals |
 | Corrected | All 63 pass. All 12 file suites locally: 920 passed, 1 skipped (`test_memory_limit_stops_the_child`, POSIX-only; Linux CI runs it), 1 expected openpyxl warning |
 
-The CI runs for the current checkpoint are listed in the handoff.
+CI on `856d9a53c25f6b3424326cb8d68532112d8b39e7`: `file-generation-verification` `43818179290` (921
+tests), `subscription-foundation-verification` `43818183401`, `safety-helpfulness-regression`
+`43818187472`, all success (Codex inspected the job logs). They did not cover repeated spaces.
 
 **Still open after this correction, unchanged:**
 - **The exact-confirmation interface:** the backend only.
@@ -144,6 +147,45 @@ The CI runs for the current checkpoint are listed in the handoff.
 - **Broader semantic dependencies:** growth rates and margins in prose.
 - **Native and cross-viewer presentation checks.**
 - **The one-attempt contract:** an output stored before a provider failure stays in the account, without rollback or deduplication.
+
+### Codex's review of `856d9a53c25f6b3424326cb8d68532112d8b39e7` and the repeated-space correction (branch `fix/codex-reverification-5`)
+
+**Independently verified by Codex at `856d9a5`:**
+- The original `-$300`, `($300)` and `USD 300` cases: refused in DOCX plain and tracked, and in PPTX.
+- The 63 R1 regressions: 30 fail and 33 pass on the parent, and all pass on the correction.
+- The `$3000` false-refusal correction and the `$300`, `$300.00` and `$ 300` controls.
+- The confirmation lifecycle: identical source blobs.
+- Provenance.
+
+None of these is changed here: `router.py` and `assistant.py` are untouched, and all 63 R1 cases and the earlier boundary cases are kept and pass.
+
+**Finding (residual R1), now corrected (implemented; awaiting Codex).** The prose matcher allowed one optional space between the parts of an amount, while the table check (`consistency._QUANTITY`) allows any run of whitespace. A total written with repeated spaces lost its currency, sign or scale in prose. Codex's cases, in DOCX plain, DOCX tracked and PPTX:
+- `USD  300`
+- `USD` followed by two U+00A0, then `300`
+- `-  $300`
+- `$  300`
+- `$300  K`
+
+In each, an ordinary edit was accepted with the stale summary left beside the restated table: 15 inconsistent files.
+
+| | |
+|---|---|
+| Source location (at the current checkpoint) | `kalillac_files/editing.py`: the comment from line 1807, `_GAP` (1816), `_FIGURE` (1817) |
+| Correction | Between the parts of an amount (after an opening parenthesis, after a sign, after a currency sign or ISO code, before a scale, before a closing parenthesis), the matcher accepts any run of horizontal whitespace the table check accepts there, in any number and mix: ordinary, no-break, narrow and thin spaces, tabs. That is, every character Python's `\s` matches except line and paragraph separators (`\n`, `\r`, `\v`, `\f`, U+001C to U+001F, U+0085, U+2028, U+2029). Document text joins paragraphs, cells and text bodies with line breaks, so an amount still never spans two lines or two containers. An ISO code still needs at least one space. A spaced sign is still ambiguous (both signs). Ranges, ambiguous parentheses and dashes, whole-token boundaries, and currency, sign and scale distinctions are unchanged. A token can no longer begin with whitespace (the gap after a currency is now inside the optional currency group). Spacing is never stripped or rewritten, nothing is changed automatically, and the confirmation checks are untouched |
+| Regressions (`tests/test_file_editing.py`, each in DOCX plain, DOCX tracked and PPTX) | `test_a_stale_total_with_repeated_spaces_is_refused_and_a_full_restatement_accepted` (1197): Codex's five styles and three mixed runs (`USD` + space, no-break, narrow no-break and space; `(` + space, no-break, `$300`, no-break, space, `)`; `−` + no-break, space, `$`, space, no-break). Each refuses the stale summary, accepts the full restatement and accepts the confirmed exact edit: 24 tests. `test_the_old_total_spaced_differently_in_the_summary_is_refused` (1222): mixed representations between table and summary, 24 tests. `test_a_restatement_in_another_spacing_is_accepted` (1236): 9 tests. `test_respacing_the_total_alone_is_not_a_change_of_total` (1252): formatting-only equivalence, 15 tests. `test_an_unrelated_spaced_amount_does_not_block_the_restatement` (1275): another currency, a larger amount, another scale, no scale, the opposite sign, a count; the text is unchanged; 21 tests. `test_an_amount_is_never_joined_across_paragraphs_points_or_cells` (1285): 3 tests. `test_horizontal_space_runs_never_cross_a_line` (1306): unit test, 1 |
+| Original failure | Run against the `856d9a5` editor (restored from that commit, then put back): **34 of the 97 new tests fail**. All 24 repeated-space reproductions fail (Codex's 15 among them). 9 cases fail where the summary itself uses a repeated or mixed run (`-` + no-break, space, no-break, `$300`; `USD` + space, no-break, space, `300`; `(  $300  )`). The unit test fails. 63 pass on both: summaries with a single space beside a repeated-space table (the parent already read the table cell correctly), restatements, formatting-only changes, unrelated amounts, and the container tests. They guard the change against false refusals and joined containers |
+| Corrected | All 97 pass. All 12 file suites locally: 1017 passed, 1 skipped (`test_memory_limit_stops_the_child`, POSIX-only; Linux CI runs it), 1 expected openpyxl warning. Ruff passes |
+
+The CI runs for the current checkpoint are listed in the handoff.
+
+**Still open after this correction, unchanged:**
+- **The exact-confirmation interface:** the backend only; there is no chat acceptance control.
+- **Word finalization:** page numbers and contents.
+- **Arabic PDF interoperability:** ligatures, diacritics, mixed-direction reading order and search.
+- **Broader semantic dependencies:** growth rates and margins in prose.
+- **Native and cross-viewer presentation checks.**
+- **The one-attempt confirmation contract:** a stored output survives a later provider failure, without rollback or request-key deduplication.
+- **Line breaks inside a paragraph:** a Word or PowerPoint line break inside a paragraph contributes no character to the document text. An amount split by one, such as `USD` at the end of one line and `300` at the start of the next, reads as `USD300`. It is not recognized, so a stale total written across such a line break would not be found. Not reported by Codex and not exercised here; recorded so it is not mistaken for coverage.
 
 ## Findings from the first audit (CODEX-D1 to CODEX-D4)
 
