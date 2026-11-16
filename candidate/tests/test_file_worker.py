@@ -260,3 +260,58 @@ def test_the_application_reaches_files_only_behind_their_flag():
     inside, outside = source[start:end], source[:start] + source[end:]
     assert "from kalillac_files" in inside
     assert "kalillac_files" not in outside.replace("nothing in kalillac_files is imported", "")
+
+
+# A child that reads its whole request, then never finishes on its own.
+# The real class: the child fixture replaces subprocess.Popen with a recording function.
+REAL_POPEN = subprocess.Popen
+SLEEPER = "import time\nsys.stdin.buffer.read()\ntime.sleep(60)\n"
+
+
+@pytest.mark.parametrize("failing", [1, 2])
+def test_a_thread_that_cannot_start_never_leaves_a_child_running(child, monkeypatch, failing):
+    """Codex audit D2: thread.start() failing after Popen, at either position (feeder or collector),
+    must still kill and reap the child, close its pipes and release the concurrency slot."""
+    started = child(SLEEPER)
+    real_start, calls = worker.threading.Thread.start, []
+
+    def start(thread):
+        calls.append(thread)
+        if len(calls) == failing:
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+    monkeypatch.setattr(worker.threading.Thread, "start", start)
+    began = time.monotonic()
+    assert refused(run_generate, DOCUMENT, "pdf", timeout_seconds=30) == "worker_failed"
+    assert time.monotonic() - began < 15                   # Not left to the 30-second time limit.
+    monkeypatch.setattr(worker.threading.Thread, "start", real_start)
+    ((process, _),) = started
+    assert process.returncode is not None                  # Killed and reaped: no zombie, no orphan.
+    assert process.stdin.closed and process.stdout.closed
+    assert len(calls) == failing
+    held = [worker._SLOTS.acquire(blocking=False) for _ in range(worker.MAX_CONCURRENT)]
+    try:
+        assert all(held)                                   # The slot came back.
+    finally:
+        for taken in held:
+            if taken:
+                worker._SLOTS.release()
+
+
+def test_an_interrupted_wait_still_kills_and_reaps_the_child(child, monkeypatch):
+    started = child(SLEEPER)
+    real_wait = REAL_POPEN.wait
+
+    def wait(process, timeout=None):
+        if timeout is not None:
+            raise KeyboardInterrupt
+        return real_wait(process)
+    monkeypatch.setattr(REAL_POPEN, "wait", wait)
+    with pytest.raises(KeyboardInterrupt):
+        run_generate(DOCUMENT, "pdf", timeout_seconds=30)
+    monkeypatch.setattr(REAL_POPEN, "wait", real_wait)
+    ((process, _),) = started
+    assert process.returncode is not None and process.stdout.closed
+    assert all(worker._SLOTS.acquire(blocking=False) for _ in range(worker.MAX_CONCURRENT))
+    for _ in range(worker.MAX_CONCURRENT):
+        worker._SLOTS.release()

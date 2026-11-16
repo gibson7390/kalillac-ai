@@ -136,21 +136,26 @@ def _run(header, payload, timeout_seconds, max_memory_bytes):
                     return
                 chunks.append(chunk)
 
-        threads = [threading.Thread(target=feed, daemon=True), threading.Thread(target=collect, daemon=True)]
-        for thread in threads:
-            thread.start()
+        # From here on the child is always killed and reaped, and both pipes closed, whatever fails:
+        # a thread that cannot start (either position), the wait, or an interruption (Codex audit D2).
+        threads, timed_out, unstarted = [], False, False
         try:
-            process.wait(timeout=timeout_seconds)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            try:
+                for target in (feed, collect):
+                    thread = threading.Thread(target=target, daemon=True)
+                    thread.start()
+                    threads.append(thread)
+            except RuntimeError:
+                unstarted = True                   # "can't start new thread": nothing was waited for.
+            else:
+                try:
+                    process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
         finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            for thread in threads:
-                thread.join(timeout=5)
-            process.stdout.close()
+            _reap(process, threads)
+        if unstarted:
+            raise WorkerError("worker_failed")
         if timed_out:
             raise WorkerError("timeout")
         if state["overflow"]:
@@ -164,6 +169,23 @@ def _run(header, payload, timeout_seconds, max_memory_bytes):
         return reply
     finally:
         _SLOTS.release()
+
+
+def _reap(process, threads):
+    """Kill the child if it still runs, reap it, then release its threads and pipes. Never raises."""
+    try:
+        if process.poll() is None:
+            process.kill()
+    except OSError:
+        pass
+    process.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+    for stream in (process.stdin, process.stdout):
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def run_generate(spec, format, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, max_memory_bytes=MAX_MEMORY_BYTES):
