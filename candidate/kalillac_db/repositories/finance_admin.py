@@ -4,6 +4,8 @@ Used only by tools/finance_ledger_admin.py; no HTTP route reaches this module
 and the application never calls it. Every function runs inside the caller's
 transaction and handles financial and control metadata only.
 
+    read_snapshot   make the caller's transaction one REPEATABLE READ, READ
+                    ONLY snapshot (its first statement);
     verify          recompute every scope and provider bucket from the
                     reservation rows and report each difference;
     summary         exposure, outstanding reservations, latches and
@@ -19,11 +21,19 @@ transaction and handles financial and control metadata only.
 
 Nothing here refunds money on a guess: a reservation whose outcome is unknown
 is always charged in full.
+
+verify and summary compare several reads (reservations, scope buckets,
+provider buckets, latches). Under READ COMMITTED each statement sees the
+latest commit, so a reservation settled between two of those reads appears
+in one and not the other, and a consistent ledger is reported as
+inconsistent (Codex audit D3). On PostgreSQL both therefore refuse to run
+outside a REPEATABLE READ (or SERIALIZABLE), READ ONLY transaction: every read
+then sees the same committed state, and the report can change nothing.
 """
 from datetime import timedelta
 import uuid
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, select, text
 
 from ..models import (FinanceLedgerBucket, FinanceOperatorAction, FinanceProviderBucket, FinanceReservation,
                       FinanceUnsafeLatch)
@@ -36,6 +46,26 @@ SCOPES = ("global", "free", "paid")
 PROVIDERS = ("openai", "brave", "tavily")
 LATCH_REASONS = ("overrun", "bound_exceeded", "headroom_exhausted")
 ZERO = (0, 0, 0)
+
+
+class SnapshotRequired(RuntimeError):
+    """A ledger comparison was attempted outside one stable, read-only snapshot."""
+
+
+def read_snapshot(session):
+    """Make the caller's new transaction a single REPEATABLE READ, READ ONLY snapshot. It must be the
+    transaction's first statement. SQLite (development and tests) has one writer: nothing to set."""
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+
+
+def _require_snapshot(session):
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    isolation, read_only = session.execute(text(
+        "SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')")).one()
+    if isolation not in ("repeatable read", "serializable") or read_only != "on":
+        raise SnapshotRequired("ledger comparisons need one REPEATABLE READ, READ ONLY snapshot")
 
 
 def _expected(session):
@@ -70,7 +100,9 @@ def _actual(session):
 def verify(session):
     """Every bucket that differs from the sum of its reservations, as
     (table, period kind, period start ISO date, name, bucket amounts,
-    reservation amounts). An empty list means the ledger is consistent."""
+    reservation amounts). An empty list means the ledger is consistent.
+    On PostgreSQL it requires read_snapshot() (SnapshotRequired otherwise)."""
+    _require_snapshot(session)
     expected, actual = _expected(session), _actual(session)
     return [(key[0], key[1], key[2].isoformat(), key[3], actual.get(key, ZERO), expected.get(key, ZERO))
             for key in sorted(set(expected) | set(actual), key=lambda k: (k[0], k[1], k[2], k[3]))
@@ -79,7 +111,9 @@ def verify(session):
 
 def summary(session, now, limits=None):
     """A report for the current UTC day and month. `limits` (FinancialLimits)
-    adds each bucket's ceiling when the configuration is available."""
+    adds each bucket's ceiling when the configuration is available. On
+    PostgreSQL it requires read_snapshot() (SnapshotRequired otherwise)."""
+    _require_snapshot(session)
     day = now.date()
     periods = {"day": day, "month": day.replace(day=1)}
     actual = _actual(session)

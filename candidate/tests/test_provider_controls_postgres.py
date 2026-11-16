@@ -1616,7 +1616,64 @@ def test_finance_operator_resolves_a_stranded_reservation_with_application_privi
     assert [a for a in fin.operator_actions(factory) if a["reservation_id"] == stranded["id"]] == [
         dict(action="resolve_stale", scope="free", reason=None, reservation_id=stranded["id"], amount=R)]
     with factory() as session, session.begin():
+        finance_admin.read_snapshot(session)
         mine = {now.date().isoformat(), "2032-07-01"}
+        assert [v for v in finance_admin.verify(session) if v[2] in mine] == []
+
+
+def test_finance_report_reads_one_snapshot_while_spending_commits(app_engine, finance_latches, monkeypatch):
+    """Codex audit D3. A reservation that completes between the report's reads made a consistent
+    ledger look inconsistent under READ COMMITTED. The schedule below commits one complete request
+    (reserve, dispatch, settle) after the reservations are summed and before the buckets are read."""
+    import importlib.util
+    import io
+    import json
+    from sqlalchemy import text as sql
+    from kalillac_db.repositories import finance_admin
+    fin = _fin()
+    now = _when(11, year=2032)
+    mine = {now.date().isoformat(), "2032-11-01"}
+    factory = _ledger(app_engine)
+    service = make_finance_service(factory, fin.finance_config(), now)
+    assert fin.attempt(service, value=fin.model_response(usage=False))["outcome"] == "ok"
+    real_expected, fired = finance_admin._expected, []
+
+    def expected_then_spend(session):
+        summed = real_expected(session)
+        fired.append(fin.attempt(service, value=fin.model_response(usage=False))["outcome"])  # Commits elsewhere.
+        return summed
+    monkeypatch.setattr(finance_admin, "_expected", expected_then_spend)
+
+    # The original failure, reproduced: the same reads under READ COMMITTED disagree.
+    with factory() as session, session.begin():
+        expected, actual = finance_admin._expected(session), finance_admin._actual(session)
+    false = [key for key in set(expected) | set(actual)
+             if key[2].isoformat() in mine and expected.get(key) != actual.get(key)]
+    assert fired == ["ok"] and false, "the schedule must reproduce the inconsistent read"
+    # ...and verify refuses to compare outside a snapshot.
+    with factory() as session, session.begin():
+        with pytest.raises(finance_admin.SnapshotRequired):
+            finance_admin.verify(session)
+
+    # The operator report: one REPEATABLE READ, READ ONLY snapshot, no false violation.
+    spec = importlib.util.spec_from_file_location("finance_ledger_admin_d3", CANDIDATE_DIR / "tools" / "finance_ledger_admin.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    out = io.StringIO()
+    assert tool.run(["report", "--json"], factory=factory, out=out) in (tool.EXIT_OK, tool.EXIT_INCONSISTENT)
+    assert fired == ["ok", "ok"]                       # Spending did commit during the report.
+    printed = out.getvalue()
+    report = json.loads(printed[:printed.rindex("finance_ledger_")])
+    assert [v for v in report["violations"] if v[2] in mine] == []
+    # The snapshot is read-only: the report's transaction cannot write.
+    with factory() as session, session.begin():
+        finance_admin.read_snapshot(session)
+        with pytest.raises(Exception, match="read-only transaction"):
+            session.execute(sql("UPDATE kalillac.finance_ledger_buckets SET reserved_microusd = reserved_microusd"))
+    # Once quiet, the ledger is exactly consistent.
+    monkeypatch.setattr(finance_admin, "_expected", real_expected)
+    with factory() as session, session.begin():
+        finance_admin.read_snapshot(session)
         assert [v for v in finance_admin.verify(session) if v[2] in mine] == []
 
 

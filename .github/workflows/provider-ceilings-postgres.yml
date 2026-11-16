@@ -73,9 +73,9 @@ jobs:
       # A green run must mean every focused test executed: none skipped,
       # failed or errored, and exactly the expected number collected. The
       # release candidate's tests/test_provider_controls_postgres.py collects
-      # 52: the 29 attempt-ceiling and anonymous-allowance tests, 17 Financial
-      # Safeguards ledger tests (migration 0015) and 6 provider-budget,
-      # request-ceiling, operator-reconciliation and migration-guard tests
+      # 53: the 29 attempt-ceiling and anonymous-allowance tests, 17 Financial
+      # Safeguards ledger tests (migration 0015) and 7 provider-budget,
+      # request-ceiling, operator-reconciliation, report-snapshot and migration-guard tests
       # (migration 0016) on the same server.
       - name: Require every focused test to have run
         run: |
@@ -86,7 +86,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 52, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 53, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused PostgreSQL verification did not run completely")
           PY
 

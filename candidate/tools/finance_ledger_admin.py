@@ -10,7 +10,9 @@ Commands (run from the candidate/ directory):
     python tools/finance_ledger_admin.py report [--json]
         Read-only. Exposure against each scope and provider ceiling for the
         current UTC day and month, outstanding reservations, unsafe latches,
-        and a full recomputation of every bucket from the reservation rows.
+        and a full recomputation of every bucket from the reservation rows,
+        all read from one REPEATABLE READ, READ ONLY snapshot, so concurrent
+        spending can never make a consistent ledger look inconsistent.
         Runs with the application's database environment.
 
     python tools/finance_ledger_admin.py resolve-stale --older-than-hours N [--apply]
@@ -100,6 +102,7 @@ def report(factory, as_json, out):
     from kalillac_db.repositories import finance_admin
     limits, state = _limits()
     with factory() as session, session.begin():
+        finance_admin.read_snapshot(session)   # First: every read below sees one committed state.
         _bounded(session)
         data = finance_admin.summary(session, _now(session), limits)
     data["configuration"] = state
