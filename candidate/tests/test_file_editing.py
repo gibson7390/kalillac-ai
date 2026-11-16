@@ -788,7 +788,28 @@ def test_the_benchmark_restatement_is_internally_consistent(word):
     assert f"{(gross / revenue - previous_gross / previous_revenue) * 100:.1f} points" in text  # 2.7 points
     for old, _new in quality_benchmark.RESTATED.values():
         assert old not in text, old
-    assert "show the figures before the restatement" in text
+    assert quality_benchmark.RESTATEMENT_NOTE in text
+
+
+def test_every_chart_that_shows_the_restated_revenue_is_named_in_the_restatement():
+    """Codex reverification, finding C: the line chart's 2026 point is the $18.4M revenue, and the
+    restatement did not say it was stale. Dependants are found from the report's own data: a chart
+    whose values sum to the 2026 revenue, or that plots it as a point (in dollars or millions)."""
+    import quality_benchmark
+    revenue = 18_400_000
+    dependent = []
+    for block in REPORT["blocks"]:
+        if block.get("type") != "chart":
+            continue
+        for series in block["series"]:
+            values = [value for value in series["values"] if value is not None]
+            if sum(values) == revenue or any(value in (revenue, revenue / 1_000_000) for value in values):
+                dependent.append(block.get("title"))
+                break
+    assert None not in dependent and len(dependent) == 3
+    assert set(dependent) == set(quality_benchmark.RESTATEMENT_CHARTS)
+    for title in dependent:
+        assert f"\u201c{title}\u201d" in quality_benchmark.RESTATEMENT_NOTE
 
 
 

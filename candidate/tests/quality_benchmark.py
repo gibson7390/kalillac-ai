@@ -405,6 +405,13 @@ MULTILINGUAL_DOCUMENT = {
 # forecast workbook: revenue is restated after an audit together with every figure that depends on it
 # (growth, gross profit, margin), a paragraph explains why and says which charts still show the figures
 # before the restatement, and a workbook input is changed so every dependent figure is recalculated.
+# Every chart that shows 2026 revenue is an image a text edit cannot redraw, so the restatement names each
+# one: a reader is never shown contradictory figures without being told which are pre-restatement.
+RESTATEMENT_CHARTS = ("Revenue by quarter", "Revenue mix", "Revenue outlook")
+RESTATEMENT_NOTE = ("Figures restated on 14 November 2026 after the year-end audit moved $0.2M of December "
+                    "wholesale revenue into 2026. The charts " + ", ".join(f"\u201c{title}\u201d"
+                                                                      for title in RESTATEMENT_CHARTS[:-1])
+                    + f" and \u201c{RESTATEMENT_CHARTS[-1]}\u201d show the figures before the restatement.")
 RESTATED = {"revenue": ("$18.4M", "$18.6M"), "revenue_thousands": ("18,400", "18,600"),
             "growth_summary": ("grew 23%", "grew 24%"), "growth_metric": ("23% vs 2025", "24% vs 2025"),
             "growth_table": ("+22.7%", "+24.0%"), "gross_profit": ("7,654", "7,854"),
@@ -423,9 +430,7 @@ def report_edit(outline):
         *({"op": "replace_text", "find": old, "replace": new, **({} if key == "revenue" else {"expect": 1})}
           for key, (old, new) in RESTATED.items()),
         {"op": "insert_paragraph", "after": paragraph("2026 was the strongest year"),
-         "text": "Figures restated on 14 November 2026 after the year-end audit moved $0.2M of December wholesale "
-                 "revenue into 2026. The quarterly revenue and revenue mix charts show the figures before the "
-                 "restatement."},
+         "text": RESTATEMENT_NOTE},
         {"op": "replace_text", "find": "strongest", "replace": "strongest and most profitable", "expect": 1},
     ]
 

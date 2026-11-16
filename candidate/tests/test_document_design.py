@@ -65,7 +65,8 @@ REPORT = {
                                            {"title": "Outsource", "items": ["No capital", "Lower margin"]}]},
         {"type": "steps", "items": [{"title": "Secure the site", "text": "Sign the lease."},
                                     {"title": "Order equipment"}, {"title": "Commission"}]},
-        {"type": "chart", "kind": "line", "categories": ["2025", "2026", "2027"],
+        {"type": "chart", "kind": "line", "title": "Revenue outlook", "caption": "Revenue, $ millions.",
+         "categories": ["2025", "2026", "2027"],
          "series": [{"name": "With", "values": [15, 18.4, 20.6]}, {"name": "Without", "values": [15, 18.4, None]}]},
     ],
 }
