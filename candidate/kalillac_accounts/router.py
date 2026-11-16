@@ -17,6 +17,7 @@ import json
 import os
 import re
 from typing import Any, Callable
+import uuid
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -198,12 +199,19 @@ def build_account_router(
     password_gate=None,
     registration_http=None,
     v1_security=None,
+    v1_authority=None,
 ) -> APIRouter:
     """Build the /api/account router.
 
     session_factory returns the SQLAlchemy sessionmaker (tests inject one).
     limiter defaults to an in-process failed-login limiter, correct for the
     current single Uvicorn worker (see rate_limit.py).
+
+    V1 mode is v1_security being set. In V1 mode login creates sessions only
+    through v1_authority (the reviewed issuance authority, as S); without it,
+    login answers 503 and never falls back to the legacy session path. The
+    application's startup gate still refuses V1 mode, and the application
+    passes no authority, so V1 login is reachable only where both are injected.
     """
 
     settings = settings or load_account_settings()
@@ -343,6 +351,9 @@ def build_account_router(
             limiter.record_failure(limit_keys)
             return _error(401, "invalid_credentials")
 
+        if v1_security is not None:
+            return await v1_login(email, password, limit_keys)
+
         token = new_session_token()
         issued_at = now()
 
@@ -402,6 +413,70 @@ def build_account_router(
             content=payload,
             headers={"Cache-Control": "no-store"},
         )
+        set_session_cookie(response, token)
+        return response
+
+    async def v1_login(email: str, password: str, limit_keys) -> JSONResponse:
+        """V1 sign-in (D3). The password is verified here, as before, but
+        nothing is written as the runtime role (no session, no rehash). The
+        session comes only from the issuance authority, which locks the account
+        and re-checks the verified hash and every account state (inactive,
+        unverified, quarantined, deletion requested, reset required) before it
+        inserts one. Refused: 401, no cookie. Unavailable or any unexpected
+        answer: 503, no cookie, and never the legacy path."""
+        from .v1_authority import V1AuthorityUnavailable
+
+        def verify(session: Session):
+            user = get_user_by_email(session, email)
+            # Unknown email still runs Argon2 (dummy hash) for equal timing.
+            password_ok = verify_password(user.password_hash if user else None, password)
+            if user is None or not password_ok:
+                return None
+            return user.id, user.password_hash, _user_json(user)
+
+        try:
+            verified = await password_gate.run(run_in_transaction, verify)
+        except PasswordWorkBusy:
+            limiter.release(limit_keys)
+            return _error(503, "busy")
+        except BaseException:
+            limiter.release(limit_keys)
+            raise
+
+        if verified is None:
+            limiter.record_failure(limit_keys)
+            return _error(401, "invalid_credentials")
+
+        user_id, verified_hash, payload = verified
+        token = new_session_token()
+        try:
+            if v1_authority is None:
+                raise V1AuthorityUnavailable()
+            issued = await run_in_threadpool(
+                lambda: v1_authority.issue_session(
+                    session_id=uuid.uuid4(),
+                    token_hash=hash_session_token(token),
+                    user_id=user_id,
+                    verified_password_hash=verified_hash,
+                    lifetime_days=settings.session_days,
+                )
+            )
+        except V1AuthorityUnavailable:
+            limiter.release(limit_keys)
+            return _error(503, "account_unavailable")
+        except BaseException:
+            limiter.release(limit_keys)
+            raise
+
+        if issued.outcome == "not_authenticated":
+            limiter.record_failure(limit_keys)
+            return _error(401, "invalid_credentials")
+        if issued.outcome != "issued":
+            limiter.release(limit_keys)
+            return _error(503, "account_unavailable")
+
+        limiter.record_success(limit_keys)
+        response = JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
         set_session_cookie(response, token)
         return response
 

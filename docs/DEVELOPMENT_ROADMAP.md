@@ -200,8 +200,15 @@ from the code. See "Owner decisions required".
   `v1_request_deletion` (P) and the customer's `v1_request_own_deletion` (S, proven and admitted as a
   password change is) set `deletion_requested_at`, move the epoch strictly forward, revoke every session
   and record `account_deletion_request` at one effective time; replays apply nothing. E gains UPDATE on
-  the marker only; guard v3 is unchanged. No withdrawal and no erasure (plan, section 4). Implemented and
-  development verified on disposable PostgreSQL 16; CI and Codex review are recorded in the handoff.
+  the marker only; guard v3 is unchanged. No withdrawal and no erasure (plan, section 4). Checkpoint
+  `49540698736f95d9309d4902915a0b4e50f4ca4a`: source reviewed, PostgreSQL CI verified, HTTP login
+  verification pending. Owner acceptance pending.
+* **D3, first route: V1 login** (`feat/account-security-d3-v1-login`, on `4954069`). In V1 mode
+  `POST /api/account/login` verifies the password and takes its session only from `v1_issue_session` as
+  S; a refusal is 401 with no cookie, an unavailable authority 503 with no cookie, never the legacy path.
+  V1-off login and the startup gate are unchanged; the application passes no authority. HTTP tests on
+  disposable PostgreSQL cover sign-in before a deletion request, refusal after either kind of request,
+  overlapping logins and requests, and unavailable authorities. Implemented; awaiting Codex.
 * Then D3 (routes), D4 (operator tool), E1 to E3; erasure after the owner's retention decisions.
 
 ### Milestone 3: Stripe billing (starting point)

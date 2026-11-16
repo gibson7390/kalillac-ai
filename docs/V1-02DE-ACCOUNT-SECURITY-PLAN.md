@@ -113,7 +113,7 @@ only the intended role can call, tampering refused, downgrade refused while its 
 
 | Route | V1 behaviour |
 |---|---|
-| `POST /api/account/login` | Existing gate and password work, then `v1_issue_session` |
+| `POST /api/account/login` | Existing gate and password work, then `v1_issue_session`. **Implemented (D3, first route)**: in V1 mode the route verifies the password and writes nothing as R (no legacy session, no rehash); the session comes only from the authority as S. A refusal is `401 invalid_credentials` with no cookie; an absent or failing authority, or any unexpected answer, is `503 account_unavailable` with no cookie, never the legacy path. V1-off login is unchanged. The application passes no authority and its startup gate still refuses V1 mode, so this is reachable only where both are injected (tests) |
 | `POST /api/account/logout` | `v1_end_session`; same bodyless idempotent contract |
 | `POST /api/account/sessions/revoke-others`, `.../revoke-all` (new) | Exact `{}` body (4096-byte bounded, duplicate and extra keys refused); `200 {"ok":true}`; revoke-all clears the cookie; admission `429 too_many_operations` with `Retry-After`, capacity `503 security_unavailable` |
 | `POST /api/account/recovery/confirm` | `v1_reset_password` |
@@ -202,6 +202,15 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
   - The request is the whole lifecycle: nothing withdraws it (no function clears the marker), reinstatement
     of a quarantined account leaves it in place (sign-in stays refused), and nothing erases or purges an
     account or its data. Erasure is a later checkpoint, after the owner's decisions in section 5.
+  - **Status of 0023 (`49540698736f95d9309d4902915a0b4e50f4ca4a`):** source reviewed, PostgreSQL CI
+    verified, HTTP login verification pending. Owner acceptance pending.
+  - **Why D3's login route was needed for it.** Before D3, `POST /api/account/login` created sessions as R
+    directly, without the deletion check in `v1_issue_session`. Reproduced on the `4954069` router with V1
+    on: after an operator deletion request, correct credentials returned 200 with a cookie and `/me`
+    answered 200. With D3's route the same login is `401` with no cookie and no session row.
+- **Password rehash in V1 mode.** The legacy login rehashes an outdated Argon2 hash as R. V1 login does
+  not: R must not write account state, and the authority compares the exact hash just verified. A
+  rehash path behind an authority is open (it matters only if the hashing parameters change).
 
 ## 5. Account deletion: retention proposal (for the owner's decision)
 
