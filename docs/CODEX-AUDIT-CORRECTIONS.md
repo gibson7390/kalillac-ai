@@ -9,15 +9,16 @@
 | Third reverification handoff | `c5291b4a732ec87a72fdbe3c39caebb339ce0452` (`fix/codex-reverification-3`) | Codex verified the confirmation lifecycle and the provenance corrections there, and found regression R1 in the amount matcher (below). |
 | Fourth reverification handoff | `856d9a53c25f6b3424326cb8d68532112d8b39e7` (`fix/codex-reverification-4`, unchanged) | The R1 correction. Codex verified its original examples and its 30-fail/33-pass comparison, and found that repeated horizontal spaces still escaped the prose matcher (below). |
 | Fifth reverification handoff | `0ea08a8e40bd1c22be4e5166c275640ec7a6d495` (`fix/codex-reverification-5`, unchanged) | The repeated-space correction. Codex verified the 15 repeated-space cases fixed, and found two text-extraction gaps: Word tabs and soft line breaks (below). |
-| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-6` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The bounded correction of the two extraction gaps, stacked on `0ea08a8`. |
+| Sixth reverification handoff (audited; the correction cycle is closed) | `78b7a055994b69aa0462ed47bd9db23de82f9bea` (`fix/codex-reverification-6`, unchanged) | The correction of the two extraction gaps, stacked on `0ea08a8`. Codex independently verified both findings resolved and found no new actionable issues. This record is updated on a separate branch so the audited commit stays as Codex reviewed it. |
 
 Nothing in any checkpoint was changed to make CI pass without investigation.
 
 Branch `fix/codex-audit-corrections`, stacked on `feat/account-security-d2` (which is on
 `feat/file-controls-v1`). The audited snapshot `6191b53` (`feat/document-quality-v1`) is unchanged.
 
-**Nothing here is independently resolved.** Each item is "corrected, awaiting Codex verification"
-until Codex verifies it against the commit named. Green CI is listed as supporting evidence only.
+**Nothing here is independently resolved unless a section records Codex's verification against a
+named commit.** Until then each item is "corrected, awaiting Codex verification". Green CI is listed
+as supporting evidence only, and no item is owner accepted.
 
 How each regression was shown to catch the original defect: the new tests were run against the
 pre-correction source of the changed module (restored from the parent commit, then put back), and
@@ -194,7 +195,7 @@ tests), `subscription-foundation-verification` `43824208279`, `safety-helpfulnes
 
 **Independently verified by Codex at `0ea08a8`:** the original 15 repeated-space cases are fixed. That correction and its 97 tests are kept unchanged; the amount matcher (`_GAP`, `_FIGURE`) is not modified here. `router.py` and `assistant.py` are untouched, so the exact-edit confirmation flow is unchanged.
 
-**Findings at `0ea08a8`, now corrected (implemented; awaiting Codex).** Both are in how the editor extracts text for the prose-total check, not in the matcher.
+**Findings at `0ea08a8`, corrected at `78b7a05`, and independently verified resolved by Codex (see the status table below).** Both are in how the editor extracts text for the prose-total check, not in the matcher.
 
 **1. Word tabs were dropped.**
 - Problem: the accepted-revisions view read only `w:t`. A `w:tab` between `USD` and `300` disappeared, so the checker saw `USD300`, and a table-only restatement to `USD 400` was accepted with the summary still showing `USD<TAB>300`.
@@ -227,7 +228,13 @@ tests), `subscription-foundation-verification` `43824208279`, `safety-helpfulnes
 
 **Known limitation kept for this pass (deliberate).** An amount deliberately split across a line break, such as `USD`, a break, then `300`, now reads as `USD\n300` and is not recognized as `USD 300`, because the matcher never crosses a line. A stale total written that way would not be found. Recognizing amounts split across a line, without joining unrelated lines (the false refusal above), is open.
 
-The CI runs for the current checkpoint are listed in the handoff.
+**Status after Codex's independent verification of `78b7a055994b69aa0462ed47bd9db23de82f9bea` (2026-11-16).** Codex reran the 12 targeted cases: 9 failed on the parent `0ea08a8` and all 12 passed on the fix. Codex also confirmed with independently built Word and PowerPoint files that the original failures are corrected, and found no new actionable issues. The correction cycle for the prose-total check is closed.
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| 1. Word tabs dropped | yes | `file-generation-verification` `43830666258` (1030 tests, none skipped), `subscription-foundation-verification` `43830672198`, `safety-helpfulness-regression` `43830677857` (820 tests), all success on `78b7a055994b69aa0462ed47bd9db23de82f9bea` | **Resolved** (Codex, at `78b7a05`) | no (pending) |
+| 2. Soft line breaks dropped (Word and PowerPoint) | yes | the same three runs | **Resolved** (Codex, at `78b7a05`) | no (pending) |
+| Amounts split across a line break | not addressed (deliberate) | n/a | documented limitation | no |
 
 **Still open after this correction:**
 - **The exact-confirmation interface:** the backend only; there is no chat acceptance control.
