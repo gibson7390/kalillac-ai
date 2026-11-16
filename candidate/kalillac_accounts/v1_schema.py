@@ -216,6 +216,19 @@ EXECUTOR_COLUMN_GRANTS_V3 = {**EXECUTOR_COLUMN_GRANTS_V2,
                                                                      "expires_at", "consumed_at"),
                              ("account_recovery_tokens", "UPDATE"): ("consumed_at",)}
 
+# 0020: the private password-change authority (V1-02D). E's grants are unchanged; the audit event
+# types gain 'password_change', so the event-type constraint is compared against this list once the
+# function is installed.
+CHANGE_PASSWORD_FUNCTION = "v1_change_password"
+CHANGE_PASSWORD_SIGNATURE = "kalillac.v1_change_password(uuid,uuid,text,text,text)"
+CHANGE_PASSWORD_DEFINITION = ("p_operation_id uuid, p_session_id uuid, p_token_hash text, p_verified_password_hash text,"
+                              " p_new_password_hash text",
+                              "TABLE(outcome text, retry_after_seconds integer, replayed boolean)", "plpgsql", "v",
+                              True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+CHANGE_PASSWORD_SOURCE_SHA256 = "c5ba098f557793c78cadeddcef450665261cdcbc0bdadc1fd84f38e287ad1fd6"
+EVENT_TYPES = ("session_revoke_others", "session_revoke_all", "password_reset")
+EVENT_TYPES_V2 = EVENT_TYPES + ("password_change",)
+
 
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
@@ -263,13 +276,16 @@ def classify(session) -> str:
     roles = _security_roles()
     installed = {r[0] for r in _rows(session, """SELECT p.proname FROM pg_proc p JOIN pg_namespace n
         ON n.oid=p.pronamespace WHERE n.nspname='kalillac' AND p.proname=ANY(:f)""",
-        f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION, RESET_PASSWORD_FUNCTION])}
+        f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION, RESET_PASSWORD_FUNCTION,
+           CHANGE_PASSWORD_FUNCTION])}
     revocation, issuance = REVOCATION_FUNCTION in installed, ISSUANCE_FUNCTION in installed
     ending, resetting = END_SESSION_FUNCTION in installed, RESET_PASSWORD_FUNCTION in installed
-    _require((revocation or not issuance) and (issuance or not ending) and (ending or not resetting))
-    owner = _catalog(session, roles, revocation, issuance, ending, resetting)
+    changing = CHANGE_PASSWORD_FUNCTION in installed
+    _require((revocation or not issuance) and (issuance or not ending) and (ending or not resetting)
+             and (resetting or not changing))
+    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing)
     principals = _authority(session, owner)
-    _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting)
+    _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting, changing)
     # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
     from .registration_schema import EPOCH_ADVANCE
     guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -292,7 +308,7 @@ def _security_roles():
         raise V1SchemaRefused("authority_roles_unconfigured") from None
 
 
-def _catalog(session, roles, revocation, issuance, ending=False, resetting=False) -> str:
+def _catalog(session, roles, revocation, issuance, ending=False, resetting=False, changing=False) -> str:
     """Exact definitions of every 0012 object, not names; returns their owner."""
     executor = roles[1]
     # Permanent ordinary tables (never UNLOGGED, temporary, partitioned, typed or
@@ -340,8 +356,12 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
         WHERE c.contype<>'n' AND ((n.nspname='kalillac' AND t.relname=ANY(:t))
         OR (fn.nspname='kalillac' AND f.relname=ANY(:t)))""", t=list(TABLES)):
         constraints.setdefault(table, {})[name] = (kind, definition, tuple(flags), index, index_schema)
+    expected_constraints = {table: dict(specs) for table, specs in CONSTRAINTS.items()}
+    if changing:                      # 0020 widened the audit event types.
+        expected_constraints["account_security_events"]["ck_account_security_events_type"] = (
+            "c", _among("event_type", EVENT_TYPES_V2))
     _require(constraints == {table: {name: _expected_constraint(name, *spec) for name, spec in specs.items()}
-                             for table, specs in CONSTRAINTS.items()})
+                             for table, specs in expected_constraints.items()})
     # Every index: method, key columns and order, no expression or predicate,
     # validity and readiness, and PostgreSQL's own rendering of the remainder.
     indexes = {}
@@ -368,6 +388,7 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
     _require(triggers == TRIGGERS and functions == FUNCTIONS | ({REVOCATION_FUNCTION} if revocation else set())
              | ({ISSUANCE_FUNCTION} if issuance else set()) | ({END_SESSION_FUNCTION} if ending else set())
              | ({RESET_PASSWORD_FUNCTION} if resetting else set())
+             | ({CHANGE_PASSWORD_FUNCTION} if changing else set())
              and not rules and not events)
     # No bridge, in any schema. A view runs with its owner's rights and a rule
     # action with its table owner's, so a view or rule over protected state
@@ -419,7 +440,8 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
                      WHERE has_column_privilege(o.oid,'kalillac.users',c,r)))""",
         g=[*REVIEWED_GUARDS, *([REVOCATION_SIGNATURE] if revocation else []),
            *([ISSUANCE_SIGNATURE] if issuance else []), *([END_SESSION_SIGNATURE] if ending else []),
-           *([RESET_PASSWORD_SIGNATURE] if resetting else [])],
+           *([RESET_PASSWORD_SIGNATURE] if resetting else []),
+           *([CHANGE_PASSWORD_SIGNATURE] if changing else [])],
         t=list(TABLES),
         w=list(WRITE_RIGHTS), c=list(USER_COLUMNS))
     _require(not bridges and not definers)
@@ -493,7 +515,7 @@ def _authority(session, owner) -> None:
 
 
 def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False,
-                         resetting=False) -> None:
+                         resetting=False, changing=False) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
     edge, and no ownership, grant or default privilege but 0013's, or 0014's,
     exact set.
@@ -537,6 +559,8 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         expected[END_SESSION_FUNCTION] = (END_SESSION_DEFINITION, END_SESSION_SOURCE_SHA256)
     if resetting:
         expected[RESET_PASSWORD_FUNCTION] = (RESET_PASSWORD_DEFINITION, RESET_PASSWORD_SOURCE_SHA256)
+    if changing:
+        expected[CHANGE_PASSWORD_FUNCTION] = (CHANGE_PASSWORD_DEFINITION, CHANGE_PASSWORD_SOURCE_SHA256)
     functions = []
     for name, (declared, digest) in expected.items():
         definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),

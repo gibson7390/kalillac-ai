@@ -54,7 +54,7 @@ def _render(revisions, downgrade=False):
 def test_0013_sits_directly_after_0012_and_below_0014():
     script = ScriptDirectory.from_config(_config())
     # 0014 (V1-02C) is directly above this revision; the sign-out authority (0018) is the head.
-    assert script.get_heads() == ["0019_v1_password_reset"]
+    assert script.get_heads() == ["0020_v1_password_change"]
     assert script.get_revision("0014_v1_session_issuance").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()

@@ -1,6 +1,7 @@
 """0019, the private password-reset authority (V1-02D, D2 second part), on real disposable PostgreSQL 16.
 
-The world stands on the head revision. S stays NOLOGIN here: it is exercised through SET LOCAL ROLE
+The world stands on the head revision (0020 keeps 0019's function unchanged); tests of 0019's own
+downgrade first step down to 0019. S stays NOLOGIN here: it is exercised through SET LOCAL ROLE
 from the disposable superuser, which also seeds fixtures and tampers with the catalog. Every password
 hash and token is synthetic; tokens are stored only as their digests, as the application stores them.
 """
@@ -271,6 +272,7 @@ def test_downgrade_and_upgrade_restore_the_exact_catalogs(world):
 ])
 def test_a_tampered_catalog_is_refused_by_startup_and_by_the_downgrade(world, tamper):
     w = world
+    migrate(w, HEAD, down=True)                  # 0019's own downgrade; 0020's is tested with 0020.
     admin_sql(w, tamper.format(**w.names))
     refused(w)
     with pytest.raises(DBAPIError, match="V1_PASSWORD_RESET_POSTCONDITION_INVALID"):

@@ -49,6 +49,8 @@ REVOKE_OUTCOMES = frozenset({"revoked", "not_authenticated", "account_unavailabl
 REVOKE_SCOPES = ("others", "all")
 RESET_OUTCOMES = frozenset({"reset", "invalid_token", "account_unavailable", "too_many_operations",
                             "security_unavailable"})
+CHANGE_OUTCOMES = frozenset({"changed", "not_authenticated", "account_unavailable", "too_many_operations",
+                             "security_unavailable"})
 
 # The only statements this module sends as S, besides its fixed transaction settings and identity and
 # catalog checks. Function arguments are bound, never interpolated.
@@ -56,6 +58,8 @@ _ISSUE = "SELECT outcome, issued_at, valid_until, replayed FROM kalillac.v1_issu
 _REVOKE = "SELECT outcome, retry_after_seconds, replayed FROM kalillac.v1_revoke_sessions(:o, :s, :t, :c)"
 _END = "SELECT outcome FROM kalillac.v1_end_session(:s, :t)"
 _RESET = "SELECT outcome, retry_after_seconds, replayed FROM kalillac.v1_reset_password(:o, :t, :h)"
+_CHANGE = ("SELECT outcome, retry_after_seconds, replayed"
+           " FROM kalillac.v1_change_password(:o, :s, :t, :v, :h)")
 # The Argon2id encoding the application's hasher produces; the function re-checks the same shape.
 _ARGON2ID = re.compile(r"\$argon2id\$v=19\$m=[0-9]{1,10},t=[0-9]{1,10},p=[0-9]{1,3}\$[A-Za-z0-9+/]{11,}"
                        r"\$[A-Za-z0-9+/]{16,}")
@@ -85,6 +89,13 @@ class SessionsRevoked:
 
 
 @dataclass(frozen=True)
+class PasswordChanged:
+    outcome: str                       # changed | not_authenticated | account_unavailable | too_many_operations | security_unavailable
+    retry_after_seconds: int | None    # only with too_many_operations
+    replayed: bool
+
+
+@dataclass(frozen=True)
 class PasswordReset:
     outcome: str                       # reset | invalid_token | account_unavailable | too_many_operations | security_unavailable
     retry_after_seconds: int | None    # only with too_many_operations
@@ -93,13 +104,15 @@ class PasswordReset:
 
 def _reviewed_functions():
     """{signature: SHA-256 of the reviewed body} for the authorities S may execute at this release's
-    head (0019): revocation v2, issuance, sign-out and password reset."""
-    from .v1_schema import (END_SESSION_SIGNATURE, END_SESSION_SOURCE_SHA256, ISSUANCE_SIGNATURE,
-                            ISSUANCE_SOURCE_SHA256, RESET_PASSWORD_SIGNATURE, RESET_PASSWORD_SOURCE_SHA256,
-                            REVOCATION_SIGNATURE, REVOCATION_SOURCE_SHA256_V2)
+    head (0020): revocation v2, issuance, sign-out, password reset and password change."""
+    from .v1_schema import (CHANGE_PASSWORD_SIGNATURE, CHANGE_PASSWORD_SOURCE_SHA256, END_SESSION_SIGNATURE,
+                            END_SESSION_SOURCE_SHA256, ISSUANCE_SIGNATURE, ISSUANCE_SOURCE_SHA256,
+                            RESET_PASSWORD_SIGNATURE, RESET_PASSWORD_SOURCE_SHA256, REVOCATION_SIGNATURE,
+                            REVOCATION_SOURCE_SHA256_V2)
     return {REVOCATION_SIGNATURE: REVOCATION_SOURCE_SHA256_V2, ISSUANCE_SIGNATURE: ISSUANCE_SOURCE_SHA256,
             END_SESSION_SIGNATURE: END_SESSION_SOURCE_SHA256,
-            RESET_PASSWORD_SIGNATURE: RESET_PASSWORD_SOURCE_SHA256}
+            RESET_PASSWORD_SIGNATURE: RESET_PASSWORD_SOURCE_SHA256,
+            CHANGE_PASSWORD_SIGNATURE: CHANGE_PASSWORD_SOURCE_SHA256}
 
 
 def parse_service_credential(raw, *, role, database_instance_id, deployment_id, forbidden_passwords=()):
@@ -304,6 +317,34 @@ class V1Authority:
             if replayed and outcome != "reset":
                 raise V1AuthorityUnavailable()
             return PasswordReset(outcome, retry_after, replayed)
+
+    def change_password(self, *, operation_id, session_id, token_hash, verified_password_hash, new_password_hash):
+        """A signed-in customer's password change, proven by the exact original session and the stored hash
+        the caller has just verified the current password against. Every other session ends; this one
+        stays. The new password itself never reaches this module, only its Argon2id hash."""
+        from sqlalchemy import text
+        if (type(operation_id) is not uuid.UUID or type(session_id) is not uuid.UUID
+                or type(token_hash) is not str or not _TOKEN_HASH.fullmatch(token_hash)
+                or type(verified_password_hash) is not str or not verified_password_hash
+                or len(verified_password_hash) > 255 or type(new_password_hash) is not str
+                or len(new_password_hash) > 255 or not _ARGON2ID.fullmatch(new_password_hash)):
+            raise V1AuthorityUnavailable()
+        with self._transaction() as session:
+            found = session.execute(text(_CHANGE), {"o": operation_id, "s": session_id, "t": token_hash,
+                                                    "v": verified_password_hash, "h": new_password_hash}).all()
+            if len(found) != 1:
+                raise V1AuthorityUnavailable()
+            outcome, retry_after, replayed = found[0]
+            if outcome not in CHANGE_OUTCOMES or type(replayed) is not bool:
+                raise V1AuthorityUnavailable()
+            if outcome == "too_many_operations":
+                if type(retry_after) is not int or retry_after < 1:
+                    raise V1AuthorityUnavailable()
+            elif retry_after is not None:
+                raise V1AuthorityUnavailable()
+            if replayed and outcome != "changed":
+                raise V1AuthorityUnavailable()
+            return PasswordChanged(outcome, retry_after, replayed)
 
     def revoke_sessions(self, *, operation_id, session_id, token_hash, scope):
         """Revoke the account's other sessions, or all of them, proven by the exact original session."""

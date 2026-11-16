@@ -148,6 +148,8 @@ def test_a_wrong_credential_is_refused(world, changes):
      "GRANT EXECUTE ON FUNCTION kalillac.v1_end_session(uuid,text) TO {service}"),
     ("REVOKE EXECUTE ON FUNCTION kalillac.v1_reset_password(uuid,text,text) FROM {service}",
      "GRANT EXECUTE ON FUNCTION kalillac.v1_reset_password(uuid,text,text) TO {service}"),
+    ("REVOKE EXECUTE ON FUNCTION kalillac.v1_change_password(uuid,uuid,text,text,text) FROM {service}",
+     "GRANT EXECUTE ON FUNCTION kalillac.v1_change_password(uuid,uuid,text,text,text) TO {service}"),
     ("GRANT SELECT (token_hash) ON kalillac.account_recovery_tokens TO {service}",
      "REVOKE SELECT (token_hash) ON kalillac.account_recovery_tokens FROM {service}"),
 ])
@@ -248,3 +250,24 @@ def test_s_completes_a_password_reset_through_its_own_login(world):
     unknown = authority.reset_password(operation_id=uuid.uuid4(), token_hash=secrets.token_hex(32),
                                        new_password_hash=new_hash())
     assert (unknown.outcome, unknown.retry_after_seconds, unknown.replayed) == ("invalid_token", None, False)
+
+
+
+def test_s_changes_a_password_through_its_own_login(world):
+    w = world
+    from test_v1_password_reset_postgres import new_hash, stored
+    authority = build(w)
+    user, old = account(w)
+    mine, other = key(), key()
+    for k in (mine, other):
+        authority.issue_session(session_id=k[0], token_hash=k[1], user_id=user, verified_password_hash=old,
+                                lifetime_days=14)
+    operation, hashed = uuid.uuid4(), new_hash()
+    done = authority.change_password(operation_id=operation, session_id=mine[0], token_hash=mine[1],
+                                     verified_password_hash=old, new_password_hash=hashed)
+    assert (done.outcome, done.retry_after_seconds, done.replayed) == ("changed", None, False)
+    assert stored(w, user)[0] == hashed
+    assert {row[0]: row[4] is None for row in sessions(w, user)} == {mine[0]: True, other[0]: False}
+    stale = authority.change_password(operation_id=uuid.uuid4(), session_id=mine[0], token_hash=mine[1],
+                                      verified_password_hash=old, new_password_hash=new_hash())
+    assert (stale.outcome, stale.replayed) == ("not_authenticated", False) and stored(w, user)[0] == hashed
