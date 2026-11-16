@@ -90,16 +90,21 @@ and the Word output was not changed.
 
 ### Content findings (Q1, Q4, Q7, Q8, Q10)
 
-Corrected in `e92583d`, with tests that reconcile each item from the fixture data: the revenue mix now
+Corrected in `e92583d` (`file-generation-verification` `43788689617` success, 810 tests, none skipped), with tests that reconcile each item from the fixture data: the revenue mix now
 sums to the income statement's $18.4M; a breakdown's shown parts always add up to its shown total
 (one rounding policy, nothing nudged); the research report is dated after its complete follow-up;
 the proposal states its start date, and its offer expires before that date; the executive review has
 no code; the tracked restatement changes every dependent figure and states which charts show
 pre-restatement figures.
 
-Still open, from Codex's architecture recommendation: a semantic-editing contract in the editing API
-(an explicit dependency plan for restatements, and consistency validation of edited documents beyond
-table totals), and shared typed facts feeding tables, metrics, charts and prose.
+Semantic editing, first part (`888293e`, on `feat/account-security-d2-change`, stacked on this branch):
+a Word or PowerPoint edit may not leave a total row that added up no longer adding up; it is refused
+with `table_total_mismatch` unless the customer explicitly asked for exactly that change
+(`edit(..., exact=True)`, the assistant's `edit_file` "exact" flag). Tables already inconsistent in the
+upload never block an edit. Regression tests in `test_file_editing.py` and `test_file_worker.py`. `file-generation-verification` `43790147001` success (814 tests, none skipped).
+
+Still open, from Codex's architecture recommendation: dependency checks for figures stated in prose
+and metrics, and shared typed facts feeding tables, metrics, charts and prose.
 
 ## Reproducing locally
 

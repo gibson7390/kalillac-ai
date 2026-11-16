@@ -37,7 +37,8 @@ production migration, live Stripe or customer data.
 | `feat/file-assistant-v1` | same worktree | GPT-6 Luna file generation and editing integrated into the product (default off), stacked on the document-quality branch. |
 | `feat/billing-cases-v1`, `feat/file-controls-v1` | same worktree | Refund and dispute records; file requests under the provider controls; V1-02D D1 and the sign-out authority (0018). |
 | `feat/account-security-d2` | same worktree | The password-reset authority (0019) and the frontend count-gate correction. |
-| `fix/codex-audit-corrections` | same worktree | **Current development branch.** Corrections for both Codex audits; evidence in `docs/CODEX-AUDIT-CORRECTIONS.md`. |
+| `fix/codex-audit-corrections` | same worktree | Corrections for both Codex audits; evidence in `docs/CODEX-AUDIT-CORRECTIONS.md`. |
+| `feat/account-security-d2-change` | same worktree | **Current development branch.** The password-change authority (0020), and the total-row rule for edited documents (Codex Q4). |
 
 The branches are a stack: each contains the one before it. The worktree has its own `.venv`
 (ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
@@ -173,8 +174,19 @@ from the code. See "Owner decisions required".
   `V1Authority.reset_password` calls it. DEVELOPMENT VERIFIED on PostgreSQL 16:
   `subscription-foundation-verification` `43781961163` (130 V1-02D tests, none skipped) and
   `provider-ceilings-postgres` `43781963838` (whole chain through 0019).
-* **Remaining in D2:** password change, email verification, quarantine and reinstatement, deletion
-  request, and the operator role P. Quarantine and email verification need a third identity-guard
+* **D2, third part: the password-change authority, migration 0020** (`00197bf`,
+  `feat/account-security-d2-change`). `v1_change_password` is proven by the exact original session
+  (revocation's own proof and lock order) and the stored hash the caller has just verified, charges the
+  customer's `manual` admission budget, replaces the hash, ends every other session and keeps the
+  presented one, and records a new `password_change` event (0012's event-type constraint widened in the
+  same migration; the downgrade refuses while such an event exists). The epoch does not move (plan,
+  section 4). `provider-ceilings-postgres` `43789685681` success (chain through 0020); the 176-test V1-02D
+  group passed in `subscription-foundation-verification` `43789681911` (none skipped). DEVELOPMENT VERIFIED.
+* **Remaining in D2:** quarantine and reinstatement (need identity guard v3, which also changes the
+  trusted guard definitions the registration startup checks), deletion request, and the operator role
+  P. Email verification probably needs no V1 authority: after registration activation the guard
+  forbids any `email_verified_at` change and every account is verified by its registration intent
+  (plan, section 4; owner decision 14). Quarantine and email verification need a third identity-guard
   version (the guard protects `quarantined_at`, and refuses `email_verified_at` changes once
   registration is active). New audit event types (password change, quarantine, deletion) need the
   0012 event-type constraint and the classifier's exact copy of it to change together.
@@ -486,6 +498,9 @@ libraries). It was created during this work, lives outside the repository and ca
 13. **Arabic font:** the PDF now uses IBM Plex Sans Arabic (OFL-1.1) for correct text extraction;
     Word and PowerPoint still use Noto Sans Arabic. Approve Plex for all three formats (consistent
     look), or keep the split.
+14. **Email verification under V1:** confirm that `v1_verify_email` can be dropped (after registration
+    activation no account is unverified and the guard forbids the change), with the legacy verification
+    route retired in E1.
 
 Resolved by the owner on 2026-11-15, recorded so they are not asked again: decision 5 (write the
 V1-02D/E plan from the code, keeping the private database authorities and adding no legacy path),
@@ -501,9 +516,9 @@ and retention rules, and a staging design. Still forbidden: anything in producti
 In this order; each is independent of the open owner decisions unless it says otherwise.
 
 1. Codex findings still open: Arabic PDF ligature order; the Word fields once decision 12 is made;
-   the semantic-editing contract (an explicit dependency plan for restatements and consistency checks
-   of edited documents beyond table totals). Then ask Codex to verify the corrections against
-   `fix/codex-audit-corrections`.
+   the rest of the semantic-editing contract (dependency checks for figures in prose and metrics, and
+   typed facts shared by tables, charts and text; total rows are enforced on edits since `888293e`).
+   Then ask Codex to verify the corrections against `fix/codex-audit-corrections` and `888293e`.
 2. Milestone 2: continue `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md`. D1 and the sign-out authority
    (0018) are implemented; next the rest of D2 (reset, change, verification, quarantine,
    reinstatement, deletion request, role P), then D3 route wiring, D4 the operator tool, and E1 to E3

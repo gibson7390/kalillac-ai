@@ -49,8 +49,8 @@ operation ids, admission where the contract requires it, and an audit event in t
 | Function | Effect |
 |---|---|
 | `v1_end_session(session, token_hash)` | Logout: revoke exactly the presented session; idempotent. **Implemented, migration 0018**: answers `ended` for every well-formed call, writes no audit event (sign-out is not an audited V1 operation), locks only the session row |
-| `v1_reset_password(token_hash, new_hash, op)` | Recovery completion: lock and re-check the token, replace the hash, invalidate every reset token, revoke every session, advance the epoch, clear `password_reset_required` (only here), audit |
-| `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, advance the epoch, audit |
+| `v1_reset_password(token_hash, new_hash, op)` | Recovery completion: lock and re-check the token, replace the hash, invalidate every reset token, revoke every session, advance the epoch, clear `password_reset_required` (only here), audit. **Implemented, migration 0019** (`recovery` admission class) |
+| `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, audit. **Implemented, migration 0020** (`manual` admission class; new `password_change` event type). The epoch does not move (see section 4) |
 | `v1_verify_email(token_hash, op)` | Email verification completion under the account lock |
 | `v1_quarantine(account, reason, op)`, `v1_reinstate(account, op)` | Operator suspension and reinstatement: quarantine revokes every session and advances the epoch; reinstatement never happens as a side effect of anything else |
 | `v1_request_deletion(account, op)` | Sets the deletion marker, revokes every session, advances the epoch; erasure itself follows the retention rules (section 5) |
@@ -113,6 +113,23 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
 - **Password change.** The V1 contract lists password change as an optional post-launch item (H1, "no
   optional password-change API" in V1). The owner's 2026-11-15 directive asks for it; it is built
   default off as above and needs no other V1 item to change.
+- **Password change does not advance the epoch.** The earlier line in D2 said it would, but advancing
+  the epoch ends every session created before it, including the presenter's, which the change must keep.
+  Revoking the other sessions is exactly revocation's `others` scope, which also leaves the epoch alone;
+  and a sign-in with the old password that is still in flight cannot create a session afterwards,
+  because issuance re-checks the stored hash under the account lock the change holds.
+- **Email verification may need no V1 authority (to confirm with the owner).** The identity guard (0011,
+  kept by 0014) refuses any change to `email_verified_at` once registration activation is no longer
+  `unactivated`, and activation itself requires zero unverified legacy accounts
+  (`legacy_unverified_count = 0`); every account created afterwards is verified by its registration
+  intent. So after activation there is nothing for `v1_verify_email` to do, and before it the legacy
+  verification route is the one in use. Proposed: drop `v1_verify_email` from D2, and retire the legacy
+  verification route with E1. Not built until confirmed.
+- **Quarantine needs identity guard v3.** `quarantined_at` is one of the guarded identity columns, so
+  `v1_quarantine` and `v1_reinstate` need a guard version that admits exactly their transitions (set with
+  a forward epoch; cleared only by reinstatement) while R, A and every other path stay refused, and
+  `registration_startup`'s trusted guard definitions must accept the new version, which changes code the
+  registration path runs in production when deployed. Designed and tested before any migration.
 - **S as a login.** The contract describes S as the private application login; 0013 created it NOLOGIN
   so nothing could call the authorities early. The transition (E2) is where it gains its login.
 - **Operator role P.** The contract places support operations in operator tools, not the application;
