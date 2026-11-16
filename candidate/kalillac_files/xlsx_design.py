@@ -500,14 +500,16 @@ class _Writer:
         row += 1
         page.write_string(row, 1, "Colour conventions", heading)
         page.write_string(row, 2, "", heading)
-        legend = (("12,500", self.formats.get(font_color=INPUT_FONT, num_format="#,##0"), "Typed values"),
-                  ("12,500", self.formats.get(font_color=INPUT_FONT, bg_color=INPUT_FILL, num_format="#,##0"),
+        # The samples are numbers shown as 12,500, not text that looks like one: Excel flags a number
+        # stored as text with a warning triangle.
+        legend = ((12500, self.formats.get(font_color=INPUT_FONT, num_format="#,##0"), "Typed values"),
+                  (12500, self.formats.get(font_color=INPUT_FONT, bg_color=INPUT_FILL, num_format="#,##0"),
                    "Inputs meant to be changed"),
-                  ("12,500", self.formats.get(font_color=INK), "Formulas on the same sheet"),
-                  ("12,500", self.formats.get(font_color=LINK_FONT), "Formulas that read another sheet"))
+                  (12500, self.formats.get(font_color=INK, num_format="#,##0"), "Formulas on the same sheet"),
+                  (12500, self.formats.get(font_color=LINK_FONT, num_format="#,##0"), "Formulas that read another sheet"))
         for sample, cell_format, meaning in legend:
             row += 1
-            page.write_string(row, 1, sample, cell_format)
+            page.write_number(row, 1, sample, cell_format)
             page.write_string(row, 2, meaning, self.formats.get(font_color=INK))
         self.print_setup(page, 3, name)
         page.activate()

@@ -302,3 +302,19 @@ def test_text_that_starts_with_an_equals_sign_is_text_to_the_engine():
                                      "rows": [["=not a formula", {"formula": "=LEN(A2)"}]]}]}
     result = evaluation(raw)
     assert result.values[("S", 2, 2)] == 14.0 and result.errors == []
+
+
+
+def test_the_about_sheet_shows_its_colour_samples_as_numbers_not_text():
+    """Codex document audit, finding 7: About!B14:B17 held the text "12,500", which Excel flags as a
+    number stored as text. Every numeric-looking cell of the About sheet is a real number."""
+    data = generate(copy.deepcopy(FORECAST_WORKBOOK), "xlsx").data
+    about = openpyxl.load_workbook(io.BytesIO(data))["About"]
+    samples = [row for row in about.iter_rows() if row[2].value in (
+        "Typed values", "Inputs meant to be changed", "Formulas on the same sheet", "Formulas that read another sheet")]
+    assert len(samples) == 4
+    for row in samples:
+        assert (row[1].value, row[1].data_type, row[1].number_format) == (12500, "n", "#,##0")
+    looks_numeric = re.compile(r"[-+]?[0-9][0-9,]*(\.[0-9]+)?%?")
+    assert not [cell.coordinate for row in about.iter_rows() for cell in row
+                if cell.data_type == "s" and looks_numeric.fullmatch(str(cell.value or "").strip())]
