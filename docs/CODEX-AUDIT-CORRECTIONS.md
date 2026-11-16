@@ -39,22 +39,35 @@ Codex independently reverified the corrections against `6337c12c81780bda28166854
 
 ### Corrections for the reverification findings (branch `fix/codex-reverification-2`)
 
-CI on `c274f90` (A to D and section 3): `file-generation-verification` `43801588596`, `subscription-foundation-verification` `43801592242` and `safety-helpfulness-regression` `43801595873`, all successful.
+Branch HEAD: `ca29074114136c738ba6595a371c2c09267263c2`. Source locations are at that commit. "Original
+failure" means the new regression tests were run against the pre-correction module (restored from the
+parent commit, then put back) and failed, or, where stated, the failure was reproduced directly.
 
-| Finding | Correction | Original failure reproduced by | Verified by |
-|---|---|---|---|
-| A. Tracked Word edits bypass the total check (`editing.py:1682-1685`) | `e7abd44` | Four of the seven new tests fail on the previous editor | Tables read with every revision accepted: tracked replacements, inserted and deleted rows, previously revised uploads, accept-all and reject-all views, formatting kept |
-| B. Table rows that each fit push the table off the slide (`editing.py:892-897`) | `7a5466c` | `test_rows_that_each_fit_cannot_together_push_the_table_off_the_slide` fails on the previous editor | Whole final table measured: cumulative rows, cells spanning rows, Arabic tables, other cells unchanged |
-| C. Restatement leaves the outlook chart's 2026 value undisclosed (`quality_benchmark.py:425-428`) | `b742ff6` | The dependency test finds an untitled, unnamed dependent chart in the previous fixture | Every chart whose data shows 2026 revenue is found from the report's data and named in the disclosure |
-| D. Displayed parts not reconciling (`charts.py:99-114`, `[33333.4, 33333.4, 33333.2]`) | `61618c2` | The previous labels showed 33.333K three times under 100.000K | Deterministic policy: reconcile within two extra decimals or disclose the rounding on the chart; sources unchanged |
-| Sections 2 and 6. A restated total left stated elsewhere (found while correcting A) | `87a1f36` | The proposal's summary kept the old total after a table restatement | Refused with `dependent_figure_unchanged` unless restated everywhere or confirmed exact |
-| Section 3. The model's `exact=True` bypassed the check | `c274f90` | The previous service applied the model's exact edit with no customer involvement | Single-use, expiring confirmations bound to account, file and operations, issued only to the interface; tests at `/api/files/assist` |
+| Finding | Correction (full SHA) | Source location | Original failure | Corrected behaviour and regression coverage |
+|---|---|---|---|---|
+| A. Tracked Word edits bypassed the total check | `e7abd44c1e0b66890529df877a8eb043568aeae3` | `kalillac_files/editing.py`: `_accepted_text` (1713), `_word_tables_accepted` (1720), `_check_totals_kept` (1773) | 4 of the 7 new tests fail on the previous editor (a tracked replacement and tracked row changes passed) | Tables are read with every revision accepted (inserted text and rows count, deleted do not, merged cells aligned); the file keeps its real revisions. `test_file_editing.py`: tracked `set_text`/`replace_text`, tracked restatement accepting to the new and rejecting to the original figures, tracked row insertion and deletion, a previously revised upload, formatting kept |
+| B. Rows that each fit pushed the table off the slide | `7a5466c6b739102d6e6e36104540fbe28d53ca4e` | `editing.py`: `_check_table_fit` (890) | `test_rows_that_each_fit_cannot_together_push_the_table_off_the_slide` fails on the previous editor | The whole final table is laid out (every row at its tallest cell, cells spanning rows, bottom compared with the slide, pre-existing overflow never charged to the edit). Also: merged cell, Arabic table, other cells unchanged (these pass on both versions; they guard the new code) |
+| C. Restatement left the outlook chart's 2026 value undisclosed | `b742ff6f0624c5377a1310c841d810e91643ca54` | `tests/quality_benchmark.py`: `RESTATEMENT_CHARTS`, `RESTATEMENT_NOTE` (410); the report fixture's line chart is titled | The dependency test finds an untitled, unnamed dependent chart in the previous fixture | Every chart whose data shows 2026 revenue is found from the report's data and named in the disclosure (`test_every_chart_that_shows_the_restated_revenue_is_named_in_the_restatement`). Charts are images in the Word file; a text edit cannot redraw them, so they are disclosed, not regenerated |
+| D. Displayed parts did not reconcile (`[33333.4, 33333.4, 33333.2]`) | `61618c259ee449071cb75ed1ad1473af6ede3531` | `kalillac_files/charts.py`: `breakdown` (111) | Reproduced directly: the previous labels were 33.333K three times under 100.000K | Within two extra decimals the shown parts add up exactly, otherwise the chart prints "Rounded; parts may not add to the total."; shares total 100%; source values unchanged. `test_document_design.py`: three non-reconcilable cases, note shown only when needed |
+| Section 3. The model's `exact=True` alone skipped the check | `c274f905d841f8251a3aba29f6e2a1d14e9a422d` | `kalillac_files/assistant.py`: `edit_digest` (208), its use in `edit_file` (317); `kalillac_files/router.py`: `FileService._offer` (123), `_presented` (137), `assist` (155); `/api/chat` handoff | The previous service applied the model's exact edit with no customer involvement | `exact` is honoured only with a single-use, 30-minute confirmation the service issued, bound to account, file and the exact operations; never shown to the model. `test_files_router.py` at `/api/files/assist`: model flag alone ignored, confirmation applies once, bound to operations and account, expires, malformed refused |
+| Prose total left stated elsewhere (found while correcting A) | `87a1f363a5ca95895c2b0217a654a8d9c68b3b8a` | `editing.py`: `_document_text` (1791), `_check_restated_totals` (1807) | The proposal's summary kept "$186,500" after a table-only restatement | Refused with `dependent_figure_unchanged` unless the old total is restated everywhere or the customer confirmed the exact edit (`test_a_restated_total_must_be_restated_wherever_the_document_states_it`) |
 
-Still open: Word finalization (decision 12, evaluation in `docs/DECISION-12-WORD-FINALIZATION.md`), Arabic PDF
-logical text, the interface control for exact-edit confirmations, and dependency enforcement for figures
-in prose and metrics beyond totals. Since `87a1f36`, an edit that changes a table's total is refused while
-the old total still appears anywhere else in the document (`dependent_figure_unchanged`); other derived
-figures (growth rates, margins) in prose are not yet checked.
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| A, B, C, D, section 3 | yes | `file-generation-verification` `43801588596`, `subscription-foundation-verification` `43801592242`, `safety-helpfulness-regression` `43801595873`, all on `c274f905d841f8251a3aba29f6e2a1d14e9a422d` | no (awaiting Codex) | no |
+| Prose total | yes | `file-generation-verification` `43802564474` on `ca29074114136c738ba6595a371c2c09267263c2` (836 tests, none skipped) | no (awaiting Codex) | no |
+
+**Exact-edit confirmation is backend-only.** The service issues and honours confirmations, and both
+`/api/files/assist` and `/api/chat` return and accept them, but the chat interface has no control that
+shows the offer and sends the confirmation. Until it exists, an edit that would break a total is refused
+for the customer, never applied silently. **The customer flow is incomplete.**
+
+**Still open (status unchanged by new evidence):** Word pagination and contents finalization (decision 12;
+prototype evaluated in `docs/DECISION-12-WORD-FINALIZATION.md`, not adopted); Arabic PDF logical text
+(ligature order, diacritics, mixed-direction reading order, search and word splitting); native and
+cross-viewer presentation checks (only Microsoft Word and PowerPoint were available here); broader
+semantic dependencies (derived figures such as growth rates and margins stated in prose and metrics are
+not checked; totals and table totals are).
 
 ## Findings from the first audit (CODEX-D1 to CODEX-D4)
 
