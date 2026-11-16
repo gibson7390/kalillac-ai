@@ -63,6 +63,52 @@ login, revoke against issuance, change against logout; future-dated and expired 
 clock rollback cannot lower an epoch; R, A and PUBLIC cannot execute or read through any function;
 hostile `search_path` and role tampering fail.
 
+### D2, remaining: identity guard v3, quarantine, reinstatement, deletion request, role P (design)
+
+Written before any migration, from the code at `d3081a9`.
+
+**Operator role P.** A NOLOGIN role named by a mandatory setting (`KALILLAC_V1_SECURITY_OPERATOR_ROLE`),
+provisioned by the operator like S and E: no attribute but NOLOGIN, NOINHERIT, no membership. P may
+EXECUTE exactly the operator functions and nothing else; S may not execute them, and P may not execute
+S's. The operator transition (E2) gives P a login only for the operator tool's own connection, with a
+credential that is not the application's (D4). Every migration's role checks and the classifier's
+`_security_principals` are extended from {S, E} to {S, E, P}; P absent is refused once the operator
+functions exist.
+
+**Identity guard v3.** `quarantined_at` stays a guarded identity column; v3 admits exactly two
+transitions and nothing else, for every writer (the guard cannot tell callers apart: inside a
+SECURITY DEFINER trigger the current user is the guard's owner):
+
+| Transition | Admitted only when, in the same UPDATE |
+|---|---|
+| quarantine: `quarantined_at` NULL to a time | every other identity column unchanged, and `sessions_valid_after` moves strictly forward to at least the new `quarantined_at` (so every session ends) |
+| reinstatement: `quarantined_at` a time to NULL | every other identity column unchanged, the epoch unchanged |
+
+Who can attempt a transition is decided by column privilege: E alone gains UPDATE (`quarantined_at`);
+R and A never hold it. v3 is v2 plus these two clauses, built by asserted substitution like v2 was from
+v1. `registration_startup.validate_security_definitions` accepts v1, v2 or v3, and `v1_schema` pairs each
+version with its revision exactly (v3 if and only if the quarantine functions exist). That change to
+registration startup ships in the same release as the migration.
+
+**Functions** (E-owned SECURITY DEFINER, fixed `search_path`, operation ids, one audit event each, new
+event types widening the constraint as 0020 did):
+
+| Function | Caller | Effect |
+|---|---|---|
+| `v1_quarantine(account, reason, op)` | P | lock the account; refuse if already quarantined; set `quarantined_at`, advance the epoch past it, revoke every session; event `account_quarantine` with a fixed reason code (no free text) |
+| `v1_reinstate(account, op)` | P | lock the account; refuse unless quarantined; clear `quarantined_at`; event `account_reinstate`. Sessions stay ended; the customer signs in again |
+| `v1_request_deletion(account, op)` | P | lock; set `deletion_requested_at` if unset; advance the epoch; revoke every session; event `account_deletion_request`. Erasure itself follows the owner's retention decision (section 5) |
+| `v1_request_own_deletion(op, session, token_hash, verified_hash)` | S | the customer's own request, proven like password change; the same effects |
+
+Quarantined and deletion-requested accounts are already refused by issuance, revocation, reset and
+change, so no other function changes.
+
+**Order of migrations.** 0022: role P checks, guard v3, `v1_quarantine` and `v1_reinstate`, E's
+UPDATE (`quarantined_at`) and UPDATE (`deletion_requested_at`), the two event types. 0023: both deletion
+functions and their event type. Each with preflight, postcondition, exact classifier support and the
+same PostgreSQL regression shape as 0018 to 0021 (effects and audit together, uniform denials, replay,
+only the intended role can call, tampering refused, downgrade refused while its events exist).
+
 ### D3. Route wiring in V1 mode
 
 | Route | V1 behaviour |
