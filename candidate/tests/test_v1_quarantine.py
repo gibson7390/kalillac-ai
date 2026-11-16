@@ -102,3 +102,11 @@ def test_offline_downgrade_is_refused(monkeypatch):
     monkeypatch.setattr(module.op, "get_context", lambda: Context())
     with pytest.raises(RuntimeError, match="V1_QUARANTINE_OFFLINE_DOWNGRADE_UNSUPPORTED"):
         module.downgrade()
+
+
+def test_the_postcondition_proves_guard_v3_and_the_preflight_guard_v2():
+    module = _module()
+    statements = module.upgrade_statements(NAMES)
+    v3_clause = "OLD.quarantined_at IS NULL AND NEW.quarantined_at IS NOT NULL"
+    assert v3_clause in statements[-1]                         # After: the installed guard is v3.
+    assert v3_clause not in statements[0]                      # Before: 0020's catalog, guard v2.

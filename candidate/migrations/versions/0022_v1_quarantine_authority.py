@@ -244,6 +244,8 @@ _OPERATOR_CHECKS = """
             AND p.oid NOT IN (quarantining, reinstating))
  THEN RAISE EXCEPTION USING MESSAGE = 'V1_PASSWORD_CHANGE_POSTCONDITION_INVALID';"""
 _post = _once(_post, "\n THEN RAISE EXCEPTION USING MESSAGE = 'V1_PASSWORD_CHANGE_POSTCONDITION_INVALID';", _OPERATOR_CHECKS)
+# The inherited checks prove identity guard v2's exact body; after this revision the guard is v3.
+_post = _once(_post, _issuance._quoted(GUARD_V2.split("$guard$")[1]), _issuance._quoted(GUARD_V3.split("$guard$")[1]))
 POSTCONDITION = _once(_post, "'V1_PASSWORD_CHANGE_POSTCONDITION_INVALID'", "'V1_QUARANTINE_POSTCONDITION_INVALID'")
 
 ABSENT = """DO $v1_quarantine_absent$

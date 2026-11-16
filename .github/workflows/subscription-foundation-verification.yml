@@ -503,5 +503,5 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 213, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 214, "skipped": 0, "failures": 0, "errors": 0}
           PY
