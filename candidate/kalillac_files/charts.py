@@ -96,35 +96,58 @@ def format_value(value, prefix="", suffix="", step=None):
     return _styled(value, prefix, suffix, *_number_style(value, suffix, step))
 
 
-def breakdown_labels(values, prefix="", suffix=""):
-    """(total label, part labels, percentage labels) for a breakdown, under one rounding policy: what
-    is shown adds up. Parts are shown at the total's own precision, raised one decimal at a time (at
-    most three) until the shown parts sum exactly to the shown total; nothing is nudged. Percentages
-    are whole numbers when they sum to 100, else tenths, else tenths apportioned by largest remainder
-    (the usual rule for shares that must total 100%). A breakdown never shows $9.6M + $5.2M + $2.4M
-    under a $17.1M total (Codex document audit, Q1)."""
+ROUNDING_NOTE = "Rounded; parts may not add to the total."
+MAX_EXTRA_DECIMALS = 2
+
+
+@dataclass(frozen=True)
+class Breakdown:
+    total: str
+    parts: list
+    percents: list
+    note: str | None          # Set when the shown parts cannot add up exactly to the shown total.
+
+
+def breakdown(values, prefix="", suffix=""):
+    """How a breakdown is shown, under one deterministic policy (Codex document audit Q1 and
+    reverification finding D). Source values are never changed.
+
+    1. Parts and total use the total's own precision, raised one decimal at a time, at most
+       MAX_EXTRA_DECIMALS, until the shown parts add up exactly to the shown total.
+    2. If no such precision exists within that bound (thirds, for instance), everything is shown at the
+       total's own precision and the breakdown carries ROUNDING_NOTE, which the chart prints.
+    3. Shares are whole percentages when they sum to 100, else tenths, else tenths apportioned by
+       largest remainder, so they always total 100%."""
     total = sum(values)
     scale, unit, decimals = _number_style(total, suffix)
-    for extra in range(4):
-        places = decimals + extra
-        shown = [round(abs(value) / scale, places) for value in values]
-        if round(sum(shown), places) == round(abs(total) / scale, places):
+    note, places = ROUNDING_NOTE, decimals
+    for extra in range(MAX_EXTRA_DECIMALS + 1):
+        candidate = decimals + extra
+        shown = [round(abs(value) / scale, candidate) for value in values]
+        if round(sum(shown), candidate) == round(abs(total) / scale, candidate):
+            note, places = None, candidate
             break
     total_label = _styled(total, prefix, suffix, scale, unit, places)
     parts = [_styled(value, prefix, suffix, scale, unit, places) for value in values]
     shares = [value / total * 100 if total else 0.0 for value in values]
-    for places in (0, 1):
-        rounded = [round(share, places) for share in shares]
-        if round(sum(rounded), places) == 100:
+    for share_places in (0, 1):
+        rounded = [round(share, share_places) for share in shares]
+        if round(sum(rounded), share_places) == 100:
             break
     else:
         tenths = [math.floor(share * 10) for share in shares]
         order = sorted(range(len(shares)), key=lambda i: shares[i] * 10 - tenths[i], reverse=True)
         for i in order[:max(0, 1000 - sum(tenths))]:
             tenths[i] += 1
-        rounded, places = [t / 10 for t in tenths], 1
-    percents = [f"{share:.{places}f}%" for share in rounded]
-    return total_label, parts, percents
+        rounded, share_places = [t / 10 for t in tenths], 1
+    percents = [f"{share:.{share_places}f}%" for share in rounded]
+    return Breakdown(total_label, parts, percents, note)
+
+
+def breakdown_labels(values, prefix="", suffix=""):
+    """(total label, part labels, percentage labels): see breakdown()."""
+    shown = breakdown(values, prefix, suffix)
+    return shown.total, shown.parts, shown.percents
 
 
 @dataclass
@@ -376,7 +399,8 @@ def _donut(chart):
                        f'fill="{color}"/>')
         angle += sweep
     canvas.boxes.append((cx - outer, cy - outer, cx + outer, cy + outer))
-    total_label, part_labels, percent_labels = breakdown_labels(values, chart.prefix, chart.suffix)
+    shown = breakdown(values, chart.prefix, chart.suffix)
+    total_label, part_labels, percent_labels = shown.total, shown.parts, shown.percents
     canvas.text(cx, cy + 2, total_label, 21, anchor="middle", fill=INK, weight="semibold", tabular=True)
     canvas.text(cx, cy + 20, "Total", SMALL, anchor="middle")
     x, y = 300.0, height / 2 - 13 * len(values) + 17
@@ -392,6 +416,8 @@ def _donut(chart):
             canvas.add(f'<line x1="{x:.2f}" y1="{y + 8.5:.2f}" x2="{WIDTH - 4:.2f}" y2="{y + 8.5:.2f}" '
                        f'stroke="{GRID}" stroke-width="1"/>')
         y += 26
+    if shown.note:                   # The parts as shown cannot add up exactly: say so.
+        canvas.text(x, y - 6, shown.note, SMALL, fill=MUTED)
     return canvas
 
 

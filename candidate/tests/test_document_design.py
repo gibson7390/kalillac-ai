@@ -706,3 +706,29 @@ def test_combining_marks_stay_in_their_letters_run(text):
     for piece, rtl in pieces:
         if any("ً" <= char <= "ْ" for char in piece):
             assert rtl and any("ء" <= char <= "ي" for char in piece), pieces
+
+
+@pytest.mark.parametrize("values", [[33333.4, 33333.4, 33333.2], [1, 1, 1, 1, 1, 1, 1], [100, 100, 100.001]])
+def test_a_breakdown_that_cannot_add_up_as_shown_says_so(values):
+    """Codex reverification, finding D: [33333.4, 33333.4, 33333.2] showed 33.333K three times under
+    100.000K. Within two extra decimals no precision makes the shown parts add up, so the chart shows the
+    total's own precision and discloses the rounding; the source values are never altered."""
+    from kalillac_files.charts import ROUNDING_NOTE, breakdown
+    source = list(values)
+    shown = breakdown(values, "$")
+    number = lambda label: float(label.strip("$MK%").replace(",", ""))  # noqa: E731
+    adds_up = round(sum(number(part) for part in shown.parts), 6) == number(shown.total)
+    assert adds_up or shown.note == ROUNDING_NOTE
+    assert round(sum(float(share[:-1]) for share in shown.percents), 6) == 100 and values == source
+    if shown.note:
+        assert max(len(part.split(".")[-1]) if "." in part else 0 for part in shown.parts) <= 3
+
+
+def test_the_rounding_disclosure_is_printed_on_the_chart_and_only_when_needed():
+    from kalillac_files import charts as chart_module
+    def drawn(values):
+        chart = spec.validate_document({"title": "T", "blocks": [{"type": "chart", "kind": "donut", "title": "Mix",
+            "categories": ["A", "B", "C"], "series": [{"name": "S", "values": values}]}]}).blocks[0]
+        return chart_module.chart_svg(chart)
+    assert chart_module.ROUNDING_NOTE in drawn([33333.4, 33333.4, 33333.2])
+    assert chart_module.ROUNDING_NOTE not in drawn([10304000, 5520000, 2576000])
