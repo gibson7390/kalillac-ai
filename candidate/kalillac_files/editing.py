@@ -1674,15 +1674,55 @@ def outline(data, declared_name=None):
 # --- edit ------------------------------------------------------------------------------------
 
 
+def _accepted_text(paragraph):
+    """A Word paragraph's text with every revision accepted: inserted text kept, deleted text dropped."""
+    skipped = (W + "del", W + "moveFrom")
+    return "".join(node.text or "" for node in paragraph.iter(W + "t")
+                   if not any(ancestor.tag in skipped for ancestor in node.iterancestors()))
+
+
+def _word_tables_accepted(data):
+    """(header, rows) of every body table of a Word document as it reads with every tracked revision
+    accepted (Codex reverification, finding A): a row marked deleted is gone, an inserted row counts,
+    inserted text counts and deleted text does not. A cell spanning columns repeats its text in each
+    column it covers, and a vertically merged cell repeats the text of the cell it continues, so columns
+    stay aligned with the header."""
+    root = _parse_xml(zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml"))
+    found = []
+    for table in [block for block in _word_blocks(root.find(W + "body")) if block.tag == W + "tbl"]:
+        rows, above = [], {}
+        for row in table.findall(W + "tr"):
+            properties = row.find(W + "trPr")
+            if properties is not None and properties.find(W + "del") is not None:
+                continue
+            cells, column = [], 0
+            for cell in row.findall(W + "tc"):
+                cell_properties = cell.find(W + "tcPr")
+                span, merge = 1, None
+                if cell_properties is not None:
+                    grid = cell_properties.find(W + "gridSpan")
+                    span = int(grid.get(W + "val", "1")) if grid is not None and grid.get(W + "val", "1").isdigit() else 1
+                    merge = cell_properties.find(W + "vMerge")
+                if merge is not None and merge.get(W + "val") in (None, "continue"):
+                    text = above.get(column, "")
+                else:
+                    text = "\n".join(_accepted_text(paragraph) for paragraph in cell.findall(W + "p"))
+                for offset in range(max(1, span)):
+                    cells.append(text)
+                    above[column + offset] = text
+                column += max(1, span)
+            rows.append(cells)
+        if rows:
+            found.append((rows[0], rows[1:]))
+    return found
+
+
 def _tables(data, kind):
-    """(header, rows) of every table in a Word document or deck, as cell text, in document order."""
+    """(header, rows) of every table in a Word document (with its revisions accepted) or deck, as cell
+    text, in document order."""
     found = []
     if kind == "docx":
-        import docx
-        for table in docx.Document(io.BytesIO(data)).tables:
-            rows = [[cell.text for cell in row.cells] for row in table.rows]
-            if rows:
-                found.append((rows[0], rows[1:]))
+        found = _word_tables_accepted(data)
     elif kind == "pptx":
         import pptx
         for slide in pptx.Presentation(io.BytesIO(data)).slides:

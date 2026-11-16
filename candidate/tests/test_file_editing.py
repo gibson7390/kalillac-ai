@@ -836,3 +836,67 @@ def test_a_deck_table_total_is_kept_too():
     cell = next(u.address for u in outline(deck, "d.pptx").units if u.kind == "cell" and u.text == "$11,000")
     assert refused(deck, "d.pptx", [{"op": "set_text", "at": cell, "text": "$12,000"}]) == "table_total_mismatch"
     edit(deck, "d.pptx", [{"op": "set_text", "at": cell, "text": "$12,000"}], exact=True)
+
+
+# --- tracked edits are judged as they read once accepted (Codex reverification, finding A) ----------
+
+def _accepted_fees(data):
+    from kalillac_files.editing import _word_tables_accepted
+    return next(rows for header, rows in _word_tables_accepted(data) if header and header[0] == "Stage")
+
+
+def test_a_tracked_replacement_that_breaks_a_total_is_refused(proposal):
+    cell = _fee_cell(outline(proposal, "p.docx"), "$11,000")
+    one = [{"op": "set_text", "at": cell, "text": "$12,000"}]
+    assert refused(proposal, "p.docx", one, track_changes=True) == "table_total_mismatch"
+    assert refused(proposal, "p.docx", [{"op": "replace_text", "find": "$11,000", "replace": "$12,000"}],
+                   track_changes=True) == "table_total_mismatch"
+
+
+def test_a_tracked_restatement_with_its_total_accepts_consistent_and_rejects_to_the_original(proposal):
+    found = outline(proposal, "p.docx")
+    operations = [{"op": "set_text", "at": _fee_cell(found, "$11,000"), "text": "$12,000"},
+                  {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"}]
+    tracked = edit(proposal, "p.docx", operations, track_changes=True).data
+    xml = document_xml(tracked)
+    assert "<w:ins " in xml and "<w:del " in xml                       # Real revisions are delivered.
+    fees = _accepted_fees(tracked)
+    assert ["Permits", "Approval lodged", "$12,000"] in fees and fees[-1][-1] == "$187,500"
+    assert "$187,500" in accepted(xml) and "$12,000" in accepted(xml) and "$11,000" not in accepted(xml)
+    assert "$11,000" in rejected(xml) and "$12,000" not in rejected(xml) and "$187,500" not in rejected(xml)
+
+
+def test_tracked_row_insertions_and_deletions_count_toward_the_total(proposal):
+    found = outline(proposal, "p.docx")
+    row = _fee_cell(found, "$11,000").rsplit(".", 1)[0]
+    added = [{"op": "add_row", "after": row, "cells": ["Survey", "Signing", "$2,000"]}]
+    assert refused(proposal, "p.docx", added, track_changes=True) == "table_total_mismatch"
+    fixed = added + [{"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$188,500"}]
+    assert _accepted_fees(edit(proposal, "p.docx", fixed, track_changes=True).data)[-1][-1] == "$188,500"
+    removed = [{"op": "delete", "at": row}]
+    assert refused(proposal, "p.docx", removed, track_changes=True) == "table_total_mismatch"
+    fixed = removed + [{"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$175,500"}]
+    after = _accepted_fees(edit(proposal, "p.docx", fixed, track_changes=True).data)
+    assert not any(cells[0] == "Permits" for cells in after) and after[-1][-1] == "$175,500"
+
+
+def test_a_previously_revised_upload_is_judged_by_its_accepted_figures(proposal):
+    found = outline(proposal, "p.docx")
+    revised = edit(proposal, "p.docx", [{"op": "set_text", "at": _fee_cell(found, "$11,000"), "text": "$12,000"},
+                                        {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"}],
+                   track_changes=True).data
+    later = outline(revised, "p.docx")
+    concept = next(u.address for u in later.units if u.kind == "cell" and u.text == "$24,500")
+    assert refused(revised, "p.docx", [{"op": "set_text", "at": concept, "text": "$25,500"}]) == "table_total_mismatch"
+    total = next(u.address for u in later.units if u.kind == "cell" and "187,500" in u.text)
+    edit(revised, "p.docx", [{"op": "set_text", "at": concept, "text": "$25,500"},
+                             {"op": "set_text", "at": total, "text": "$188,500"}], track_changes=True)
+
+
+def test_a_tracked_fee_edit_keeps_the_cells_formatting(proposal):
+    import re as _re
+    cell = _fee_cell(outline(proposal, "p.docx"), "$11,000")
+    operations = [{"op": "set_text", "at": cell, "text": "$12,000"}]
+    exact = edit(proposal, "p.docx", operations, track_changes=True, exact=True).data
+    original = _re.search(r"<w:r>(<w:rPr>(?:(?!</w:rPr>).)*</w:rPr>)<w:t[^>]*>\$11,000</w:t>", document_xml(proposal), _re.S)
+    assert original is not None and original.group(1) in document_xml(exact)
