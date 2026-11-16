@@ -480,7 +480,7 @@ def test_the_benchmark_complex_edit_applies_whole(word, book):
     tracked = document_xml(edit(word, "report.docx", operations, track_changes=True).data)
     assert accepted(tracked) == accepted(plain) and rejected(tracked) == rejected(document_xml(word))
     text = accepted(plain)
-    assert "strongest and most profitable" in text and "Audit adjustment" in text and "18,600" in text
+    assert "strongest and most profitable" in text and "18,600" in text
     edited = edit(book, "forecast.xlsx", quality_benchmark.WORKBOOK_EDIT).data
     assert openpyxl.load_workbook(io.BytesIO(edited))["Inputs"]["B2"].value == 1500
 
@@ -768,3 +768,24 @@ def test_every_generated_shape_and_cell_is_judged_to_fit_as_generation_made_it(d
                     before[other] = ("<changed>" if other == key else editing._body_text(body), copy.deepcopy(body))
             editing._check_deck_fit(presentation, before)              # Raises if it would refuse.
         assert len(containers) > 50
+
+
+
+def test_the_benchmark_restatement_is_internally_consistent(word):
+    """Q4: the tracked edit restated revenue to $18.6M but left growth, gross profit and margin at
+    their old values. Now every dependent figure the text states moves with it, the old figures are
+    gone, and the charts that cannot be restated are named."""
+    import quality_benchmark
+    text = accepted(document_xml(edit(word, "report.docx", quality_benchmark.report_edit(outline(word, "report.docx")),
+                                      track_changes=True).data))
+    revenue, cost, previous_revenue, previous_gross = 18_600, 10_746, 15_000, 5_925
+    gross = revenue - cost
+    assert f"{gross:,}" in text and f"{revenue:,}" in text
+    assert f"+{(revenue / previous_revenue - 1) * 100:.1f}%" in text                    # +24.0%
+    assert f"grew {round((revenue / previous_revenue - 1) * 100)}%" in text            # grew 24%
+    assert f"+{(gross / previous_gross - 1) * 100:.1f}%" in text                       # +32.6%
+    assert f"{gross / revenue * 100:.1f}%" in text                                       # 42.2%
+    assert f"{(gross / revenue - previous_gross / previous_revenue) * 100:.1f} points" in text  # 2.7 points
+    for old, _new in quality_benchmark.RESTATED.values():
+        assert old not in text, old
+    assert "show the figures before the restatement" in text

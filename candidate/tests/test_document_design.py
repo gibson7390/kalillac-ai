@@ -58,7 +58,7 @@ REPORT = {
                   ["Gross profit", "5,925", "7,654", "+29.2%"]]},
         {"type": "chart", "kind": "donut", "title": "Revenue mix",
          "categories": ["Wholesale", "Subscriptions", "Cafes"], "prefix": "$",
-         "series": [{"name": "Revenue", "values": [9568000, 5152000, 2392000]}]},
+         "series": [{"name": "Revenue", "values": [10304000, 5520000, 2576000]}]},
         {"type": "quote", "text": "Wholesale pays for everyone else's growth.", "attribution": "The CEO"},
         {"type": "heading", "level": 1, "text": "The plan"},
         {"type": "comparison", "columns": [{"title": "Build", "items": ["Adds capacity", "$4.2M"]},
@@ -67,8 +67,15 @@ REPORT = {
                                     {"title": "Order equipment"}, {"title": "Commission"}]},
         {"type": "chart", "kind": "line", "categories": ["2025", "2026", "2027"],
          "series": [{"name": "With", "values": [15, 18.4, 20.6]}, {"name": "Without", "values": [15, 18.4, None]}]},
-        {"type": "code", "language": "python", "text": "def margin(r, c):\n    return (r - c) / r"},
     ],
+}
+
+# Code rendering is exercised by a technical note of its own, never by an executive report.
+TECHNICAL_NOTE = {
+    "title": "Margin calculation: technical note", "organization": "Northwind Coffee Roasters",
+    "blocks": [{"type": "heading", "level": 1, "text": "Gross margin"},
+               {"type": "paragraph", "text": "The finance model computes gross margin as follows."},
+               {"type": "code", "language": "python", "text": "def margin(r, c):\n    return (r - c) / r"}],
 }
 ARABIC = {
     "title": "تقرير الأداء السنوي لعام 2026", "language": "ar", "organization": "شركة الشمال",
@@ -277,8 +284,9 @@ def test_the_benchmark_report_is_sound_structured_and_accessible():
     body = " ".join(pages[2:])
     for expected in ("Revenue reached $18.4M", "$18.4M", "41.6%", "Key result", "Acquisition cost fell 14%.",
                      "Gross profit", "7,654", "Figure 1", "Wholesale pays for everyone else's growth.",
-                     "Secure the site", "Outsource", "def margin(r, c):"):
+                     "Secure the site", "Outsource"):
         assert expected in body, expected
+    assert "def margin" not in body                                  # No code in an executive review (Q10).
     assert "Page 1 of" in pages[2] and f"Page {len(pages) - 2} of {len(pages) - 2}" in pages[-1]
 
 
@@ -595,3 +603,82 @@ def test_arabic_pdf_text_keeps_every_letter_of_every_word():
     assert textpage.search("لمحة عن العام").get_next() is not None      # The heading, exactly.
     # Never a letter that is not in the source (the old text layer invented ق, ي and ت).
     assert set(char for char in compact if "\u0621" <= char <= "\u064a") <= set("".join(words))
+
+
+
+# --- benchmark content (Codex document audit: Q1, Q7, Q8, Q10) -----------------------------------
+
+def _thousands(text):
+    return int(text.replace(",", "").strip("()$"))
+
+
+def test_the_report_revenue_mix_reconciles_to_its_income_statement():
+    """Q1: the channel breakdown summed to $17.112M against the $18.4M income statement."""
+    statement = next(b for b in REPORT["blocks"] if b["type"] == "table" and b["header"][0] == "Line item")
+    revenue = {row[0]: row for row in statement["rows"]}["Revenue"]
+    mix = next(b for b in REPORT["blocks"] if b.get("kind") == "donut")
+    assert sum(mix["series"][0]["values"]) == _thousands(revenue[2]) * 1000
+    quarters = next(b for b in REPORT["blocks"] if b.get("title") == "Revenue by quarter")
+    for series, column in ((quarters["series"][0], 1), (quarters["series"][1], 2)):
+        assert sum(series["values"]) == _thousands(revenue[column]) * 1000, series["name"]
+    gross = {row[0]: row for row in statement["rows"]}["Gross profit"]
+    cost = {row[0]: row for row in statement["rows"]}["Cost of goods sold"]
+    for column in (1, 2):
+        assert _thousands(revenue[column]) - _thousands(cost[column]) == _thousands(gross[column])
+    assert f"{_thousands(gross[2]) / _thousands(revenue[2]) * 100:.1f}%" == "41.6%"
+
+
+def test_a_breakdowns_shown_parts_add_up_to_its_shown_total():
+    """Q1, presentation: individually rounded labels ($9.6M + $5.2M + $2.4M) must never sit under a
+    $17.1M total. The shown precision rises until the shown parts add up; shares total 100%."""
+    from kalillac_files.charts import breakdown_labels
+    for values in ([9568000, 5152000, 2392000], [10304000, 5520000, 2576000], [1, 1, 1], [333, 333, 334],
+                   [1234567, 7654321, 1111111, 999999]):
+        total, parts, shares = breakdown_labels(values, "$")
+        number = lambda label: float(label.strip("$MK%").replace(",", ""))  # noqa: E731
+        assert round(sum(number(part) for part in parts), 6) == number(total), (values, parts, total)
+        assert round(sum(float(share[:-1]) for share in shares), 6) == 100, (values, shares)
+    assert breakdown_labels([9568000, 5152000, 2392000], "$")[:2] == ("$17.11M", ["$9.57M", "$5.15M", "$2.39M"])
+
+
+def test_the_research_report_follows_its_complete_follow_up():
+    """Q7: enrolment to 30 November 2025 plus twelve months of follow-up ends 30 November 2026, so a
+    report claiming complete follow-up cannot be dated October 2026."""
+    from datetime import date
+    import quality_benchmark
+    research = quality_benchmark.RESEARCH_DOCUMENT
+    method = next(b["text"] for b in research["blocks"] if b["type"] == "paragraph" and "joined between" in b["text"])
+    assert "30 November 2025" in method and "followed for twelve months" in method
+    follow_up_ends = date(2026, 11, 30)
+    months = {"January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6, "July": 7, "August": 8,
+              "September": 9, "October": 10, "November": 11, "December": 12}
+    month, year = research["date"].split()
+    assert date(int(year), months[month], 1) > follow_up_ends
+    recommendation = next(b["text"] for b in research["blocks"] if b.get("title") == "Recommendation")
+    start = recommendation.rsplit("from ", 1)[1].rstrip(".")
+    assert date(int(start.split()[1]), months[start.split()[0]], 1) > date(int(year), months[month], 1)
+
+
+def test_the_proposal_schedule_reconciles():
+    """Q8: start, site access, fourteen weeks, the guaranteed opening and the offer's expiry agree."""
+    from datetime import date, timedelta
+    import quality_benchmark
+    proposal = quality_benchmark.WORD_PROPOSAL
+    text = " ".join(str(b.get("text", "")) for b in proposal["blocks"]) + " " + proposal["summary"]
+    start, opening, access, expiry = date(2026, 11, 23), date(2027, 3, 1), date(2026, 12, 4), date(2026, 11, 20)
+    assert "Monday 23 November 2026" in text and start.weekday() == 0
+    assert "14 weeks" in proposal["summary"] and start + timedelta(weeks=14) == opening
+    assert "valid until 20 November 2026" in text and expiry < start
+    build = start + timedelta(weeks=5)                                 # Week 6 begins.
+    assert access <= build
+    steps = next(b for b in proposal["blocks"] if b["type"] == "steps")["items"]
+    assert steps[-1]["title"].startswith("Weeks 13 to 14") and "1 March 2027" in text
+
+
+def test_code_renders_in_a_technical_note():
+    """Q10: code rendering keeps its coverage in a document where code belongs."""
+    data = generate(copy.deepcopy(TECHNICAL_NOTE), "pdf").data
+    assert "def margin(r, c):" in " ".join(" ".join(page.split()) for page in text_pages(data))
+    xml = zipfile.ZipFile(io.BytesIO(generate(copy.deepcopy(TECHNICAL_NOTE), "docx").data)).read(
+        "word/document.xml").decode("utf-8")
+    assert "def margin(r, c):" in xml and "Consolas" in xml

@@ -66,9 +66,8 @@ def nice_scale(low, high, target=5, zero=True):
     return math.floor(low / step + 1e-9) * step, math.ceil(high / step - 1e-9) * step, step
 
 
-def format_value(value, prefix="", suffix="", step=None):
-    """A compact, readable number: thousands separators, K/M/B above 10,000, no float noise."""
-    sign = "−" if value < 0 else ""
+def _number_style(value, suffix="", step=None):
+    """(scale, unit letter, decimals) format_value would use for value."""
     magnitude = abs(value)
     scale, unit = 1, ""
     if not suffix or suffix == "%":
@@ -84,8 +83,48 @@ def format_value(value, prefix="", suffix="", step=None):
         decimals = min(3, max(1, -math.floor(math.log10(reference))))
     else:
         decimals = 0 if float(round(scaled, 6)).is_integer() else (1 if scaled >= 10 else 2)
-    body = f"{scaled:,.{decimals}f}"
-    return f"{sign}{prefix}{body}{unit}{suffix}"
+    return scale, unit, decimals
+
+
+def _styled(value, prefix, suffix, scale, unit, decimals):
+    sign = "−" if value < 0 else ""
+    return f"{sign}{prefix}{abs(value) / scale:,.{decimals}f}{unit}{suffix}"
+
+
+def format_value(value, prefix="", suffix="", step=None):
+    """A compact, readable number: thousands separators, K/M/B above 10,000, no float noise."""
+    return _styled(value, prefix, suffix, *_number_style(value, suffix, step))
+
+
+def breakdown_labels(values, prefix="", suffix=""):
+    """(total label, part labels, percentage labels) for a breakdown, under one rounding policy: what
+    is shown adds up. Parts are shown at the total's own precision, raised one decimal at a time (at
+    most three) until the shown parts sum exactly to the shown total; nothing is nudged. Percentages
+    are whole numbers when they sum to 100, else tenths, else tenths apportioned by largest remainder
+    (the usual rule for shares that must total 100%). A breakdown never shows $9.6M + $5.2M + $2.4M
+    under a $17.1M total (Codex document audit, Q1)."""
+    total = sum(values)
+    scale, unit, decimals = _number_style(total, suffix)
+    for extra in range(4):
+        places = decimals + extra
+        shown = [round(abs(value) / scale, places) for value in values]
+        if round(sum(shown), places) == round(abs(total) / scale, places):
+            break
+    total_label = _styled(total, prefix, suffix, scale, unit, places)
+    parts = [_styled(value, prefix, suffix, scale, unit, places) for value in values]
+    shares = [value / total * 100 if total else 0.0 for value in values]
+    for places in (0, 1):
+        rounded = [round(share, places) for share in shares]
+        if round(sum(rounded), places) == 100:
+            break
+    else:
+        tenths = [math.floor(share * 10) for share in shares]
+        order = sorted(range(len(shares)), key=lambda i: shares[i] * 10 - tenths[i], reverse=True)
+        for i in order[:max(0, 1000 - sum(tenths))]:
+            tenths[i] += 1
+        rounded, places = [t / 10 for t in tenths], 1
+    percents = [f"{share:.{places}f}%" for share in rounded]
+    return total_label, parts, percents
 
 
 @dataclass
@@ -337,18 +376,18 @@ def _donut(chart):
                        f'fill="{color}"/>')
         angle += sweep
     canvas.boxes.append((cx - outer, cy - outer, cx + outer, cy + outer))
-    canvas.text(cx, cy + 2, format_value(total, chart.prefix, chart.suffix), 21, anchor="middle", fill=INK,
-                weight="semibold", tabular=True)
+    total_label, part_labels, percent_labels = breakdown_labels(values, chart.prefix, chart.suffix)
+    canvas.text(cx, cy + 2, total_label, 21, anchor="middle", fill=INK, weight="semibold", tabular=True)
     canvas.text(cx, cy + 20, "Total", SMALL, anchor="middle")
     x, y = 300.0, height / 2 - 13 * len(values) + 17
     number_x, percent_x = WIDTH - 62, WIDTH - 4
     for index, (name, value) in enumerate(zip(chart.categories, values)):
         canvas.add(f'<rect x="{x:.2f}" y="{y - 9:.2f}" width="10" height="10" rx="2.5" '
                    f'fill="{PALETTE[index % len(PALETTE)]}"/>', (x, y - 9, x + 10, y + 1))
-        amount = format_value(value, chart.prefix, chart.suffix)
+        amount = part_labels[index]
         canvas.text(x + 18, y, fit(name, number_x - text_width(amount, LABEL, "medium") - x - 34), fill=INK)
         canvas.text(number_x, y, amount, anchor="end", fill=INK, weight="medium", tabular=True)
-        canvas.text(percent_x, y, f"{value / total * 100:.0f}%", anchor="end", tabular=True)
+        canvas.text(percent_x, y, percent_labels[index], anchor="end", tabular=True)
         if index < len(values) - 1:
             canvas.add(f'<line x1="{x:.2f}" y1="{y + 8.5:.2f}" x2="{WIDTH - 4:.2f}" y2="{y + 8.5:.2f}" '
                        f'stroke="{GRID}" stroke-width="1"/>')

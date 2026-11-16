@@ -64,7 +64,7 @@ def _loan_rows():
         rows.append([
             period,
             {"formula": opening},
-            {"formula": f"=-PMT(Inputs!$B$11/12,Inputs!$B$12,Inputs!$B$10)"},
+            {"formula": "=-PMT(Inputs!$B$11/12,Inputs!$B$12,Inputs!$B$10)"},
             {"formula": f"=-IPMT(Inputs!$B$11/12,A{r},Inputs!$B$12,Inputs!$B$10)"},
             {"formula": f"=-PPMT(Inputs!$B$11/12,A{r},Inputs!$B$12,Inputs!$B$10)"},
             {"formula": f"=MAX(0,ROUND(B{r}-E{r},2))"},
@@ -247,7 +247,7 @@ RESEARCH_DOCUMENT = {
     "title": "Does Delivery Flexibility Reduce Subscription Churn?",
     "subtitle": "Evidence from a twelve-month field experiment with 6,400 coffee subscribers",
     "author": "Priya Raman and Tomás Ibarra, Customer Insights", "organization": "Northwind Coffee Roasters",
-    "date": "October 2026", "theme": "editorial", "page": "a4", "cover": True, "contents": True,
+    "date": "January 2027", "theme": "editorial", "page": "a4", "cover": True, "contents": True,
     "summary": "Subscribers offered a choice of delivery day and the option to skip a delivery cancelled 21% less "
                "often over twelve months than subscribers on a fixed schedule (2.4% against 3.0% a month; "
                "difference 0.62 points, 95% interval 0.41 to 0.83). The effect was largest among subscribers "
@@ -310,7 +310,7 @@ RESEARCH_DOCUMENT = {
             "Twelve months is long enough to measure churn, not lifetime value."]},
         {"type": "heading", "level": 2, "text": "Recommendation"},
         {"type": "callout", "tone": "success", "title": "Recommendation",
-         "text": "Offer the flexible schedule to every subscriber from January 2027."},
+         "text": "Offer the flexible schedule to every subscriber from March 2027."},
         {"type": "heading", "level": 1, "text": "References"},
         {"type": "list", "ordered": True, "items": [
             "Customer Insights. Exit survey of cancelled subscribers, January to September 2025. Internal report.",
@@ -344,9 +344,12 @@ WORD_PROPOSAL = {
         {"type": "comparison", "columns": [
             {"title": "What we do", "items": ["Concept and layout", "Permits and contractor management",
                                               "Furniture, lighting and signage", "Staff training for opening week"]},
-            {"title": "What you provide", "items": ["Access to the site from 4 December", "Decisions within three "
-                                                    "working days", "Your brand guidelines and menu"]}]},
+            {"title": "What you provide", "items": ["Access to the site from 4 December 2026, before the build "
+                                                    "starts in week 6", "Decisions within three working days",
+                                                    "Your brand guidelines and menu"]}]},
         {"type": "heading", "level": 1, "text": "Timeline"},
+        {"type": "paragraph", "text": "Work starts on Monday 23 November 2026, the latest start that opens the café "
+                                      "on 1 March 2027 after fourteen weeks."},
         {"type": "steps", "items": [
             {"title": "Weeks 1 to 2: Concept", "text": "Layout, materials board and budget confirmed with you."},
             {"title": "Weeks 3 to 5: Permits", "text": "Building and food-premises approvals lodged and tracked."},
@@ -364,8 +367,9 @@ WORD_PROPOSAL = {
         {"type": "heading", "level": 1, "text": "Why Studio Meridian"},
         {"type": "quote", "text": "They opened our second site three days early and under budget.",
          "attribution": "Marcus Hale, Owner, Hale & Daughter Bakery"},
-        {"type": "paragraph", "text": "This proposal is valid until 15 December 2026. To accept, reply in writing "
-                                      "and we will schedule the concept workshop within a week."},
+        {"type": "paragraph", "text": "This proposal is valid until 20 November 2026, so that work can start on "
+                                      "23 November. To accept, reply in writing and we will hold the concept "
+                                      "workshop in the first week."},
     ],
 }
 
@@ -398,8 +402,14 @@ MULTILINGUAL_DOCUMENT = {
 # --- A complex edit -----------------------------------------------------------------------------
 #
 # Applied to the business report (tests/test_document_design.py REPORT) as tracked changes, and to the
-# forecast workbook: the figures are restated after an audit, a paragraph explains why, a table row is
-# added, and a workbook input is changed so every dependent figure is recalculated.
+# forecast workbook: revenue is restated after an audit together with every figure that depends on it
+# (growth, gross profit, margin), a paragraph explains why and says which charts still show the figures
+# before the restatement, and a workbook input is changed so every dependent figure is recalculated.
+RESTATED = {"revenue": ("$18.4M", "$18.6M"), "revenue_thousands": ("18,400", "18,600"),
+            "growth_summary": ("grew 23%", "grew 24%"), "growth_metric": ("23% vs 2025", "24% vs 2025"),
+            "growth_table": ("+22.7%", "+24.0%"), "gross_profit": ("7,654", "7,854"),
+            "gross_profit_change": ("+29.2%", "+32.6%"), "margin": ("41.6%", "42.2%"),
+            "margin_summary": ("by 2.1 points", "by 2.7 points"), "margin_metric": ("2.1 pts", "2.7 pts")}
 
 
 def report_edit(outline):
@@ -408,13 +418,14 @@ def report_edit(outline):
         return next(u.address for u in outline.units if u.kind == "paragraph" and u.text.startswith(starts)
                     and "\n" not in u.text)
     table = next(u.address for u in outline.units if u.kind == "cell" and u.text == "Line item").split(".")[0]
+    del table                      # The restated table keeps its rows; the restatement is in its figures.
     return [
-        {"op": "replace_text", "find": "$18.4M", "replace": "$18.6M"},
-        {"op": "replace_text", "find": "18,400", "replace": "18,600", "expect": 1},
+        *({"op": "replace_text", "find": old, "replace": new, **({} if key == "revenue" else {"expect": 1})}
+          for key, (old, new) in RESTATED.items()),
         {"op": "insert_paragraph", "after": paragraph("2026 was the strongest year"),
          "text": "Figures restated on 14 November 2026 after the year-end audit moved $0.2M of December wholesale "
-                 "revenue into 2026."},
-        {"op": "add_row", "after": f"{table}.r3", "cells": ["Audit adjustment", "0", "200", "n/a"]},
+                 "revenue into 2026. The quarterly revenue and revenue mix charts show the figures before the "
+                 "restatement."},
         {"op": "replace_text", "find": "strongest", "replace": "strongest and most profitable", "expect": 1},
     ]
 
