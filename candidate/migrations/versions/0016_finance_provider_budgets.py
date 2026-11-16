@@ -24,7 +24,11 @@ only the owner may delete from finance_unsafe_latches.
 The provider buckets start empty, which is exact only while
 finance_reservations is empty: this revision refuses to run on PostgreSQL
 if any reservation exists (Financial Safeguards have never been enabled, so
-none does).
+none does). The refusal is SQL the database itself evaluates, after locking
+the reservations against new rows, so it holds equally when the migration
+runs online and when its SQL is rendered offline (alembic --sql) and applied
+later: offline rendering cannot see the ledger, so the check must travel
+with the script (Codex audit D1).
 
 Unused until KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED is true. Downgrade drops
 the two tables (development and test use).
@@ -41,13 +45,23 @@ branch_labels = depends_on = None
 GRANTS = {"finance_provider_buckets": "SELECT, INSERT, UPDATE",
           "finance_operator_actions": "SELECT, INSERT"}
 
+LEDGER_NOT_EMPTY = "finance_reservations is not empty: provider buckets cannot start at zero."
+# Evaluated by the server, online or from rendered SQL. SHARE mode blocks new reservations until the
+# migration commits, so none can appear between the check and the new tables.
+EMPTY_LEDGER_GUARD = (
+    "LOCK TABLE kalillac.finance_reservations IN SHARE MODE",
+    "DO $finance_provider_budgets_guard$\nBEGIN\n"
+    " IF EXISTS (SELECT 1 FROM kalillac.finance_reservations) THEN\n"
+    "  RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = '" + LEDGER_NOT_EMPTY + "';\n"
+    " END IF;\nEND $finance_provider_budgets_guard$",
+)
+
 
 def upgrade():
-    context = op.get_context()
-    postgresql = context.dialect.name == "postgresql"
-    if postgresql and not context.as_sql:
-        if op.get_bind().execute(sa.text("SELECT EXISTS (SELECT 1 FROM kalillac.finance_reservations)")).scalar():
-            raise RuntimeError("finance_reservations is not empty: provider buckets cannot start at zero.")
+    postgresql = op.get_context().dialect.name == "postgresql"
+    if postgresql:
+        for statement in EMPTY_LEDGER_GUARD:
+            op.execute(statement)
     op.create_table(
         "finance_provider_buckets",
         sa.Column("period_kind", sa.String(5), nullable=False),

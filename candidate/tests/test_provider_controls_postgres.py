@@ -1706,6 +1706,32 @@ def _migrate(revision, downgrade=False):
                 os.environ[name] = value
 
 
+def _render_offline(revisions):
+    """The SQL `alembic upgrade <revisions> --sql` renders, without any database connection."""
+    import io
+    from alembic import command
+    from kalillac_db import migration_roles
+    settings = {migration_roles.OWNER_ROLE_ENV: OWNER, migration_roles.APP_ROLE_ENV: APP,
+                "KALILLAC_MIGRATION_REGISTRATION_ROLE": REGISTRATION,
+                migration_roles.V1_SECURITY_SERVICE_ROLE_ENV: SERVICE,
+                migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV: EXECUTOR}
+    saved = {name: os.environ.get(name) for name in settings}
+    os.environ.update(settings)
+    buffer = io.StringIO()
+    try:
+        config = _alembic_config()
+        config.output_buffer = buffer
+        config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline@127.0.0.1/offline")
+        command.upgrade(config, revisions, sql=True)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    return buffer.getvalue()
+
+
 def _revision(admin):
     with _connect(admin) as conn:
         return conn.execute("SELECT version_num FROM kalillac.alembic_version").fetchall()
@@ -1727,11 +1753,26 @@ def test_finance_provider_budget_migration_refuses_a_ledger_with_reservations(ap
             assert conn.execute("SELECT to_regclass('kalillac.finance_provider_buckets') IS NULL, "
                                 "to_regclass('kalillac.finance_operator_actions') IS NULL").fetchone() == (True, True)
             assert conn.execute("SELECT count(*) FROM kalillac.finance_reservations").fetchone()[0] > 0
-        with pytest.raises(RuntimeError, match="finance_reservations is not empty"):
+        from sqlalchemy.exc import DBAPIError
+        with pytest.raises(DBAPIError, match="finance_reservations is not empty"):
             _migrate(HEAD)
         assert _revision(database) == [("0015_finance_ledger",)]  # Refused and rolled back.
         with _connect(database) as conn:
             assert conn.execute("SELECT to_regclass('kalillac.finance_provider_buckets') IS NULL").fetchone() == (True,)
+        # Codex audit D1: the same refusal must travel in offline-rendered SQL, which cannot read the
+        # ledger when it is rendered. Render 0015 -> 0016 with alembic --sql and apply it as the owner.
+        script = _render_offline("0015_finance_ledger:0016_finance_provider_budgets")
+        assert "LOCK TABLE kalillac.finance_reservations IN SHARE MODE" in script
+        assert script.index("finance_provider_budgets_guard") < script.index("CREATE TABLE kalillac.finance_provider_buckets")
+        with _connect(MIGRATE, autocommit=False) as conn:
+            conn.execute("SET ROLE " + OWNER)
+            with pytest.raises(Exception, match="finance_reservations is not empty"):
+                conn.execute(script)
+            conn.rollback()
+        assert _revision(database) == [("0015_finance_ledger",)]
+        with _connect(database) as conn:
+            assert conn.execute("SELECT to_regclass('kalillac.finance_provider_buckets') IS NULL, "
+                                "to_regclass('kalillac.finance_operator_actions') IS NULL").fetchone() == (True, True)
             # The precondition production has: Financial Safeguards were never enabled, so the ledger is empty.
             conn.execute("TRUNCATE kalillac.finance_reservations, kalillac.finance_ledger_buckets, "
                          "kalillac.finance_unsafe_latches")

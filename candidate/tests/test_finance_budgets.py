@@ -628,3 +628,30 @@ def test_no_application_route_or_module_reaches_the_admin_functions():
     for path in (CANDIDATE / "kalillac_routing").glob("*.py"):
         assert "finance_admin" not in path.read_text(encoding="utf-8"), path.name
     assert date(2030, 3, 14) == DAY  # The shared fixture clock these tests assume.
+
+
+def test_0016_rendered_offline_carries_its_empty_ledger_refusal(monkeypatch):
+    """Codex audit D1: `alembic upgrade --sql` cannot read the ledger, so the refusal must be SQL the
+    database evaluates when the script is applied, ahead of the new tables (verified against a
+    populated ledger in test_provider_controls_postgres)."""
+    import io
+    from pathlib import Path
+    from alembic import command
+    from alembic.config import Config
+    from kalillac_db import migration_roles
+    for name, value in ((migration_roles.OWNER_ROLE_ENV, "kalillac_owner"), (migration_roles.APP_ROLE_ENV, "kalillac_app"),
+                        ("KALILLAC_MIGRATION_REGISTRATION_ROLE", "kalillac_registration"),
+                        (migration_roles.V1_SECURITY_SERVICE_ROLE_ENV, "kalillac_v1_service"),
+                        (migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV, "kalillac_v1_executor")):
+        monkeypatch.setenv(name, value)
+    candidate = Path(__file__).resolve().parents[1]
+    config = Config(str(candidate / "alembic.ini"))
+    config.set_main_option("script_location", str(candidate / "migrations"))
+    config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline@127.0.0.1/offline")
+    config.output_buffer = io.StringIO()
+    command.upgrade(config, "0015_finance_ledger:0016_finance_provider_budgets", sql=True)
+    script = config.output_buffer.getvalue()
+    lock = script.index("LOCK TABLE kalillac.finance_reservations IN SHARE MODE")
+    guard = script.index("IF EXISTS (SELECT 1 FROM kalillac.finance_reservations) THEN")
+    assert lock < guard < script.index("CREATE TABLE kalillac.finance_provider_buckets")
+    assert "finance_reservations is not empty: provider buckets cannot start at zero." in script
