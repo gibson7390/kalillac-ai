@@ -135,6 +135,14 @@ Revokes R's direct DML on `users`, `account_sessions`, recovery and verification
 and billing, and its reads of credential digests, **only** inside the operator transition. The
 migration itself prepares and verifies; startup never migrates or changes grants.
 
+**Dependency recorded before E1 (from D3's login route).** V1 login reads the account by email and its
+stored password hash (`users.password_hash`) through the runtime role R, then passes that exact hash to
+`v1_issue_session`. E1 removes R's reads of credential digests, so before E1 lands a reviewed credential
+read path must exist (for example an S-executable SECURITY DEFINER lookup returning only the account id
+and hash for an email, with its own catalog proof and tests), and HTTP login must be tested against the
+final post-E1 grants: login succeeds through the new path, and R alone can no longer read a digest. E1
+itself stays its own checkpoint.
+
 ### E2. The operator transition
 
 `tools/v1_security_transition.py`: with ingress closed, checks the catalog exactly, gives S its login
@@ -211,6 +219,15 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
 - **Password rehash in V1 mode.** The legacy login rehashes an outdated Argon2 hash as R. V1 login does
   not: R must not write account state, and the authority compares the exact hash just verified. A
   rehash path behind an authority is open (it matters only if the hashing parameters change).
+- **D3 login at `ac9f12c669970550957d64d1508400ef0a69ee87` (Codex review).** Codex independently checked
+  the routing and found the original deletion-related sign-in defect resolved in the D3 HTTP fixture, and
+  verified that the PostgreSQL CI group passed 303 tests with no skips or failures. Owner acceptance
+  pending. Codex also found that an issuance authority answering `None` made the route return 500 and
+  left the login limiter's reservation held. **Corrected on `fix/d3-v1-login-malformed-authority`**
+  (awaiting Codex): only the authority's own `SessionIssued` with a contract outcome counts; anything
+  else is `503 account_unavailable`, the reservation is released exactly once, no cookie is set and no
+  legacy session is created. Successful issuance (200, success recorded), denied credentials (401,
+  failure recorded) and cancellation (released once, re-raised) are unchanged.
 
 ## 5. Account deletion: retention proposal (for the owner's decision)
 

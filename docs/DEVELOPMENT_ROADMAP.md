@@ -208,7 +208,11 @@ from the code. See "Owner decisions required".
   S; a refusal is 401 with no cookie, an unavailable authority 503 with no cookie, never the legacy path.
   V1-off login and the startup gate are unchanged; the application passes no authority. HTTP tests on
   disposable PostgreSQL cover sign-in before a deletion request, refusal after either kind of request,
-  overlapping logins and requests, and unavailable authorities. Implemented; awaiting Codex.
+  overlapping logins and requests, and unavailable authorities. At `ac9f12c`: Codex independently found
+  the deletion-related sign-in defect resolved in the D3 HTTP fixture and the 303-test PostgreSQL group
+  passing. Its one remaining finding (a malformed authority answer gave 500 and held the limiter slot) is
+  corrected on `fix/d3-v1-login-malformed-authority`, awaiting Codex. Owner acceptance pending. Before E1:
+  a reviewed credential read path for V1 login (plan, E1).
 * Then D3 (routes), D4 (operator tool), E1 to E3; erasure after the owner's retention decisions.
 
 ### Milestone 3: Stripe billing (starting point)

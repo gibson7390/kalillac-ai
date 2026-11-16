@@ -424,7 +424,7 @@ def build_account_router(
         unverified, quarantined, deletion requested, reset required) before it
         inserts one. Refused: 401, no cookie. Unavailable or any unexpected
         answer: 503, no cookie, and never the legacy path."""
-        from .v1_authority import V1AuthorityUnavailable
+        from .v1_authority import SessionIssued, V1AuthorityUnavailable
 
         def verify(session: Session):
             user = get_user_by_email(session, email)
@@ -462,16 +462,20 @@ def build_account_router(
                 )
             )
         except V1AuthorityUnavailable:
-            limiter.release(limit_keys)
-            return _error(503, "account_unavailable")
+            issued = None
         except BaseException:
+            # Cancellation or a server error is not a failed guess; free the slot.
             limiter.release(limit_keys)
             raise
 
-        if issued.outcome == "not_authenticated":
+        # Only the authority's own result type with a contract outcome counts.
+        # Anything else (None, another type, an unknown outcome) is an
+        # unavailable authority. Each path below ends the attempt exactly once.
+        outcome = issued.outcome if type(issued) is SessionIssued else None
+        if outcome == "not_authenticated":
             limiter.record_failure(limit_keys)
             return _error(401, "invalid_credentials")
-        if issued.outcome != "issued":
+        if outcome != "issued":
             limiter.release(limit_keys)
             return _error(503, "account_unavailable")
 

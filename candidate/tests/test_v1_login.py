@@ -148,3 +148,112 @@ def test_the_application_still_passes_no_authority_and_keeps_its_startup_gate():
     source = (Path(__file__).resolve().parents[1] / "app_fastapi_candidate.py").read_text(encoding="utf-8")
     assert "v1_authority" not in source
     assert "_v1_account_security = _load_v1_startup()" in source
+
+
+# --- malformed authority answers and the login limiter (Codex reverification of ac9f12c) -------------
+
+from kalillac_accounts.rate_limit import LoginRateLimiter  # noqa: E402
+
+
+class RecordingLimiter(LoginRateLimiter):
+    """The real limiter, with every attempt boundary recorded."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def begin(self, keys):
+        self.calls.append("begin")
+        return super().begin(keys)
+
+    def record_failure(self, keys):
+        self.calls.append("failure")
+        super().record_failure(keys)
+
+    def release(self, keys):
+        self.calls.append("release")
+        super().release(keys)
+
+    def record_success(self, keys):
+        self.calls.append("success")
+        super().record_success(keys)
+
+    def in_flight(self):
+        return sum(bucket.in_flight for bucket in self._store._buckets.values())
+
+
+class Answers:
+    """An issuance authority that gives the listed answers in turn (raising any exception listed)."""
+
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), 0
+
+    def issue_session(self, **arguments):
+        self.calls += 1
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        if answer == "issued":
+            at = datetime.now(timezone.utc)
+            return SessionIssued("issued", at, at + timedelta(days=arguments["lifetime_days"]), False)
+        return answer
+
+
+def limited_client(db, limiter, authority, raise_server_exceptions=False):
+    api = FastAPI()
+    api.include_router(build_account_router(session_factory=lambda: db, settings=SETTINGS, limiter=limiter,
+                                            v1_security=V1_ON, v1_authority=authority))
+    return TestClient(api, base_url="https://testserver", raise_server_exceptions=raise_server_exceptions)
+
+
+MALFORMED = {
+    "none": None,
+    "another_type": object(),
+    "a_tuple": ("issued", None, None, False),
+    "unknown_outcome": SessionIssued("granted", None, None, False),
+    "outcome_not_a_string": SessionIssued(None, None, None, False),
+}
+
+
+@pytest.mark.parametrize("answer", list(MALFORMED.values()), ids=list(MALFORMED))
+def test_a_malformed_authority_answer_is_503_releases_the_attempt_once_and_a_valid_retry_signs_in(db, answer):
+    registered(db)
+    limiter, authority = RecordingLimiter(), Answers(answer, "issued")
+    with limited_client(db, limiter, authority) as client:
+        response = client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+        assert (response.status_code, response.json()) == (503, {"error": "account_unavailable"})
+        assert "set-cookie" not in response.headers and COOKIE not in client.cookies
+        assert limiter.calls == ["begin", "release"] and limiter.in_flight() == 0
+        assert sessions(db) == 0                                              # No legacy session.
+        retry = client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+        assert retry.status_code == 200 and retry.cookies.get(COOKIE)
+    assert limiter.calls == ["begin", "release", "begin", "success"] and limiter.in_flight() == 0
+    assert authority.calls == 2 and sessions(db) == 0
+
+
+@pytest.mark.parametrize("answer, status, ending", [
+    ("issued", 200, "success"),
+    (SessionIssued("not_authenticated", None, None, False), 401, "failure"),
+    (SessionIssued("security_unavailable", None, None, False), 503, "release"),
+    (V1AuthorityUnavailable(), 503, "release"),
+])
+def test_every_authority_outcome_ends_the_attempt_exactly_once(db, answer, status, ending):
+    registered(db)
+    limiter = RecordingLimiter()
+    with limited_client(db, limiter, Answers(answer)) as client:
+        response = client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+    assert response.status_code == status and ("set-cookie" in response.headers) == (status == 200)
+    assert limiter.calls == ["begin", ending] and limiter.in_flight() == 0
+
+
+def test_cancellation_releases_the_attempt_once_and_propagates(db):
+    class Cancelled(BaseException):
+        pass
+    registered(db)
+    limiter = RecordingLimiter()
+    # No `with`: each request then runs in its own event-loop portal, which a BaseException escaping the
+    # application may end without breaking the client's shutdown.
+    client = limited_client(db, limiter, Answers(Cancelled()), raise_server_exceptions=True)
+    with pytest.raises(Cancelled):
+        client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+    assert limiter.calls == ["begin", "release"] and limiter.in_flight() == 0 and sessions(db) == 0
