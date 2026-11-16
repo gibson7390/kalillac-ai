@@ -900,3 +900,76 @@ def test_a_tracked_fee_edit_keeps_the_cells_formatting(proposal):
     exact = edit(proposal, "p.docx", operations, track_changes=True, exact=True).data
     original = _re.search(r"<w:r>(<w:rPr>(?:(?!</w:rPr>).)*</w:rPr>)<w:t[^>]*>\$11,000</w:t>", document_xml(proposal), _re.S)
     assert original is not None and original.group(1) in document_xml(exact)
+
+
+# --- the whole table must still fit (Codex reverification, finding B) --------------------------------
+
+PHRASE = "Margin falls on overflow volume and quality depends on a third party. "
+
+
+def _table_cells(data, name):
+    found = outline(data, name)
+    return [u for u in found.units if u.kind == "cell"]
+
+
+def _first_column_cells_by_row(data, name):
+    rows = {}
+    for unit in _table_cells(data, name):
+        table, row, column = unit.address.rsplit(".", 2)
+        if column == "c1" and row != "r1":
+            rows.setdefault(table, []).append(unit.address)
+    return next(iter(rows.values()))
+
+
+def test_rows_that_each_fit_cannot_together_push_the_table_off_the_slide(deck):
+    first, second = _first_column_cells_by_row(deck, "x.pptx")[:2]
+    for count in range(1, 40):
+        text = PHRASE * count
+        both = [{"op": "set_text", "at": first, "text": text}, {"op": "set_text", "at": second, "text": text}]
+        try:
+            edit(deck, "x.pptx", both)
+        except SpecError as error:
+            assert error.code == "slide_text_too_long"
+            edit(deck, "x.pptx", both[:1])                                # One of them alone still fits.
+            edit(deck, "x.pptx", both[1:])
+            return
+    pytest.fail("no length made two rows overflow")
+
+
+def _merged_and_rtl_decks():
+    import pptx
+    from test_deck_design import ARABIC_DECK
+    spec = {"title": "Fees", "slides": [
+        {"layout": "table", "title": "Fees by stage", "header": ["Stage", "Paid on", "Fee"],
+         "rows": [["Concept", "Signing", "$24,500"], ["Permits", "Lodged", "$11,000"],
+                  ["Build", "Weeks 6 to 12", "$138,000"], ["Opening", "Opening day", "$13,000"]]}]}
+    merged = pptx.Presentation(io.BytesIO(generate(spec, "pptx").data))
+    table = next(shape for shape in merged.slides[0].shapes if getattr(shape, "has_table", False)).table
+    table.cell(1, 1).merge(table.cell(2, 1))                               # A cell spanning two rows.
+    out = io.BytesIO()
+    merged.save(out)
+    return out.getvalue(), generate(copy.deepcopy(ARABIC_DECK), "pptx").data
+
+
+def test_merged_and_right_to_left_tables_are_measured_whole():
+    merged, arabic = _merged_and_rtl_decks()
+    spanning = next(u.address for u in _table_cells(merged, "m.pptx") if u.text.startswith("Signing"))
+    assert refused(merged, "m.pptx", [{"op": "set_text", "at": spanning, "text": PHRASE * 40}]) == "slide_text_too_long"
+    edit(merged, "m.pptx", [{"op": "set_text", "at": spanning, "text": "On signing"}])
+    cells = _table_cells(arabic, "a.pptx")
+    if not cells:
+        pytest.skip("the Arabic deck has no table")
+    long = " ".join(["نمت الإيرادات في كل المناطق مع تحسن كفاءة سلاسل الإمداد."] * 30)
+    rows = sorted({u.address.rsplit(".", 1)[0] for u in cells})[1:3]
+    targets = [next(u.address for u in cells if u.address.startswith(row + ".")) for row in rows]
+    assert refused(arabic, "a.pptx", [{"op": "set_text", "at": a, "text": long} for a in targets]) \
+        == "slide_text_too_long"
+
+
+def test_an_edit_that_fits_keeps_every_other_cell_unchanged(deck):
+    before = {u.address: u.text for u in _table_cells(deck, "x.pptx")}
+    target = _first_column_cells_by_row(deck, "x.pptx")[0]
+    after = {u.address: u.text for u in _table_cells(edit(deck, "x.pptx", [{"op": "set_text", "at": target,
+                                                                              "text": "Capital"}]).data, "x.pptx")}
+    assert after[target] == "Capital"
+    assert {a: t for a, t in after.items() if a != target} == {a: t for a, t in before.items() if a != target}

@@ -856,6 +856,7 @@ def _check_deck_fit(presentation, before):
     original text did (a deliberate oversized glyph, a customer's own tight box): only growth past
     both the box and the original is refused."""
     slide_height = presentation.slide_height / EMU
+    changed_tables = {}                               # (slide, shape) -> table shape with an edited cell
     for key, kind, element, _slide in _text_containers(presentation):
         original_text, original_body = before.get(key, (None, None))
         if kind == "shape":
@@ -877,24 +878,59 @@ def _check_deck_fit(presentation, before):
             if needed > room + FIT_TOLERANCE and (was is None or needed > was[0] + FIT_TOLERANCE):
                 _refuse("slide_text_too_long")
         else:
-            graphic, row_index, column_index, cell = element
+            graphic, _row_index, _column_index, cell = element
             body = cell._tc.find(A + "txBody")
             if body is None or original_text == _body_text(body):
                 continue
-            table = graphic.table
-            span = int(cell._tc.get("gridSpan") or 1)
-            width = sum(table.columns[i].width
-                        for i in range(column_index, min(column_index + span, len(table.columns)))) / EMU
-            needed = _cell_needed(cell._tc, body, width)
+            changed_tables[key[:2]] = graphic
+    for key, graphic in changed_tables.items():
+        _check_table_fit(graphic, key, before, slide_height)
+
+
+def _check_table_fit(graphic, key, before, slide_height):
+    """The whole final table must end on the slide (Codex reverification, finding B): every row grows to
+    its tallest cell, a cell spanning several rows needs their sum, and the table's bottom is the sum of
+    all rows, not of one edited row. Measured the same way for the original text, so an edit is refused
+    only when it pushes the table further off the slide than it already was."""
+    table = graphic.table
+    rows, columns = len(table.rows), len(table.columns)
+    new_heights = [row.height / EMU for row in table.rows]
+    old_heights = list(new_heights)
+    spanning = []
+    for r, row in enumerate(table.rows):
+        for c, cell in enumerate(row.cells):
+            tc = cell._tc
+            if tc.get("hMerge") in ("1", "true") or tc.get("vMerge") in ("1", "true"):
+                continue                                  # Covered by the cell that spans it.
+            body = tc.find(A + "txBody")
+            if body is None:
+                continue
+            span = int(tc.get("gridSpan") or 1)
+            row_span = min(int(tc.get("rowSpan") or 1), rows - r)
+            width = sum(table.columns[i].width for i in range(c, min(c + span, columns))) / EMU
+            needed = _cell_needed(tc, body, width)
             if needed is None:
                 _refuse("slide_text_too_long")
-            was = _cell_needed(cell._tc, original_body, width) if original_body is not None else None
-            # A table row grows to fit its text: the table must still end on the slide.
-            heights = [row.height / EMU for row in table.rows]
-            heights[row_index] = max(heights[row_index], needed)
-            off_slide = graphic.top is None or graphic.top / EMU + sum(heights) > slide_height + FIT_TOLERANCE
-            if off_slide and (was is None or needed > was + FIT_TOLERANCE):
-                _refuse("slide_text_too_long")
+            original = before.get((*key, r + 1, c + 1), (None, None))[1]
+            was = _cell_needed(tc, original, width) if original is not None else needed
+            if was is None:
+                was = needed
+            if row_span == 1:
+                new_heights[r] = max(new_heights[r], needed)
+                old_heights[r] = max(old_heights[r], was)
+            else:
+                spanning.append((r, row_span, needed, was))
+    for r, row_span, needed, was in spanning:
+        for heights, value in ((new_heights, needed), (old_heights, was)):
+            short = value - sum(heights[r:r + row_span])
+            if short > 0:
+                heights[r + row_span - 1] += short
+    if graphic.top is None:
+        _refuse("slide_text_too_long")
+    top = graphic.top / EMU
+    bottom, previous = top + sum(new_heights), top + sum(old_heights)
+    if bottom > slide_height + FIT_TOLERANCE and bottom > previous + FIT_TOLERANCE:
+        _refuse("slide_text_too_long")
 
 
 def _edit_pptx(data, operations):
