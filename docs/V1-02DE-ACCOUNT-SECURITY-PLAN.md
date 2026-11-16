@@ -224,10 +224,19 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
   verified that the PostgreSQL CI group passed 303 tests with no skips or failures. Owner acceptance
   pending. Codex also found that an issuance authority answering `None` made the route return 500 and
   left the login limiter's reservation held. **Corrected on `fix/d3-v1-login-malformed-authority`**
-  (awaiting Codex): only the authority's own `SessionIssued` with a contract outcome counts; anything
-  else is `503 account_unavailable`, the reservation is released exactly once, no cookie is set and no
-  legacy session is created. Successful issuance (200, success recorded), denied credentials (401,
-  failure recorded) and cancellation (released once, re-raised) are unchanged.
+  (`d0247a448ca9b77dc5fea67c58140e20ddf173f6`): only the authority's own `SessionIssued` with a
+  contract outcome counts; anything else is `503 account_unavailable`, the reservation is released
+  exactly once, no cookie is set and no legacy session is created. Successful issuance (200, success
+  recorded), denied credentials (401, failure recorded) and cancellation (released once, re-raised)
+  are unchanged. **Codex independently verified the original limiter leak resolved at `d0247a4`.**
+  Owner acceptance pending.
+- **Outcome type at `d0247a4` (Codex review).** Codex found that `v1_login` compared the outcome to
+  contract values without first requiring it to be a string, so an outcome that is not a string but
+  compares equal to `"issued"` signed in (200, cookie, success recorded), and one equal to
+  `"not_authenticated"` was counted as a failed guess. **Corrected on `fix/d3-v1-login-outcome-type`**
+  (awaiting Codex): the outcome must be exactly `str` before any comparison; otherwise it is treated as
+  an unavailable authority (`503 account_unavailable`, the reservation released exactly once, no
+  cookie, no legacy session), and a valid retry signs in.
 
 ## 5. Account deletion: retention proposal (for the owner's decision)
 

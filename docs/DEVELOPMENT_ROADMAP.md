@@ -210,8 +210,10 @@ from the code. See "Owner decisions required".
   disposable PostgreSQL cover sign-in before a deletion request, refusal after either kind of request,
   overlapping logins and requests, and unavailable authorities. At `ac9f12c`: Codex independently found
   the deletion-related sign-in defect resolved in the D3 HTTP fixture and the 303-test PostgreSQL group
-  passing. Its one remaining finding (a malformed authority answer gave 500 and held the limiter slot) is
-  corrected on `fix/d3-v1-login-malformed-authority`, awaiting Codex. Owner acceptance pending. Before E1:
+  passing. Its next finding (a malformed authority answer gave 500 and held the limiter slot) was
+  corrected at `d0247a4`, and Codex independently verified the limiter leak resolved. Its follow-up (an
+  outcome that is not a string but compares equal to a contract value) is corrected on
+  `fix/d3-v1-login-outcome-type`, awaiting Codex. Owner acceptance pending. Before E1:
   a reviewed credential read path for V1 login (plan, E1).
 * Then D3 (routes), D4 (operator tool), E1 to E3; erasure after the owner's retention decisions.
 

@@ -472,6 +472,10 @@ def build_account_router(
         # Anything else (None, another type, an unknown outcome) is an
         # unavailable authority. Each path below ends the attempt exactly once.
         outcome = issued.outcome if type(issued) is SessionIssued else None
+        if type(outcome) is not str:
+            # Exactly str, checked before any comparison: a look-alike or a str
+            # subclass could define equality to match a contract value.
+            outcome = None
         if outcome == "not_authenticated":
             limiter.record_failure(limit_keys)
             return _error(401, "invalid_credentials")

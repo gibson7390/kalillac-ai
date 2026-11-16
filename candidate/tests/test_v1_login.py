@@ -246,6 +246,70 @@ def test_every_authority_outcome_ends_the_attempt_exactly_once(db, answer, statu
     assert limiter.calls == ["begin", ending] and limiter.in_flight() == 0
 
 
+# --- an outcome must be an actual string before any comparison (Codex reverification of d0247a4) -----
+
+class LooksLike:
+    """Not a string, but compares equal to one chosen contract value (and unequal to every other)."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return other == self.value
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = None
+
+
+class ForgedStr(str):
+    """A str subclass whose text is not a contract value but whose equality claims "issued"."""
+
+    def __eq__(self, other):
+        return other == "issued"
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = str.__hash__
+
+
+LOOK_ALIKES = {
+    "object_equal_to_issued": LooksLike("issued"),
+    "str_subclass_equal_to_issued": ForgedStr("granted"),
+}
+
+
+@pytest.mark.parametrize("outcome", list(LOOK_ALIKES.values()), ids=list(LOOK_ALIKES))
+def test_a_non_string_outcome_equal_to_issued_is_rejected_and_a_valid_retry_signs_in(db, outcome):
+    assert outcome == "issued" and not (outcome != "issued") and type(outcome) is not str
+    registered(db)
+    limiter, authority = RecordingLimiter(), Answers(SessionIssued(outcome, None, None, False), "issued")
+    with limited_client(db, limiter, authority) as client:
+        response = client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+        assert (response.status_code, response.json()) == (503, {"error": "account_unavailable"})
+        assert "set-cookie" not in response.headers and COOKIE not in client.cookies
+        assert limiter.calls == ["begin", "release"] and limiter.in_flight() == 0
+        assert sessions(db) == 0                                              # No legacy session.
+        retry = client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+        assert retry.status_code == 200 and retry.cookies.get(COOKIE)
+    assert limiter.calls == ["begin", "release", "begin", "success"] and limiter.in_flight() == 0
+    assert authority.calls == 2 and sessions(db) == 0
+
+
+def test_a_non_string_outcome_equal_to_a_denial_is_unavailable_not_a_failed_guess(db):
+    """A look-alike of "not_authenticated" must not be counted against the person as a wrong password."""
+    registered(db)
+    limiter = RecordingLimiter()
+    answer = SessionIssued(LooksLike("not_authenticated"), None, None, False)
+    with limited_client(db, limiter, Answers(answer)) as client:
+        response = client.post("/api/account/login", json={"email": EMAIL, "password": PASSWORD})
+    assert (response.status_code, response.json()) == (503, {"error": "account_unavailable"})
+    assert "set-cookie" not in response.headers
+    assert limiter.calls == ["begin", "release"] and limiter.in_flight() == 0 and sessions(db) == 0
+
+
 def test_cancellation_releases_the_attempt_once_and_propagates(db):
     class Cancelled(BaseException):
         pass

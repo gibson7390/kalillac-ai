@@ -472,10 +472,10 @@ jobs:
           assert totals == {"tests": 154, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
-      # Actual collect-only result for the explicit modules: 313 tests (219
+      # Actual collect-only result for the explicit modules: 316 tests (219
       # through 0022; 0023's deletion requests: 18 unit + 42 real PostgreSQL,
-      # and 3 more for S's own login; D3's V1 login route: 20 unit, 10 of them
-      # for malformed authority answers and the login limiter, + 11 real
+      # and 3 more for S's own login; D3's V1 login route: 23 unit, 13 of them
+      # for malformed authority answers, outcome types and the login limiter, + 11 real
       # PostgreSQL through HTTP). S logs in with its own credential in the
       # disposable database only. Missing PG fails as above.
       - name: Run V1-02D service connection, sign-out, password, quarantine and deletion-request authority contracts and the V1 login route
@@ -509,5 +509,5 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 313, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 316, "skipped": 0, "failures": 0, "errors": 0}
           PY
