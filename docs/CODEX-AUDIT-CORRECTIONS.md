@@ -1,5 +1,9 @@
 # Corrections for the Codex audits: evidence for independent verification
 
+**Checkpoint for reverification:** the tag `codex-reverify-2026-11-16` marks the exact commit that
+contains this file in this form (`feat/account-security-d2-change`). It contains every correction
+below and the work stacked after them; nothing in it was changed to make CI pass without investigation.
+
 Branch `fix/codex-audit-corrections`, stacked on `feat/account-security-d2` (which is on
 `feat/file-controls-v1`). The audited snapshot `6191b53` (`feat/document-quality-v1`) is unchanged.
 
@@ -74,11 +78,19 @@ Verified locally in Microsoft Word 16 through automation, on the generated bench
   holds the results table). So no cached page number written at generation is guaranteed to match
   Word.
 
-The fields stay editable and unchanged until the owner chooses (see the roadmap's owner decisions):
-keep the prompt (Word refreshes the contents exactly), or remove it and ship cached page numbers from
-the PDF engine (correct for three of the four benchmark documents, off by one page for three
-headings of the research document until the reader updates the table), or adopt a pagination
-engine such as LibreOffice in the worker (a new dependency).
+Owner decision 12 (2026-11-15): page-number accuracy is never traded for the prompt, so the accurate
+Word refresh stays. A LibreOffice finalization prototype, run in isolation, is evaluated in
+`docs/DECISION-12-WORD-FINALIZATION.md`: it reproduced the owner's "Page 2 of 1" (LibreOffice does not
+compute `SECTIONPAGES`), paginated every benchmark heading like Word, and its finalized files opened in
+Word with no prompt and with contents equal to Word's own recomputation. Not adopted until the owner
+accepts a sandboxed design. Finding 4 therefore stays open.
+
+### Owner decision 13: Arabic in IBM Plex Sans Arabic in Word (`9c9a80d`)
+
+Word documents in Arabic-script languages embed Plex; Arabic inside documents of other languages now
+gets Plex too (it was Arial). Verified in Word 16 with Plex not installed: Word renders from the
+embedded faces and the result matches the PDF. Found and fixed on the way: combining marks (tanween,
+shadda) were split into runs of their own. PowerPoint keeps Arial: decks cannot embed a font today. `file-generation-verification` `43793462261` success (818 tests, none skipped).
 
 ### Finding 8: Arabic Word mirroring
 

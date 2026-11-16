@@ -38,7 +38,7 @@ production migration, live Stripe or customer data.
 | `feat/billing-cases-v1`, `feat/file-controls-v1` | same worktree | Refund and dispute records; file requests under the provider controls; V1-02D D1 and the sign-out authority (0018). |
 | `feat/account-security-d2` | same worktree | The password-reset authority (0019) and the frontend count-gate correction. |
 | `fix/codex-audit-corrections` | same worktree | Corrections for both Codex audits; evidence in `docs/CODEX-AUDIT-CORRECTIONS.md`. |
-| `feat/account-security-d2-change` | same worktree | **Current development branch.** The password-change authority (0020), and the total-row rule for edited documents (Codex Q4). |
+| `feat/account-security-d2-change` | same worktree | **Current development branch.** The password-change authority (0020), the total-row rule for edited documents (Codex Q4), the registration activation guard (0021) and Arabic in IBM Plex Sans Arabic in Word. |
 
 The branches are a stack: each contains the one before it. The worktree has its own `.venv`
 (ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
@@ -182,11 +182,19 @@ from the code. See "Owner decisions required".
   same migration; the downgrade refuses while such an event exists). The epoch does not move (plan,
   section 4). `provider-ceilings-postgres` `43789685681` success (chain through 0020); the 176-test V1-02D
   group passed in `subscription-foundation-verification` `43789681911` (none skipped). DEVELOPMENT VERIFIED.
+* **Owner decision 14 (conditional removal of `v1_verify_email`).** Verified from the code: after
+  activation, only the registration role inserts accounts, each with a registration intent consumed in
+  the same transaction (proof the customer received the emailed token) and `email_verified_at` set; no
+  role can change `email` or `email_verified_at`; recovery runs on its own reset tokens. **One condition
+  failed:** the activation transition did not count unverified accounts (the CHECK constraint only
+  required the operator-recorded count to be 0). **Corrected by migration 0021** (`540a523`): the
+  transition is refused while any account is unverified, exact under concurrency. PostgreSQL regressions
+  for every condition: `subscription-foundation-verification` `43792363270` (192 tests, none skipped),
+  `provider-ceilings-postgres` `43792366823`. With 0021 all six conditions hold, so `v1_verify_email` is
+  dropped from the V1-02D/E design and the legacy verification route is retired in E1.
 * **Remaining in D2:** quarantine and reinstatement (need identity guard v3, which also changes the
   trusted guard definitions the registration startup checks), deletion request, and the operator role
-  P. Email verification probably needs no V1 authority: after registration activation the guard
-  forbids any `email_verified_at` change and every account is verified by its registration intent
-  (plan, section 4; owner decision 14). Quarantine and email verification need a third identity-guard
+  P. Quarantine and email verification need a third identity-guard
   version (the guard protects `quarantined_at`, and refuses `email_verified_at` changes once
   registration is active). New audit event types (password change, quarantine, deletion) need the
   0012 event-type constraint and the classifier's exact copy of it to change together.
@@ -488,19 +496,19 @@ libraries). It was created during this work, lives outside the repository and ca
 10. Later milestones: subscription price, Stripe product and price IDs, billing interval, trial,
     refund policy, Premium allowances. Nothing has been assumed.
 11. ~~PDF fonts~~: resolved 2026-11-15 (approved); bundled as described under Milestone 5.
-12. **Word contents and page fields** (verified in Word 16; details in `docs/CODEX-AUDIT-CORRECTIONS.md`):
-    (a) keep the dirty contents field: Word asks to update fields on opening, then shows exact page
-    numbers; (b) remove the prompt and ship page numbers from the PDF engine's pagination: no prompt,
-    but some page numbers can be off by one in Word until the reader updates the table (three of
-    eighteen headings in the benchmark); (c) add a pagination engine such as LibreOffice to the
-    worker image (a new dependency, larger worker) and verify it against Word. Recommendation: (b) for
-    business documents if the owner accepts the one-click update, otherwise (a).
-13. **Arabic font:** the PDF now uses IBM Plex Sans Arabic (OFL-1.1) for correct text extraction;
-    Word and PowerPoint still use Noto Sans Arabic. Approve Plex for all three formats (consistent
-    look), or keep the split.
-14. **Email verification under V1:** confirm that `v1_verify_email` can be dropped (after registration
-    activation no account is unverified and the guard forbids the change), with the legacy verification
-    route retired in E1.
+12. ~~Word contents and page fields~~: decided 2026-11-15: never trade page-number accuracy for the
+    prompt; keep the accurate Word refresh; prototype LibreOffice finalization in isolation only. The
+    prototype's evaluation is `docs/DECISION-12-WORD-FINALIZATION.md`: LibreOffice paginated 16 of 16
+    benchmark headings like Word, finalized files opened with no prompt, and their cached contents equalled
+    Word's own recomputation; cost 738 MB, ~280 MB and 16 to 56 s per document. **Owner acceptance
+    needed** for a sandboxed finalization service before anything changes in the product.
+13. ~~Arabic font~~: decided 2026-11-15: IBM Plex Sans Arabic in every format, after verification.
+    Done for PDF (`dee4831`) and Word (`9c9a80d`, verified in Word 16 with the embedded font).
+    **PowerPoint not changed:** a deck cannot embed the font (python-pptx has no embedding; PowerPoint's
+    embedded-font parts are a proprietary compressed form), so a deck naming Plex would show an
+    unpredictable substitute; decks keep Arial until embedding is solved.
+14. ~~Email verification under V1~~: decided 2026-11-15 (conditional); the conditions now hold with 0021
+    (see Milestone 2).
 
 Resolved by the owner on 2026-11-15, recorded so they are not asked again: decision 5 (write the
 V1-02D/E plan from the code, keeping the private database authorities and adding no legacy path),

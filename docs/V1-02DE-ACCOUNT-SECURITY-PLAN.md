@@ -51,7 +51,7 @@ operation ids, admission where the contract requires it, and an audit event in t
 | `v1_end_session(session, token_hash)` | Logout: revoke exactly the presented session; idempotent. **Implemented, migration 0018**: answers `ended` for every well-formed call, writes no audit event (sign-out is not an audited V1 operation), locks only the session row |
 | `v1_reset_password(token_hash, new_hash, op)` | Recovery completion: lock and re-check the token, replace the hash, invalidate every reset token, revoke every session, advance the epoch, clear `password_reset_required` (only here), audit. **Implemented, migration 0019** (`recovery` admission class) |
 | `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, audit. **Implemented, migration 0020** (`manual` admission class; new `password_change` event type). The epoch does not move (see section 4) |
-| `v1_verify_email(token_hash, op)` | Email verification completion under the account lock |
+| ~~`v1_verify_email(token_hash, op)`~~ | Dropped (section 4): after activation no account can be unverified; migration 0021 makes activation prove it |
 | `v1_quarantine(account, reason, op)`, `v1_reinstate(account, op)` | Operator suspension and reinstatement: quarantine revokes every session and advances the epoch; reinstatement never happens as a side effect of anything else |
 | `v1_request_deletion(account, op)` | Sets the deletion marker, revokes every session, advances the epoch; erasure itself follows the retention rules (section 5) |
 
@@ -118,13 +118,13 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
   Revoking the other sessions is exactly revocation's `others` scope, which also leaves the epoch alone;
   and a sign-in with the old password that is still in flight cannot create a session afterwards,
   because issuance re-checks the stored hash under the account lock the change holds.
-- **Email verification may need no V1 authority (to confirm with the owner).** The identity guard (0011,
-  kept by 0014) refuses any change to `email_verified_at` once registration activation is no longer
-  `unactivated`, and activation itself requires zero unverified legacy accounts
-  (`legacy_unverified_count = 0`); every account created afterwards is verified by its registration
-  intent. So after activation there is nothing for `v1_verify_email` to do, and before it the legacy
-  verification route is the one in use. Proposed: drop `v1_verify_email` from D2, and retire the legacy
-  verification route with E1. Not built until confirmed.
+- **`v1_verify_email` is dropped (owner decision 14, its conditions verified).** After activation only
+  the registration role inserts accounts, each with a registration intent consumed in the same
+  transaction and `email_verified_at` set; the identity guard refuses any change to `email` or
+  `email_verified_at`; recovery uses its own reset tokens. The one failing condition, that activation
+  did not itself count unverified accounts, is corrected by migration 0021. PostgreSQL regressions cover
+  each condition (`test_registration_email_guarantees_postgres.py`). The legacy verification route is
+  retired in E1.
 - **Quarantine needs identity guard v3.** `quarantined_at` is one of the guarded identity columns, so
   `v1_quarantine` and `v1_reinstate` need a guard version that admits exactly their transitions (set with
   a forward epoch; cleared only by reinstatement) while R, A and every other path stay refused, and
