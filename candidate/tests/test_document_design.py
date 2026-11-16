@@ -517,9 +517,9 @@ def test_word_embeds_inter_so_it_looks_the_same_everywhere():
 def test_word_right_to_left_document_is_mirrored_with_complex_script_fonts():
     _data, archive, xml = docx_parts(ARABIC)
     assert "<w:bidi/>" in xml and "<w:rtl/>" in xml and "<w:bidiVisual/>" in xml
-    assert 'w:cs="Noto Sans Arabic"' in xml
+    assert 'w:cs="IBM Plex Sans Arabic"' in xml
     font_table = archive.read("word/fontTable.xml").decode()
-    assert '<w:font w:name="Noto Sans Arabic">' in font_table and 'w:charset w:val="B2"' in font_table
+    assert '<w:font w:name="IBM Plex Sans Arabic">' in font_table and 'w:charset w:val="B2"' in font_table
     for run in re.findall(r"<w:rPr>(.*?)</w:rPr>", xml):                # No letter-spacing on Arabic runs.
         assert not ("<w:rtl/>" in run and "<w:spacing w:val=" in run), run
 
@@ -682,3 +682,27 @@ def test_code_renders_in_a_technical_note():
     xml = zipfile.ZipFile(io.BytesIO(generate(copy.deepcopy(TECHNICAL_NOTE), "docx").data)).read(
         "word/document.xml").decode("utf-8")
     assert "def margin(r, c):" in xml and "Consolas" in xml
+
+
+def test_arabic_in_a_document_of_another_language_uses_the_arabic_face_in_word():
+    """Owner decision 13: Arabic is IBM Plex Sans Arabic in every format, including inside an English
+    document (whose complex-script face is otherwise Arial), and every face used is embedded."""
+    import quality_benchmark
+    _data, archive, xml = docx_parts(quality_benchmark.MULTILINGUAL_DOCUMENT)
+    runs = re.findall(r"<w:r>(.*?)</w:r>", xml, re.S)
+    arabic = [run for run in runs if re.search("[؀-ۿ]", run)]
+    assert arabic and all('w:cs="IBM Plex Sans Arabic"' in run and "<w:rtl/>" in run for run in arabic)
+    latin = [run for run in runs if re.search(r"<w:t[^>]*>[A-Za-z]", run)]
+    assert latin and not any("IBM Plex Sans Arabic" in run for run in latin)
+    font_table = archive.read("word/fontTable.xml").decode()
+    assert font_table.count('<w:font w:name="IBM Plex Sans Arabic">') == 1 and "embedRegular" in font_table
+    assert sum(name.startswith("word/fonts/") for name in archive.namelist()) == 7      # Inter x5 + Plex x2.
+
+
+@pytest.mark.parametrize("text", ["أهلاً وسهلاً", "يُقدَّم الإفطار", "مرحباً 2026"])
+def test_combining_marks_stay_in_their_letters_run(text):
+    """A tanween or shadda is a combining mark: split into a run of its own it can render detached."""
+    pieces = script_segments(text, base_rtl=False)
+    for piece, rtl in pieces:
+        if any("ً" <= char <= "ْ" for char in piece):
+            assert rtl and any("ء" <= char <= "ي" for char in piece), pieces

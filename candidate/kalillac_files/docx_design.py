@@ -46,12 +46,17 @@ EMBEDDED = (("Inter", "Inter-Regular.ttf", "embedRegular"), ("Inter", "Inter-Bol
             ("Inter", "Inter-Italic.ttf", "embedItalic"), ("Inter", "Inter-BoldItalic.ttf", "embedBoldItalic"),
             ("Inter SemiBold", "Inter-SemiBold.ttf", "embedRegular"))
 # Right-to-left text is drawn with Word's "complex script" font, embedded as well when the language needs it.
-COMPLEX = {"Noto Sans Arabic": (("Noto Sans Arabic", "NotoSansArabic-Regular.ttf", "embedRegular"),
+# Arabic script is IBM Plex Sans Arabic in every format (owner decision 13): it covers Arabic, Persian,
+# Urdu, Pashto, Sindhi and Uyghur, permits installable embedding, and draws each letter form as its own
+# glyph. Noto Sans Arabic stays available as the Arabic face for anything that asks for it.
+COMPLEX = {"IBM Plex Sans Arabic": (("IBM Plex Sans Arabic", "IBMPlexSansArabic-Regular.ttf", "embedRegular"),
+                                    ("IBM Plex Sans Arabic", "IBMPlexSansArabic-Bold.ttf", "embedBold")),
+           "Noto Sans Arabic": (("Noto Sans Arabic", "NotoSansArabic-Regular.ttf", "embedRegular"),
                                 ("Noto Sans Arabic", "NotoSansArabic-Bold.ttf", "embedBold")),
            "Noto Sans Hebrew": (("Noto Sans Hebrew", "NotoSansHebrew-Regular.ttf", "embedRegular"),
                                 ("Noto Sans Hebrew", "NotoSansHebrew-Bold.ttf", "embedBold"))}
-COMPLEX_BY_LANGUAGE = {"ar": "Noto Sans Arabic", "fa": "Noto Sans Arabic", "ur": "Noto Sans Arabic",
-                       "ps": "Noto Sans Arabic", "sd": "Noto Sans Arabic", "ug": "Noto Sans Arabic",
+COMPLEX_BY_LANGUAGE = {"ar": "IBM Plex Sans Arabic", "fa": "IBM Plex Sans Arabic", "ur": "IBM Plex Sans Arabic",
+                       "ps": "IBM Plex Sans Arabic", "sd": "IBM Plex Sans Arabic", "ug": "IBM Plex Sans Arabic",
                        "he": "Noto Sans Hebrew", "yi": "Noto Sans Hebrew"}
 
 
@@ -126,7 +131,10 @@ def script_segments(text, base_rtl=False):
     for char in text:
         kind = unicodedata.bidirectional(char)
         kinds.append("R" if kind in ("R", "AL") else "L" if kind == "L" else "N" if kind in ("EN", "AN")
-                     else "T" if kind == "ET" else "S" if kind in ("ES", "CS") else "n")
+                     else "T" if kind == "ET" else "S" if kind in ("ES", "CS") else "M" if kind == "NSM" else "n")
+    for index, kind in enumerate(kinds):  # A combining mark (tanween, shadda) takes its base's direction (W1).
+        if kind == "M":
+            kinds[index] = kinds[index - 1] if index else "n"
     count = len(kinds)
     for index, kind in enumerate(kinds):  # Separators inside a number.
         if kind == "S":
@@ -215,6 +223,7 @@ class _Writer:
         self.east = next((font for prefix, font in EAST_ASIAN.items()
                           if lowered == prefix or lowered.startswith(prefix + "-")), "Microsoft YaHei")
         self.complex = COMPLEX_BY_LANGUAGE.get(primary, "Arial")
+        self.complex_used = set()          # Right-to-left faces given to runs in a document of another script.
         self.page_width, self.page_height = PAGES[document.page]
         self.text_width = self.page_width - 2 * MARGIN_X
         self.figures = 0
@@ -265,6 +274,18 @@ class _Writer:
             r_pr.append(_element("w:bCs"))
         if italic:
             r_pr.append(_element("w:iCs"))
+        if rtl:
+            # A right-to-left run in a document of another script still gets its own script's face (the
+            # document's complex-script face is Arial there), so Arabic looks the same in every document.
+            face = _complex_face(text)
+            if face is not None and face != self.complex:
+                from docx.oxml.ns import qn
+                r_fonts = r_pr.find(qn("w:rFonts"))
+                if r_fonts is None:
+                    r_fonts = _element("w:rFonts")
+                    r_pr.insert(0, r_fonts)
+                r_fonts.set(qn("w:cs"), face)
+                self.complex_used.add(face)
         if tracking is not None and not rtl:  # Letter-spacing breaks the joins of cursive scripts.
             r_pr.append(_element("w:spacing", val=int(round(tracking * 20))))
         if rtl:
@@ -933,7 +954,7 @@ class _Writer:
 
 # --- embedded fonts -------------------------------------------------------------------------
 
-_CHARSETS = {"Noto Sans Arabic": "B2", "Noto Sans Hebrew": "B1"}
+_CHARSETS = {"IBM Plex Sans Arabic": "B2", "Noto Sans Arabic": "B2", "Noto Sans Hebrew": "B1"}
 
 
 def _font_facts(file_name):
@@ -965,20 +986,32 @@ def _obfuscate(font, key):
     return bytes(data)
 
 
-def embed_fonts(docx, complex_font=None):
-    """The same .docx with the Inter faces (and the right-to-left face, when used) embedded and
-    declared in its font table."""
+def _complex_face(text):
+    """The embedded right-to-left face for text's script, or None."""
+    if any("\u0600" <= char <= "\u06ff" or "\u0750" <= char <= "\u077f" or "\u08a0" <= char <= "\u08ff"
+           or "\ufb50" <= char <= "\ufdff" or "\ufe70" <= char <= "\ufeff" for char in text):
+        return "IBM Plex Sans Arabic"
+    if any("\u0590" <= char <= "\u05ff" or "\ufb1d" <= char <= "\ufb4f" for char in text):
+        return "Noto Sans Hebrew"
+    return None
+
+
+def embed_fonts(docx, complex_font=None, extra=()):
+    """The same .docx with the Inter faces (and every right-to-left face it uses) embedded and declared
+    in its font table."""
     source = zipfile.ZipFile(io.BytesIO(docx))
     out = io.BytesIO()
     families, relationships, parts = {}, [], {}
-    for index, (family, file_name, slot) in enumerate((*EMBEDDED, *COMPLEX.get(complex_font, ())), start=1):
+    faces = [face for face in dict.fromkeys((complex_font, *sorted(extra))) if face in COMPLEX]
+    chosen = [entry for face in faces for entry in COMPLEX[face]]
+    for index, (family, file_name, slot) in enumerate((*EMBEDDED, *chosen), start=1):
         key = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, "kalillac-font/" + file_name)).upper() + "}"
         parts[f"word/fonts/font{index}.odttf"] = _obfuscate((FONTS / file_name).read_bytes(), key)
         relationships.append(f'<Relationship Id="rIdFont{index}" Type="http://schemas.openxmlformats.org/'
                              f'officeDocument/2006/relationships/font" Target="fonts/font{index}.odttf"/>')
         families.setdefault(family, []).append(f'<w:{slot} r:id="rIdFont{index}" w:fontKey="{key}"/>')
     facts = {}
-    for family, file_name, slot in (*EMBEDDED, *COMPLEX.get(complex_font, ())):
+    for family, file_name, slot in (*EMBEDDED, *chosen):
         if slot == "embedRegular":
             facts[family] = _font_facts(file_name)
     fonts = "".join(f'<w:font w:name="{family}"><w:altName w:val="Segoe UI"/><w:panose1 w:val="{facts[family][0]}"/>'
@@ -990,7 +1023,8 @@ def embed_fonts(docx, complex_font=None):
             data = source.read(entry.filename)
             if entry.filename == "word/fontTable.xml":
                 text = data.decode("utf-8")
-                text = re.sub(r'<w:font w:name="(Inter( SemiBold)?|Noto Sans (Arabic|Hebrew))".*?</w:font>', "", text,
+                text = re.sub(r'<w:font w:name="(Inter( SemiBold)?|Noto Sans (Arabic|Hebrew)|IBM Plex Sans Arabic)"'
+                              r'.*?</w:font>', "", text,
                               flags=re.S)
                 if "xmlns:r=" not in text.split(">", 2)[1]:
                     text = text.replace("<w:fonts ", "<w:fonts xmlns:r=\"http://schemas.openxmlformats.org/"
@@ -1032,4 +1066,4 @@ def embed_fonts(docx, complex_font=None):
 
 def write_docx(document):
     writer = _Writer(document)
-    return fixed_dates(embed_fonts(writer.build(), writer.complex))
+    return fixed_dates(embed_fonts(writer.build(), writer.complex, writer.complex_used))
