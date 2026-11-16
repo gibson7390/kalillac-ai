@@ -315,3 +315,15 @@ def test_an_interrupted_wait_still_kills_and_reaps_the_child(child, monkeypatch)
     assert all(worker._SLOTS.acquire(blocking=False) for _ in range(worker.MAX_CONCURRENT))
     for _ in range(worker.MAX_CONCURRENT):
         worker._SLOTS.release()
+
+
+
+def test_an_exact_edit_flag_reaches_the_core_through_the_worker():
+    import quality_benchmark
+    from kalillac_files.editing import outline
+    proposal = generate(copy.deepcopy(quality_benchmark.WORD_PROPOSAL), "docx").data
+    cell = next(u.address for u in outline(proposal, "p.docx").units if u.kind == "cell" and u.text == "$11,000")
+    operations = [{"op": "set_text", "at": cell, "text": "$12,000"}]
+    assert refused(worker.run_edit, proposal, "p.docx", operations) == "table_total_mismatch"
+    assert worker.run_edit(proposal, "p.docx", operations, exact=True).filename.endswith("-edited.docx")
+    assert refused(worker.run_edit, proposal, "p.docx", operations, exact=1) == "invalid_edit"

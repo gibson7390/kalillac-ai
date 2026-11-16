@@ -789,3 +789,50 @@ def test_the_benchmark_restatement_is_internally_consistent(word):
     for old, _new in quality_benchmark.RESTATED.values():
         assert old not in text, old
     assert "show the figures before the restatement" in text
+
+
+
+# --- a changed figure carries its dependants (Codex document audit, Q4) -----------------------------
+
+@pytest.fixture(scope="module")
+def proposal():
+    import quality_benchmark
+    return generate(copy.deepcopy(quality_benchmark.WORD_PROPOSAL), "docx").data
+
+
+def _fee_cell(found, text):
+    return next(u.address for u in found.units if u.kind == "cell" and u.text == text)
+
+
+def test_an_edit_that_breaks_a_total_row_is_refused_unless_asked_for_exactly(proposal):
+    found = outline(proposal, "p.docx")
+    permits, total = _fee_cell(found, "$11,000"), _fee_cell(found, "$186,500")
+    one = [{"op": "set_text", "at": permits, "text": "$12,000"}]
+    assert refused(proposal, "p.docx", one) == "table_total_mismatch"
+    assert refused(proposal, "p.docx", [{"op": "replace_text", "find": "$11,000", "replace": "$12,000"}]) \
+        == "table_total_mismatch"
+    # With its dependant, the same change is accepted.
+    both = edit(proposal, "p.docx", one + [{"op": "set_text", "at": total, "text": "$187,500"}]).data
+    assert "$187,500" in document_xml(both)
+    # The customer's explicit, limited change is still possible.
+    exact = edit(proposal, "p.docx", one, exact=True).data
+    assert "$12,000" in document_xml(exact) and "$186,500" in document_xml(exact)
+    assert refused(proposal, "p.docx", one, exact="yes") == "invalid_edit"
+
+
+def test_a_table_already_inconsistent_in_the_upload_never_blocks_an_edit(proposal):
+    found = outline(proposal, "p.docx")
+    broken = edit(proposal, "p.docx", [{"op": "set_text", "at": _fee_cell(found, "$11,000"), "text": "$12,000"}],
+                  exact=True).data
+    later = outline(broken, "p.docx")
+    edit(broken, "p.docx", [{"op": "set_text", "at": _fee_cell(later, "$13,000"), "text": "$14,000"}])
+
+
+def test_a_deck_table_total_is_kept_too():
+    deck = generate({"title": "Fees", "slides": [
+        {"layout": "table", "title": "Fees by stage", "total_row": True, "header": ["Stage", "Fee"],
+         "rows": [["Concept", "$24,500"], ["Permits", "$11,000"], ["Build", "$138,000"], ["Total", "$173,500"]]}]},
+        "pptx").data
+    cell = next(u.address for u in outline(deck, "d.pptx").units if u.kind == "cell" and u.text == "$11,000")
+    assert refused(deck, "d.pptx", [{"op": "set_text", "at": cell, "text": "$12,000"}]) == "table_total_mismatch"
+    edit(deck, "d.pptx", [{"op": "set_text", "at": cell, "text": "$12,000"}], exact=True)

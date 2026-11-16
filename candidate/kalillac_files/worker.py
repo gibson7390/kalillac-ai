@@ -252,7 +252,7 @@ def run_outline(data, declared_name=None, timeout_seconds=DEFAULT_TIMEOUT_SECOND
 
 
 def run_edit(data, declared_name, operations, track_changes=False, revision_date=None,
-             timeout_seconds=DEFAULT_TIMEOUT_SECONDS, max_memory_bytes=MAX_MEMORY_BYTES):
+             timeout_seconds=DEFAULT_TIMEOUT_SECONDS, max_memory_bytes=MAX_MEMORY_BYTES, exact=False):
     """editing.edit(...) in an isolated process: a GeneratedFile (the edited copy), or WorkerError."""
     from .editing import MEDIA
     _upload_checks(data, declared_name)
@@ -262,12 +262,12 @@ def run_edit(data, declared_name, operations, track_changes=False, revision_date
         raise WorkerError("invalid_edit") from None
     if len(encoded) > MAX_SPEC_BYTES:
         raise WorkerError("invalid_edit")
-    if type(track_changes) is not bool or (revision_date is not None and (type(revision_date) is not str
-                                                                          or len(revision_date) > 40)):
+    if type(track_changes) is not bool or type(exact) is not bool or (
+            revision_date is not None and (type(revision_date) is not str or len(revision_date) > 40)):
         raise WorkerError("invalid_edit")
     # The operations travel ahead of the file in the payload; the header only says where they end.
     reply = _run({"task": "edit", "name": declared_name, "operations": len(encoded), "track": track_changes,
-                  "date": revision_date}, encoded + data, timeout_seconds, max_memory_bytes)
+                  "date": revision_date, "exact": exact}, encoded + data, timeout_seconds, max_memory_bytes)
     filename, media_type = reply.header.get("filename"), reply.header.get("media_type")
     extension = {media: kind for kind, media in MEDIA.items()}.get(media_type)
     if extension is None or type(filename) is not str or not filename.endswith("-edited." + extension) \
@@ -340,7 +340,7 @@ def main():
                 split = int(header["operations"])
                 operations = json.loads(payload[:split].decode("utf-8"))
                 result = edit(payload[split:], header.get("name"), operations, header.get("track") is True,
-                              header.get("date"))
+                              header.get("date"), exact=header.get("exact") is True)
                 reply = _frame({"ok": True, "filename": result.filename, "media_type": result.media_type}, result.data)
             else:
                 reply = _frame({"ok": False, "code": "worker_failed"})

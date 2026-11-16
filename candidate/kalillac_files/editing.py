@@ -1674,10 +1674,53 @@ def outline(data, declared_name=None):
 # --- edit ------------------------------------------------------------------------------------
 
 
-def edit(data, declared_name, operations, track_changes=False, revision_date=None):
+def _tables(data, kind):
+    """(header, rows) of every table in a Word document or deck, as cell text, in document order."""
+    found = []
+    if kind == "docx":
+        import docx
+        for table in docx.Document(io.BytesIO(data)).tables:
+            rows = [[cell.text for cell in row.cells] for row in table.rows]
+            if rows:
+                found.append((rows[0], rows[1:]))
+    elif kind == "pptx":
+        import pptx
+        for slide in pptx.Presentation(io.BytesIO(data)).slides:
+            for shape_kind, shape in _shapes_of(slide):
+                if shape_kind == "table":
+                    rows = [[cell.text for cell in row.cells] for row in shape.table.rows]
+                    if rows:
+                        found.append((rows[0], rows[1:]))
+    return found
+
+
+def _check_totals_kept(before, after, kind):
+    """Codex document audit, Q4: an edit must not leave a total row that added up no longer adding up.
+    A table that was already inconsistent in the customer's file never blocks an edit, and a customer's
+    explicitly exact edit skips this (edit(..., exact=True))."""
+    from .consistency import TotalMismatch, check_table
+    old = _tables(before, kind)
+    for number, (header, rows) in enumerate(_tables(after, kind), start=1):
+        try:
+            check_table(header, rows, number)
+        except TotalMismatch:
+            if number <= len(old):
+                try:
+                    check_table(*old[number - 1], number)
+                except TotalMismatch:
+                    continue                          # Already inconsistent before this edit.
+            raise
+
+
+def edit(data, declared_name, operations, track_changes=False, revision_date=None, exact=False):
     """A GeneratedFile: the uploaded file with the operations applied. The upload is not modified.
 
-    revision_date: an ISO 8601 timestamp recorded on Word revisions (optional)."""
+    revision_date: an ISO 8601 timestamp recorded on Word revisions (optional).
+    exact: the customer explicitly asked for exactly these changes, accepting that a total row they
+    affect may no longer add up. Otherwise such an edit is refused with table_total_mismatch, so a
+    restatement carries its dependent figures (a workbook's formulas recompute by themselves)."""
+    if type(exact) is not bool:
+        _refuse("invalid_edit")
     kind = _accepted(data, declared_name)
     checked = _check(operations, kind)
     if type(track_changes) is not bool or (track_changes and kind != "docx"):
@@ -1691,6 +1734,8 @@ def edit(data, declared_name, operations, track_changes=False, revision_date=Non
         result = _edit_pptx(data, checked)
     else:
         result = _edit_xlsx(data, checked)[0]
+    if kind in ("docx", "pptx") and not exact:
+        _check_totals_kept(data, result, kind)
     result = fixed_dates(result)
     if len(result) > MAX_FILE_BYTES:
         _refuse("file_too_large")
