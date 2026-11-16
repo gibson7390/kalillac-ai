@@ -821,6 +821,11 @@ def proposal():
     return generate(copy.deepcopy(quality_benchmark.WORD_PROPOSAL), "docx").data
 
 
+def _summary(old, new):
+    """The proposal's summary states the total fee: a restatement changes it too."""
+    return {"op": "replace_text", "find": old, "replace": new, "expect": 1}
+
+
 def _fee_cell(found, text):
     return next(u.address for u in found.units if u.kind == "cell" and u.text == text)
 
@@ -833,7 +838,8 @@ def test_an_edit_that_breaks_a_total_row_is_refused_unless_asked_for_exactly(pro
     assert refused(proposal, "p.docx", [{"op": "replace_text", "find": "$11,000", "replace": "$12,000"}]) \
         == "table_total_mismatch"
     # With its dependant, the same change is accepted.
-    both = edit(proposal, "p.docx", one + [{"op": "set_text", "at": total, "text": "$187,500"}]).data
+    both = edit(proposal, "p.docx", one + [{"op": "set_text", "at": total, "text": "$187,500"},
+                                           _summary("$186,500", "$187,500")]).data
     assert "$187,500" in document_xml(both)
     # The customer's explicit, limited change is still possible.
     exact = edit(proposal, "p.docx", one, exact=True).data
@@ -877,7 +883,8 @@ def test_a_tracked_replacement_that_breaks_a_total_is_refused(proposal):
 def test_a_tracked_restatement_with_its_total_accepts_consistent_and_rejects_to_the_original(proposal):
     found = outline(proposal, "p.docx")
     operations = [{"op": "set_text", "at": _fee_cell(found, "$11,000"), "text": "$12,000"},
-                  {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"}]
+                  {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"},
+                  _summary("$186,500", "$187,500")]
     tracked = edit(proposal, "p.docx", operations, track_changes=True).data
     xml = document_xml(tracked)
     assert "<w:ins " in xml and "<w:del " in xml                       # Real revisions are delivered.
@@ -892,11 +899,13 @@ def test_tracked_row_insertions_and_deletions_count_toward_the_total(proposal):
     row = _fee_cell(found, "$11,000").rsplit(".", 1)[0]
     added = [{"op": "add_row", "after": row, "cells": ["Survey", "Signing", "$2,000"]}]
     assert refused(proposal, "p.docx", added, track_changes=True) == "table_total_mismatch"
-    fixed = added + [{"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$188,500"}]
+    fixed = added + [{"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$188,500"},
+                     _summary("$186,500", "$188,500")]
     assert _accepted_fees(edit(proposal, "p.docx", fixed, track_changes=True).data)[-1][-1] == "$188,500"
     removed = [{"op": "delete", "at": row}]
     assert refused(proposal, "p.docx", removed, track_changes=True) == "table_total_mismatch"
-    fixed = removed + [{"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$175,500"}]
+    fixed = removed + [{"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$175,500"},
+                       _summary("$186,500", "$175,500")]
     after = _accepted_fees(edit(proposal, "p.docx", fixed, track_changes=True).data)
     assert not any(cells[0] == "Permits" for cells in after) and after[-1][-1] == "$175,500"
 
@@ -904,14 +913,16 @@ def test_tracked_row_insertions_and_deletions_count_toward_the_total(proposal):
 def test_a_previously_revised_upload_is_judged_by_its_accepted_figures(proposal):
     found = outline(proposal, "p.docx")
     revised = edit(proposal, "p.docx", [{"op": "set_text", "at": _fee_cell(found, "$11,000"), "text": "$12,000"},
-                                        {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"}],
+                                        {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"},
+                                        _summary("$186,500", "$187,500")],
                    track_changes=True).data
     later = outline(revised, "p.docx")
     concept = next(u.address for u in later.units if u.kind == "cell" and u.text == "$24,500")
     assert refused(revised, "p.docx", [{"op": "set_text", "at": concept, "text": "$25,500"}]) == "table_total_mismatch"
     total = next(u.address for u in later.units if u.kind == "cell" and "187,500" in u.text)
     edit(revised, "p.docx", [{"op": "set_text", "at": concept, "text": "$25,500"},
-                             {"op": "set_text", "at": total, "text": "$188,500"}], track_changes=True)
+                             {"op": "set_text", "at": total, "text": "$188,500"},
+                             _summary("$187,500", "$188,500")], track_changes=True)
 
 
 def test_a_tracked_fee_edit_keeps_the_cells_formatting(proposal):
@@ -994,3 +1005,17 @@ def test_an_edit_that_fits_keeps_every_other_cell_unchanged(deck):
                                                                               "text": "Capital"}]).data, "x.pptx")}
     assert after[target] == "Capital"
     assert {a: t for a, t in after.items() if a != target} == {a: t for a, t in before.items() if a != target}
+
+
+def test_a_restated_total_must_be_restated_wherever_the_document_states_it(proposal):
+    """The proposal's summary states the total fee: changing the fee table's total (with its rows) but
+    not the summary would leave the document stating two totals."""
+    found = outline(proposal, "p.docx")
+    table_only = [{"op": "set_text", "at": _fee_cell(found, "$11,000"), "text": "$12,000"},
+                  {"op": "set_text", "at": _fee_cell(found, "$186,500"), "text": "$187,500"}]
+    assert refused(proposal, "p.docx", table_only) == "dependent_figure_unchanged"
+    assert refused(proposal, "p.docx", table_only, track_changes=True) == "dependent_figure_unchanged"
+    everywhere = table_only[:1] + [{"op": "replace_text", "find": "$186,500", "replace": "$187,500"}]
+    text = accepted(document_xml(edit(proposal, "p.docx", everywhere, track_changes=True).data))
+    assert "$186,500" not in text and text.count("$187,500") >= 2
+    edit(proposal, "p.docx", table_only, exact=True)                       # The customer's confirmed choice.

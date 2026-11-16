@@ -1788,6 +1788,45 @@ def _check_totals_kept(before, after, kind):
             raise
 
 
+def _document_text(data, kind):
+    """All of a document's text as it reads once revisions are accepted: Word paragraphs (in tables too),
+    or every text body and table cell of a deck."""
+    if kind == "docx":
+        root = _parse_xml(zipfile.ZipFile(io.BytesIO(data)).read("word/document.xml"))
+        return "\n".join(_accepted_text(paragraph) for paragraph in root.iter(W + "p"))
+    import pptx
+    presentation = pptx.Presentation(io.BytesIO(data))
+    texts = []
+    for _key, kind_, element, _slide in _text_containers(presentation):
+        body = element.text_frame._txBody if kind_ == "shape" else element[3]._tc.find(A + "txBody")
+        if body is not None:
+            texts.append(_body_text(body))
+    return "\n".join(texts)
+
+
+def _check_restated_totals(before, after, kind):
+    """When an edit changes a table's total, the old total may not survive anywhere else in the document
+    (a summary sentence, a metric, another table): the document would then state two totals. The figure
+    must be restated everywhere it appears, or the customer must confirm the exact edit."""
+    from .consistency import _TOTAL_LABEL
+    old_tables, new_tables = _tables(before, kind), _tables(after, kind)
+    if len(old_tables) != len(new_tables):
+        return
+    text = _document_text(after, kind)
+    for (_old_header, old_rows), (_new_header, new_rows) in zip(old_tables, new_tables):
+        if not old_rows or not new_rows or _TOTAL_LABEL.match(old_rows[-1][0] or "") is None:
+            continue
+        changed = [old for old, new in zip(old_rows[-1][1:], new_rows[-1][1:]) if old.strip() and old != new]
+        for old in changed:
+            figure = old.strip()
+            if not any(char.isdigit() for char in figure):
+                continue
+            # Occurrences outside this table's own cells (which may legitimately still show it).
+            remaining = text.count(figure) - sum(cell.count(figure) for row in new_rows for cell in row)
+            if remaining > 0:
+                raise SpecError("dependent_figure_unchanged")
+
+
 def edit(data, declared_name, operations, track_changes=False, revision_date=None, exact=False):
     """A GeneratedFile: the uploaded file with the operations applied. The upload is not modified.
 
@@ -1812,6 +1851,7 @@ def edit(data, declared_name, operations, track_changes=False, revision_date=Non
         result = _edit_xlsx(data, checked)[0]
     if kind in ("docx", "pptx") and not exact:
         _check_totals_kept(data, result, kind)
+        _check_restated_totals(data, result, kind)
     result = fixed_dates(result)
     if len(result) > MAX_FILE_BYTES:
         _refuse("file_too_large")

@@ -148,6 +148,8 @@ or edit_file returned "status":"created". Kalillac attaches the files to your re
 
 HINTS = {
     "table_total_mismatch": "a total row does not equal the sum of the rows above it",
+    "dependent_figure_unchanged": "the edit changes a table's total but the old total still appears elsewhere "
+                                  "in the document (a summary or another table); change it there too",
     "pdf_layout_failed": "the content does not lay out cleanly; shorten very long table cells or split wide "
                          "tables",
     "pdf_unsupported_characters": "the text contains characters (such as emoji) no bundled font draws; remove "
@@ -320,7 +322,7 @@ def execute(request: FileRequest, name: str, arguments: Mapping[str, Any]):
             edited = request.run_edit(data, record.filename, operations, track_changes=track,
                                       exact=confirmation is not None)
         except WorkerError as error:
-            if error.code == "table_total_mismatch" and request.offer is not None:
+            if error.code in ("table_total_mismatch", "dependent_figure_unchanged") and request.offer is not None:
                 offered = request.offer(file_id, digest)
                 request.offered.append({"id": offered, "file_id": file_id})
                 return _refused(error.code, "the customer can still have exactly this edit applied by confirming it "
