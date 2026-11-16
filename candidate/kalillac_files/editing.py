@@ -751,10 +751,153 @@ def _shapes_of(slide):
     return found
 
 
+EMU = 914400                                   # EMUs per inch.
+DEFAULT_SIZE = 18.0                            # PowerPoint's body text size when nothing sets one.
+FIT_TOLERANCE = 0.02                           # Inches: measurement noise, never a visible overflow.
+
+
+def _body_text(body):
+    return "\n".join("".join(node.text or "" for node in paragraph.iter(A + "t"))
+                     for paragraph in body.findall(A + "p"))
+
+
+def _text_containers(presentation):
+    """(key, kind, element, slide) for every shape text body and table cell, keyed stably."""
+    found = []
+    for s, slide in enumerate(presentation.slides, start=1):
+        for index, (kind, shape) in enumerate(_shapes_of(slide), start=1):
+            if kind == "table":
+                for r, row in enumerate(shape.table.rows, start=1):
+                    for c, cell in enumerate(row.cells, start=1):
+                        found.append(((s, index, r, c), "cell", (shape, r - 1, c - 1, cell), slide))
+            else:
+                found.append(((s, index), "shape", shape, slide))
+    return found
+
+
+def _paragraph_height(paragraph, inner_width, scale, list_style_size):
+    """Inches one paragraph needs at its own run sizes, wrapped as PowerPoint wraps it."""
+    from .pptx_design import LINE, wrap
+    sizes = [int(node.get("sz")) / 100 for node in (*paragraph.iter(A + "rPr"), *paragraph.iter(A + "endParaRPr"))
+             if node.get("sz", "").isdigit()]
+    size = (max(sizes) if sizes else list_style_size or DEFAULT_SIZE) * scale
+    bold = any(node.get("b") in ("1", "true") for node in paragraph.iter(A + "rPr"))
+    spacing, before, after = 1.0, 0.0, 0.0
+    properties = paragraph.find(A + "pPr")
+    if properties is not None:
+        percent = properties.find(A + "lnSpc/" + A + "spcPct")
+        spacing = int(percent.get("val")) / 100000 if percent is not None and percent.get("val", "").isdigit() else 1.0
+        for tag in ("spcBef", "spcAft"):
+            points = properties.find(A + tag + "/" + A + "spcPts")
+            if points is not None and points.get("val", "").isdigit():
+                if tag == "spcBef":
+                    before = int(points.get("val")) / 100 / 72
+                else:
+                    after = int(points.get("val")) / 100 / 72
+    text = "".join(node.text if node.tag == A + "t" else "\n" for node in paragraph.iter(A + "t", A + "br"))
+    lines = sum(max(1, len(wrap(segment, inner_width, size, bold))) for segment in text.split("\n"))
+    return before + lines * size * LINE * spacing / 72 + after
+
+
+def _text_height(body, width_in):
+    """(inches the text needs, inner width, vertical insets, autofit kind) for a shape's text body."""
+    properties = body.find(A + "bodyPr")
+    get = (lambda name, default: int(properties.get(name)) / EMU
+           if properties is not None and (properties.get(name) or "").lstrip("-").isdigit() else default)
+    inner_width = width_in - get("lIns", 0.1) - get("rIns", 0.1)
+    insets = get("tIns", 0.05) + get("bIns", 0.05)
+    scale, autofit = 1.0, None
+    if properties is not None:
+        normal = properties.find(A + "normAutofit")
+        if normal is not None:
+            autofit = "shrink"
+            if (normal.get("fontScale") or "").isdigit():
+                scale = int(normal.get("fontScale")) / 100000
+        elif properties.find(A + "spAutoFit") is not None:
+            autofit = "grow"
+    level = body.find(A + "lstStyle/" + A + "lvl1pPr/" + A + "defRPr")
+    list_size = int(level.get("sz")) / 100 if level is not None and level.get("sz", "").isdigit() else None
+    if not _body_text(body).strip():
+        return 0.0, inner_width, insets, autofit       # No text (an accent bar, a frame): nothing to fit.
+    if inner_width <= 0:
+        return None
+    needed = sum(_paragraph_height(p, inner_width, scale, list_size) for p in body.findall(A + "p"))
+    return needed, inner_width, insets, autofit
+
+
+def _cell_needed(cell, body, inner_width_in=None):
+    """Inches a table cell's text needs, margins included, or None when its width is unknown."""
+    properties = cell.find(A + "tcPr")
+    margin = (lambda name, default: int(properties.get(name)) / EMU
+              if properties is not None and (properties.get(name) or "").isdigit() else default)
+    inner = inner_width_in - margin("marL", 0.1) - margin("marR", 0.1)
+    if inner <= 0:
+        return None
+    if not _body_text(body).strip():
+        return 0.0
+    level = body.find(A + "lstStyle/" + A + "lvl1pPr/" + A + "defRPr")
+    list_size = int(level.get("sz")) / 100 if level is not None and level.get("sz", "").isdigit() else None
+    return sum(_paragraph_height(p, inner, 1.0, list_size) for p in body.findall(A + "p")) \
+        + margin("marT", 0.05) + margin("marB", 0.05)
+
+
+def _check_deck_fit(presentation, before):
+    """Every shape and table cell whose text an edit changed must still fit, measured the way generation
+    measures (Codex document audit, finding 6), so an edit never returns a valid package whose text
+    runs out of its shape or pushes a table off the slide. An edit may always need as much room as the
+    original text did (a deliberate oversized glyph, a customer's own tight box): only growth past
+    both the box and the original is refused."""
+    slide_height = presentation.slide_height / EMU
+    for key, kind, element, _slide in _text_containers(presentation):
+        original_text, original_body = before.get(key, (None, None))
+        if kind == "shape":
+            body = element.text_frame._txBody
+            if original_text == _body_text(body):
+                continue
+            if element.width is None or element.height is None or element.top is None:
+                _refuse("slide_text_too_long")          # No geometry to measure against: refuse, never guess.
+            measured = _text_height(body, element.width / EMU)
+            if measured is None:
+                _refuse("slide_text_too_long")
+            needed, _width, insets, autofit = measured
+            if needed == 0:
+                continue                                 # Emptied: nothing can overflow.
+            room = element.height / EMU - insets
+            if autofit == "grow":
+                room = slide_height - element.top / EMU - insets   # The shape grows, but not off the slide.
+            was = _text_height(original_body, element.width / EMU) if original_body is not None else None
+            if needed > room + FIT_TOLERANCE and (was is None or needed > was[0] + FIT_TOLERANCE):
+                _refuse("slide_text_too_long")
+        else:
+            graphic, row_index, column_index, cell = element
+            body = cell._tc.find(A + "txBody")
+            if body is None or original_text == _body_text(body):
+                continue
+            table = graphic.table
+            span = int(cell._tc.get("gridSpan") or 1)
+            width = sum(table.columns[i].width
+                        for i in range(column_index, min(column_index + span, len(table.columns)))) / EMU
+            needed = _cell_needed(cell._tc, body, width)
+            if needed is None:
+                _refuse("slide_text_too_long")
+            was = _cell_needed(cell._tc, original_body, width) if original_body is not None else None
+            # A table row grows to fit its text: the table must still end on the slide.
+            heights = [row.height / EMU for row in table.rows]
+            heights[row_index] = max(heights[row_index], needed)
+            off_slide = graphic.top is None or graphic.top / EMU + sum(heights) > slide_height + FIT_TOLERANCE
+            if off_slide and (was is None or needed > was + FIT_TOLERANCE):
+                _refuse("slide_text_too_long")
+
+
 def _edit_pptx(data, operations):
     import pptx
     presentation = pptx.Presentation(io.BytesIO(data))
     addresses = _deck_map(presentation)
+    before = {}                                   # key -> (text, a copy of the text body) before any edit
+    for key, kind, element, _slide in _text_containers(presentation):
+        body = element.text_frame._txBody if kind == "shape" else element[3]._tc.find(A + "txBody")
+        if body is not None:
+            before[key] = (_body_text(body), deepcopy(body))
     for operation in operations:
         if operation["op"] == "replace_text":
             if operation["in"] is None:
@@ -784,6 +927,7 @@ def _edit_pptx(data, operations):
                 element.notes_text_frame.text = operation["text"]
             else:
                 _refuse("edit_address_wrong_kind")
+    _check_deck_fit(presentation, before)
     buffer = io.BytesIO()
     presentation.save(buffer)
     return buffer.getvalue()

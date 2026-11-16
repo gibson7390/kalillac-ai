@@ -703,3 +703,68 @@ def test_charts_over_formulas_the_editor_cannot_compute_lose_their_caches(book):
     caches = chart_caches(edited)
     revenue = [cache for (name, reference, numeric), cache in caches.items() if reference.endswith("$C$2:$C$37")]
     assert revenue and all(cache is None for cache in revenue)
+
+
+
+# --- presentation edits must still fit (Codex document audit, finding 6) ----------------------------
+
+LONG = " ".join(["Revenue grew across every region as procurement savings offset higher freight costs."] * 40)
+
+
+def test_a_replacement_that_cannot_fit_its_shape_is_refused(deck):
+    """The audit replaced s4.sh2 with 3,329 characters: the edit succeeded at 32 points in a 0.55-inch box."""
+    assert len(LONG) > 3300
+    assert refused(deck, "x.pptx", [{"op": "set_text", "at": "s4.sh2", "text": LONG}]) == "slide_text_too_long"
+    assert refused(deck, "x.pptx", [{"op": "set_text", "at": "s4.sh2.p1", "text": LONG}]) == "slide_text_too_long"
+    short = edit(deck, "x.pptx", [{"op": "set_text", "at": "s4.sh2", "text": "Two roasteries"}]).data
+    assert "Two roasteries" in [u.text for u in outline(short, "x.pptx").units]
+
+
+def test_a_replace_text_that_overflows_is_refused_and_one_that_fits_is_kept(deck):
+    found = outline(deck, "x.pptx")
+    title = next(u for u in found.units if u.address == "s4.sh2")
+    word = title.text.split()[0]
+    assert refused(deck, "x.pptx", [{"op": "replace_text", "find": word, "replace": LONG, "in": "s4.sh2"}]) \
+        == "slide_text_too_long"
+    kept = edit(deck, "x.pptx", [{"op": "replace_text", "find": word, "replace": word, "in": "s4.sh2"}]).data
+    assert [u.text for u in outline(kept, "x.pptx").units if u.address == "s4.sh2"] == [title.text]
+
+
+def test_a_table_cell_that_would_push_the_table_off_the_slide_is_refused(deck):
+    cell = next(u for u in outline(deck, "x.pptx").units if u.kind == "cell")
+    assert refused(deck, "x.pptx", [{"op": "set_text", "at": cell.address, "text": LONG}]) == "slide_text_too_long"
+    edit(deck, "x.pptx", [{"op": "set_text", "at": cell.address, "text": "Third party"}])
+
+
+def test_right_to_left_text_is_measured_too():
+    from test_deck_design import ARABIC_DECK
+    arabic = generate(copy.deepcopy(ARABIC_DECK), "pptx").data
+    title = next(u for u in outline(arabic, "a.pptx").units if u.kind == "shape" and u.text.strip())
+    long = " ".join(["نمت الإيرادات في كل المناطق مع تحسن كفاءة سلاسل الإمداد وارتفاع تكاليف الشحن."] * 40)
+    assert refused(arabic, "a.pptx", [{"op": "set_text", "at": title.address, "text": long}]) == "slide_text_too_long"
+    edit(arabic, "a.pptx", [{"op": "set_text", "at": title.address, "text": "نظرة عامة"}])
+
+
+def test_speaker_notes_have_no_box_and_are_never_refused_for_length(deck):
+    notes = next((u for u in outline(deck, "x.pptx").units if u.kind == "notes"), None)
+    if notes is None:
+        pytest.skip("the benchmark deck has no notes")
+    edit(deck, "x.pptx", [{"op": "set_text", "at": notes.address, "text": LONG}])
+
+
+def test_every_generated_shape_and_cell_is_judged_to_fit_as_generation_made_it(deck):
+    """The editor's measurement agrees with generation's: nothing a fresh deck contains is refused."""
+    import pptx
+    from kalillac_files import editing
+    from test_deck_design import ARABIC_DECK
+    for data in (deck, generate(copy.deepcopy(ARABIC_DECK), "pptx").data):
+        presentation = pptx.Presentation(io.BytesIO(data))
+        containers = editing._text_containers(presentation)
+        for key, _kind, _element, _slide in containers:
+            before = {}
+            for other, kind, element, _s in containers:
+                body = element.text_frame._txBody if kind == "shape" else element[3]._tc.find(editing.A + "txBody")
+                if body is not None:
+                    before[other] = ("<changed>" if other == key else editing._body_text(body), copy.deepcopy(body))
+            editing._check_deck_fit(presentation, before)              # Raises if it would refuse.
+        assert len(containers) > 50
