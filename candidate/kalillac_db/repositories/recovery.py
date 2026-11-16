@@ -45,9 +45,11 @@ def issue_token(session, user_id, token_hash, now):
 
 
 def validate_token(session, token_hash, now):
-    """Read-only, non-reserving password-work eligibility check."""
+    """Read-only, non-reserving password-work eligibility check. Returns the account's email (used by
+    V1 mode only for the notification sent after the reset authority succeeds)."""
     eligible = session.scalar(
-        select(AccountRecoveryToken.id)
+        select(User.email)
+        .select_from(AccountRecoveryToken)
         .join(User, User.id == AccountRecoveryToken.user_id)
         .where(
             AccountRecoveryToken.token_hash == token_hash,
@@ -59,6 +61,7 @@ def validate_token(session, token_hash, now):
     )
     if eligible is None:
         raise InvalidRecoveryToken()
+    return eligible
 
 
 def confirm_token(session, token_hash, password_hash, clock):

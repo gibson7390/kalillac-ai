@@ -92,12 +92,20 @@ REGISTRATION_INVENTORY = (
     _route("POST", "/api/account/register/confirm", "account"),
 )
 
+# Mounted only in V1 account-security mode (D3); guarded whether or not they are mounted.
+V1_INVENTORY = (
+    _route("POST", "/api/account/sessions/revoke-others", "account"),
+    _route("POST", "/api/account/sessions/revoke-all", "account"),
+    _route("POST", "/api/account/password", "account"),
+    _route("POST", "/api/account/deletion-request", "account"),
+)
+
 # Server-to-server and authenticated by Stripe's signature over the raw body.
 EXEMPT: tuple[tuple[str, str], ...] = (("POST", "/api/billing/stripe/webhook"),)
 
 
 def guarded_route(method: str, path: str) -> GuardedRoute | None:
-    for route in INVENTORY + REGISTRATION_INVENTORY:
+    for route in INVENTORY + REGISTRATION_INVENTORY + V1_INVENTORY:
         if route.method == method and route.pattern.fullmatch(path):
             return route
     return None

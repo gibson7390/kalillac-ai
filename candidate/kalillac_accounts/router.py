@@ -189,6 +189,69 @@ async def _read_credentials(request: Request) -> tuple[str, str] | JSONResponse:
     return email, password
 
 
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _unique_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise _DuplicateKey()
+    return dict(pairs)
+
+
+async def _read_exact_body(request: Request, fields: set[str]) -> dict[str, Any] | JSONResponse:
+    """A JSON object with exactly these keys (V1 account routes): bounded to MAX_BODY_BYTES while
+    streaming, duplicate and extra keys refused."""
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return _error(415, "json_required")
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isascii() and declared.isdigit():
+        significant = declared.lstrip("0") or "0"
+        if len(significant) > len(str(MAX_BODY_BYTES)) or int(significant) > MAX_BODY_BYTES:
+            return _error(413, "body_too_large")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_BODY_BYTES:
+            return _error(413, "body_too_large")
+        raw.extend(chunk)
+    try:
+        body = json.loads(raw, object_pairs_hook=_unique_keys)
+    except _DuplicateKey:
+        return _error(400, "invalid_body")
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _error(400, "invalid_json")
+    if type(body) is not dict or set(body) != fields:
+        return _error(400, "invalid_body")
+    return body
+
+
+def _contract_outcome(result: Any, kind: type, outcomes: frozenset[str]) -> str | None:
+    """The outcome of the authority's own result type, only when it is exactly a str and one the
+    contract defines; None (an unavailable authority) for anything else."""
+    if type(result) is not kind:
+        return None
+    outcome = result.outcome
+    if type(outcome) is not str or outcome not in outcomes:
+        return None
+    return outcome
+
+
+def _authority_refusal(outcome: str | None, result: Any) -> JSONResponse:
+    """The response for every outcome of a proven V1 operation other than its success."""
+    if outcome == "not_authenticated":
+        return _error(401, "not_authenticated")
+    if outcome == "account_unavailable":
+        return _error(403, "account_unavailable")
+    if outcome == "too_many_operations":
+        retry = result.retry_after_seconds
+        if type(retry) is int and retry >= 1:
+            response = _error(429, "too_many_operations")
+            response.headers["Retry-After"] = str(retry)
+            return response
+    return _error(503, "security_unavailable")
+
+
 def build_account_router(
     session_factory: Callable[[], sessionmaker[Session] | None] = (
         get_session_factory
@@ -490,6 +553,8 @@ def build_account_router(
 
     @router.post("/logout")
     async def logout(request: Request):
+        if v1_security is not None:
+            return await v1_logout(request)
         token = request.cookies.get(settings.cookie_name)
 
         if token:
@@ -608,6 +673,183 @@ def build_account_router(
             content=payload,
             headers={"Cache-Control": "no-store"},
         )
+
+    # --- V1 mode (D3): every account-state change goes through a private authority as S ------------
+
+    async def v1_identify(request: Request, *, with_password: bool = False):
+        """(identity, email, stored password hash or None) for the presented cookie's exact original
+        session, through the authorized read as R (which writes nothing); or the error response."""
+        from sqlalchemy import select
+        from .auth import RequestRejected, session_token_hash
+        from .v1_security import V1SecurityUnavailable
+        token_hash = session_token_hash(request.cookies, settings.cookie_name)
+        if token_hash is None:
+            return _error(401, "not_authenticated")
+
+        def work(session, account, identity):
+            stored = None
+            if with_password:
+                stored = session.scalar(select(User.password_hash).where(User.id == account.id))
+            return identity, account.email, stored
+
+        try:
+            return await v1_security.read_async(token_hash, work, with_identity=True)
+        except RequestRejected as rejected:
+            return _error(rejected.status, rejected.code)
+        except V1SecurityUnavailable:
+            return _error(503, "account_unavailable")
+
+    async def call_authority(name: str, **arguments):
+        """The authority's answer, or None when there is none or it cannot answer. Anything else
+        raised (cancellation, a server error) propagates to the caller."""
+        from .v1_authority import V1AuthorityUnavailable
+        if v1_authority is None:
+            return None
+        try:
+            return await run_in_threadpool(lambda: getattr(v1_authority, name)(**arguments))
+        except V1AuthorityUnavailable:
+            return None
+
+    async def v1_logout(request: Request) -> JSONResponse:
+        """End exactly the presented session through v1_end_session. No cookie, or a digest bound to no
+        session: nothing to end (200). Any binding is ended whatever the account's state. If the end
+        cannot be confirmed, 503 and the cookie is kept, so signing out can be retried."""
+        from .auth import RequestRejected, session_token_hash
+        from .v1_security import V1SecurityUnavailable
+        token_hash = session_token_hash(request.cookies, settings.cookie_name)
+        if token_hash is not None:
+            try:
+                identity = await v1_security.read_async(
+                    token_hash, lambda session, account, identity: identity, with_identity=True, authorize=False)
+            except RequestRejected:
+                identity = None
+            except V1SecurityUnavailable:
+                return _error(503, "account_unavailable")
+            if identity is not None:
+                ended = await call_authority("end_session", session_id=identity.session_id,
+                                             token_hash=identity.token_hash)
+                if not (type(ended) is str and ended == "ended"):
+                    return _error(503, "account_unavailable")
+        response = JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+        clear_session_cookie(response)
+        return response
+
+    async def v1_revoke(request: Request, scope: str) -> JSONResponse:
+        from .v1_authority import REVOKE_OUTCOMES, SessionsRevoked
+        body = await _read_exact_body(request, set())
+        if isinstance(body, JSONResponse):
+            return body
+        found = await v1_identify(request)
+        if isinstance(found, JSONResponse):
+            return found
+        identity, _email, _stored = found
+        result = await call_authority("revoke_sessions", operation_id=uuid.uuid4(), session_id=identity.session_id,
+                                      token_hash=identity.token_hash, scope=scope)
+        outcome = _contract_outcome(result, SessionsRevoked, REVOKE_OUTCOMES)
+        if outcome != "revoked":
+            return _authority_refusal(outcome, result)
+        response = JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+        if scope == "all":
+            clear_session_cookie(response)       # The presenting session ended too.
+        return response
+
+    async def v1_proven(request: Request, fields: set[str], new_password_field: str | None, call, kind, outcomes,
+                        success: str, end_session_cookie: bool) -> JSONResponse:
+        """A signed-in customer's own operation proven by the current password: the body, the exact
+        original session, the login limiter (shared with sign-in, keyed by the account's email), one
+        password-work admission for verifying the current password (and hashing a new one), then the
+        authority. Every path after the limiter admits the attempt ends it exactly once."""
+        body = await _read_exact_body(request, fields)
+        if isinstance(body, JSONResponse):
+            return body
+        current = body["current_password"]
+        new = body[new_password_field] if new_password_field else None
+        if type(current) is not str or (new_password_field and type(new) is not str):
+            return _error(422, "invalid_password")
+        if new_password_field and not password_length_ok(new):
+            return _error(422, "password_length")
+        found = await v1_identify(request, with_password=True)
+        if isinstance(found, JSONResponse):
+            return found
+        identity, email, stored = found
+        if type(stored) is not str or not stored:
+            return _error(503, "account_unavailable")
+
+        limit_keys = limiter.keys_for(
+            client_identifier(request.client.host if request.client else None, request.headers,
+                              settings.trust_cloudflare_client_ip),
+            email,
+        )
+        decision = limiter.begin(limit_keys)
+        if not decision.allowed:
+            response = _error(429, "too_many_attempts")
+            response.headers["Retry-After"] = str(decision.retry_after_seconds)
+            return response
+        if len(current) > MAX_PASSWORD_LENGTH:
+            limiter.record_failure(limit_keys)
+            return _error(403, "invalid_current_password")
+
+        def work():
+            if not verify_password(stored, current):
+                return None
+            return hash_password(new) if new_password_field else stored
+
+        try:
+            proven = await password_gate.run(work)
+        except PasswordWorkBusy:
+            limiter.release(limit_keys)
+            return _error(503, "busy")
+        except BaseException:
+            limiter.release(limit_keys)
+            raise
+        if proven is None:
+            limiter.record_failure(limit_keys)
+            return _error(403, "invalid_current_password")
+
+        arguments = {"operation_id": uuid.uuid4(), "session_id": identity.session_id,
+                     "token_hash": identity.token_hash, "verified_password_hash": stored}
+        if new_password_field:
+            arguments["new_password_hash"] = proven
+        try:
+            result = await call_authority(call, **arguments)
+        except BaseException:
+            limiter.release(limit_keys)
+            raise
+        outcome = _contract_outcome(result, kind, outcomes)
+        if outcome != success:
+            # Not a wrong password: the session ended, the password changed meanwhile, or the
+            # authority refused or could not answer.
+            limiter.release(limit_keys)
+            return _authority_refusal(outcome, result)
+        limiter.record_success(limit_keys)
+        response = JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+        if end_session_cookie:
+            clear_session_cookie(response)
+        return response
+
+    if v1_security is not None:
+        @router.post("/sessions/revoke-others")
+        async def revoke_other_sessions(request: Request):
+            return await v1_revoke(request, "others")
+
+        @router.post("/sessions/revoke-all")
+        async def revoke_all_sessions(request: Request):
+            return await v1_revoke(request, "all")
+
+        @router.post("/password")
+        async def change_password(request: Request):
+            from .v1_authority import CHANGE_OUTCOMES, PasswordChanged
+            # The current session stays; every other session ends.
+            return await v1_proven(request, {"current_password", "new_password"}, "new_password",
+                                   "change_password", PasswordChanged, CHANGE_OUTCOMES, "changed",
+                                   end_session_cookie=False)
+
+        @router.post("/deletion-request")
+        async def request_deletion(request: Request):
+            from .v1_authority import DeletionRequested, OWN_DELETION_OUTCOMES
+            # Marks the account and ends every session, this one too. Nothing is erased here.
+            return await v1_proven(request, {"current_password"}, None, "request_own_deletion",
+                                   DeletionRequested, OWN_DELETION_OUTCOMES, "requested", end_session_cookie=True)
 
     if registration_http is not None:
         from .registration_http import confirmation_router

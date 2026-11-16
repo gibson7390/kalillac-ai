@@ -90,12 +90,21 @@ class RecoveryService:
         with self.transaction() as session:
             repository.validate_token(session, hash_recovery_token(token), self._clock())
 
+    def prevalidate_reset_email(self, token):
+        """V1 mode: the same non-consuming, read-only precheck, returning the account's email for the
+        notification sent after the reset authority succeeds. Nothing is written."""
+        with self.transaction() as session:
+            return repository.validate_token(session, hash_recovery_token(token), self._clock())
+
     def confirm_reset(self, token, password_hash):
         with self.transaction() as session:
             email = repository.confirm_token(
                 session, hash_recovery_token(token), password_hash, self._clock,
             )
         # Commit already succeeded. Notification failure cannot undo the reset.
+        self.notify_password_changed(email)
+
+    def notify_password_changed(self, email):
         try:
             self._gateway.send_password_changed(email)
         except Exception:

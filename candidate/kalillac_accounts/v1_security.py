@@ -6,6 +6,7 @@ mutations, billing, chat revalidation or a production feature.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import socket
 import stat
@@ -153,7 +154,13 @@ class V1AccountSecurity:
                 _prepare(session)
                 _schema(session)
 
-    def read(self, token_hash, work, stopped=None):
+    def read(self, token_hash, work, stopped=None, with_identity=False, authorize=True):
+        """work(session, account) inside the authorized read; with_identity, work(session, account,
+        identity), where identity is the exact original session binding (account id, session id, token
+        digest) a V1 authority call must present. authorize=False (sign-out only) skips the account
+        authorization and passes account None: any binding, live or not, may be ended."""
+        if not authorize and not with_identity:
+            raise V1SecurityUnavailable()
         from .auth import RequestRejected, resolve_original_identity, authorize_original_identity
         stopped = stopped if stopped is not None else threading.Event()
         try:
@@ -172,10 +179,10 @@ class V1AccountSecurity:
                     identity = resolve_original_identity(session, token_hash)
                     if identity is None:
                         raise RequestRejected(401, "not_authenticated")
-                    account = authorize_original_identity(session, identity)
+                    account = authorize_original_identity(session, identity) if authorize else None
                     if stopped.is_set():
                         raise V1SecurityUnavailable()
-                    payload = work(session, account)
+                    payload = work(session, account, identity) if with_identity else work(session, account)
                     if stopped.is_set() or session.new or session.dirty or session.deleted:
                         raise V1SecurityUnavailable()
                     return payload
@@ -190,11 +197,15 @@ class V1AccountSecurity:
             _report(failure)
         raise V1SecurityUnavailable() from None
 
-    async def read_async(self, token_hash, work):
+    async def read_async(self, token_hash, work, with_identity=False, authorize=True):
         import anyio
         from starlette.concurrency import run_in_threadpool
         stopped = threading.Event()
-        task = asyncio.create_task(run_in_threadpool(self.read, token_hash, work, stopped))
+        # The default call is exactly the original read(token_hash, work, stopped); the D3 options are
+        # passed only when a route asks for them.
+        read = (functools.partial(self.read, with_identity=with_identity, authorize=authorize)
+                if with_identity or not authorize else self.read)
+        task = asyncio.create_task(run_in_threadpool(read, token_hash, work, stopped))
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:

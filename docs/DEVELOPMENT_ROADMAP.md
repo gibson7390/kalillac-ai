@@ -212,10 +212,17 @@ from the code. See "Owner decisions required".
   the deletion-related sign-in defect resolved in the D3 HTTP fixture and the 303-test PostgreSQL group
   passing. Its next finding (a malformed authority answer gave 500 and held the limiter slot) was
   corrected at `d0247a4`, and Codex independently verified the limiter leak resolved. Its follow-up (an
-  outcome that is not a string but compares equal to a contract value) is corrected on
-  `fix/d3-v1-login-outcome-type`, awaiting Codex. Owner acceptance pending. Before E1:
-  a reviewed credential read path for V1 login (plan, E1).
-* Then D3 (routes), D4 (operator tool), E1 to E3; erasure after the owner's retention decisions.
+  outcome that is not a string but compares equal to a contract value) was corrected at `dcc0d44`, and
+  Codex independently verified it resolved (23 focused login tests, 11 PostgreSQL HTTP tests, no new
+  finding). Owner acceptance pending.
+* **D3, remaining routes** (`feat/account-security-d3-routes`, on `dcc0d44`). In V1 mode: sign-out
+  through `v1_end_session`; new `sessions/revoke-others` and `sessions/revoke-all`; new `password`
+  (current password proven, sign-in limiter shared); new `deletion-request` (the customer's own request,
+  no erasure); recovery confirmation through `v1_reset_password`; no email-verification routes. Each
+  only through its authority as S, never the legacy path; real PostgreSQL HTTP tests prove R writes
+  nothing. Implemented; awaiting Codex.
+* Then D5 (migration 0024: reset-token issuance authority and the credential read path), D4 (operator
+  tool), E1 (with the row-lock design: plan, D5) to E3; erasure after the owner's retention decisions.
 
 ### Milestone 3: Stripe billing (starting point)
 

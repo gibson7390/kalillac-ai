@@ -2,8 +2,11 @@
 
 Status: **in progress**. Approved by the owner on 2026-11-15 to be written from the code and then
 implemented, keeping the private database authorities and adding no legacy path. Implemented so far
-(default off, unexposed): D1, and the sign-out authority of D2 (migration 0018). Nothing here
-authorizes a production migration, a role or credential change, or activation.
+(default off; the application's startup gate still refuses V1 mode and passes no authority): D1; every
+D2 authority (migrations 0018 to 0023); D3's routes (login, sign-out, revoking sessions, password
+change, the customer's deletion request, recovery confirmation; no email-verification routes in V1).
+Remaining: D5 (below), D4, E1 to E3. Nothing here authorizes a production migration, a role or
+credential change, or activation.
 
 Sources: the code on `feat/file-assistant-v1` (migrations 0012 to 0014, `kalillac_accounts/v1_security.py`,
 the registration authority) and the V1 contract in
@@ -52,7 +55,7 @@ operation ids, admission where the contract requires it, and an audit event in t
 | `v1_reset_password(token_hash, new_hash, op)` | Recovery completion: lock and re-check the token, replace the hash, invalidate every reset token, revoke every session, advance the epoch, clear `password_reset_required` (only here), audit. **Implemented, migration 0019** (`recovery` admission class) |
 | `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, audit. **Implemented, migration 0020** (`manual` admission class; new `password_change` event type). The epoch does not move (see section 4) |
 | ~~`v1_verify_email(token_hash, op)`~~ | Dropped (section 4): after activation no account can be unverified; migration 0021 makes activation prove it |
-| `v1_quarantine(account, reason, op)`, `v1_reinstate(account, op)` | Operator suspension and reinstatement: quarantine revokes every session and advances the epoch; reinstatement never happens as a side effect of anything else |
+| `v1_quarantine(op, account)`, `v1_reinstate(op, account)` | Operator suspension and reinstatement: quarantine revokes every session and advances the epoch; reinstatement never happens as a side effect of anything else. **Implemented, migration 0022** (operation id first, as every later function; no reason argument: the operator tool, D4, records its reason code with the operation id) |
 | `v1_request_deletion(account, op)` | Sets the deletion marker, revokes every session, advances the epoch; erasure itself follows the retention rules (section 5). **Implemented, migration 0023**, with the customer's own `v1_request_own_deletion` (section 4, "Deletion requests") |
 
 The operator functions are executable by a separate NOLOGIN operator role P, used only by the operator
@@ -114,13 +117,19 @@ only the intended role can call, tampering refused, downgrade refused while its 
 | Route | V1 behaviour |
 |---|---|
 | `POST /api/account/login` | Existing gate and password work, then `v1_issue_session`. **Implemented (D3, first route)**: in V1 mode the route verifies the password and writes nothing as R (no legacy session, no rehash); the session comes only from the authority as S. A refusal is `401 invalid_credentials` with no cookie; an absent or failing authority, or any unexpected answer, is `503 account_unavailable` with no cookie, never the legacy path. V1-off login is unchanged. The application passes no authority and its startup gate still refuses V1 mode, so this is reachable only where both are injected (tests) |
-| `POST /api/account/logout` | `v1_end_session`; same bodyless idempotent contract |
-| `POST /api/account/sessions/revoke-others`, `.../revoke-all` (new) | Exact `{}` body (4096-byte bounded, duplicate and extra keys refused); `200 {"ok":true}`; revoke-all clears the cookie; admission `429 too_many_operations` with `Retry-After`, capacity `503 security_unavailable` |
-| `POST /api/account/recovery/confirm` | `v1_reset_password` |
-| `POST /api/account/email-verification/confirm` | `v1_verify_email` |
-| `POST /api/account/password` (new) | `{"current_password", "new_password"}`; existing password policy and work gate; `v1_change_password`; keeps the current session |
+| `POST /api/account/logout` | **Implemented**: `v1_end_session` for exactly the presented binding, whatever the account's state (the read resolves the binding without authorizing the account); no cookie or an unbound digest is `200` with no call; bodyless and idempotent. If the end cannot be confirmed (no authority, any answer but exactly `"ended"`, read path unavailable) it is `503 account_unavailable` and the cookie is **kept**, so signing out can be retried |
+| `POST /api/account/sessions/revoke-others`, `.../revoke-all` (new) | **Implemented**: exact `{}` body (4096-byte bounded, duplicate and extra keys refused) checked before any database work; the exact original session from V1-01's authorized read; `200 {"ok":true}`; revoke-all clears the cookie; `401 not_authenticated`, `403 account_unavailable`, admission `429 too_many_operations` with `Retry-After`; anything else, including a malformed answer, `503 security_unavailable` |
+| `POST /api/account/recovery/confirm` | **Implemented**: the existing read-only precheck (now also returning the email for the notification), the password work, then `v1_reset_password` as S. `invalid_token` is `400 invalid_or_expired_token` (counted as an invalid attempt), `account_unavailable` `403`, admission `429` with `Retry-After`, anything else `503 recovery_unavailable`; the "password changed" notification is sent after the response, only on `reset` |
+| `POST /api/account/email-verification/*` | **No routes in V1 mode** (section 4, `v1_verify_email` dropped): registration proves ownership before an account exists and the identity guard refuses later changes; both legacy endpoints wrote as R |
+| `POST /api/account/password` (new) | **Implemented**: exact `{"current_password", "new_password"}`; the existing password policy; the sign-in limiter, keyed by the account's email (a wrong current password is a failed guess, `403 invalid_current_password`); one password-work admission verifies the current password and hashes the new one; `v1_change_password` with the just-verified stored hash; keeps the current session |
+| `POST /api/account/deletion-request` (new) | **Implemented** (see "Customer deletion request route" in section 4): exact `{"current_password"}`, proven like a password change; `v1_request_own_deletion`; `200 {"ok":true}` and the cookie cleared (every session ended). Nothing is erased |
 
-All new routes join the unsafe-request guard inventory. Off mode is byte-for-byte unchanged (tests).
+All new routes are in the guard's `V1_INVENTORY` (guarded whether or not mounted) and are mounted only in
+V1 mode. Off mode is unchanged (tests). Every proven route ends its limiter attempt exactly once
+(success, failure or release) and releases on cancellation; every authority answer is accepted only as
+the authority's own result type with an exactly-`str` contract outcome. Tests:
+`test_v1_account_routes.py` (88, no database) and `test_v1_account_routes_postgres.py` (14, real
+PostgreSQL through HTTP, with a test-only trigger proving every write is S's and none is R's).
 
 ### D4. Operator tool
 
@@ -128,6 +137,19 @@ All new routes join the unsafe-request guard inventory. Off mode is byte-for-byt
 held about an account, each through P with an operator credential that is not the application's,
 with a dry-run mode, a required reason code and an operation id. Tested against fixtures; writing it
 is not permission to run it against production.
+
+### D5. Before E1: the remaining legacy account-state paths in V1 mode (inventory after D3)
+
+What V1 mode still does as the runtime role R once D3's routes are in place, and what each needs:
+
+| Path | Writes or reads as R | Needed before E1 |
+|---|---|---|
+| `POST /api/account/recovery/request` | inserts a reset token and consumes the account's open ones (`account_recovery_tokens`) | an issuance authority (`v1_issue_reset_token`, S-executable, account lock, uniform outcome, no account-existence signal), migration 0024 |
+| V1 login, password change, deletion request | read `users.password_hash` | the reviewed credential read path (below, E1 dependency), migration 0024 |
+| Recovery precheck | reads `account_recovery_tokens.token_hash` | the reset authority already re-checks the token; the precheck only saves password work for a dead link. Either a narrow S lookup or dropping the precheck, decided with 0024 |
+| V1-01 read path (`/me`, `/entitlements`, files, the D3 routes' identity), billing, Spaces | `SELECT … FOR UPDATE` on `users` | **row locks need UPDATE privilege** (measured on PostgreSQL 16.2: `FOR UPDATE`, `FOR SHARE` and `FOR KEY SHARE` are each refused with SELECT alone; column-level UPDATE on one column suffices). E1 cannot revoke every UPDATE on `users` from R without breaking every account lock. Design to write with E1: R keeps column UPDATE on exactly one inert column, and a guard refuses any actual UPDATE by R |
+| `POST /api/account/register` without registration v2 | inserts users and entitlements | V1 mode must require registration v2 (role A); to be enforced at startup with E2 |
+| Billing (Checkout, portal, Stripe webhooks) | writes `account_billing`, `account_entitlements`, webhook and case records | Milestone 3: the entitlement and billing writes move behind their own reviewed path before E1 revokes R's DML on them (E1's list names entitlements and billing) |
 
 ### E1. Removing the legacy route (a later migration, prepared, not self-applied)
 
@@ -152,14 +174,16 @@ account startup (an old broad-grant binary is not a rollback).
 
 ### E3. The synthetic lifecycle test
 
-One PostgreSQL test through the real routes: register, verify, log in twice, revoke others, change the
-password, log out, request recovery, reset, revoke all, operator quarantine (every session refused),
-reinstate, request deletion (login refused) — asserting sessions, epochs and audit events after each
-step, and that R cannot write any of it.
+One PostgreSQL test through the real routes: register (email-first, which proves ownership; there is no
+separate verification step in V1), log in twice, revoke others, change the password, log out, request
+recovery, reset, revoke all, operator quarantine (every session refused), reinstate, request deletion
+(login refused) — asserting sessions, epochs and audit events after each step, and that R cannot write
+any of it, under the final post-E1 grants.
 
 ## 3. Order and checkpoints
 
-D1 and D2 first (no route changes), then D3 route by route, then D4, then E1 to E3. Each commit runs the
+D1 and D2 first (no route changes), then D3 route by route, then D5 (migration 0024: the reset-token
+issuance authority and the credential read path), then D4, then E1 (with the row-lock design) to E3. Each commit runs the
 three existing workflows plus the new PostgreSQL group with measured counts and no unexpected skips.
 
 ## 4. Decisions and deviations recorded
@@ -216,6 +240,15 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
     directly, without the deletion check in `v1_issue_session`. Reproduced on the `4954069` router with V1
     on: after an operator deletion request, correct credentials returned 200 with a cookie and `/me`
     answered 200. With D3's route the same login is `401` with no cookie and no session row.
+- **Customer deletion request route (D3).** Section 5 had left a customer-facing route open. The owner's
+  2026-11-16 directive defines the V1 customer journey as ending in an account deletion request, so the
+  request itself is exposed in V1 mode (`POST /api/account/deletion-request`), proven by the current
+  password. It marks the account and ends every session; the response promises nothing about erasure,
+  and no confirmation email is sent. Erasure, withdrawal, the confirmation message and the subscription
+  cancellation remain the owner's section 5 decisions.
+- **Password change notification.** Recovery sends a "password changed" email; the signed-in password
+  change does not yet (the account router has no email gateway). Open, to wire with the customer
+  account page (Milestone 9 acceptance includes it).
 - **Password rehash in V1 mode.** The legacy login rehashes an outdated Argon2 hash as R. V1 login does
   not: R must not write account state, and the authority compares the exact hash just verified. A
   rehash path behind an authority is open (it matters only if the hashing parameters change).
@@ -234,9 +267,13 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
   contract values without first requiring it to be a string, so an outcome that is not a string but
   compares equal to `"issued"` signed in (200, cookie, success recorded), and one equal to
   `"not_authenticated"` was counted as a failed guess. **Corrected on `fix/d3-v1-login-outcome-type`**
-  (awaiting Codex): the outcome must be exactly `str` before any comparison; otherwise it is treated as
-  an unavailable authority (`503 account_unavailable`, the reservation released exactly once, no
-  cookie, no legacy session), and a valid retry signs in.
+  (`dcc0d44c8176ef9b739edc004bbf44f77b226f8b`): the outcome must be exactly `str` before any comparison;
+  otherwise it is treated as an unavailable authority (`503 account_unavailable`, the reservation
+  released exactly once, no cookie, no legacy session), and a valid retry signs in. **Independently
+  verified resolved by Codex at `dcc0d44`** (23 focused login tests and 11 PostgreSQL HTTP tests passed,
+  none skipped or failed; malformed answers fail closed; limiter reservations released correctly; no
+  unauthorized cookie or legacy session; no new actionable finding). Owner acceptance pending. Not to be
+  revisited without new evidence.
 
 ## 5. Account deletion: retention proposal (for the owner's decision)
 

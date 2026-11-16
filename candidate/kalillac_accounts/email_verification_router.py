@@ -44,12 +44,17 @@ def _limited(decision):
 
 def build_email_verification_router(
     *, session_factory=get_session_factory, gateway=None, settings=None,
-    limiter=None, clock=utc_now, environ=None,
+    limiter=None, clock=utc_now, environ=None, v1_security=None,
 ):
-    """No routes while off; when on, validate all prerequisites before mounting."""
+    """No routes while off; when on, validate all prerequisites before mounting.
+
+    V1 mode (v1_security set) mounts no routes: registration proves email ownership before an account
+    exists (owner decision 14; migration 0021 makes activation prove no unverified account remains), the
+    identity guard refuses any later change to email or email_verified_at, and the retired
+    v1_verify_email authority is not reintroduced. Both endpoints wrote as the runtime role."""
     config = load_verification_config(gateway, environ)
     router = APIRouter(prefix="/api/account/email-verification")
-    if config is None:
+    if config is None or v1_security is not None:
         return router
     settings = settings or load_account_settings()
     limiter = limiter if limiter is not None else VerificationRateLimiter()

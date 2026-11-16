@@ -14993,14 +14993,15 @@ if _recovery_enabled or _email_verification_enabled:
     if _recovery_enabled:
         from kalillac_accounts.recovery_router import build_recovery_router
 
-        api.include_router(build_recovery_router(gateway=_email_gateway))
+        api.include_router(build_recovery_router(gateway=_email_gateway, v1_security=_v1_account_security))
 
     if _email_verification_enabled:
         from kalillac_accounts.email_verification_router import (
             build_email_verification_router,
         )
 
-        api.include_router(build_email_verification_router(gateway=_email_gateway))
+        api.include_router(build_email_verification_router(gateway=_email_gateway,
+                                                           v1_security=_v1_account_security))
 
 
 # Optional aggregate usage metering. Off unless explicitly enabled; when off,
