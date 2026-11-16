@@ -235,6 +235,7 @@ def test_only_s_may_call_it(world):
 
 def test_e_gains_exactly_the_reset_columns(world):
     w = world
+    migrate(w, HEAD, down=True)                  # Exactly 0019's grants; later revisions add their own.
     with w.admin_engine.connect() as c:
         granted = {tuple(r) for r in c.execute(text(
             "SELECT c.relname,a.attname,x.privilege_type FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid"

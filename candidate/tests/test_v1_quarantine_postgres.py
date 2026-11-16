@@ -100,7 +100,9 @@ def test_a_quarantined_account_cannot_revoke_or_change_anything_itself(world):
 def test_only_p_may_call_the_operator_functions(world):
     w = world
     user, _, _ = signed_in(w, 1)
-    for role in ("service", "executor"):
+    # S may not; E owns the functions (owner EXECUTE, as for every V1 authority) and is NOLOGIN, reachable
+    # only through the operator's owner->E edge, so it is not a caller to refuse here.
+    for role in ("service",):
         with pytest.raises(DBAPIError) as error:
             operate(w, "v1_quarantine", uuid.uuid4(), user, role=role)
         assert error.value.orig.sqlstate == "42501"
@@ -163,3 +165,83 @@ def test_a_tampered_catalog_is_refused_by_startup_and_by_the_downgrade(world, ta
     refused(w)
     with pytest.raises(DBAPIError, match="V1_QUARANTINE_POSTCONDITION_INVALID"):
         migrate(w, PREVIOUS, down=True)
+
+
+# --- the guard swap and all-or-nothing behaviour, in the database itself ------------------------------
+
+def _guard_source(w):
+    with w.admin_engine.connect() as c:
+        return c.scalar(text("SELECT p.prosrc FROM pg_proc p WHERE p.oid = "
+                             "to_regprocedure('kalillac.registration_user_identity_guard()')"))
+
+
+def _expected_guard(w, version):
+    from kalillac_accounts import registration_schema
+    build = registration_schema.identity_guard_v3 if version == 3 else registration_schema.identity_guard_v2
+    return build(w.names["registration"]).split("$guard$")[1]
+
+
+def _state(w):
+    """Everything 0022 changes: revision, guard, functions, P's and E's rights, event types."""
+    from test_v1_schema_postgres import version
+    with w.admin_engine.connect() as c:
+        return (version(w), _guard_source(w),
+                c.scalar(text("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+                              " WHERE n.nspname = 'kalillac' AND p.proname IN ('v1_quarantine', 'v1_reinstate')")),
+                c.scalar(text("SELECT has_schema_privilege(:p, 'kalillac', 'USAGE')"), {"p": w.names["operator"]}),
+                c.scalar(text("SELECT has_column_privilege(:e, 'kalillac.users', 'quarantined_at', 'UPDATE')"),
+                         {"e": w.names["executor"]}),
+                c.scalar(text("SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                              " WHERE conname = 'ck_account_security_events_type'")))
+
+
+def test_the_upgrade_installs_exactly_guard_v3_over_exactly_v2(world):
+    w = world
+    assert _guard_source(w) == _expected_guard(w, 3)
+    migrate(w, PREVIOUS, down=True)
+    assert _guard_source(w) == _expected_guard(w, 2)
+    migrate(w, HEAD)
+    assert _guard_source(w) == _expected_guard(w, 3)
+
+
+@pytest.mark.parametrize("fault, message", [
+    # The guard is not exactly v2: the preflight's catalog proof refuses it before any change.
+    ("UPDATE pg_catalog.pg_proc SET prosrc = prosrc || ' ' WHERE oid = "
+     "to_regprocedure('kalillac.registration_user_identity_guard()')", "V1_QUARANTINE_PREREQUISITE_INVALID"),
+    # P is not as the operator must provision it.
+    ("ALTER ROLE {operator} LOGIN", "V1_QUARANTINE_PREREQUISITE_INVALID"),
+    ("GRANT {app} TO {operator}", "V1_QUARANTINE_PREREQUISITE_INVALID"),
+])
+def test_a_refused_upgrade_leaves_nothing_changed(world, fault, message):
+    w = world
+    migrate(w, PREVIOUS, down=True)
+    admin_sql(w, fault.format(**w.names))
+    before = _state(w)
+    assert before[0] == PREVIOUS and before[2] == 0
+    with pytest.raises(DBAPIError, match=message):
+        migrate(w, HEAD)
+    assert _state(w) == before                 # Revision, guard, functions, rights and event types unchanged.
+
+
+def test_a_failure_after_the_swap_rolls_the_swap_back(world, monkeypatch):
+    """Fail at the very last statement (the postcondition), after the guard swap, the functions and the
+    grants: one transaction, so nothing of it remains."""
+    import importlib.util
+    from pathlib import Path
+    w = world
+    migrate(w, PREVIOUS, down=True)
+    before = _state(w)
+    path = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0022_v1_quarantine_authority.py"
+    spec = importlib.util.spec_from_file_location("v1_0022_for_rollback", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    statements = module.upgrade_statements(module._names())
+    failing = statements[:-1] + ["DO $fail$ BEGIN RAISE EXCEPTION USING MESSAGE = 'INJECTED_AFTER_SWAP'; END $fail$"]
+    with pytest.raises(DBAPIError, match="INJECTED_AFTER_SWAP"):
+        with w.migration.begin() as c:
+            c.exec_driver_sql("SET ROLE " + w.names["owner"])
+            for statement in failing:
+                c.exec_driver_sql(statement)
+    assert _state(w) == before and _guard_source(w) == _expected_guard(w, 2)
+    migrate(w, HEAD)
+    assert _guard_source(w) == _expected_guard(w, 3) and classify(w.owner_factory) == v1_schema.PREPARED
