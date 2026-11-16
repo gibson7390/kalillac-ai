@@ -1804,18 +1804,46 @@ def _document_text(data, kind):
     return "\n".join(texts)
 
 
-# A complete figure in running text: an optional currency sign, digits with thousands separators, an
-# optional decimal part and an optional K/M/B scale. Never part of a longer number or word: "$300" is
-# not found inside "$3000", "$3,000", "$300.5" or "A$300".
-_FIGURE = re.compile(r"(?<![\w.,$€£¥₹])(?:[$€£¥₹]\s?)?\d(?:[\d,]*\d)?(?:\.\d+)?(?:[KMB](?![A-Za-z]))?(?![\w$€£¥₹])"
-                     r"(?!\.\d)(?!,\d)")
+# A complete amount in running text, in the forms a table total may take (consistency._QUANTITY): an
+# optional opening parenthesis, a sign (-, \u2212, \u2013), a currency sign or a three-letter ISO code
+# followed by a space, digits with thousands separators and an optional decimal part, an optional K/M/B or
+# bn scale, and an optional closing parenthesis. Never part of a longer number or word: "$300" is not
+# found inside "$3000", "$3,000", "$300.5" or "A$300", and "$100-$300" holds "$100" and "$300" (a range,
+# not a negative). Spaces are ordinary or no-break spaces only, so a figure never spans two lines.
+_GAP = "[ \u00a0]"
+_FIGURE = re.compile(
+    rf"(?<![\w.,$€£¥₹])"
+    rf"(?P<open>\({_GAP}?)?"
+    rf"(?P<sign>[-\u2212\u2013](?P<spaced>{_GAP})?)?"
+    rf"(?P<currency>[$€£¥₹]|[A-Z]{{3}}(?={_GAP}))?{_GAP}?"
+    rf"(?P<number>\d{{1,3}}(?:,\d{{3}})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    rf"(?:{_GAP}?(?P<scale>[KMB]|bn)(?![A-Za-z]))?"
+    rf"(?![\w$€£¥₹])(?!\.\d)(?!,\d)"
+    rf"(?P<close>{_GAP}?\))?")
 
 
-def _figure_key(token):
-    """(value, currency, scale) of one figure, or None: "$300" and "$300.00" are the same figure;
-    "300" (no currency) and "$300" are not, so an unrelated count never blocks a money edit."""
+def _figure_keys(match):
+    """The (value, currency, scale) keys one amount in running text may stand for. Where prose is
+    ambiguous the amount stands for both signs, so a stale total is never missed: parentheses may be
+    accounting notation or punctuation ("The total fee ($300) is fixed."), and a spaced hyphen or an en
+    dash may be a minus sign or a dash ("Fees \u2013 $300"). An adjacent hyphen or a minus sign (\u2212) is
+    negative, as in a table."""
+    value = round(float(match.group("number").replace(",", "")), 9)
+    unit = (match.group("currency") or "", match.group("scale") or "")
+    sign = match.group("sign")
+    if sign and (sign[0] == "\u2212" or (sign[0] == "-" and not match.group("spaced"))):
+        return {(-value, *unit)}
+    if sign or match.group("open"):
+        return {(value, *unit), (-value, *unit)}
+    return {(value, *unit)}
+
+
+def _figure_key(cell):
+    """(value, currency, scale) of a table cell read exactly as the total check reads it, or None.
+    "$300" and "$300.00" are the same amount; "300" (no currency), "$300", "USD 300", "-$300" and
+    "$300K" are different ones, so an unrelated count, currency or scale never blocks an edit."""
     from .consistency import _quantity
-    found = _quantity(token.replace(" ", ""))
+    found = _quantity(cell)
     if found is None:
         return None
     value, (currency, scale), _decimals = found
@@ -1823,16 +1851,18 @@ def _figure_key(token):
 
 
 def _figures(text):
+    """How many amounts in the text may stand for each key."""
     from collections import Counter
-    return Counter(key for key in (_figure_key(match.group(0)) for match in _FIGURE.finditer(text)) if key)
+    return Counter(key for match in _FIGURE.finditer(text) for key in _figure_keys(match))
 
 
 def _check_restated_totals(before, after, kind):
     """When an edit changes a table's total, the old total may not survive anywhere else in the document
-    (a summary sentence, a metric, another table): the document would then state two totals. The figure
-    must be restated everywhere it appears, or the customer must confirm the exact edit. Figures are
-    compared as complete tokens by value, currency and scale (Codex reverification: substring counting
-    found "$300" inside "$3000"); nothing is ever changed automatically."""
+    (a summary sentence, a metric, another table): the document would then state two totals. The amount
+    must be restated everywhere it appears, or the customer must confirm the exact edit. Amounts are
+    compared as complete tokens by value, sign, currency and scale (Codex reverifications: substring
+    counting found "$300" inside "$3000"; the token matcher that replaced it missed "-$300", "($300)"
+    and "USD 300"); nothing is ever changed automatically."""
     from .consistency import _TOTAL_LABEL
     old_tables, new_tables = _tables(before, kind), _tables(after, kind)
     if len(old_tables) != len(new_tables):
@@ -1841,11 +1871,11 @@ def _check_restated_totals(before, after, kind):
     for (_old_header, old_rows), (_new_header, new_rows) in zip(old_tables, new_tables):
         if not old_rows or not new_rows or _TOTAL_LABEL.match(old_rows[-1][0] or "") is None:
             continue
-        changed = [old for old, new in zip(old_rows[-1][1:], new_rows[-1][1:]) if old.strip() and old != new]
         own = _figures("\n".join(cell for row in new_rows for cell in row))
-        for old in changed:
-            key = _figure_key(old.strip())
-            if key is None:
+        for old, new in zip(old_rows[-1][1:], new_rows[-1][1:]):
+            key = _figure_key(old)
+            # Not an amount the total check reads (text, a percentage), or the same amount rewritten.
+            if key is None or key == _figure_key(new):
                 continue
             # Occurrences outside this table's own cells (which may legitimately still show it).
             if document[key] - own[key] > 0:

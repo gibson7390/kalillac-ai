@@ -1,12 +1,13 @@
 # Corrections for the Codex audits: evidence for independent verification
 
-**Checkpoints (provenance).** Three different commits have been handed to Codex; they are not the same:
+**Checkpoints (provenance).** Four different commits have been handed to Codex; they are not the same:
 
 | Checkpoint | Full SHA | What it is |
 |---|---|---|
 | Tag `codex-reverify-2026-11-16` (historical, published, unchanged) | `d3081a96f4fc20d711dbc8d094cab8c576b1bdc1` | The first reverification checkpoint, on `feat/account-security-d2-change`. It predates the corrections for findings A to D. An earlier version of this header said the tag marks "the commit that contains this file in this form"; that was wrong after this file changed, and the tag was never moved. |
 | Second reverification handoff | `53869d73a509df07643e91dde7dff18ba6bbf984` (`feat/account-security-d2-quarantine`) | The checkpoint Codex reviewed on 2026-11-16: A to D corrected, migration 0022's 19 PostgreSQL tests passed independently; the confirmation lifecycle and the prose-total check had defects (below). |
-| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-3` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The corrections for the third reverification findings, stacked on `53869d7`. |
+| Third reverification handoff | `c5291b4a732ec87a72fdbe3c39caebb339ce0452` (`fix/codex-reverification-3`) | Codex verified the confirmation lifecycle and the provenance corrections there, and found regression R1 in the amount matcher (below). |
+| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-4` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The bounded correction of R1, stacked on `c5291b4`. |
 
 Nothing in any checkpoint was changed to make CI pass without investigation.
 
@@ -98,8 +99,9 @@ If a file was stored before a later failure, it stays in the customer's files (i
 storage and is visible in the file list); the service does not deduplicate or roll it back. Exact
 requests are not idempotent by request key; there is no request key.
 
-The CI runs for the current checkpoint are listed in the handoff (they run on the commit after it
-exists, so this file cannot name them).
+CI on `c5291b4a732ec87a72fdbe3c39caebb339ce0452`: `file-generation-verification` `43809914449` (858
+tests), `subscription-foundation-verification` `43809917574`, `safety-helpfulness-regression`
+`43809920980`, all success (Codex inspected the job logs). They did not cover R1.
 
 **Still open after these corrections, unchanged:**
 
@@ -108,6 +110,40 @@ exists, so this file cannot name them).
 - **Arabic PDF interoperability.** Ligature order, diacritics, mixed-direction reading order, search and word splitting.
 - **Broader semantic dependencies.** Derived figures such as growth rates and margins stated in prose are not checked; totals and table totals are.
 - **Native and cross-viewer presentation checks.**
+
+### Codex's review of `c5291b4a732ec87a72fdbe3c39caebb339ce0452` and the R1 correction (branch `fix/codex-reverification-4`)
+
+**Independently verified by Codex at `c5291b4`:**
+- F1, the confirmation lifecycle: one attempt per confirmation, consumed atomically before the edit.
+- F3, provenance.
+- The original `$300`/`$3000` false refusal.
+
+None of these is changed here: `router.py` and `assistant.py` are untouched, and the earlier boundary regressions are kept and pass.
+
+**R1, now corrected (implemented; awaiting Codex).** The token matcher introduced in `c5291b4` missed stale totals written as:
+- signed amounts (`-$300`);
+- accounting negatives (`($300)`);
+- ISO-currency amounts (`USD 300`).
+
+Ordinary Word (plain and tracked) and PowerPoint edits were therefore accepted with the old total left in the summary beside a correctly restated table.
+
+| | |
+|---|---|
+| Source location (at the current checkpoint) | `kalillac_files/editing.py`: `_FIGURE`, `_figure_keys`, `_figure_key`, `_figures`, `_check_restated_totals` (from line 1807) |
+| Correction | Prose amounts are recognized in every form the table total check reads (`consistency._QUANTITY`): an opening parenthesis, a sign (`-`, `−`, `–`), a currency sign or a three-letter ISO code followed by an ordinary or no-break space, thousands separators, decimals, a K/M/B or bn scale, and a closing parenthesis. A table cell is keyed exactly as the total check reads it (`_quantity`), without removing spaces. Whole-token boundaries, currency and scale distinctions are kept. Where prose is ambiguous, the amount counts as both signs, so a stale total is never missed. This covers parentheses (accounting notation or punctuation: `The total fee ($300) is fixed.` still refuses a `$300` total), a spaced hyphen, and an en dash. An adjacent hyphen or `−` is negative. `$100-$300` is a range. Rewriting a total as the same amount in another form is not a change. Nothing is changed automatically; the customer's confirmed exact edit still bypasses the check |
+| Regressions (`tests/test_file_editing.py`, each in DOCX plain, DOCX tracked and PPTX) | `test_a_stale_signed_accounting_or_iso_total_is_refused_and_a_full_restatement_accepted`: 5 styles (`-$`, `−$`, `($)`, `USD `, `USD` + no-break space) × 3 formats. Each refuses the table-only edit, accepts the restatement made everywhere (the summary then states only the new total), and accepts the confirmed exact edit. `test_an_amount_that_may_be_the_old_total_is_refused`: 8 cases × 3 formats (a negative written another way, `−`, parentheses, en dash, positive parenthetical, dash, range, `USD 300.00`). `test_an_unrelated_signed_or_iso_amount_does_not_block_the_restatement`: 8 cases × 3 formats (opposite sign, larger amounts, another currency, another scale, a count, a decimal); the unrelated text is unchanged |
+| Original failure | Run against the `c5291b4` editor (restored from that commit, then put back): **30 of the 63 new tests fail**. These are all 15 stale-total reproductions (5 styles × DOCX plain, DOCX tracked, PPTX) and the 15 equivalent-representation cases (negative written as `-`, `−`, `()` and `–`, and `USD 300.00`). The 33 others pass on both versions: the positive parenthetical, dash and range cases (which `c5291b4` already matched as `$300`) and the 24 unrelated-amount cases. They guard the new matcher against false refusals |
+| Corrected | All 63 pass. All 12 file suites locally: 920 passed, 1 skipped (`test_memory_limit_stops_the_child`, POSIX-only; Linux CI runs it), 1 expected openpyxl warning |
+
+The CI runs for the current checkpoint are listed in the handoff.
+
+**Still open after this correction, unchanged:**
+- **The exact-confirmation interface:** the backend only.
+- **Word finalization.**
+- **Arabic PDF interoperability.**
+- **Broader semantic dependencies:** growth rates and margins in prose.
+- **Native and cross-viewer presentation checks.**
+- **The one-attempt contract:** an output stored before a provider failure stays in the account, without rollback or deduplication.
 
 ## Findings from the first audit (CODEX-D1 to CODEX-D4)
 

@@ -1080,3 +1080,98 @@ def test_the_old_total_left_in_another_table_is_still_refused():
     summary = next(u.address for u in found.units if u.kind == "cell" and u.text == "$300"
                    and u.address != _fee_cell(found, "$300"))
     edit(data, "c.docx", _restate(data) + [{"op": "set_text", "at": summary, "text": "$400"}])
+
+
+# --- signed, accounting and ISO-currency totals (Codex reverification of c5291b4, R1) ---------------
+
+STYLES = {"signed": lambda n: f"-${n}", "minus": lambda n: f"−${n}", "accounting": lambda n: f"(${n})",
+          "iso": lambda n: f"USD {n}", "iso_no_break": lambda n: f"USD {n}", "positive": lambda n: f"${n}"}
+
+
+def _styled(kind, cell, prose):
+    """A document (docx) or deck (pptx) stating `prose`, with a total-row table A 100, B 200, Total 300
+    written in the cell style."""
+    rows = [["A", cell(100)], ["B", cell(200)], ["Total", cell(300)]]
+    if kind == "docx":
+        raw = {"title": "Total test", "blocks": [{"type": "paragraph", "text": prose},
+               {"type": "table", "header": ["Item", "Amount"], "total_row": True, "rows": rows}]}
+    else:
+        raw = {"title": "Total test", "slides": [{"layout": "points", "title": "Summary", "points": [prose]},
+               {"layout": "table", "title": "Breakdown", "total_row": True, "header": ["Item", "Amount"],
+                "rows": rows}]}
+    return generate(raw, kind).data
+
+
+def _restated(data, name, cell):
+    """Set A to 200 and the total to 400: the table still adds up."""
+    found = outline(data, name)
+    return [{"op": "set_text", "at": next(u.address for u in found.units if u.kind == "cell" and u.text == old),
+             "text": new} for old, new in [(cell(100), cell(200)), (cell(300), cell(400))]]
+
+
+def _text(data, kind):
+    if kind == "docx":
+        return accepted(document_xml(data))
+    from pptx import Presentation
+    deck = Presentation(io.BytesIO(data))
+    return "\n".join(shape.text_frame.text for slide in deck.slides for shape in slide.shapes
+                     if shape.has_text_frame)
+
+
+FORMATS = [("docx", False), ("docx", True), ("pptx", False)]
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("style", ["signed", "minus", "accounting", "iso", "iso_no_break"])
+def test_a_stale_signed_accounting_or_iso_total_is_refused_and_a_full_restatement_accepted(kind, tracked, style):
+    cell = STYLES[style]
+    name = f"t.{kind}"
+    options = {"track_changes": True} if tracked else {}
+    data = _styled(kind, cell, f"The total is {cell(300)}.")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    # Restated everywhere, the same edit is accepted and the summary states the new total only.
+    everywhere = table_only + [{"op": "replace_text", "find": f"The total is {cell(300)}.",
+                                "replace": f"The total is {cell(400)}.", "expect": 1}]
+    text = _text(edit(data, name, everywhere, **options).data, kind)
+    assert f"The total is {cell(400)}." in text and f"The total is {cell(300)}." not in text
+    edit(data, name, table_only, exact=True, **options)                    # The customer's confirmed choice.
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("cell_style,prose", [
+    ("accounting", "The net result was -$300."),      # The same negative amount, written another way.
+    ("accounting", "The net result was −$300."),
+    ("signed", "The net result was ($300)."),         # Parentheses in prose may be accounting notation.
+    ("signed", "The net result –$300 is final."),  # An en dash may be a minus sign.
+    ("positive", "The total fee ($300) is fixed."),   # ... or punctuation around a positive amount.
+    ("positive", "Fees – $300 in all."),         # A dash before a positive amount.
+    ("positive", "Quotes ranged $100-$300."),         # A range, not a negative "-$300".
+    ("iso", "The total is USD 300.00."),
+])
+def test_an_amount_that_may_be_the_old_total_is_refused(kind, tracked, cell_style, prose):
+    cell = STYLES[cell_style]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, prose)
+    options = {"track_changes": True} if tracked else {}
+    assert refused(data, name, _restated(data, name, cell), **options) == "dependent_figure_unchanged"
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("cell_style,prose", [
+    ("signed", "A separate deposit of $300 is refundable."),   # Positive, not the negative total.
+    ("signed", "The prior year was -$3000."),
+    ("accounting", "Insurance is ($3,000) a year."),
+    ("iso", "The fee is EUR 300."),                           # Another currency.
+    ("iso", "The fee is USD 3000."),
+    ("iso", "The fee is USD 300K."),                          # Another scale.
+    ("iso", "The venue holds 300 seats."),                    # A count.
+    ("minus", "The loss was −$300.5 per unit."),
+])
+def test_an_unrelated_signed_or_iso_amount_does_not_block_the_restatement(kind, tracked, cell_style, prose):
+    cell = STYLES[cell_style]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, prose)
+    options = {"track_changes": True} if tracked else {}
+    text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert prose in text                                               # Nothing else changed automatically.
