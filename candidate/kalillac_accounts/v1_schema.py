@@ -227,6 +227,14 @@ CHANGE_PASSWORD_DEFINITION = ("p_operation_id uuid, p_session_id uuid, p_token_h
                               True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
 CHANGE_PASSWORD_SOURCE_SHA256 = "c5ba098f557793c78cadeddcef450665261cdcbc0bdadc1fd84f38e287ad1fd6"
 EVENT_TYPES = ("session_revoke_others", "session_revoke_all", "password_reset")
+
+# 0021: the registration activation guard. Not SECURITY DEFINER; owned by the schema owner and
+# executable by nobody else; compared exactly when present (above 0020 only).
+ACTIVATION_GUARD_FUNCTION = "registration_activation_guard"
+ACTIVATION_GUARD_TRIGGER = "trg_registration_activation_zero_legacy"
+# PostgreSQL's rendering of the trigger from its timing on (the name is compared separately).
+ACTIVATION_GUARD_TRIGGER_DEFINITION = "BEFORE UPDATE ON kalillac.account_registration_activation FOR EACH ROW EXECUTE FUNCTION kalillac.registration_activation_guard()"
+ACTIVATION_GUARD_SOURCE_SHA256 = "615353e86bb5b3ade30de5a9f1f488e3ada398ea832ead0a50cb54f3d4903fd4"
 EVENT_TYPES_V2 = EVENT_TYPES + ("password_change",)
 
 
@@ -385,11 +393,34 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
     rules = _rows(session, """SELECT r.rulename FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class
         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='kalillac' AND r.rulename<>'_RETURN'""")
     events = _rows(session, "SELECT evtname FROM pg_event_trigger WHERE evtenabled<>'D'")
-    _require(triggers == TRIGGERS and functions == FUNCTIONS | ({REVOCATION_FUNCTION} if revocation else set())
+    activation_guard = ACTIVATION_GUARD_FUNCTION in functions
+    _require(changing or not activation_guard)
+    _require(triggers == TRIGGERS | ({ACTIVATION_GUARD_TRIGGER} if activation_guard else set())
+             and functions == FUNCTIONS | ({REVOCATION_FUNCTION} if revocation else set())
              | ({ISSUANCE_FUNCTION} if issuance else set()) | ({END_SESSION_FUNCTION} if ending else set())
              | ({RESET_PASSWORD_FUNCTION} if resetting else set())
              | ({CHANGE_PASSWORD_FUNCTION} if changing else set())
+             | ({ACTIVATION_GUARD_FUNCTION} if activation_guard else set())
              and not rules and not events)
+    if activation_guard:
+        import hashlib
+        guard = _rows(session, """SELECT p.prosecdef,p.proconfig,p.prosrc,p.proowner=c.relowner,
+            NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) x WHERE x.grantee<>c.relowner) AND p.proacl IS NOT NULL,
+            pg_get_function_identity_arguments(p.oid),pg_get_function_result(p.oid)
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace,
+            pg_class c WHERE n.nspname='kalillac' AND p.proname=:f
+            AND c.oid='kalillac.account_registration_activation'::regclass""", f=ACTIVATION_GUARD_FUNCTION)
+        _require(len(guard) == 1)
+        definer, config, source, owned, private, arguments, result = guard[0]
+        _require(definer is False and list(config or []) == ["search_path=pg_catalog, pg_temp"] and owned
+                 and private and arguments == "" and result == "trigger"
+                 and hashlib.sha256(source.encode()).hexdigest() == ACTIVATION_GUARD_SOURCE_SHA256)
+        bound = _rows(session, """SELECT substr(pg_get_triggerdef(t.oid,false),strpos(pg_get_triggerdef(t.oid,false),' BEFORE ')+1),
+            t.tgenabled::text,p.proname,t.tgname
+            FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+            WHERE t.tgrelid='kalillac.account_registration_activation'::regclass AND NOT t.tgisinternal""")
+        _require([tuple(r) for r in bound] == [(ACTIVATION_GUARD_TRIGGER_DEFINITION, "O", ACTIVATION_GUARD_FUNCTION,
+                                                 ACTIVATION_GUARD_TRIGGER)])
     # No bridge, in any schema. A view runs with its owner's rights and a rule
     # action with its table owner's, so a view or rule over protected state
     # can hand it to R, A or PUBLIC whatever the tables' own grants say. None is

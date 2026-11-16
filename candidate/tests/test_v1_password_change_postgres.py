@@ -1,6 +1,7 @@
 """0020, the private password-change authority (V1-02D, D2 third part), on real disposable PostgreSQL 16.
 
-The world stands on the head revision. S stays NOLOGIN here: it is exercised through SET LOCAL ROLE
+The world stands on the head revision (0021 leaves 0020's function and constraint unchanged).
+S stays NOLOGIN here: it is exercised through SET LOCAL ROLE
 from the disposable superuser, which also seeds fixtures and tampers with the catalog. Every password
 hash is synthetic.
 """

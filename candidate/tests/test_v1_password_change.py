@@ -27,9 +27,9 @@ def _module():
     return _load("v1_0020_password_change", "0020_v1_password_change_authority.py")
 
 
-def test_0020_is_the_head_directly_after_0019():
+def test_0020_sits_directly_after_0019_below_0021():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0020_v1_password_change"]
+    assert script.get_revision("0021_registration_activation").down_revision == "0020_v1_password_change"
     assert script.get_revision("0020_v1_password_change").down_revision == "0019_v1_password_reset"
     module = _module()
     assert (module.revision, module.down_revision, module.branch_labels, module.depends_on) == (
