@@ -12,10 +12,13 @@ Kalillac evaluates every formula of a workbook it generates, for three reasons:
 Semantics follow Excel where it matters for business models: blanks are zero
 in arithmetic, numeric text is coerced, text in a range is skipped by SUM and
 friends, comparison ranks numbers < text < booleans and is case-insensitive,
-errors propagate through arithmetic, and dates are serial numbers in the 1900
-system. Every function the formula allowlist accepts is implemented here;
+errors propagate through arithmetic, and dates are serial numbers in the
+workbook's own date system: the 1900 system (Windows Excel, every generated
+workbook) or the 1904 system an uploaded workbook may declare (date1904), where
+serial 0 is 1 January 1904. Mixing them up moves every date by 1,462 days. Every function the formula allowlist accepts is implemented here;
 formulas.FUNCTIONS and FUNCTIONS below are kept identical by a test.
 """
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import math
@@ -24,7 +27,10 @@ import re
 from openpyxl.formula.tokenizer import Tokenizer
 from openpyxl.utils import column_index_from_string
 
-EPOCH = date(1899, 12, 30)
+EPOCH = date(1899, 12, 30)        # Serial 0 of the 1900 date system (serials from 1 March 1900 on).
+EPOCH_1904 = date(1904, 1, 1)     # Serial 0 of the 1904 date system.
+# The epoch of the workbook being evaluated; Workbook.value sets it for the duration of an evaluation.
+_EPOCH = ContextVar("formula_engine_epoch", default=EPOCH)
 MAX_ITERATIONS = 2_000_000  # Expressions evaluated plus cells read, per workbook: a bound on runaway work.
 
 
@@ -87,14 +93,15 @@ class Range:
 
 
 def to_serial(value):
+    epoch = _EPOCH.get()
     if isinstance(value, datetime):
-        delta = value - datetime(1899, 12, 30)
+        delta = value - datetime(epoch.year, epoch.month, epoch.day)
         return delta.days + delta.seconds / 86400
-    return float((value - EPOCH).days)
+    return float((value - epoch).days)
 
 
 def from_serial(serial):
-    return EPOCH + timedelta(days=int(math.floor(serial)))
+    return _EPOCH.get() + timedelta(days=int(math.floor(serial)))
 
 
 # --- parsing ------------------------------------------------------------------------------
@@ -536,7 +543,8 @@ def _format_text(value, pattern):
 class Workbook:
     """Cells by sheet; formulas evaluated on demand with memoisation."""
 
-    def __init__(self, today=None):
+    def __init__(self, today=None, date1904=False):
+        self.epoch = EPOCH_1904 if date1904 else EPOCH
         self.cells = {}          # (sheet key, row, column) -> constant or ("formula", text, tree)
         self.names = {}          # sheet key -> sheet name as written
         self.extent = {}         # sheet key -> (max row, max column)
@@ -577,6 +585,7 @@ class Workbook:
         self.visiting.add(address)
         previous = self.current
         self.current = address
+        epoch = _EPOCH.set(self.epoch)     # Every serial in this evaluation is in this workbook's system.
         try:
             tree = cell[2] or parse(cell[1], self.names[sheet_key])
             self.cells[address] = ("formula", cell[1], tree)
@@ -593,6 +602,7 @@ class Workbook:
         except (OverflowError, ValueError):
             result = NUM
         finally:
+            _EPOCH.reset(epoch)
             self.visiting.discard(address)
             self.current = previous
         self.results[address] = result

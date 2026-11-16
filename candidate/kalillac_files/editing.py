@@ -1075,7 +1075,10 @@ class _Book:
         """Fresh cached values for every formula, or none at all: never a stale number."""
         from . import formula_engine as fe
         from .formulas import is_safe_formula
-        engine = fe.Workbook()
+        # The workbook's own date system: a 1904 workbook's serials count from 1 January 1904.
+        properties = self.workbook.find(S + "workbookPr")
+        date1904 = properties is not None and (properties.get("date1904") or "").lower() in ("1", "true")
+        engine = fe.Workbook(date1904=date1904)
         formula_cells, computable = [], True
         for _key, (name, part) in self.sheets.items():
             engine.add_sheet(name)

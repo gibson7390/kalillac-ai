@@ -529,3 +529,74 @@ def test_an_uploaded_malformed_formula_leaves_no_computed_value(book):
     cached = [values[sheet.title][cell.coordinate].value for sheet in formulas.worksheets
               for row in sheet.iter_rows() for cell in row if cell.data_type == "f"]
     assert cached and all(value is None for value in cached)
+
+
+
+# --- the workbook's date system (Codex document audit, finding 1) -----------------------------------
+
+def _dated_book(date1904):
+    """Equivalent workbooks in the 1900 and 1904 date systems: the same dates, date formulas and an
+    unrelated input (D1) that an edit will change."""
+    from datetime import datetime
+    from openpyxl.utils.datetime import CALENDAR_MAC_1904, CALENDAR_WINDOWS_1900
+    book = openpyxl.Workbook()
+    book.epoch = CALENDAR_MAC_1904 if date1904 else CALENDAR_WINDOWS_1900
+    sheet = book.active
+    sheet.title = "Dates"
+    sheet["A1"], sheet["A2"], sheet["D1"] = datetime(2027, 1, 1), datetime(2027, 3, 31), 5
+    for row, formula in enumerate(DATE_FORMULAS, start=1):
+        sheet.cell(row=row, column=2, value=formula)
+    out = io.BytesIO()
+    book.save(out)
+    return out.getvalue()
+
+
+DATE_FORMULAS = ["=YEAR(A1)", "=MONTH(A1)", "=DAY(A1)", "=DATE(2027,3,15)", "=EDATE(A1,1)", "=EOMONTH(A1,0)",
+                 "=A1+30", "=DAYS(A2,A1)", "=WEEKDAY(A1)", "=TEXT(A1,\"yyyy-mm-dd\")", "=NETWORKDAYS(A1,A2)",
+                 "=YEAR(EDATE(A1,12))", "=DATEDIF(A1,A2,\"d\")", "=PMT(0.05/12,DATEDIF(A1,A2,\"m\"),-1000)",
+                 "=D1*2"]
+
+
+def _expected(date1904):
+    from datetime import date, timedelta
+    epoch = date(1904, 1, 1) if date1904 else date(1899, 12, 30)
+
+    def serial(day):
+        return float((day - epoch).days)
+    start, end = date(2027, 1, 1), date(2027, 3, 31)
+    workdays = sum(1 for n in range((end - start).days + 1) if (start + timedelta(days=n)).weekday() < 5)
+    months = 2
+    payment = 1000 * (0.05 / 12) / (1 - (1 + 0.05 / 12) ** -months)
+    return [2027, 1, 1, serial(date(2027, 3, 15)), serial(date(2027, 2, 1)), serial(date(2027, 1, 31)),
+            serial(date(2027, 1, 31)), 89, 6, "2027-01-01", workdays, 2028, 89, payment, 12]
+
+
+@pytest.mark.parametrize("date1904", [False, True])
+def test_an_unrelated_edit_recalculates_dates_in_the_workbooks_own_date_system(date1904):
+    """A 1904 workbook's YEAR(2027-01-01) once became 2022 after an unrelated edit."""
+    edited = edit(_dated_book(date1904), "dates.xlsx", [{"op": "set_cell", "at": "Dates!D1", "value": 6}]).data
+    sheet = openpyxl.load_workbook(io.BytesIO(edited), data_only=True)["Dates"]
+    assert openpyxl.load_workbook(io.BytesIO(edited)).epoch.year == (1904 if date1904 else 1899)
+    found = [sheet.cell(row=row, column=2).value for row in range(1, len(DATE_FORMULAS) + 1)]
+    for formula, mine, want in zip(DATE_FORMULAS, found, _expected(date1904)):
+        if isinstance(want, float):
+            assert isinstance(mine, (int, float)) and abs(mine - want) < 1e-9, (formula, mine, want)
+        else:
+            assert mine == want, (formula, mine, want)
+    # The dates themselves are untouched, and still read as the same calendar dates.
+    dates = openpyxl.load_workbook(io.BytesIO(edited))["Dates"]
+    assert (dates["A1"].value.date().isoformat(), dates["A2"].value.date().isoformat()) == ("2027-01-01", "2027-03-31")
+
+
+def test_equivalent_1900_and_1904_workbooks_differ_only_by_their_epoch():
+    results = []
+    for date1904 in (False, True):
+        edited = edit(_dated_book(date1904), "dates.xlsx", [{"op": "set_cell", "at": "Dates!D1", "value": 7}]).data
+        sheet = openpyxl.load_workbook(io.BytesIO(edited), data_only=True)["Dates"]
+        results.append([sheet.cell(row=row, column=2).value for row in range(1, len(DATE_FORMULAS) + 1)])
+    serial_rows = {4, 5, 6, 7}                       # DATE, EDATE, EOMONTH and A1+30 return serials.
+    for row, (windows, mac) in enumerate(zip(*results), start=1):
+        if row in serial_rows:
+            assert windows - mac == 1462, row        # The two systems' serials are 1,462 days apart.
+        else:
+            assert windows == mac, row
