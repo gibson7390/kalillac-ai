@@ -337,9 +337,16 @@ def test_changing_an_input_recomputes_every_formula_exactly_as_a_fresh_build(boo
 def test_everything_the_edit_does_not_touch_is_kept_byte_for_byte(book):
     edited = edit(book, "forecast.xlsx", [{"op": "set_cell", "at": "Inputs!B2", "value": 1500}]).data
     before, after = zipfile.ZipFile(io.BytesIO(book)), zipfile.ZipFile(io.BytesIO(edited))
-    kept = [name for name in before.namelist() if name.startswith(("xl/charts/", "xl/drawings/", "xl/styles",
+    kept = [name for name in before.namelist() if name.startswith(("xl/drawings/", "xl/styles",
                                                                      "xl/theme/", "xl/sharedStrings"))]
     assert len(kept) >= 4 and all(before.read(name) == after.read(name) for name in kept)
+    # Charts plot the changed results, so their cached copies change (tested below); a label edit
+    # that no chart plots leaves every chart part byte for byte.
+    label = edit(book, "forecast.xlsx", [{"op": "replace_text", "find": "launch", "replace": "day one",
+                                          "in": "Inputs!A2"}]).data
+    charts = [name for name in before.namelist() if name.startswith("xl/charts/")]
+    labelled = zipfile.ZipFile(io.BytesIO(label))
+    assert charts and all(before.read(name) == labelled.read(name) for name in charts)
     original = {cell.coordinate: cell.number_format for cell in openpyxl.load_workbook(io.BytesIO(book))["Inputs"]["B"]}
     assert {cell.coordinate: cell.number_format
             for cell in openpyxl.load_workbook(io.BytesIO(edited))["Inputs"]["B"]} == original
@@ -600,3 +607,99 @@ def test_equivalent_1900_and_1904_workbooks_differ_only_by_their_epoch():
             assert windows - mac == 1462, row        # The two systems' serials are 1,462 days apart.
         else:
             assert windows == mac, row
+
+
+
+# --- chart caches after an edit (Codex document audit, finding 2) -------------------------------------
+
+def chart_caches(data):
+    """{(chart part, reference): cached values} for every numRef and strRef of every chart."""
+    from lxml import etree
+    archive, found = zipfile.ZipFile(io.BytesIO(data)), {}
+    c = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+    for name in sorted(n for n in archive.namelist() if n.startswith("xl/charts/chart") and n.endswith(".xml")):
+        root = etree.fromstring(archive.read(name))
+        for reference in [*root.iter(c + "numRef"), *root.iter(c + "strRef")]:
+            cache = reference.find(c + "numCache") if reference.tag == c + "numRef" else reference.find(c + "strCache")
+            points = None if cache is None else {
+                "count": int(cache.find(c + "ptCount").get("val")),
+                "points": {int(p.get("idx")): p.findtext(c + "v") for p in cache.findall(c + "pt")}}
+            found[(name, reference.findtext(c + "f"), reference.tag.endswith("numRef"))] = points
+    return found
+
+
+def _same(a, b):
+    try:
+        return abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(b)))
+    except (TypeError, ValueError):
+        return a == b
+
+
+def test_an_edit_refreshes_every_chart_cache_exactly_as_a_fresh_build(book):
+    """WORKBOOK_EDIT moved Summary!B2 from 872,739 to 1,090,495 while every chart kept 872,739."""
+    edited = edit(book, "forecast.xlsx", [{"op": "set_cell", "at": "Inputs!B2", "value": 1500}]).data
+    spec = copy.deepcopy(FORECAST_WORKBOOK)
+    spec["sheets"][1]["rows"][0][1]["value"] = 1500
+    found, expected = chart_caches(edited), chart_caches(generate(spec, "xlsx").data)
+    assert found.keys() == expected.keys() and len(found) >= 12
+    for key, want in expected.items():
+        mine = found[key]
+        assert mine is not None and mine["count"] == want["count"], key
+        assert mine["points"].keys() == want["points"].keys(), key
+        assert all(_same(mine["points"][i], want["points"][i]) for i in want["points"]), key
+    assert found != chart_caches(book)                                  # The charts did change.
+
+
+def test_every_cached_chart_point_agrees_with_the_cells_it_plots(book):
+    """Category and value caches, including the date axis, against the edited file's own cell values."""
+    edited = edit(book, "forecast.xlsx", [{"op": "set_cell", "at": "Inputs!B3", "value": 0.07},
+                                          {"op": "set_cell", "at": "Inputs!B2", "value": 1800}]).data
+    values = openpyxl.load_workbook(io.BytesIO(edited), data_only=True)
+    from openpyxl.utils.cell import range_boundaries
+    checked = 0
+    for (part, reference, numeric), cache in chart_caches(edited).items():
+        sheet, area = reference.split("!")
+        left, top, right, bottom = range_boundaries(area.replace("$", ""))
+        cells = [values[sheet.strip("'")].cell(row=r, column=col).value
+                 for r in range(top, bottom + 1) for col in range(left, right + 1)]
+        assert cache["count"] == len(cells), (part, reference)
+        for index, value in enumerate(cells):
+            if hasattr(value, "toordinal"):                              # A date cell: its serial.
+                from openpyxl.utils.datetime import to_excel
+                value = to_excel(value)
+            if value is None:
+                assert index not in cache["points"], (part, reference, index)
+            else:
+                assert _same(cache["points"][index], value), (part, reference, index, cache["points"][index], value)
+            checked += 1
+    assert checked > 100
+
+
+def _with_chart_reference(book, old, new):
+    archive = zipfile.ZipFile(io.BytesIO(book))
+    part = next(n for n in archive.namelist() if n.startswith("xl/charts/chart") and old.encode() in archive.read(n))
+    return rezip(book, change={part: lambda content: content.replace(old.encode(), new.encode(), 1)}), part
+
+
+def test_a_chart_reference_this_editor_cannot_recompute_loses_its_stale_cache(book):
+    """A two-dimensional area is not a series this editor can rebuild: its copy is removed, so no
+    viewer shows an old number, and Excel rebuilds it when the file opens."""
+    changed, part = _with_chart_reference(book, "<c:f>Summary!$B$2:$B$4</c:f>", "<c:f>Summary!$B$2:$C$4</c:f>")
+    edited = edit(changed, "forecast.xlsx", [{"op": "set_cell", "at": "Inputs!B2", "value": 1500}]).data
+    caches = chart_caches(edited)
+    assert caches[(part, "Summary!$B$2:$C$4", True)] is None
+    assert all(cache is not None for (name, reference, _n), cache in caches.items() if reference != "Summary!$B$2:$C$4")
+
+
+def test_charts_over_formulas_the_editor_cannot_compute_lose_their_caches(book):
+    """When the workbook holds a formula outside the supported set, no result is recomputed: every
+    chart copy that depends on a formula is removed instead of left stale."""
+    archive = zipfile.ZipFile(io.BytesIO(book))
+    target = next(n for n in archive.namelist()
+                  if n.startswith("xl/worksheets/sheet") and re.search(rb"<f>[^<]+</f>", archive.read(n)))
+    broken = rezip(book, change={target: lambda content: re.sub(rb"<f>[^<]+</f>", b"<f>INDIRECT(\"A1\")</f>",
+                                                                content, count=1)})
+    edited = edit(broken, "forecast.xlsx", [{"op": "set_cell", "at": "Inputs!B2", "value": 1500}]).data
+    caches = chart_caches(edited)
+    revenue = [cache for (name, reference, numeric), cache in caches.items() if reference.endswith("$C$2:$C$37")]
+    assert revenue and all(cache is None for cache in revenue)

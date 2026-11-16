@@ -74,6 +74,13 @@ A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+CHART = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+CHART_EX = "{http://schemas.microsoft.com/office/drawing/2014/chartex}"
+# A chart reference this editor can recompute: one or more single-row or single-column areas on
+# named sheets ("Summary!$B$2:$B$6", "('Q1 data'!$A$2:$A$4,'Q1 data'!$A$7)").
+_CHART_AREA = re.compile(r"(?:'((?:[^']|'')+)'|([^'!:(),\s\[\]]+))!\$?([A-Za-z]{1,3})\$?([0-9]{1,7})"
+                         r"(?::\$?([A-Za-z]{1,3})\$?([0-9]{1,7}))?")
+MAX_CHART_POINTS = 100_000
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 
@@ -1041,6 +1048,7 @@ class _Book:
 
     def save(self, changed_formula_cells):
         self.recalculate(changed_formula_cells)
+        self.refresh_charts()
         calculation = self.workbook.find(S + "calcPr")
         if calculation is None:
             calculation = self.workbook.makeelement(S + "calcPr", {})
@@ -1079,6 +1087,7 @@ class _Book:
         properties = self.workbook.find(S + "workbookPr")
         date1904 = properties is not None and (properties.get("date1904") or "").lower() in ("1", "true")
         engine = fe.Workbook(date1904=date1904)
+        self.engine, self.formula_keys = engine, set()
         formula_cells, computable = [], True
         for _key, (name, part) in self.sheets.items():
             engine.add_sheet(name)
@@ -1089,6 +1098,7 @@ class _Book:
                     if formula.get("t") in ("array", "dataTable") or not is_safe_formula(text):
                         computable = False
                     engine.set_formula(name, row, column, text)
+                    self.formula_keys.add((name.lower(), row, column))
                     formula_cells.append((name, part, row, column, cell))
                     continue
                 engine.set(name, row, column, self.constant(cell, fe))
@@ -1128,6 +1138,138 @@ class _Book:
             if previous != (cell.get("t"), [node.text]):
                 self.dirty.add(part)
         self.computed = computable
+
+    # --- chart caches -----------------------------------------------------------------------------
+    # A chart part stores a copy of the values it plots (numCache, strCache) so that viewers which do
+    # not recalculate can draw it. After an edit those copies must agree with the cells, or a preview
+    # shows new tables beside old charts. Every reference is recomputed from the recalculated cells:
+    # an unchanged one is left byte for byte; a changed one is rewritten when it is a plain list of
+    # single-row or single-column areas, and its cache is removed otherwise (multi-level categories,
+    # names, numbers shown as text, formulas this engine could not compute): Excel rebuilds a missing
+    # cache on opening (fullCalcOnLoad), and a viewer shows no stale number.
+
+    def refresh_charts(self):
+        sheets_changed = any(part in self.dirty for _name, part in self.sheets.values()) \
+            or "xl/sharedStrings.xml" in self.dirty
+        for part in self.names:
+            if not (part.startswith("xl/charts/") and part.endswith(".xml") and "/_rels/" not in part):
+                continue
+            root = self.root(part)
+            changed = False
+            for tag, kind in ((CHART + "numRef", "num"), (CHART + "strRef", "str")):
+                for reference in list(root.iter(tag)):
+                    changed |= self._refresh_reference(reference, kind)
+            if sheets_changed:
+                # Not recomputable here: drop the copies rather than keep possibly stale ones.
+                for reference in list(root.iter(CHART + "multiLvlStrRef")):
+                    for cache in reference.findall(CHART + "multiLvlStrCache"):
+                        reference.remove(cache)
+                        changed = True
+                for dimension in [*root.iter(CHART_EX + "numDim"), *root.iter(CHART_EX + "strDim")]:
+                    for level in dimension.findall(CHART_EX + "lvl"):
+                        dimension.remove(level)
+                        changed = True
+            if changed:
+                self.dirty.add(part)
+
+    def _chart_values(self, formula):
+        """The values a chart reference reads now, in order, or None when this editor cannot know them."""
+        text = (formula or "").strip()
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        pieces, current, quoted = [], "", False
+        for character in text:
+            if character == "'":
+                quoted = not quoted
+            if character == "," and not quoted:
+                pieces.append(current)
+                current = ""
+            else:
+                current += character
+        pieces.append(current)
+        values, count = [], 0
+        for piece in pieces:
+            match = _CHART_AREA.fullmatch(piece.strip())
+            if match is None:
+                return None
+            sheet = match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2)
+            if sheet.lower() not in self.sheets:
+                return None
+            top, left = int(match.group(4)), _column_number(match.group(3).upper())
+            bottom, right = ((int(match.group(6)), _column_number(match.group(5).upper())) if match.group(5)
+                             else (top, left))
+            if top > bottom or left > right or (top != bottom and left != right):
+                return None
+            count += (bottom - top + 1) * (right - left + 1)
+            if count > MAX_CHART_POINTS:
+                return None
+            key = sheet.lower()
+            for row in range(top, bottom + 1):
+                for column in range(left, right + 1):
+                    if (key, row, column) in self.formula_keys and not self.computed:
+                        return None
+                    values.append(self.engine.value(key, row, column))
+        return values
+
+    def _refresh_reference(self, reference, kind):
+        """Bring one numRef or strRef cache in line with its cells; True when the part changed."""
+        from . import formula_engine as fe
+        cache = reference.find(CHART + ("numCache" if kind == "num" else "strCache"))
+        if cache is None:
+            return False                      # Nothing stored, nothing stale.
+        values = self._chart_values(reference.findtext(CHART + "f"))
+        if values is None:
+            reference.remove(cache)
+            return True
+        old = {int(point.get("idx", "-1")): point.findtext(CHART + "v") or "" for point in cache.findall(CHART + "pt")}
+
+        def same_number(text, value):
+            try:
+                return math.isclose(float(text), value, rel_tol=1e-12, abs_tol=1e-9)
+            except ValueError:
+                return False
+        points = {}
+        for index, value in enumerate(values):
+            if kind == "num":
+                if type(value) is str:
+                    try:                      # Numeric text ("2027") is plotted, and cached, as its number.
+                        value = float(value.strip())
+                    except ValueError:
+                        continue
+                    if not math.isfinite(value):
+                        continue
+                if type(value) in (int, float):
+                    points[index] = old[index] if index in old and same_number(old[index], value) else _number_text(value)
+                continue
+            if value is None or value == "":
+                continue
+            if type(value) is str:
+                points[index] = value
+            elif type(value) is bool:
+                points[index] = "TRUE" if value else "FALSE"
+            elif isinstance(value, fe.ExcelError):
+                points[index] = value.code
+            elif index in old and same_number(old[index], value):
+                points[index] = old[index]    # A number shown as text, unchanged: keep its formatted text.
+            else:
+                reference.remove(cache)       # A changed number shown as text: its format is the cell's.
+                return True
+        count = cache.find(CHART + "ptCount")
+        if points == old and count is not None and count.get("val") == str(len(values)):
+            return False
+        for child in list(cache):
+            if child.tag in (CHART + "ptCount", CHART + "pt"):
+                cache.remove(child)
+        position = 1 if len(cache) and cache[0].tag == CHART + "formatCode" else 0
+        count = cache.makeelement(CHART + "ptCount", {"val": str(len(values))})
+        cache.insert(position, count)
+        for offset, (index, text) in enumerate(sorted(points.items()), start=1):
+            point = cache.makeelement(CHART + "pt", {"idx": str(index)})
+            node = point.makeelement(CHART + "v", {})
+            node.text = text
+            point.append(node)
+            cache.insert(position + offset, point)
+        return True
 
     def constant(self, cell, fe):
         kind = cell.get("t")
