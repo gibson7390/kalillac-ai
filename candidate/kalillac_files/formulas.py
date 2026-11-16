@@ -7,7 +7,11 @@ closed set is accepted:
   * outside string literals, only cell references, numbers, the listed
     operators and separators, and sheet references ('Sheet name'!A1) appear;
   * every function name is in FUNCTIONS: arithmetic, statistics, logic, text,
-    date, lookup and finance functions that read cells of this workbook only.
+    date, lookup and finance functions that read cells of this workbook only;
+  * it is well formed (formula_engine.check_syntax): no missing operand or
+    parenthesis, no stray token, every reference a real cell (never row 0 or
+    beyond the sheet) and every function called with an argument count it
+    accepts. A well-formed formula whose result is an error (#DIV/0!) is valid.
 
 That excludes everything that reaches outside the workbook or runs something:
 external workbook references ("[book.xlsx]"), DDE ("=cmd|..."), structured or
@@ -82,4 +86,9 @@ def is_safe_formula(text):
             after = remainder[match.end():match.end() + 2]
             if before != ":" and after[:1] != ":" and re.match(r"\$[0-9]", after) is None:
                 return False
+    from .formula_engine import FormulaSyntaxError, check_syntax
+    try:
+        check_syntax(text)
+    except FormulaSyntaxError:
+        return False
     return True

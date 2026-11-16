@@ -50,6 +50,21 @@ DIV0, VALUE, REF, NAME, NUM, NA = (ExcelError(code) for code in ("#DIV/0!", "#VA
 STRUCTURAL = {REF, NAME}
 
 
+class FormulaSyntaxError(ValueError):
+    """The text is not a well-formed formula: a missing operand or parenthesis, a stray token, an
+    impossible cell coordinate (row 0, beyond row 1,048,576 or column XFD), a mixed range ("A1:B") or a
+    function called with an argument count it does not accept. Never a calculation result: a
+    well-formed formula that computes an error (#DIV/0!, #VALUE!, ...) is valid and keeps it."""
+
+    code = "invalid_formula"
+
+    def __init__(self):
+        super().__init__(self.code)
+
+
+MAX_ROW, MAX_COLUMN = 1_048_576, 16_384
+
+
 class CircularReference(Exception):
     pass
 
@@ -91,6 +106,10 @@ _CELL = re.compile(r"\$?([A-Za-z]{1,3})?\$?([0-9]{1,7})?$")
 _PRECEDENCE = {"=": 1, "<>": 1, "<": 1, ">": 1, "<=": 1, ">=": 1, "&": 2, "+": 3, "-": 3, "*": 4, "/": 4, "^": 5}
 
 
+def _kind(column, row):
+    return "cell" if column and row else "column" if column else "row"
+
+
 def _parse_reference(text, sheet):
     match = _REF.match(text)
     if match is None:
@@ -98,20 +117,29 @@ def _parse_reference(text, sheet):
     name = match.group("sheet")
     if name is not None:
         sheet = name[1:-1].replace("''", "'") if name.startswith("'") else name
-    first, second = match.group("a"), match.group("b") or match.group("a")
-    (c1, r1), (c2, r2) = (_CELL.match(part).groups() for part in (first, second))
+    first, second = match.group("a"), match.group("b")
+    (c1, r1), (c2, r2) = (_CELL.match(part).groups() for part in (first, second or first))
+    if second is None and _kind(c1, r1) != "cell":
+        raise ExcelError("#NAME?")             # A lone column or row is a name, not a reference.
+    if _kind(c1, r1) != _kind(c2, r2):
+        raise FormulaSyntaxError()             # "A1:B", "A:1": not a range.
     left = column_index_from_string(c1.upper()) if c1 else 1
-    right = column_index_from_string(c2.upper()) if c2 else 16384
+    right = column_index_from_string(c2.upper()) if c2 else MAX_COLUMN
     top = int(r1) if r1 else 1
-    bottom = int(r2) if r2 else 1_048_576
-    if not c1 and not r1:
-        raise ExcelError("#NAME?")
+    bottom = int(r2) if r2 else MAX_ROW
+    if not (1 <= top <= MAX_ROW and 1 <= bottom <= MAX_ROW and 1 <= left <= MAX_COLUMN and 1 <= right <= MAX_COLUMN):
+        raise FormulaSyntaxError()             # Row 0, or beyond the sheet.
     return Range(sheet, min(top, bottom), min(left, right), max(top, bottom), max(left, right))
 
 
 def parse(formula, sheet):
-    """An expression tree for formula (with its leading "=") written on sheet."""
-    tokens = [t for t in Tokenizer(formula).items if t.type != "WHITE-SPACE"]
+    """An expression tree for formula (with its leading "=") written on sheet. Raises
+    FormulaSyntaxError for anything that is not a well-formed formula, ExcelError("#NAME?") for an
+    unknown name."""
+    try:
+        tokens = [t for t in Tokenizer(formula).items if t.type != "WHITE-SPACE"]
+    except Exception:
+        raise FormulaSyntaxError() from None  # The tokenizer's own failures (")1+2(") are syntax too.
     position = [0]
 
     def peek():
@@ -125,7 +153,9 @@ def parse(formula, sheet):
     def primary():
         token = take()
         if token is None:
-            raise ExcelError("#VALUE!")
+            raise FormulaSyntaxError()         # A missing operand: "=1+", "=".
+        if token.type == "OPERATOR-PREFIX" and peek() is None:
+            raise FormulaSyntaxError()
         if token.type == "OPERATOR-PREFIX":
             node = ("neg" if token.value == "-" else "pos", unary())
             return node
@@ -152,22 +182,24 @@ def parse(formula, sheet):
                     args.append(expression(0))
                 token = take()
                 if token is None:
-                    raise ExcelError("#VALUE!")
+                    raise FormulaSyntaxError()  # An unclosed call.
                 if token.type == "FUNC" and token.subtype == "CLOSE":
                     if args and args[-1] is None:
                         args[-1] = ("blank",)
                     return ("call", name, args)
-                if token.type != "SEP":
-                    raise ExcelError("#VALUE!")
+                if token.type != "SEP" or token.subtype != "ARG":
+                    raise FormulaSyntaxError()
                 if peek() is not None and peek().type == "FUNC" and peek().subtype == "CLOSE":
+                    take()                      # A trailing omitted argument: "SUM(A1,)".
                     args.append(("blank",))
+                    return ("call", name, args)
         if token.type == "PAREN" and token.subtype == "OPEN":
             node = expression(0)
             closing = take()
-            if closing is None or closing.type != "PAREN":
-                raise ExcelError("#VALUE!")
+            if closing is None or closing.type != "PAREN" or closing.subtype != "CLOSE":
+                raise FormulaSyntaxError()     # An unclosed parenthesis.
             return node
-        raise ExcelError("#NAME?")
+        raise FormulaSyntaxError()             # An operator, separator or closing token where a value belongs.
 
     def unary():
         node = primary()
@@ -189,10 +221,38 @@ def parse(formula, sheet):
             right = expression(precedence + 1)  # Every Excel operator, "^" included, is left-associative.
             node = ("op", token.value, node, right)
 
+    if not tokens:
+        raise FormulaSyntaxError()
     tree = expression(0)
     if position[0] != len(tokens):
-        raise ExcelError("#VALUE!")
+        raise FormulaSyntaxError()             # A stray token after a complete expression.
     return tree
+
+
+def check_syntax(formula):
+    """Raise FormulaSyntaxError unless formula is well formed: it parses completely, every reference
+    is a real cell, column or row range, and every function is known and called with an argument count
+    it accepts. Calculation errors are not checked here: they are results, not syntax."""
+    if type(formula) is not str or not formula.startswith("="):
+        raise FormulaSyntaxError()
+    try:
+        tree = parse(formula, "Sheet1")
+    except ExcelError:
+        raise FormulaSyntaxError() from None   # An unknown name.
+    except RecursionError:
+        raise FormulaSyntaxError() from None
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if node[0] == "call":
+            bounds = ARITY.get(node[1])
+            if bounds is None or len(node[2]) < bounds[0] or (bounds[1] is not None and len(node[2]) > bounds[1]):
+                raise FormulaSyntaxError()
+            stack.extend(node[2])
+        elif node[0] in ("neg", "pos", "pct"):
+            stack.append(node[1])
+        elif node[0] == "op":
+            stack.extend(node[2:])
 
 
 # --- values -------------------------------------------------------------------------------
@@ -492,9 +552,15 @@ class Workbook:
         self.extent.setdefault(key, (0, 0))
 
     def set(self, sheet, row, column, value):
+        """A constant, taken literally: text that starts with "=" is text, never a formula."""
+        self._put(sheet, row, column, value)
+
+    def set_formula(self, sheet, row, column, formula):
+        """A formula (its text, with the leading "=")."""
+        self._put(sheet, row, column, ("formula", formula, None))
+
+    def _put(self, sheet, row, column, value):
         key = sheet.lower()
-        if isinstance(value, str) and value.startswith("="):
-            value = ("formula", value, None)
         self.cells[(key, row, column)] = value
         bottom, right = self.extent.get(key, (0, 0))
         self.extent[key] = (max(bottom, row), max(right, column))
@@ -625,9 +691,11 @@ def _f(arity_min, arity_max=None):
     """Decorator: argument count checking for a function implementation."""
     def wrap(function):
         def checked(engine, nodes):
+            # (Recorded below: check_syntax refuses a call outside these bounds before evaluation.)
             if len(nodes) < arity_min or (arity_max is not None and len(nodes) > arity_max):
                 raise VALUE
             return function(engine, nodes)
+        checked.arity = (arity_min, arity_max)
         return checked
     return wrap
 
@@ -1364,6 +1432,17 @@ class Evaluation:
     values: dict          # (sheet name, row, column) -> computed value (float, str, bool, None or ExcelError)
     errors: list          # (sheet name, cell address, error code) for every formula that resulted in an error
     structural: list      # the subset that reflects a broken model: #REF! or #NAME?
+
+
+class _Arity(dict):
+    """{function name: (fewest, most or None) arguments}, read from FUNCTIONS as registered."""
+
+    def get(self, name, default=None):
+        handler = FUNCTIONS.get(name)
+        return default if handler is None else getattr(handler, "arity", default)
+
+
+ARITY = _Arity()
 
 
 def evaluate_workbook(workbook):

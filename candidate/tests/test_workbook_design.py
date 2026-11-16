@@ -239,3 +239,66 @@ def test_text_is_never_turned_into_a_formula_number_or_link():
     values = [(book["S"][f"A{r}"].value, book["S"][f"A{r}"].data_type) for r in range(2, 6)]
     assert values == [("=1+1", "s"), ("123", "s"), ("https://example.test", "s"), ("@SUM(A1)", "s")]
     assert "hyperlink" not in zipfile.ZipFile(io.BytesIO(data)).read("xl/worksheets/sheet1.xml").decode()
+
+
+
+# --- Codex audit D4: syntax is validated apart from calculation -----------------------------------
+
+MALFORMED = [
+    "=1+", "=)1+2(", "=A0", "=-", "=1*/2", "=(1+2", "=1+2)", "=SUM(1,2", "=SUM((1,2)", "=SUM(1;2)",
+    "=A1048577", "=XFE1", "=ZZZ1", "=SUM(A0:A3)", "=SUM(A1:B)", "=SUM(A:1)", "=ROUND(1)", "=IF()",
+    "=SUM()", "=NOT(TRUE,FALSE)", "=1 2",
+]
+
+
+@pytest.mark.parametrize("formula", MALFORMED)
+def test_a_malformed_formula_is_refused_in_every_workbook_format(formula):
+    raw = {"title": "T", "sheets": [{"name": "S", "columns": [{"header": "A", "format": "number"}],
+                                     "rows": [[1], [{"formula": formula}]]}]}
+    for kind in ("xlsx", "csv", "json"):
+        with pytest.raises(SpecError) as refused:
+            generate(copy.deepcopy(raw), kind)
+        assert refused.value.code == "invalid_formula", (formula, kind)
+
+
+@pytest.mark.parametrize("formula", MALFORMED)
+def test_check_syntax_raises_only_its_stable_error(formula):
+    with pytest.raises(fe.FormulaSyntaxError) as refused:
+        fe.check_syntax(formula)
+    assert refused.value.code == "invalid_formula" and str(refused.value) == "invalid_formula"
+
+
+@pytest.mark.parametrize("formula", [
+    "=1/0", "=SUM(A1:B2)", "=SUM(A:A)", "=SUM(1:1)", "=XFD1048576", "=-A1", "=1%", "=(1+2)*3",
+    "=SUM(A1,)", "=IF(A1,,2)", "=SUM(,)", "=IF(A1>0,\"y\",\"n\")", "=ROUND(PMT(B3/12,E3,-B2),2)",
+    "='Data sheet'!B2*2", "=TODAY()", "=1--2", "=2^-1",
+])
+def test_well_formed_formulas_pass_the_syntax_check(formula):
+    fe.check_syntax(formula)
+
+
+def test_legitimate_calculation_errors_are_kept_not_refused():
+    raw = {"title": "T", "sheets": [{"name": "S", "columns": [{"header": "A", "format": "number"}],
+                                     "rows": [[0], [{"formula": "=1/A2"}], [{"formula": "=SQRT(-1)"}],
+                                              [{"formula": "=VLOOKUP(99,A2:A2,1,FALSE)"}]]}]}
+    result = evaluation(raw)
+    assert [result.values[("S", row, 1)] for row in (3, 4, 5)] == [fe.DIV0, fe.NUM, fe.NA]
+    for kind in ("xlsx", "csv", "json"):
+        generate(copy.deepcopy(raw), kind)                   # Valid models, whose results are errors.
+
+
+def test_a_missing_sheet_keeps_its_own_code_in_every_workbook_format():
+    raw = {"title": "T", "sheets": [{"name": "S", "columns": [{"header": "A", "format": "number"}],
+                                     "rows": [[1], [{"formula": "='Missing Sheet'!A1"}]]}]}
+    for kind in ("xlsx", "csv", "json"):
+        with pytest.raises(SpecError) as refused:
+            generate(copy.deepcopy(raw), kind)
+        assert refused.value.code == "formula_reference_error", kind
+
+
+def test_text_that_starts_with_an_equals_sign_is_text_to_the_engine():
+    raw = {"title": "T", "sheets": [{"name": "S", "columns": [{"header": "A", "format": "text"},
+                                                             {"header": "B", "format": "number"}],
+                                     "rows": [["=not a formula", {"formula": "=LEN(A2)"}]]}]}
+    result = evaluation(raw)
+    assert result.values[("S", 2, 2)] == 14.0 and result.errors == []

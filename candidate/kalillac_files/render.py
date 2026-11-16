@@ -72,6 +72,8 @@ def render_csv(workbook):
     so spreadsheet programs read non-ASCII text correctly."""
     if len(workbook.sheets) != 1:
         raise SpecError("csv_requires_one_sheet")
+    from .xlsx_design import check_formulas
+    check_formulas(workbook)       # The same refusals as the XLSX: no broken model in any format.
     sheet = workbook.sheets[0]
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
@@ -216,6 +218,9 @@ def render_text(document):
 
 def render_json(workbook):
     """Each sheet as a list of records keyed by column header."""
+    from .xlsx_design import check_formulas
+    check_formulas(workbook)       # The same refusals as the XLSX: no broken model in any format.
+
     def plain(value):
         if type(value) is Typed:
             value = value.value

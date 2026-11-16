@@ -504,3 +504,28 @@ def test_the_upload_is_never_modified_and_the_result_is_reproducible(word):
     first = edit(word, "x.docx", operation)
     assert word == original and edit(word, "x.docx", operation).data == first.data
     assert refused(word, "x.docx", operation, revision_date="yesterday") == "invalid_edit"
+
+
+
+@pytest.mark.parametrize("formula", ["=1+", "=)1+2(", "=A0", "=XFE1", "=SUM(A1:B)", "=ROUND(1)", "=(1+2"])
+def test_editing_refuses_a_malformed_formula_before_writing(book, formula):
+    """Codex audit D4, editing: the same syntax check as generation, before any change."""
+    assert refused(book, "f.xlsx", [{"op": "set_cell", "at": "Inputs!D2", "formula": formula}]) == "invalid_formula"
+
+
+def test_an_uploaded_malformed_formula_leaves_no_computed_value(book):
+    """A customer's own malformed formula is never given a computed cache: every cache is cleared and
+    Excel recalculates on opening."""
+    archive = zipfile.ZipFile(io.BytesIO(book))
+    target = next(name for name in archive.namelist()
+                  if name.startswith("xl/worksheets/sheet") and re.search(rb"<f>[^<]+</f>", archive.read(name)))
+
+    def break_one(content):
+        return re.sub(rb"<f>[^<]+</f>", b"<f>1+</f>", content, count=1)
+    broken = rezip(book, change={target: break_one})
+    edited = edit(broken, "f.xlsx", [{"op": "set_cell", "at": "Inputs!B2", "value": 1500}]).data
+    formulas = openpyxl.load_workbook(io.BytesIO(edited))
+    values = openpyxl.load_workbook(io.BytesIO(edited), data_only=True)
+    cached = [values[sheet.title][cell.coordinate].value for sheet in formulas.worksheets
+              for row in sheet.iter_rows() for cell in row if cell.data_type == "f"]
+    assert cached and all(value is None for value in cached)

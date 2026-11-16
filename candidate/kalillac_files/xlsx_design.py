@@ -108,7 +108,7 @@ class _Formats:
 
 def _engine_value(value):
     if isinstance(value, Formula):
-        return value.text
+        return ("formula", value.text, None)
     if isinstance(value, Typed):
         return _engine_value(value.value)
     if isinstance(value, int) and not isinstance(value, bool):
@@ -126,10 +126,15 @@ def _build_model(workbook, positions):
                 model.set(sheet.name, 1, column_index, column.header)
             for row_index, row in enumerate(sheet.rows, start=2):
                 for column_index, value in enumerate(row, start=1):
-                    if value is not None:
-                        model.set(sheet.name, row_index, column_index, _engine_value(value))
+                    if value is None:
+                        continue
+                    value = _engine_value(value)
+                    if isinstance(value, tuple):
+                        model.set_formula(sheet.name, row_index, column_index, value[1])
+                    else:
+                        model.set(sheet.name, row_index, column_index, value)   # Text is text, even "=...".
     for (sheet_name, row, column), formula in positions.items():
-        model.set(sheet_name, row, column, formula)
+        model.set_formula(sheet_name, row, column, formula)
     return model
 
 
@@ -141,9 +146,23 @@ def _evaluate(workbook, positions):
         raise SpecError("formula_circular") from None
     except fe.WorkTooLarge:
         raise SpecError("workbook_too_large") from None
+    except fe.FormulaSyntaxError:
+        raise SpecError("invalid_formula") from None
     if evaluation.structural:
         raise SpecError("formula_reference_error")
     return evaluation
+
+
+def check_formulas(workbook):
+    """Evaluate every formula of a workbook specification, exactly as the XLSX writer will, and refuse a
+    broken model (circular, too large, a reference to a missing sheet or an unknown name). Every
+    workbook format runs it, so CSV and JSON never carry a formula the XLSX would refuse."""
+    positions = {}
+    for sheet in workbook.sheets:
+        if sheet.kind == "dashboard":
+            for metric, (row, column) in zip(sheet.metrics, _dashboard_positions(sheet)):
+                positions[(sheet.name, row, column)] = metric.formula.text
+    return _evaluate(workbook, positions)
 
 
 def _cached(value):
@@ -178,12 +197,7 @@ class _Writer:
         self.book.set_properties({"title": workbook.title, "author": workbook.author or "Kalillac AI",
                                   "creator": "Kalillac AI", "comments": workbook.summary or ""})
         self.formats = _Formats(self.book)
-        positions = {}
-        for sheet in workbook.sheets:
-            if sheet.kind == "dashboard":
-                for metric, (row, column) in zip(sheet.metrics, _dashboard_positions(sheet)):
-                    positions[(sheet.name, row, column)] = metric.formula.text
-        self.evaluation = _evaluate(workbook, positions)
+        self.evaluation = check_formulas(workbook)
 
     def value_of(self, sheet, row, column):
         return self.evaluation.values.get((sheet, row, column))

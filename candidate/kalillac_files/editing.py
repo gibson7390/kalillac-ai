@@ -1085,7 +1085,7 @@ class _Book:
                     text = re.sub(r"_xl(fn|ws)\.", "", "=" + (formula.text or ""))
                     if formula.get("t") in ("array", "dataTable") or not is_safe_formula(text):
                         computable = False
-                    engine.set(name, row, column, text)
+                    engine.set_formula(name, row, column, text)
                     formula_cells.append((name, part, row, column, cell))
                     continue
                 engine.set(name, row, column, self.constant(cell, fe))
@@ -1094,7 +1094,7 @@ class _Book:
             try:
                 for name, _part, row, column, _cell in formula_cells:
                     values[(name.lower(), row, column)] = engine.value(name.lower(), row, column)
-            except (fe.CircularReference, fe.WorkTooLarge, RecursionError):
+            except (fe.CircularReference, fe.WorkTooLarge, fe.FormulaSyntaxError, RecursionError):
                 computable = False
         for key in changed_formula_cells:
             if computable and values.get(key) in fe.STRUCTURAL:
