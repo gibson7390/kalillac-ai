@@ -205,3 +205,86 @@ def test_the_assistant_runs_inside_the_request_scope_and_maps_its_stops(tmp_path
     second = client.post("/api/files/assist", json={"message": "Make a report"}, headers=headers())
     assert (first.status_code, second.status_code, second.json()) == (200, 429, {"error": "busy"})
     assert events == ["enter", ("call", "a"), "exit", "enter", ("call", "a"), "exit"]
+
+
+# --- the customer, not the model, authorizes an exact edit (Codex reverification, section 3) ---------
+
+def _edit_call(file_id, operations, exact=True):
+    return [{"type": "function_call", "call_id": "e1", "name": "edit_file",
+             "arguments": json.dumps({"file_id": file_id, "operations": operations, "exact": exact})}]
+
+
+DONE = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}]
+
+
+def _proposal_and_fee_edit(client, account="paid-a"):
+    from kalillac_files.editing import outline
+    data = generate(copy.deepcopy(WORD_PROPOSAL), "docx").data
+    file_id = upload(client, data, "proposal.docx", account).json()["file"]["id"]
+    cell = next(u.address for u in outline(data, "p.docx").units if u.kind == "cell" and u.text == "$11,000")
+    return file_id, [{"op": "set_text", "at": cell, "text": "$12,000"}]
+
+
+def _assist(client, file_id, confirmations=None, account="paid-a"):
+    body = {"message": "Change the permits fee to $12,000", "file_ids": [file_id]}
+    if confirmations is not None:
+        body["confirmations"] = confirmations
+    return client.post("/api/files/assist", json=body, headers=headers(account))
+
+
+def test_the_models_exact_flag_alone_never_bypasses_the_total_check(tmp_path):
+    model = Model()
+    client, store = build(tmp_path, model)
+    file_id, operations = _proposal_and_fee_edit(client)
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    body = _assist(client, file_id).json()
+    assert body["files"] == [] and len(store.list("a")) == 1                 # Nothing was edited.
+    (offer,) = body["confirmations"]
+    assert offer["file_id"] == file_id and len(offer["id"]) >= 24
+
+
+def test_a_customer_confirmation_applies_exactly_that_edit_once(tmp_path):
+    model = Model()
+    client, store = build(tmp_path, model)
+    file_id, operations = _proposal_and_fee_edit(client)
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    confirmation = _assist(client, file_id).json()["confirmations"][0]["id"]
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    applied = _assist(client, file_id, [confirmation]).json()
+    assert len(applied["files"]) == 1 and "confirmations" not in applied
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    again = _assist(client, file_id, [confirmation]).json()                  # Single use.
+    assert again["files"] == [] and again["confirmations"][0]["id"] != confirmation
+
+
+def test_a_confirmation_is_bound_to_its_edit_account_and_lifetime(tmp_path):
+    model = Model()
+    client, store = build(tmp_path, model)
+    file_id, operations = _proposal_and_fee_edit(client)
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    confirmation = _assist(client, file_id).json()["confirmations"][0]["id"]
+    other = [{**operations[0], "text": "$13,000"}]                          # Different operations.
+    model.outputs += [_edit_call(file_id, other), DONE]
+    assert _assist(client, file_id, [confirmation]).json()["files"] == []
+    their_file, their_ops = _proposal_and_fee_edit(client, "paid-b")        # Another account presents it.
+    model.outputs += [_edit_call(their_file, their_ops), DONE]
+    assert _assist(client, their_file, [confirmation], "paid-b").json()["files"] == []
+    model.outputs += [_edit_call(file_id, operations, exact=False), DONE]    # Confirmed, but not asked exact.
+    assert _assist(client, file_id, [confirmation]).json()["files"] == []
+    for bad in (["x" * 65], [3], ["a"] * 5, "id"):
+        reply = client.post("/api/files/assist", json={"message": "x", "confirmations": bad}, headers=headers())
+        assert reply.json() == {"error": "invalid_request"}
+
+
+def test_an_expired_confirmation_authorizes_nothing(tmp_path, monkeypatch):
+    from kalillac_files import router
+    now = [1000.0]
+    monkeypatch.setattr(router.time, "monotonic", lambda: now[0])
+    model = Model()
+    client, store = build(tmp_path, model)
+    file_id, operations = _proposal_and_fee_edit(client)
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    confirmation = _assist(client, file_id).json()["confirmations"][0]["id"]
+    now[0] += router.CONFIRMATION_SECONDS + 1
+    model.outputs += [_edit_call(file_id, operations), DONE]
+    assert _assist(client, file_id, [confirmation]).json()["files"] == []

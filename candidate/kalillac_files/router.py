@@ -23,7 +23,9 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass
 import json
+import secrets
 import threading
+import time
 from typing import Any, Awaitable, Callable
 from urllib.parse import quote, unquote
 
@@ -74,6 +76,17 @@ async def _bounded_body(request, limit):
     return bytes(body)
 
 
+MAX_CONFIRMATIONS = 4
+CONFIRMATION_SECONDS = 30 * 60
+CONFIRMATIONS_PER_OWNER = 20
+
+
+def valid_confirmations(confirmations):
+    """Exact-edit confirmations a client presents: a short list of the service's own ids."""
+    return (type(confirmations) is list and len(confirmations) <= MAX_CONFIRMATIONS
+            and all(type(item) is str and 0 < len(item) <= 64 for item in confirmations))
+
+
 def valid_assist_request(message, history, file_ids):
     """Whether a file-assistant request is well formed (the same rules for /api/files/assist and /api/chat)."""
     return (type(message) is str and bool(message.strip()) and len(message) <= MAX_MESSAGE
@@ -103,6 +116,32 @@ class FileService:
         self.required_tier = required_tier
         self.worker = worker_module or default_worker
         self.assists = threading.BoundedSemaphore(max_concurrent_assists)
+        # Exact-edit confirmations the service issued: id -> (owner, file id, edit digest, expiry).
+        self.confirmations, self.confirmations_lock = {}, threading.Lock()
+        self.clock = time.monotonic
+
+    def _offer(self, owner):
+        def offer(file_id, digest):
+            with self.confirmations_lock:
+                now = self.clock()
+                for key in [k for k, v in self.confirmations.items() if v[3] <= now]:
+                    del self.confirmations[key]
+                mine = sorted((v[3], k) for k, v in self.confirmations.items() if v[0] == owner)
+                for _expiry, key in mine[:max(0, len(mine) - CONFIRMATIONS_PER_OWNER + 1)]:
+                    del self.confirmations[key]
+                key = secrets.token_urlsafe(18)
+                self.confirmations[key] = (owner, file_id, digest, now + CONFIRMATION_SECONDS)
+                return key
+        return offer
+
+    def _presented(self, owner, confirmations):
+        """{id: (file id, digest)} for the presented ids this owner may use now; anything else is ignored
+        (it authorizes nothing)."""
+        with self.confirmations_lock:
+            now = self.clock()
+            return {key: (value[1], value[2]) for key in dict.fromkeys(confirmations or ())
+                    for value in [self.confirmations.get(key)]
+                    if value is not None and value[0] == owner and value[3] > now}
 
     async def account(self, request):
         """(account, None) when the caller may use files, else (None, the refusal response)."""
@@ -113,8 +152,9 @@ class FileService:
             return None, _error(403, "files_require_premium")
         return found, None
 
-    async def assist(self, account, message, history, file_ids):
-        """Run the file assistant: ({"reply", "files"}, None) or (None, the refusal response)."""
+    async def assist(self, account, message, history, file_ids, confirmations=()):
+        """Run the file assistant: ({"reply", "files"[, "confirmations"]}, None) or (None, the refusal
+        response). confirmations: exact-edit confirmation ids the customer confirmed in the product."""
         from .assistant import AssistantError, FileRequest, run_file_assistant
         for file_id in file_ids:
             try:
@@ -126,7 +166,9 @@ class FileService:
         try:
             file_request = FileRequest(account.owner, self.store, tuple(dict.fromkeys(file_ids)),
                                        run_generate=self.worker.run_generate, run_outline=self.worker.run_outline,
-                                       run_edit=self.worker.run_edit)
+                                       run_edit=self.worker.run_edit,
+                                       confirmed=self._presented(account.owner, confirmations),
+                                       offer=self._offer(account.owner))
             def run():
                 with self.request_scope(account):
                     return run_file_assistant(message, history, file_request, self.call_model)
@@ -141,7 +183,13 @@ class FileService:
             return None, _error(502, "file_assistant_unavailable")
         finally:
             self.assists.release()
-        return {"reply": result.text, "files": [record.public() for record in result.files]}, None
+        with self.confirmations_lock:
+            for key in file_request.used:                 # Single use.
+                self.confirmations.pop(key, None)
+        content = {"reply": result.text, "files": [record.public() for record in result.files]}
+        if result.confirmations:
+            content["confirmations"] = list(result.confirmations)
+        return content, None
 
 
 def build_files_router(*, service: FileService | None = None, **options) -> APIRouter:
@@ -246,12 +294,13 @@ def build_files_router(*, service: FileService | None = None, **options) -> APIR
             payload = json.loads(body) if body else None
         except ValueError:
             payload = None
-        if not isinstance(payload, dict) or not set(payload) <= {"message", "history", "file_ids"}:
+        if not isinstance(payload, dict) or not set(payload) <= {"message", "history", "file_ids", "confirmations"}:
             return _error(422, "invalid_request")
         message, history, file_ids = payload.get("message"), payload.get("history", []), payload.get("file_ids", [])
-        if not valid_assist_request(message, history, file_ids):
+        confirmations = payload.get("confirmations", [])
+        if not valid_assist_request(message, history, file_ids) or not valid_confirmations(confirmations):
             return _error(422, "invalid_request")
-        content, refusal = await service.assist(found, message, history, file_ids)
+        content, refusal = await service.assist(found, message, history, file_ids, confirmations)
         if refusal:
             return refusal
         return JSONResponse(content=content, headers=_NO_STORE)

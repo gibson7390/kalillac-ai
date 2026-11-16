@@ -14731,6 +14731,9 @@ class ChatRequest(BaseModel):
     # Optional ids of the account's uploaded files. Untyped on purpose: while files are off it is
     # ignored like any unknown field; while they are on, the file handoff validates it.
     file_ids: object = Field(default=None)
+    # Exact-edit confirmations the customer gave in the interface (ids the file service issued). Untyped
+    # for the same reason; validated by the file handoff.
+    file_confirmations: object = Field(default=None)
 
     @field_validator("message")
     @classmethod
@@ -15144,7 +15147,8 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
     from contextlib import contextmanager as _files_contextmanager
     from kalillac_files.assistant import MAX_TOOL_ROUNDS as _FILE_MAX_TOOL_ROUNDS
     from kalillac_files.intent import wants_file as _wants_file
-    from kalillac_files.router import FileService, valid_assist_request as _valid_assist_request
+    from kalillac_files.router import (FileService, valid_assist_request as _valid_assist_request,
+                                       valid_confirmations as _valid_confirmations)
 
     @_files_contextmanager
     def _file_request_scope(account):
@@ -15212,13 +15216,17 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
         # The chat's own limits allow longer turns than the assistant reads; it sees the recent ones, clipped.
         turns = [{"role": turn["role"], "content": str(turn["content"])[:20_000]} for turn in history[-20:]
                  if turn.get("role") in ("user", "assistant")]
-        if not _valid_assist_request(req.message, turns, attached):
+        confirmations = req.file_confirmations if req.file_confirmations is not None else []
+        if not _valid_assist_request(req.message, turns, attached) or not _valid_confirmations(confirmations):
             return JSONResponse(status_code=422, content={"error": "invalid_request"})
         session_id = resolve_session_id(req.session_id)   # May raise SessionEnded, handled by the caller.
-        content, refusal = await _file_service.assist(account, req.message, turns, attached)
+        content, refusal = await _file_service.assist(account, req.message, turns, attached, confirmations)
         if refusal is not None:
             return refusal
-        return JSONResponse(content={"reply": content["reply"], "session_id": session_id, "files": content["files"]})
+        reply = {"reply": content["reply"], "session_id": session_id, "files": content["files"]}
+        if content.get("confirmations"):
+            reply["confirmations"] = content["confirmations"]
+        return JSONResponse(content=reply)
 
     async def _purge_expired_files():
         from starlette.concurrency import run_in_threadpool

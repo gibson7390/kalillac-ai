@@ -57,9 +57,10 @@ FILE_TOOLS = [
          "file_id": {"type": "string"},
          "operations": {"type": "array", "items": {"type": "object"}},
          "track_changes": {"type": "boolean", "description": "Word only: mark every change as a revision."},
-         "exact": {"type": "boolean", "description": "Only when the customer explicitly asked for exactly this "
-                   "limited change: apply it even if a table's total row no longer adds up. Otherwise a "
-                   "changed figure must come with every figure that depends on it."}},
+         "exact": {"type": "boolean", "description": "Applies an edit that leaves a table's total row no longer "
+                   "adding up, and only after the customer has confirmed exactly that edit in the product; "
+                   "otherwise it is ignored and the edit is checked. A changed figure should come with "
+                   "every figure that depends on it."}},
          "required": ["file_id", "operations"], "additionalProperties": False}},
 ]
 
@@ -177,6 +178,13 @@ class FileRequest:
     run_edit: Callable | None = None
     created: list = field(default_factory=list)
     calls: int = 0
+    # Customer confirmations of exact edits, presented with this request: {id: (file id, edit digest)}.
+    # Only the product's interface sends them; the model never sees or chooses one.
+    confirmed: Mapping[str, tuple] = field(default_factory=dict)
+    # offer(file id, edit digest) -> confirmation id, minted by the service when a precise edit is refused.
+    offer: Callable | None = None
+    offered: list = field(default_factory=list)
+    used: set = field(default_factory=set)
 
     def __post_init__(self):
         from . import worker
@@ -192,6 +200,15 @@ class AssistantResult:
     files: tuple            # StoredFile records made by this request, in order
     model_calls: int
     tool_calls: int
+    confirmations: tuple = ()   # ({"id", "file_id"}, ...) the customer may confirm in the product
+
+
+def edit_digest(file_id, operations, track_changes):
+    """What a customer's confirmation is bound to: this file, these exact operations, this mode."""
+    import hashlib
+    canonical = json.dumps({"file": file_id, "operations": operations, "track": track_changes},
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class AssistantError(RuntimeError):
@@ -292,10 +309,26 @@ def execute(request: FileRequest, name: str, arguments: Mapping[str, Any]):
         exact = arguments.get("exact", False)
         if type(track) is not bool or type(exact) is not bool:
             return _refused("invalid_request", "track_changes and exact must be true or false")
+        # Codex reverification, section 3: the model's exact=True is never authority on its own. It is
+        # honoured only when the customer confirmed this very edit (same file, operations and mode) in the
+        # product, which the service proves with a single-use confirmation it issued.
+        digest = edit_digest(file_id, operations, track)
+        confirmation = next((key for key, (confirmed_file, confirmed_digest) in request.confirmed.items()
+                             if confirmed_file == file_id and confirmed_digest == digest and key not in request.used),
+                            None) if exact else None
         try:
-            edited = request.run_edit(data, record.filename, operations, track_changes=track, exact=exact)
+            edited = request.run_edit(data, record.filename, operations, track_changes=track,
+                                      exact=confirmation is not None)
         except WorkerError as error:
+            if error.code == "table_total_mismatch" and request.offer is not None:
+                offered = request.offer(file_id, digest)
+                request.offered.append({"id": offered, "file_id": file_id})
+                return _refused(error.code, "the customer can still have exactly this edit applied by confirming it "
+                                            "in the product; say which total would no longer add up and offer to "
+                                            "update it instead")
             return _refused(error.code)
+        if confirmation is not None:
+            request.used.add(confirmation)
         stored, problem = _store_result(request, edited, "edited", parent=file_id)
         if problem:
             return problem
@@ -345,7 +378,7 @@ def run_file_assistant(message: str, history: Sequence[Mapping[str, str]], reque
             text = (extract_output_text(response) or "").strip()
             if not text:
                 raise AssistantError("model_output_unusable")
-            return AssistantResult(text, tuple(request.created), model_calls, calls)
+            return AssistantResult(text, tuple(request.created), model_calls, calls, tuple(request.offered))
         if response_incomplete_reason(response) is not None:
             raise AssistantError("model_output_incomplete")   # Never run tools from a cut-off response.
         rounds += 1
