@@ -38,7 +38,8 @@ production migration, live Stripe or customer data.
 | `feat/billing-cases-v1`, `feat/file-controls-v1` | same worktree | Refund and dispute records; file requests under the provider controls; V1-02D D1 and the sign-out authority (0018). |
 | `feat/account-security-d2` | same worktree | The password-reset authority (0019) and the frontend count-gate correction. |
 | `fix/codex-audit-corrections` | same worktree | Corrections for both Codex audits; evidence in `docs/CODEX-AUDIT-CORRECTIONS.md`. |
-| `feat/account-security-d2-change` | same worktree | **Current development branch.** The password-change authority (0020), the total-row rule for edited documents (Codex Q4), the registration activation guard (0021) and Arabic in IBM Plex Sans Arabic in Word. |
+| `fix/codex-reverification-2` | same worktree | **Current development branch.** Corrections for Codex's reverification findings, stacked on the branch below. |
+| `feat/account-security-d2-change` | same worktree | The password-change authority (0020), the total-row rule for edited documents (Codex Q4), the registration activation guard (0021) and Arabic in IBM Plex Sans Arabic in Word. |
 
 The branches are a stack: each contains the one before it. The worktree has its own `.venv`
 (ignored by Git) holding the pinned dependencies plus the document libraries; the main checkout's
@@ -360,6 +361,12 @@ artwork; fixed and tested.
 
 ## Audits and owner review
 
+* **Codex reverification (2026-11-16, against `6337c12`):** CODEX-D1 to D4, the 1904 date system, stale
+  chart caches, the report's financial reconciliation and the About-sheet numbers are **independently
+  verified resolved**. Remaining defects A to D and the exact-edit authorization are corrected on
+  `fix/codex-reverification-2` (`e7abd44`, `7a5466c`, `b742ff6`, `61618c2`, `c274f90`) and await another
+  targeted reverification. Word finalization, Arabic PDF logical text and general semantic consistency
+  remain open. Details: `docs/CODEX-AUDIT-CORRECTIONS.md`.
 * **Codex audits, findings supplied 2026-11-15** (the first audit's CODEX-D1 to CODEX-D4, and the
   document-quality audit of `6191b53`). Every correction, with the commit, how the original failure is
   reproduced, how the correction is verified and its CI run, is in `docs/CODEX-AUDIT-CORRECTIONS.md`.

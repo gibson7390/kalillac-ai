@@ -14,6 +14,48 @@ How each regression was shown to catch the original defect: the new tests were r
 pre-correction source of the changed module (restored from the parent commit, then put back), and
 they failed; they pass on the correction. The counts are recorded per item.
 
+## Status after Codex's reverification (handoff of 2026-11-16)
+
+Codex independently reverified the corrections against `6337c12c81780bda28166854fd5a6c956c0c030c`
+(and also inspected `9c9a80d3033b74a5dee57efb412168080d7980eb`).
+
+| Item | Implemented | Our CI | **Independently verified by Codex** | Owner accepted |
+|---|---|---|---|---|
+| CODEX-D1 financial migration safety | `f582696` | yes | **Resolved** (original failure sequence prevented) | n/a |
+| CODEX-D2 file-worker cleanup | `ad983ed` | yes | **Resolved** | n/a |
+| CODEX-D3 reconciliation consistency | `da2321c` | yes | **Resolved** | n/a |
+| CODEX-D4 formula validation | `ea5e081` | yes | **Resolved** | n/a |
+| 1904 date system | `3126abe` | yes | **Resolved** | n/a |
+| Stale chart caches | `adf9da8` | yes | **Resolved** | n/a |
+| Financial report reconciliation (Q1) | `e92583d` | yes | **Resolved** | no |
+| About-sheet numbers | `c0851b6` | yes | **Resolved** | no |
+| PowerPoint edit fitting | `7137da2` | yes | Remaining defect B (cumulative table height) | no |
+| Total rows after edits (Q4) | `888293e` | yes | Remaining defects A (tracked edits) and section 3 (exact authorization) | no |
+| Rounding policy | `e92583d` | yes | Remaining defect D | no |
+| Benchmark restatement | `e92583d` | yes | Remaining defect C (outlook chart) | no |
+| Word pagination and contents (finding 4, Q3) | not adopted (decision 12) | n/a | **Unresolved** | no |
+| Arabic PDF extraction (finding 5) | `dee4831` partial | yes | **Partially resolved** | no |
+| General semantic consistency | partial | yes | **Incomplete** | no |
+
+### Corrections for the reverification findings (branch `fix/codex-reverification-2`)
+
+CI on `c274f90` (A to D and section 3): `file-generation-verification` `43801588596`, `subscription-foundation-verification` `43801592242` and `safety-helpfulness-regression` `43801595873`, all successful.
+
+| Finding | Correction | Original failure reproduced by | Verified by |
+|---|---|---|---|
+| A. Tracked Word edits bypass the total check (`editing.py:1682-1685`) | `e7abd44` | Four of the seven new tests fail on the previous editor | Tables read with every revision accepted: tracked replacements, inserted and deleted rows, previously revised uploads, accept-all and reject-all views, formatting kept |
+| B. Table rows that each fit push the table off the slide (`editing.py:892-897`) | `7a5466c` | `test_rows_that_each_fit_cannot_together_push_the_table_off_the_slide` fails on the previous editor | Whole final table measured: cumulative rows, cells spanning rows, Arabic tables, other cells unchanged |
+| C. Restatement leaves the outlook chart's 2026 value undisclosed (`quality_benchmark.py:425-428`) | `b742ff6` | The dependency test finds an untitled, unnamed dependent chart in the previous fixture | Every chart whose data shows 2026 revenue is found from the report's data and named in the disclosure |
+| D. Displayed parts not reconciling (`charts.py:99-114`, `[33333.4, 33333.4, 33333.2]`) | `61618c2` | The previous labels showed 33.333K three times under 100.000K | Deterministic policy: reconcile within two extra decimals or disclose the rounding on the chart; sources unchanged |
+| Sections 2 and 6. A restated total left stated elsewhere (found while correcting A) | `87a1f36` | The proposal's summary kept the old total after a table restatement | Refused with `dependent_figure_unchanged` unless restated everywhere or confirmed exact |
+| Section 3. The model's `exact=True` bypassed the check | `c274f90` | The previous service applied the model's exact edit with no customer involvement | Single-use, expiring confirmations bound to account, file and operations, issued only to the interface; tests at `/api/files/assist` |
+
+Still open: Word finalization (decision 12, evaluation in `docs/DECISION-12-WORD-FINALIZATION.md`), Arabic PDF
+logical text, the interface control for exact-edit confirmations, and dependency enforcement for figures
+in prose and metrics beyond totals. Since `87a1f36`, an edit that changes a table's total is refused while
+the old total still appears anywhere else in the document (`dependent_figure_unchanged`); other derived
+figures (growth rates, margins) in prose are not yet checked.
+
 ## Findings from the first audit (CODEX-D1 to CODEX-D4)
 
 These are defect identifiers, unrelated to the D1/D2 implementation stages of the V1-02D/E
