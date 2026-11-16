@@ -45,6 +45,9 @@
 #set document(title: data.plain-title, author: data.meta-author, date: none)
 #set text(font: body-fonts, size: if editorial { 10.5pt } else { 10pt }, fill: body-ink, lang: data.lang,
   hyphenate: editorial, number-type: "lining")
+// Cursive scripts are never letter-spaced: tracking would break the joins between Arabic letters
+// (and split words in the PDF's text layer). The styles' tracking still applies to other scripts.
+#show regex("[\u{0600}-\u{06FF}\u{0750}-\u{077F}\u{08A0}-\u{08FF}\u{FB50}-\u{FDFF}\u{FE70}-\u{FEFF}]+"): set text(tracking: 0em)
 #set par(justify: editorial, leading: if editorial { 0.7em } else { 0.74em },
   spacing: if editorial { 1.05em } else { 1.1em })
 

@@ -180,6 +180,24 @@
       "sha256": "4e5462d2e8be880317b9f49b5b2da109ddb6a3563d91cc604b67f3535832a555"
     },
     {
+      "file": "IBMPlexSansArabic-Regular.ttf",
+      "family": "IBM Plex Sans Arabic",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "IBM Plex Sans Arabic, IBM Corp. (google/fonts at 2cf3010)",
+      "url": "https://raw.githubusercontent.com/google/fonts/2cf30108643373d19195f09bdba07de4317152ae/ofl/ibmplexsansarabic/IBMPlexSansArabic-Regular.ttf",
+      "sha256": "6f611412270a132bbac838da9259d4c68569b4175f3b3b8fa3fa36a30b56dab9"
+    },
+    {
+      "file": "IBMPlexSansArabic-Bold.ttf",
+      "family": "IBM Plex Sans Arabic",
+      "group": "core",
+      "license": "OFL-1.1",
+      "source": "IBM Plex Sans Arabic, IBM Corp. (google/fonts at 2cf3010)",
+      "url": "https://raw.githubusercontent.com/google/fonts/2cf30108643373d19195f09bdba07de4317152ae/ofl/ibmplexsansarabic/IBMPlexSansArabic-Bold.ttf",
+      "sha256": "691e0c891a38637ae6bbdb69700f8042cb0724a137bee615068ffdb92244f61f"
+    },
+    {
       "file": "NotoSansHebrew-Regular.ttf",
       "family": "Noto Sans Hebrew",
       "group": "core",

@@ -223,18 +223,19 @@ def test_chart_text_is_escaped():
 def test_every_bundled_font_matches_its_recorded_hash_and_has_its_license():
     manifest = json.loads((typeset.FONTS / "manifest.json").read_text(encoding="utf-8"))
     licenses = sorted(path.name for path in (typeset.FONTS / "licenses").iterdir())
-    assert licenses == ["Carlito-OFL.txt", "Inter-OFL.txt", "JetBrainsMono-OFL.txt", "NotoSansArabic-OFL.txt", "NotoSansCJK-OFL.txt",
+    assert licenses == ["Carlito-OFL.txt", "IBMPlexSansArabic-OFL.txt", "Inter-OFL.txt", "JetBrainsMono-OFL.txt",
+                        "NotoSansArabic-OFL.txt", "NotoSansCJK-OFL.txt",
                         "NotoSansDevanagari-OFL.txt", "NotoSansHebrew-OFL.txt", "NotoSansThai-OFL.txt",
                         "SourceSerif4-OFL.md"]
     for path in (typeset.FONTS / "licenses").iterdir():
         assert "SIL Open Font License" in path.read_text(encoding="utf-8"), path.name
     core = [entry for entry in manifest["fonts"] if entry["group"] == "core"]
-    assert len(core) == 24 and all(entry["license"] == "OFL-1.1" for entry in manifest["fonts"])
+    assert len(core) == 26 and all(entry["license"] == "OFL-1.1" for entry in manifest["fonts"])
     for entry in core:
         data = (typeset.FONTS / entry["file"]).read_bytes()
         assert hashlib.sha256(data).hexdigest() == entry["sha256"], entry["file"]
-        assert entry["url"].startswith("https://github.com/") or entry["url"].startswith(
-            "https://raw.githubusercontent.com/notofonts/")
+        assert entry["url"].startswith(("https://github.com/", "https://raw.githubusercontent.com/notofonts/",
+                                        "https://raw.githubusercontent.com/google/fonts/"))
     on_disk = {path.name for path in typeset.FONTS.glob("*.[ot]tf")}
     assert on_disk == {entry["file"] for entry in core}       # Nothing unlisted is ever typeset with.
     metrics = [entry for entry in manifest["fonts"] if entry["group"] == "metrics"]
@@ -251,8 +252,8 @@ def test_only_bundled_fonts_reach_the_pdf_and_they_are_subsetted():
         for font in (page.get("/Resources", {}).get("/Font", {}) or {}).values():
             names.add(str(font.get_object().get("/BaseFont")))
     families = {re.sub(r"^[A-Z]{6}\+", "", name.lstrip("/")).split("-")[0] for name in names}
-    assert families <= {"Inter", "InterDisplay", "JetBrainsMono", "NotoSansArabic", "NotoSansJP", "NotoSansKR",
-                        "NotoSansSC", "SourceSerif4"}, families
+    assert families <= {"IBMPlexSansArabic", "Inter", "InterDisplay", "JetBrainsMono", "NotoSansArabic", "NotoSansJP",
+                        "NotoSansKR", "NotoSansSC", "SourceSerif4"}, families
     assert all(re.match(r"^/?[A-Z]{6}\+", name.lstrip("/")) for name in names)  # Subset prefixes.
     assert len(data) < 600_000
 
@@ -548,3 +549,49 @@ def test_word_property_elements_are_in_schema_order():
                      if t in ("pStyle", "keepNext", "keepLines", "widowControl", "numPr", "pBdr", "shd", "tabs",
                               "bidi", "spacing", "ind", "jc", "rPr", "sectPr")]
         assert positions == sorted(positions), p_pr[:200]
+
+
+
+# --- Arabic text that survives extraction (Codex document audit, finding 5) -----------------------
+
+LAM_ALEF = ("لا", "لأ", "لإ", "لآ")
+
+
+def _extracted(data):
+    import unicodedata
+    import pypdfium2 as pdfium
+    page = pdfium.PdfDocument(data)[0]
+    textpage = page.get_textpage()
+    return " ".join(unicodedata.normalize("NFKC", textpage.get_text_range()).split()), textpage
+
+
+def test_arabic_pdf_text_keeps_every_letter_of_every_word():
+    """Rendering alone is not proof: the PDF's text layer must give back the letters a reader sees.
+    With Noto Sans Arabic, ب ت ث ن ي shared one dotless body glyph and their dots were separate glyphs,
+    so PDFium returned "ققريير" for "تقرير" and found no heading. Now every source word's exact letters
+    come back as one run, and headings are found by search.
+
+    Known remaining limitation, tracked in the roadmap rather than hidden: PDFium (Chrome's viewer)
+    and pypdf reverse the two letters of a required ligature glyph (lam-alef, and Plex's other rlig
+    pairs) inside right-to-left runs, and PDFium may insert a space where a letter's tail leaves a
+    gap. So letters are compared as a multiset over a window of the word's length, spaces ignored."""
+    from collections import Counter
+    data = pdf_of(ARABIC)
+    text, textpage = _extracted(data)
+    compact = text.replace(" ", "")
+    labels = typeset.document_data(spec.validate_document(ARABIC))["labels"]
+    source = [ARABIC["title"], ARABIC["organization"], labels["page"], labels["of"]] + [
+        block.get("text", "") for block in ARABIC["blocks"]] + [block.get("title", "") for block in ARABIC["blocks"]]
+    source += [cell for block in ARABIC["blocks"] if block["type"] == "table"
+               for row in [block["header"], *block["rows"]] for cell in row]
+    words = sorted({word.strip(".،:") for line in source for word in line.split()
+                    if any("\u0600" <= char <= "\u06ff" for char in word)})
+    assert len(words) >= 14
+
+    def present(word):
+        size, want = len(word), Counter(word)
+        return any(Counter(compact[i:i + size]) == want for i in range(len(compact) - size + 1))
+    assert [word for word in words if not present(word)] == []
+    assert textpage.search("لمحة عن العام").get_next() is not None      # The heading, exactly.
+    # Never a letter that is not in the source (the old text layer invented ق, ي and ت).
+    assert set(char for char in compact if "\u0621" <= char <= "\u064a") <= set("".join(words))

@@ -26,7 +26,13 @@ TEMPLATE = HERE / "templates" / "document.typ"
 FONTS = HERE / "fonts"
 FONT_PATHS = (FONTS, FONTS / "cjk")
 RTL = frozenset({"ar", "he", "fa", "ur", "yi", "ps", "sd", "dv", "ug"})
-SCRIPT_FONTS = ("Noto Sans Arabic", "Noto Sans Hebrew", "Noto Sans Devanagari", "Noto Sans Thai")
+# Arabic script is set in IBM Plex Sans Arabic, which draws every letter in every joining form as its
+# own glyph. Noto Sans Arabic builds letters from shared dotless bodies plus separate dot glyphs, so a
+# PDF glyph-to-text map cannot tell them apart and extraction, search and copy return wrong or
+# doubled letters (Codex document audit, finding 5). Noto stays as the fallback for anything Plex
+# lacks.
+SCRIPT_FONTS = ("IBM Plex Sans Arabic", "Noto Sans Arabic", "Noto Sans Hebrew", "Noto Sans Devanagari",
+                "Noto Sans Thai")
 CJK = {"ja": "Noto Sans JP", "ko": "Noto Sans KR", "zh-hant": "Noto Sans TC", "zh-tw": "Noto Sans TC",
        "zh-hk": "Noto Sans TC", "zh-mo": "Noto Sans TC", "zh": "Noto Sans SC"}
 LABELS = {
