@@ -22,9 +22,9 @@ def _module():
     return module
 
 
-def test_0021_is_the_head_directly_after_0020():
+def test_0021_sits_directly_after_0020_below_0022():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0021_registration_activation"]
+    assert script.get_revision("0022_v1_quarantine").down_revision == "0021_registration_activation"
     module = _module()
     assert (module.revision, module.down_revision) == ("0021_registration_activation", "0020_v1_password_change")
 

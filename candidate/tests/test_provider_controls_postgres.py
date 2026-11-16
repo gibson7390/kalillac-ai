@@ -53,8 +53,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0021_registration_activation"
+HEAD = "0022_v1_quarantine"
 CHAIN = (
+    "0022_v1_quarantine",
     "0021_registration_activation",
     "0020_v1_password_change",
     "0019_v1_password_reset",
@@ -82,6 +83,7 @@ OWNER, MIGRATE, APP = "ceiling_owner", "ceiling_migrate", "ceiling_app"
 REGISTRATION = "ceiling_registration"
 # NOLOGIN V1 security service/executor roles required by migration 0013.
 SERVICE, EXECUTOR = "ceiling_v1_security_service", "ceiling_v1_security_executor"
+OPERATOR = "ceiling_v1_security_operator"
 ANONYMOUS_TABLES = ("anonymous_usage_days", "anonymous_usage_slots")
 PROVIDERS = ("openai", "brave", "tavily")
 PERIOD = 2_000_000_000  # One accounting period for the whole job: no rollover.
@@ -264,10 +266,10 @@ def database():
         assert conn.execute("SELECT count(*) FROM pg_database WHERE datname = %s", [DATABASE]).fetchone() == (0,), \
             "expected a fresh disposable server"
         assert conn.execute("SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)",
-                            [[OWNER, MIGRATE, APP, REGISTRATION, SERVICE, EXECUTOR]]).fetchone() == (0,), \
+                            [[OWNER, MIGRATE, APP, REGISTRATION, SERVICE, EXECUTOR, OPERATOR]]).fetchone() == (0,), \
             "expected a fresh disposable server"
         conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(ident(OWNER)))
-        for role in (SERVICE, EXECUTOR):
+        for role in (SERVICE, EXECUTOR, OPERATOR):
             conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
                                  " NOBYPASSRLS").format(ident(role)))
         # The operator's prerequisite for 0013: owner->executor, SET only.
@@ -290,12 +292,14 @@ def database():
 
     saved = {name: os.environ.get(name) for name in (
         migration_roles.OWNER_ROLE_ENV, migration_roles.APP_ROLE_ENV, "KALILLAC_MIGRATION_REGISTRATION_ROLE",
-        migration_roles.V1_SECURITY_SERVICE_ROLE_ENV, migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV)}
+        migration_roles.V1_SECURITY_SERVICE_ROLE_ENV, migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV,
+        migration_roles.V1_SECURITY_OPERATOR_ROLE_ENV)}
     os.environ[migration_roles.OWNER_ROLE_ENV] = OWNER
     os.environ[migration_roles.APP_ROLE_ENV] = APP
     os.environ["KALILLAC_MIGRATION_REGISTRATION_ROLE"] = REGISTRATION
     os.environ[migration_roles.V1_SECURITY_SERVICE_ROLE_ENV] = SERVICE
     os.environ[migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV] = EXECUTOR
+    os.environ[migration_roles.V1_SECURITY_OPERATOR_ROLE_ENV] = OPERATOR
     migrator = _engine(MIGRATE, poolclass=pool.NullPool)  # Fresh physical connection, discarded after.
     try:
         with migrator.begin() as conn:
@@ -1749,7 +1753,8 @@ def _migrate(revision, downgrade=False):
     settings = {migration_roles.OWNER_ROLE_ENV: OWNER, migration_roles.APP_ROLE_ENV: APP,
                 "KALILLAC_MIGRATION_REGISTRATION_ROLE": REGISTRATION,
                 migration_roles.V1_SECURITY_SERVICE_ROLE_ENV: SERVICE,
-                migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV: EXECUTOR}
+                migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV: EXECUTOR,
+                migration_roles.V1_SECURITY_OPERATOR_ROLE_ENV: OPERATOR}
     saved = {name: os.environ.get(name) for name in settings}
     os.environ.update(settings)
     migrator = _engine(MIGRATE, poolclass=pool.NullPool)
@@ -1773,7 +1778,8 @@ def _render_offline(revisions):
     settings = {migration_roles.OWNER_ROLE_ENV: OWNER, migration_roles.APP_ROLE_ENV: APP,
                 "KALILLAC_MIGRATION_REGISTRATION_ROLE": REGISTRATION,
                 migration_roles.V1_SECURITY_SERVICE_ROLE_ENV: SERVICE,
-                migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV: EXECUTOR}
+                migration_roles.V1_SECURITY_EXECUTOR_ROLE_ENV: EXECUTOR,
+                migration_roles.V1_SECURITY_OPERATOR_ROLE_ENV: OPERATOR}
     saved = {name: os.environ.get(name) for name in settings}
     os.environ.update(settings)
     buffer = io.StringIO()

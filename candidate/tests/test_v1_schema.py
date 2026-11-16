@@ -49,8 +49,9 @@ BILLING_CASES = "0017_billing_cases"  # Refunds and disputes for operator review
 SESSION_END = "0018_v1_session_end"   # The private sign-out authority (V1-02D), above 0017.
 RESET = "0019_v1_password_reset"      # The private password-reset authority (V1-02D), above 0018.
 CHANGE = "0020_v1_password_change"    # The private password-change authority (V1-02D), above 0019.
-ACTIVATION = "0021_registration_activation"  # The registration activation guard, the head, above 0020.
-CHAIN = (ACTIVATION, CHANGE, RESET, SESSION_END, BILLING_CASES, FINANCE_HEAD, FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
+ACTIVATION = "0021_registration_activation"  # The registration activation guard, above 0020.
+QUARANTINE = "0022_v1_quarantine"     # Quarantine and reinstatement (V1-02D), the head, above 0021.
+CHAIN = (QUARANTINE, ACTIVATION, CHANGE, RESET, SESSION_END, BILLING_CASES, FINANCE_HEAD, FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
          "0008_account_recovery_tokens", "0007_anonymous_usage", "0006_provider_usage_pools",
          "0005_account_usage_slots", "0004_account_billing", "0003_account_usage_daily",
          "0002_account_entitlements", "0001_account_tables")
@@ -73,7 +74,8 @@ def forbidden():
 
 def test_0012_follows_the_exact_0011_chain_directly_below_0013():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [ACTIVATION]
+    assert script.get_heads() == [QUARANTINE]
+    assert script.get_revision(QUARANTINE).down_revision == ACTIVATION
     assert script.get_revision(ACTIVATION).down_revision == CHANGE
     assert script.get_revision(CHANGE).down_revision == RESET
     assert script.get_revision(RESET).down_revision == SESSION_END

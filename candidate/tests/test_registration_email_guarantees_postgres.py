@@ -162,6 +162,7 @@ def test_the_guard_is_classified_exactly_and_executable_by_nobody_but_its_owner(
 ])
 def test_a_tampered_guard_is_refused_by_startup_and_by_the_downgrade(world, tamper):
     w = world
+    migrate(w, HEAD, down=True)                  # 0021's own downgrade; 0022's is tested with 0022.
     admin_sql(w, tamper.format(**w.names))
     refused(w)
     with pytest.raises(DBAPIError, match="REGISTRATION_ACTIVATION_GUARD_POSTCONDITION_INVALID"):

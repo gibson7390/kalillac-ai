@@ -237,6 +237,17 @@ ACTIVATION_GUARD_TRIGGER_DEFINITION = "BEFORE UPDATE ON kalillac.account_registr
 ACTIVATION_GUARD_SOURCE_SHA256 = "615353e86bb5b3ade30de5a9f1f488e3ada398ea832ead0a50cb54f3d4903fd4"
 EVENT_TYPES_V2 = EVENT_TYPES + ("password_change",)
 
+# 0022: quarantine and reinstatement, executable only by the operator role P (never S). Identity guard v3.
+QUARANTINE_FUNCTION, REINSTATE_FUNCTION = "v1_quarantine", "v1_reinstate"
+QUARANTINE_SIGNATURE, REINSTATE_SIGNATURE = "kalillac.v1_quarantine(uuid,uuid)", "kalillac.v1_reinstate(uuid,uuid)"
+OPERATOR_DEFINITION = ("p_operation_id uuid, p_user_id uuid", "TABLE(outcome text, replayed boolean)", "plpgsql", "v",
+                       True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+QUARANTINE_SOURCE_SHA256 = "a92c5ddc56ba4893ea22f3e0d1bb7aef5985a6b40885c47b333b6cebfb71d81d"
+REINSTATE_SOURCE_SHA256 = "eec4fcb3b4e8bd80389662365efbfbf02c522559cf1a8fc265388aed28a001bf"
+EVENT_TYPES_V3 = EVENT_TYPES_V2 + ("account_quarantine", "account_reinstate")
+EXECUTOR_COLUMN_GRANTS_V4 = {**EXECUTOR_COLUMN_GRANTS_V3,
+                             ("users", "UPDATE"): EXECUTOR_COLUMN_GRANTS_V3[("users", "UPDATE")] + ("quarantined_at",)}
+
 
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
@@ -285,26 +296,39 @@ def classify(session) -> str:
     installed = {r[0] for r in _rows(session, """SELECT p.proname FROM pg_proc p JOIN pg_namespace n
         ON n.oid=p.pronamespace WHERE n.nspname='kalillac' AND p.proname=ANY(:f)""",
         f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION, RESET_PASSWORD_FUNCTION,
-           CHANGE_PASSWORD_FUNCTION])}
+           CHANGE_PASSWORD_FUNCTION, QUARANTINE_FUNCTION, REINSTATE_FUNCTION])}
     revocation, issuance = REVOCATION_FUNCTION in installed, ISSUANCE_FUNCTION in installed
     ending, resetting = END_SESSION_FUNCTION in installed, RESET_PASSWORD_FUNCTION in installed
     changing = CHANGE_PASSWORD_FUNCTION in installed
+    quarantining = QUARANTINE_FUNCTION in installed
     _require((revocation or not issuance) and (issuance or not ending) and (ending or not resetting)
-             and (resetting or not changing))
-    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing)
+             and (resetting or not changing) and (changing or not quarantining)
+             and (REINSTATE_FUNCTION in installed) == quarantining)
+    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing, quarantining)
     principals = _authority(session, owner)
-    _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting, changing)
+    _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting, changing,
+                         quarantining)
     # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
-    from .registration_schema import EPOCH_ADVANCE
+    from .registration_schema import EPOCH_ADVANCE, QUARANTINE
     guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname='kalillac' AND p.proname='registration_user_identity_guard'""")
-    _require(len(guard) == 1 and (EPOCH_ADVANCE in guard[0][0]) == issuance)
+    _require(len(guard) == 1 and (EPOCH_ADVANCE in guard[0][0]) == issuance
+             and (QUARANTINE in guard[0][0]) == quarantining)
     if not _rows(session, "SELECT has_table_privilege('kalillac.account_security_activation','SELECT')")[0][0]:
         raise V1SchemaRefused("authority_state_unreadable")
     latch = _rows(session, "SELECT state FROM kalillac.account_security_activation")
     if len(latch) != 1 or latch[0][0] not in (PREPARED, ACTIVE):
         raise V1SchemaRefused("inconsistent_schema")
     return latch[0][0]
+
+
+def _operator_role():
+    """P from its mandatory setting, needed once the operator functions exist."""
+    from kalillac_db.migration_roles import v1_security_operator_role
+    try:
+        return v1_security_operator_role()
+    except ValueError:
+        raise V1SchemaRefused("authority_roles_unconfigured") from None
 
 
 def _security_roles():
@@ -316,7 +340,8 @@ def _security_roles():
         raise V1SchemaRefused("authority_roles_unconfigured") from None
 
 
-def _catalog(session, roles, revocation, issuance, ending=False, resetting=False, changing=False) -> str:
+def _catalog(session, roles, revocation, issuance, ending=False, resetting=False, changing=False,
+             quarantining=False) -> str:
     """Exact definitions of every 0012 object, not names; returns their owner."""
     executor = roles[1]
     # Permanent ordinary tables (never UNLOGGED, temporary, partitioned, typed or
@@ -365,9 +390,9 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
         OR (fn.nspname='kalillac' AND f.relname=ANY(:t)))""", t=list(TABLES)):
         constraints.setdefault(table, {})[name] = (kind, definition, tuple(flags), index, index_schema)
     expected_constraints = {table: dict(specs) for table, specs in CONSTRAINTS.items()}
-    if changing:                      # 0020 widened the audit event types.
+    if changing:                      # 0020 widened the audit event types, and 0022 again.
         expected_constraints["account_security_events"]["ck_account_security_events_type"] = (
-            "c", _among("event_type", EVENT_TYPES_V2))
+            "c", _among("event_type", EVENT_TYPES_V3 if quarantining else EVENT_TYPES_V2))
     _require(constraints == {table: {name: _expected_constraint(name, *spec) for name, spec in specs.items()}
                              for table, specs in expected_constraints.items()})
     # Every index: method, key columns and order, no expression or predicate,
@@ -401,6 +426,7 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
              | ({RESET_PASSWORD_FUNCTION} if resetting else set())
              | ({CHANGE_PASSWORD_FUNCTION} if changing else set())
              | ({ACTIVATION_GUARD_FUNCTION} if activation_guard else set())
+             | ({QUARANTINE_FUNCTION, REINSTATE_FUNCTION} if quarantining else set())
              and not rules and not events)
     if activation_guard:
         import hashlib
@@ -472,7 +498,8 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
         g=[*REVIEWED_GUARDS, *([REVOCATION_SIGNATURE] if revocation else []),
            *([ISSUANCE_SIGNATURE] if issuance else []), *([END_SESSION_SIGNATURE] if ending else []),
            *([RESET_PASSWORD_SIGNATURE] if resetting else []),
-           *([CHANGE_PASSWORD_SIGNATURE] if changing else [])],
+           *([CHANGE_PASSWORD_SIGNATURE] if changing else []),
+           *([QUARANTINE_SIGNATURE, REINSTATE_SIGNATURE] if quarantining else [])],
         t=list(TABLES),
         w=list(WRITE_RIGHTS), c=list(USER_COLUMNS))
     _require(not bridges and not definers)
@@ -546,7 +573,7 @@ def _authority(session, owner) -> None:
 
 
 def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False,
-                         resetting=False, changing=False) -> None:
+                         resetting=False, changing=False, quarantining=False) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
     edge, and no ownership, grant or default privilege but 0013's, or 0014's,
     exact set.
@@ -559,24 +586,26 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
     """
     import hashlib
     service, executor = roles
-    _require(len({service, executor, owner, *principals}) == 5)
+    operator = _operator_role() if quarantining else None
+    roles_checked = [service, executor] + ([operator] if operator else [])
+    _require(len({*roles_checked, owner, *principals}) == len(roles_checked) + 3)
     present = {r[0]: tuple(r[1:]) for r in _rows(session, """SELECT rolname,rolcanlogin,rolinherit,rolsuper,
         rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=ANY(:r)""",
-        r=[service, executor])}
-    _require(set(present) == {service, executor} if revocation else set(present) <= {service, executor})
+        r=roles_checked)}
+    _require(set(present) == set(roles_checked) if revocation else set(present) <= {service, executor})
     _require(all(flags == (False,) * 7 for flags in present.values()))
     edges = {tuple(r) for r in _rows(session, """SELECT pg_get_userbyid(m.roleid),pg_get_userbyid(m.member),
         m.admin_option,m.inherit_option,m.set_option FROM pg_auth_members m
-        WHERE pg_get_userbyid(m.roleid)=ANY(:r) OR pg_get_userbyid(m.member)=ANY(:r)""", r=[service, executor])}
+        WHERE pg_get_userbyid(m.roleid)=ANY(:r) OR pg_get_userbyid(m.member)=ANY(:r)""", r=roles_checked)}
     edge = (executor, owner, False, False, True)
     _require(edges == {edge} if revocation else edges <= ({edge} if executor in present else set()))
     defaults = _rows(session, """SELECT 1 FROM pg_default_acl d WHERE pg_get_userbyid(d.defaclrole)=ANY(:r)
         OR EXISTS (SELECT 1 FROM aclexplode(d.defaclacl) a WHERE pg_get_userbyid(a.grantee)=ANY(:r))""",
-        r=[service, executor])
+        r=roles_checked)
     dependencies = {tuple(r) for r in _rows(session, """SELECT pg_get_userbyid(d.refobjid),d.classid::regclass::text,
         d.objid,d.deptype::text FROM pg_shdepend d WHERE d.refclassid='pg_authid'::regclass
         AND pg_get_userbyid(d.refobjid)=ANY(:r)
-        AND d.dbid IN (0,(SELECT oid FROM pg_database WHERE datname=current_database()))""", r=[service, executor])}
+        AND d.dbid IN (0,(SELECT oid FROM pg_database WHERE datname=current_database()))""", r=roles_checked)}
     _require(not defaults)
     if not revocation:
         _require(not dependencies)
@@ -592,6 +621,11 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         expected[RESET_PASSWORD_FUNCTION] = (RESET_PASSWORD_DEFINITION, RESET_PASSWORD_SOURCE_SHA256)
     if changing:
         expected[CHANGE_PASSWORD_FUNCTION] = (CHANGE_PASSWORD_DEFINITION, CHANGE_PASSWORD_SOURCE_SHA256)
+    callers = {name: service for name in expected}   # Who may execute each: S, or P for the operator's.
+    if quarantining:
+        expected[QUARANTINE_FUNCTION] = (OPERATOR_DEFINITION, QUARANTINE_SOURCE_SHA256)
+        expected[REINSTATE_FUNCTION] = (OPERATOR_DEFINITION, REINSTATE_SOURCE_SHA256)
+        callers.update({QUARANTINE_FUNCTION: operator, REINSTATE_FUNCTION: operator})
     functions = []
     for name, (declared, digest) in expected.items():
         definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),
@@ -607,17 +641,18 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         _require(tuple(attributes) == declared and function_owner == executor
                  and hashlib.sha256(source.encode()).hexdigest() == digest
                  and sorted(acl) == sorted([[executor, "EXECUTE", "false", executor],
-                                            [service, "EXECUTE", "false", executor]]))
-        functions.append(function)
+                                            [callers[name], "EXECUTE", "false", executor]]))
+        functions.append((function, callers[name]))
     relations = {r[0]: r[1] for r in _rows(session, """SELECT c.relname,c.oid FROM pg_class c
         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='kalillac' AND c.relname=ANY(:t)""",
         t=["users", "account_sessions", *(["account_recovery_tokens"] if resetting else []),
            *EXECUTOR_TABLE_GRANTS])}
     schema = _rows(session, "SELECT oid FROM pg_namespace WHERE nspname='kalillac'")[0][0]
     _require(dependencies == {(executor, "pg_namespace", schema, "a"), (service, "pg_namespace", schema, "a"),
-                              *((executor, "pg_proc", function, "o") for function in functions),
-                              *((service, "pg_proc", function, "a") for function in functions),
-                              *((executor, "pg_class", oid, "a") for oid in relations.values())})
+                              *((executor, "pg_proc", function, "o") for function, _caller in functions),
+                              *((caller, "pg_proc", function, "a") for function, caller in functions),
+                              *((executor, "pg_class", oid, "a") for oid in relations.values()),
+                              *([(operator, "pg_namespace", schema, "a")] if operator else [])})
     # Exact grants on those objects: schema USAGE (never CREATE) for both,
     # E's table and column privileges, nothing for S.
     granted = {tuple(r) for r in _rows(session, """SELECT 'schema',NULL::text,pg_get_userbyid(a.grantee),
@@ -629,10 +664,11 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         UNION ALL SELECT c.relname,t.attname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable,
         pg_get_userbyid(a.grantor) FROM pg_attribute t JOIN pg_class c ON c.oid=t.attrelid
         CROSS JOIN LATERAL aclexplode(t.attacl) a WHERE c.oid=ANY(CAST(:o AS oid[])) AND pg_get_userbyid(a.grantee)=ANY(:r)""",
-        r=[service, executor], o=list(relations.values()))}
-    columns_granted = (EXECUTOR_COLUMN_GRANTS_V3 if resetting
+        r=roles_checked, o=list(relations.values()))}
+    columns_granted = (EXECUTOR_COLUMN_GRANTS_V4 if quarantining else EXECUTOR_COLUMN_GRANTS_V3 if resetting
                        else EXECUTOR_COLUMN_GRANTS_V2 if issuance else EXECUTOR_COLUMN_GRANTS)
     _require(granted == {("schema", None, executor, "USAGE", False, owner), ("schema", None, service, "USAGE", False, owner),
+                         *([("schema", None, operator, "USAGE", False, owner)] if operator else []),
                          *((table, None, executor, right, False, owner)
                            for table, rights in EXECUTOR_TABLE_GRANTS.items() for right in rights),
                          *((table, column, executor, right, False, owner)

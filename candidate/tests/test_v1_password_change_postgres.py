@@ -67,7 +67,7 @@ def test_the_head_classifies_as_prepared_with_five_authorities(world):
         definition = c.scalar(text("SELECT pg_get_constraintdef(oid) FROM pg_constraint"
                                    " WHERE conname = 'ck_account_security_events_type'"))
     assert sorted(acl) == sorted([w.names["executor"], w.names["service"]])
-    assert definition == v1_schema._among("event_type", v1_schema.EVENT_TYPES_V2)
+    assert "'password_change'::character varying" in definition       # Later revisions widen it further.
 
 
 def test_a_change_replaces_the_hash_keeps_this_session_ends_the_others_and_records_once(world):
@@ -218,6 +218,7 @@ def test_downgrade_is_refused_while_change_history_exists_and_otherwise_restores
 ])
 def test_a_tampered_catalog_is_refused_by_startup_and_by_the_downgrade(world, tamper):
     w = world
+    migrate(w, HEAD, down=True)                  # 0020's own downgrade; later revisions test theirs.
     admin_sql(w, *tamper.format(**w.names).split("; "))
     refused(w)
     with pytest.raises(DBAPIError, match="V1_PASSWORD_CHANGE_POSTCONDITION_INVALID"):

@@ -79,6 +79,20 @@ def identity_guard_v2(a):
     v1=guard_functions(a,"unused")["registration_user_identity_guard"]
     if v1.count(_IDENTITY_DENY)!=1:raise RuntimeError("REGISTRATION_IDENTITY_GUARD_UNRECOGNIZED")
     return v1.replace(_IDENTITY_DENY,")\n   AND NOT ("+EPOCH_ADVANCE+_IDENTITY_DENY)
+# Identity guard v3 (V1-02D, migration 0022): v2 plus exactly two quarantined_at transitions. Quarantine
+# sets it from NULL while the epoch moves strictly forward to at least the quarantine time (every
+# session ends); reinstatement clears it and moves nothing else. Who may attempt either is decided by
+# column privilege (only E holds UPDATE on quarantined_at, through the reviewed operator functions).
+QUARANTINE=("ROW(NEW.id,NEW.email,NEW.created_at,NEW.registration_intent_id) IS NOT DISTINCT FROM ROW(OLD.id,OLD.email,OLD.created_at,OLD.registration_intent_id)"
+    " AND OLD.quarantined_at IS NULL AND NEW.quarantined_at IS NOT NULL AND NEW.sessions_valid_after IS NOT NULL"
+    " AND (OLD.sessions_valid_after IS NULL OR NEW.sessions_valid_after > OLD.sessions_valid_after)"
+    " AND NEW.sessions_valid_after >= NEW.quarantined_at")
+REINSTATE=("ROW(NEW.id,NEW.email,NEW.created_at,NEW.registration_intent_id,NEW.sessions_valid_after) IS NOT DISTINCT FROM ROW(OLD.id,OLD.email,OLD.created_at,OLD.registration_intent_id,OLD.sessions_valid_after)"
+    " AND OLD.quarantined_at IS NOT NULL AND NEW.quarantined_at IS NULL")
+def identity_guard_v3(a):
+    v2=identity_guard_v2(a)
+    if v2.count(_IDENTITY_DENY)!=1:raise RuntimeError("REGISTRATION_IDENTITY_GUARD_UNRECOGNIZED")
+    return v2.replace(_IDENTITY_DENY,")\n   AND NOT ("+QUARANTINE+")\n   AND NOT ("+REINSTATE+_IDENTITY_DENY)
 
 
 # Exact PostgreSQL 16 catalog forms; changes require explicit migration review.
@@ -112,9 +126,11 @@ def validate_security_definitions(session,role,runtime,owner):
     canonical=guard_functions(role,migrator)
     for name,definition in canonical.items():
         row=by[name]
-        # The identity guard may be 0011's v1 or 0014's v2; v1_schema pairs it with its revision.
+        # The identity guard may be 0011's v1, 0014's v2 or 0022's v3; v1_schema pairs it with its revision.
         bodies={definition.split("$guard$")[1]}
-        if name=="registration_user_identity_guard":bodies.add(identity_guard_v2(role).split("$guard$")[1])
+        if name=="registration_user_identity_guard":
+            bodies.add(identity_guard_v2(role).split("$guard$")[1])
+            bodies.add(identity_guard_v3(role).split("$guard$")[1])
         require(row[2] in bodies)
         require(tuple(row[3:12])==(owner,["search_path=pg_catalog, pg_temp"],True,"v","u",False,False,"f","plpgsql"))
         require(tuple(row[12:])==(("exclusive boolean","void",100.0,0,None) if name=="registration_control_lock" else ("","trigger",100.0,0,None)))

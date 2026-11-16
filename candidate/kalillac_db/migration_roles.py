@@ -24,6 +24,8 @@ at all; an unset or blank setting raises RoleNameRequired:
 - KALILLAC_V1_SECURITY_SERVICE_ROLE: NOLOGIN service role S, the only
   grantee of the fixed V1 security functions
 - KALILLAC_V1_SECURITY_EXECUTOR_ROLE: NOLOGIN executor role E that owns them
+- KALILLAC_V1_SECURITY_OPERATOR_ROLE: NOLOGIN operator role P, the only grantee
+  of the operator functions (quarantine, reinstatement), never S
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ OWNER_ROLE_ENV = "KALILLAC_MIGRATION_OWNER_ROLE"
 APP_ROLE_ENV = "KALILLAC_MIGRATION_APP_ROLE"
 V1_SECURITY_SERVICE_ROLE_ENV = "KALILLAC_V1_SECURITY_SERVICE_ROLE"
 V1_SECURITY_EXECUTOR_ROLE_ENV = "KALILLAC_V1_SECURITY_EXECUTOR_ROLE"
+V1_SECURITY_OPERATOR_ROLE_ENV = "KALILLAC_V1_SECURITY_OPERATOR_ROLE"
 
 # Unquoted PostgreSQL identifier, lowercase only (unquoted names fold to
 # lowercase, so uppercase would silently name a different role), at most
@@ -93,6 +96,10 @@ def v1_security_service_role() -> str:
 
 def v1_security_executor_role() -> str:
     return _required_role(V1_SECURITY_EXECUTOR_ROLE_ENV)
+
+
+def v1_security_operator_role() -> str:
+    return _required_role(V1_SECURITY_OPERATOR_ROLE_ENV)
 
 
 def assume_migration_owner(connection: Connection) -> None:
