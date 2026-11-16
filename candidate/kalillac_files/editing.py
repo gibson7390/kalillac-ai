@@ -756,6 +756,12 @@ DEFAULT_SIZE = 18.0                            # PowerPoint's body text size whe
 FIT_TOLERANCE = 0.02                           # Inches: measurement noise, never a visible overflow.
 
 
+def _inches(properties, name, default, signed=False):
+    """An EMU attribute in inches, or default when the element or attribute is absent or malformed."""
+    value = (properties.get(name) or "") if properties is not None else ""
+    return int(value) / EMU if (value.lstrip("-") if signed else value).isdigit() else default
+
+
 def _body_text(body):
     return "\n".join("".join(node.text or "" for node in paragraph.iter(A + "t"))
                      for paragraph in body.findall(A + "p"))
@@ -802,8 +808,9 @@ def _paragraph_height(paragraph, inner_width, scale, list_style_size):
 def _text_height(body, width_in):
     """(inches the text needs, inner width, vertical insets, autofit kind) for a shape's text body."""
     properties = body.find(A + "bodyPr")
-    get = (lambda name, default: int(properties.get(name)) / EMU
-           if properties is not None and (properties.get(name) or "").lstrip("-").isdigit() else default)
+
+    def get(name, default):
+        return _inches(properties, name, default, signed=True)
     inner_width = width_in - get("lIns", 0.1) - get("rIns", 0.1)
     insets = get("tIns", 0.05) + get("bIns", 0.05)
     scale, autofit = 1.0, None
@@ -828,8 +835,9 @@ def _text_height(body, width_in):
 def _cell_needed(cell, body, inner_width_in=None):
     """Inches a table cell's text needs, margins included, or None when its width is unknown."""
     properties = cell.find(A + "tcPr")
-    margin = (lambda name, default: int(properties.get(name)) / EMU
-              if properties is not None and (properties.get(name) or "").isdigit() else default)
+
+    def margin(name, default):
+        return _inches(properties, name, default)
     inner = inner_width_in - margin("marL", 0.1) - margin("marR", 0.1)
     if inner <= 0:
         return None
