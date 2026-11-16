@@ -70,7 +70,7 @@ def test_0014_is_the_sole_head_directly_after_0013():
     # Only the Financial Safeguards ledger (0015, its provider budgets 0016), billing cases (0017) and
     # the sign-out authority (0018) sit above.
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0022_v1_quarantine"]
+    assert script.get_heads() == ["0023_v1_deletion_request"]
     assert script.get_revision("0015_finance_ledger").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()

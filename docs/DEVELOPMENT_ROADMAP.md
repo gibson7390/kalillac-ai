@@ -138,7 +138,7 @@ Gap analysis against the directive (read from the code on 2026-11-14, not yet te
 | Suspension | Partly. `is_active` is enforced at sign-in and on every session lookup, but **there is no operator command to suspend or reinstate an account**. |
 | Session invalidation by the customer ("sign out everywhere") | **Missing at the HTTP layer.** The database authority exists (`v1_revoke_sessions`, migration `0013`) and is unexposed. |
 | Password change while signed in | **Missing.** |
-| Account deletion | **Missing.** Only the `deletion_requested_at` column exists. Needs a retention decision from the owner. |
+| Account deletion | **Request only, unexposed** (migration 0023): an operator (role P) or the signed-in customer (through S) can mark an account, which ends every session and blocks sign-in. **No erasure**: it needs the owner's retention decisions (plan, section 5). |
 | Full synthetic lifecycle test | **Missing** as one end-to-end test; the parts are tested separately. |
 
 **Dependency that blocks the missing items.** The account-security work follows a slice plan
@@ -193,13 +193,16 @@ from the code. See "Owner decisions required".
   for every condition: `subscription-foundation-verification` `43792363270` (192 tests, none skipped),
   `provider-ceilings-postgres` `43792366823`. With 0021 all six conditions hold, so `v1_verify_email` is
   dropped from the V1-02D/E design and the legacy verification route is retired in E1.
-* **Remaining in D2:** quarantine and reinstatement (need identity guard v3, which also changes the
-  trusted guard definitions the registration startup checks), deletion request, and the operator role
-  P. Quarantine and email verification need a third identity-guard
-  version (the guard protects `quarantined_at`, and refuses `email_verified_at` changes once
-  registration is active). New audit event types (password change, quarantine, deletion) need the
-  0012 event-type constraint and the classifier's exact copy of it to change together.
-* Then D3 (routes), D4 (operator tool), E1 to E3.
+* **D2: quarantine and reinstatement by the operator role P, identity guard v3, migration 0022**
+  (`feat/account-security-d2-quarantine`, checkpoint `53869d73a509df07643e91dde7dff18ba6bbf984`). Codex
+  independently passed its 19 PostgreSQL tests at that checkpoint. Not owner accepted.
+* **D2: deletion requests, migration 0023** (`feat/account-security-d3-deletion-requests`, on `53869d7`).
+  `v1_request_deletion` (P) and the customer's `v1_request_own_deletion` (S, proven and admitted as a
+  password change is) set `deletion_requested_at`, move the epoch strictly forward, revoke every session
+  and record `account_deletion_request` at one effective time; replays apply nothing. E gains UPDATE on
+  the marker only; guard v3 is unchanged. No withdrawal and no erasure (plan, section 4). Implemented and
+  development verified on disposable PostgreSQL 16; CI and Codex review are recorded in the handoff.
+* Then D3 (routes), D4 (operator tool), E1 to E3; erasure after the owner's retention decisions.
 
 ### Milestone 3: Stripe billing (starting point)
 

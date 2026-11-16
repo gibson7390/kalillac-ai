@@ -51,6 +51,8 @@ RESET_OUTCOMES = frozenset({"reset", "invalid_token", "account_unavailable", "to
                             "security_unavailable"})
 CHANGE_OUTCOMES = frozenset({"changed", "not_authenticated", "account_unavailable", "too_many_operations",
                              "security_unavailable"})
+OWN_DELETION_OUTCOMES = frozenset({"requested", "not_authenticated", "account_unavailable", "too_many_operations",
+                                   "security_unavailable"})
 
 # The only statements this module sends as S, besides its fixed transaction settings and identity and
 # catalog checks. Function arguments are bound, never interpolated.
@@ -60,6 +62,8 @@ _END = "SELECT outcome FROM kalillac.v1_end_session(:s, :t)"
 _RESET = "SELECT outcome, retry_after_seconds, replayed FROM kalillac.v1_reset_password(:o, :t, :h)"
 _CHANGE = ("SELECT outcome, retry_after_seconds, replayed"
            " FROM kalillac.v1_change_password(:o, :s, :t, :v, :h)")
+_OWN_DELETION = ("SELECT outcome, retry_after_seconds, replayed"
+                 " FROM kalillac.v1_request_own_deletion(:o, :s, :t, :v)")
 # The Argon2id encoding the application's hasher produces; the function re-checks the same shape.
 _ARGON2ID = re.compile(r"\$argon2id\$v=19\$m=[0-9]{1,10},t=[0-9]{1,10},p=[0-9]{1,3}\$[A-Za-z0-9+/]{11,}"
                        r"\$[A-Za-z0-9+/]{16,}")
@@ -96,6 +100,13 @@ class PasswordChanged:
 
 
 @dataclass(frozen=True)
+class DeletionRequested:
+    outcome: str                       # requested | not_authenticated | account_unavailable | too_many_operations | security_unavailable
+    retry_after_seconds: int | None    # only with too_many_operations
+    replayed: bool
+
+
+@dataclass(frozen=True)
 class PasswordReset:
     outcome: str                       # reset | invalid_token | account_unavailable | too_many_operations | security_unavailable
     retry_after_seconds: int | None    # only with too_many_operations
@@ -104,15 +115,17 @@ class PasswordReset:
 
 def _reviewed_functions():
     """{signature: SHA-256 of the reviewed body} for the authorities S may execute at this release's
-    head (0020): revocation v2, issuance, sign-out, password reset and password change."""
+    head (0023): revocation v2, issuance, sign-out, password reset, password change and the customer's own
+    deletion request. The operator functions (0022, 0023) belong to P and are never S's."""
     from .v1_schema import (CHANGE_PASSWORD_SIGNATURE, CHANGE_PASSWORD_SOURCE_SHA256, END_SESSION_SIGNATURE,
                             END_SESSION_SOURCE_SHA256, ISSUANCE_SIGNATURE, ISSUANCE_SOURCE_SHA256,
-                            RESET_PASSWORD_SIGNATURE, RESET_PASSWORD_SOURCE_SHA256, REVOCATION_SIGNATURE,
-                            REVOCATION_SOURCE_SHA256_V2)
+                            OWN_DELETION_SIGNATURE, OWN_DELETION_SOURCE_SHA256, RESET_PASSWORD_SIGNATURE,
+                            RESET_PASSWORD_SOURCE_SHA256, REVOCATION_SIGNATURE, REVOCATION_SOURCE_SHA256_V2)
     return {REVOCATION_SIGNATURE: REVOCATION_SOURCE_SHA256_V2, ISSUANCE_SIGNATURE: ISSUANCE_SOURCE_SHA256,
             END_SESSION_SIGNATURE: END_SESSION_SOURCE_SHA256,
             RESET_PASSWORD_SIGNATURE: RESET_PASSWORD_SOURCE_SHA256,
-            CHANGE_PASSWORD_SIGNATURE: CHANGE_PASSWORD_SOURCE_SHA256}
+            CHANGE_PASSWORD_SIGNATURE: CHANGE_PASSWORD_SOURCE_SHA256,
+            OWN_DELETION_SIGNATURE: OWN_DELETION_SOURCE_SHA256}
 
 
 def parse_service_credential(raw, *, role, database_instance_id, deployment_id, forbidden_passwords=()):
@@ -345,6 +358,33 @@ class V1Authority:
             if replayed and outcome != "changed":
                 raise V1AuthorityUnavailable()
             return PasswordChanged(outcome, retry_after, replayed)
+
+    def request_own_deletion(self, *, operation_id, session_id, token_hash, verified_password_hash):
+        """A signed-in customer's own deletion request, proven by the exact original session and the stored
+        hash the caller has just verified the current password against. Marks the account, ends every
+        session (this one too) and advances the epoch, once per operation id. Nothing is erased here."""
+        from sqlalchemy import text
+        if (type(operation_id) is not uuid.UUID or type(session_id) is not uuid.UUID
+                or type(token_hash) is not str or not _TOKEN_HASH.fullmatch(token_hash)
+                or type(verified_password_hash) is not str or not verified_password_hash
+                or len(verified_password_hash) > 255):
+            raise V1AuthorityUnavailable()
+        with self._transaction() as session:
+            found = session.execute(text(_OWN_DELETION), {"o": operation_id, "s": session_id, "t": token_hash,
+                                                          "v": verified_password_hash}).all()
+            if len(found) != 1:
+                raise V1AuthorityUnavailable()
+            outcome, retry_after, replayed = found[0]
+            if outcome not in OWN_DELETION_OUTCOMES or type(replayed) is not bool:
+                raise V1AuthorityUnavailable()
+            if outcome == "too_many_operations":
+                if type(retry_after) is not int or retry_after < 1:
+                    raise V1AuthorityUnavailable()
+            elif retry_after is not None:
+                raise V1AuthorityUnavailable()
+            if replayed and outcome != "requested":
+                raise V1AuthorityUnavailable()
+            return DeletionRequested(outcome, retry_after, replayed)
 
     def revoke_sessions(self, *, operation_id, session_id, token_hash, scope):
         """Revoke the account's other sessions, or all of them, proven by the exact original session."""

@@ -1,5 +1,8 @@
 """0022, quarantine and reinstatement by the operator role P, on real disposable PostgreSQL 16.
 
+The world stands on the head revision (0023, which keeps 0022's functions, guard and P unchanged); tests
+of 0022's own downgrade first step down to 0022.
+
 P and S stay NOLOGIN: each is exercised through SET LOCAL ROLE from the disposable superuser, which also
 seeds fixtures and tampers with the catalog. Every password hash is synthetic.
 """
@@ -161,6 +164,7 @@ def test_downgrade_restores_0021_and_is_refused_once_history_exists(world):
 ])
 def test_a_tampered_catalog_is_refused_by_startup_and_by_the_downgrade(world, tamper):
     w = world
+    migrate(w, HEAD, down=True)                  # 0022's own downgrade; 0023 tests its own.
     admin_sql(w, tamper.format(**w.names))
     refused(w)
     with pytest.raises(DBAPIError, match="V1_QUARANTINE_POSTCONDITION_INVALID"):

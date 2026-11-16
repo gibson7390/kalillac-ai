@@ -248,6 +248,22 @@ EVENT_TYPES_V3 = EVENT_TYPES_V2 + ("account_quarantine", "account_reinstate")
 EXECUTOR_COLUMN_GRANTS_V4 = {**EXECUTOR_COLUMN_GRANTS_V3,
                              ("users", "UPDATE"): EXECUTOR_COLUMN_GRANTS_V3[("users", "UPDATE")] + ("quarantined_at",)}
 
+# 0023: deletion requests. The operator's, for any account, executable only by P; the customer's own,
+# proven by the exact original session and a just-verified password, executable only by S. Both share
+# one audit event type; E gains UPDATE on users.deletion_requested_at. Identity guard v3 is unchanged.
+DELETION_REQUEST_FUNCTION, OWN_DELETION_FUNCTION = "v1_request_deletion", "v1_request_own_deletion"
+DELETION_REQUEST_SIGNATURE = "kalillac.v1_request_deletion(uuid,uuid)"
+OWN_DELETION_SIGNATURE = "kalillac.v1_request_own_deletion(uuid,uuid,text,text)"
+OWN_DELETION_DEFINITION = ("p_operation_id uuid, p_session_id uuid, p_token_hash text, p_verified_password_hash text",
+                           "TABLE(outcome text, retry_after_seconds integer, replayed boolean)", "plpgsql", "v",
+                           True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+DELETION_REQUEST_SOURCE_SHA256 = "4035c4ea49ba5616a57a4dfed1f8757c2e5e1c7fead9033183ae49b93b4991cd"
+OWN_DELETION_SOURCE_SHA256 = "f8eb94330fe3a7c560cd906bdf5515e84d3a15c6a1ff7795b2ec001d481ad403"
+EVENT_TYPES_V4 = EVENT_TYPES_V3 + ("account_deletion_request",)
+EXECUTOR_COLUMN_GRANTS_V5 = {**EXECUTOR_COLUMN_GRANTS_V4,
+                             ("users", "UPDATE"): EXECUTOR_COLUMN_GRANTS_V4[("users", "UPDATE")]
+                             + ("deletion_requested_at",)}
+
 
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
@@ -296,18 +312,21 @@ def classify(session) -> str:
     installed = {r[0] for r in _rows(session, """SELECT p.proname FROM pg_proc p JOIN pg_namespace n
         ON n.oid=p.pronamespace WHERE n.nspname='kalillac' AND p.proname=ANY(:f)""",
         f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION, RESET_PASSWORD_FUNCTION,
-           CHANGE_PASSWORD_FUNCTION, QUARANTINE_FUNCTION, REINSTATE_FUNCTION])}
+           CHANGE_PASSWORD_FUNCTION, QUARANTINE_FUNCTION, REINSTATE_FUNCTION, DELETION_REQUEST_FUNCTION,
+           OWN_DELETION_FUNCTION])}
     revocation, issuance = REVOCATION_FUNCTION in installed, ISSUANCE_FUNCTION in installed
     ending, resetting = END_SESSION_FUNCTION in installed, RESET_PASSWORD_FUNCTION in installed
     changing = CHANGE_PASSWORD_FUNCTION in installed
     quarantining = QUARANTINE_FUNCTION in installed
+    deleting = DELETION_REQUEST_FUNCTION in installed
     _require((revocation or not issuance) and (issuance or not ending) and (ending or not resetting)
              and (resetting or not changing) and (changing or not quarantining)
-             and (REINSTATE_FUNCTION in installed) == quarantining)
-    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing, quarantining)
+             and (REINSTATE_FUNCTION in installed) == quarantining
+             and (quarantining or not deleting) and (OWN_DELETION_FUNCTION in installed) == deleting)
+    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing, quarantining, deleting)
     principals = _authority(session, owner)
     _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting, changing,
-                         quarantining)
+                         quarantining, deleting)
     # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
     from .registration_schema import EPOCH_ADVANCE, QUARANTINE
     guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -341,7 +360,7 @@ def _security_roles():
 
 
 def _catalog(session, roles, revocation, issuance, ending=False, resetting=False, changing=False,
-             quarantining=False) -> str:
+             quarantining=False, deleting=False) -> str:
     """Exact definitions of every 0012 object, not names; returns their owner."""
     executor = roles[1]
     # Permanent ordinary tables (never UNLOGGED, temporary, partitioned, typed or
@@ -390,9 +409,10 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
         OR (fn.nspname='kalillac' AND f.relname=ANY(:t)))""", t=list(TABLES)):
         constraints.setdefault(table, {})[name] = (kind, definition, tuple(flags), index, index_schema)
     expected_constraints = {table: dict(specs) for table, specs in CONSTRAINTS.items()}
-    if changing:                      # 0020 widened the audit event types, and 0022 again.
+    if changing:                      # 0020 widened the audit event types, and 0022 and 0023 again.
         expected_constraints["account_security_events"]["ck_account_security_events_type"] = (
-            "c", _among("event_type", EVENT_TYPES_V3 if quarantining else EVENT_TYPES_V2))
+            "c", _among("event_type", EVENT_TYPES_V4 if deleting else EVENT_TYPES_V3 if quarantining
+                        else EVENT_TYPES_V2))
     _require(constraints == {table: {name: _expected_constraint(name, *spec) for name, spec in specs.items()}
                              for table, specs in expected_constraints.items()})
     # Every index: method, key columns and order, no expression or predicate,
@@ -427,6 +447,7 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
              | ({CHANGE_PASSWORD_FUNCTION} if changing else set())
              | ({ACTIVATION_GUARD_FUNCTION} if activation_guard else set())
              | ({QUARANTINE_FUNCTION, REINSTATE_FUNCTION} if quarantining else set())
+             | ({DELETION_REQUEST_FUNCTION, OWN_DELETION_FUNCTION} if deleting else set())
              and not rules and not events)
     if activation_guard:
         import hashlib
@@ -499,7 +520,8 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
            *([ISSUANCE_SIGNATURE] if issuance else []), *([END_SESSION_SIGNATURE] if ending else []),
            *([RESET_PASSWORD_SIGNATURE] if resetting else []),
            *([CHANGE_PASSWORD_SIGNATURE] if changing else []),
-           *([QUARANTINE_SIGNATURE, REINSTATE_SIGNATURE] if quarantining else [])],
+           *([QUARANTINE_SIGNATURE, REINSTATE_SIGNATURE] if quarantining else []),
+           *([DELETION_REQUEST_SIGNATURE, OWN_DELETION_SIGNATURE] if deleting else [])],
         t=list(TABLES),
         w=list(WRITE_RIGHTS), c=list(USER_COLUMNS))
     _require(not bridges and not definers)
@@ -573,7 +595,7 @@ def _authority(session, owner) -> None:
 
 
 def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False,
-                         resetting=False, changing=False, quarantining=False) -> None:
+                         resetting=False, changing=False, quarantining=False, deleting=False) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
     edge, and no ownership, grant or default privilege but 0013's, or 0014's,
     exact set.
@@ -626,6 +648,10 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         expected[QUARANTINE_FUNCTION] = (OPERATOR_DEFINITION, QUARANTINE_SOURCE_SHA256)
         expected[REINSTATE_FUNCTION] = (OPERATOR_DEFINITION, REINSTATE_SOURCE_SHA256)
         callers.update({QUARANTINE_FUNCTION: operator, REINSTATE_FUNCTION: operator})
+    if deleting:
+        expected[DELETION_REQUEST_FUNCTION] = (OPERATOR_DEFINITION, DELETION_REQUEST_SOURCE_SHA256)
+        expected[OWN_DELETION_FUNCTION] = (OWN_DELETION_DEFINITION, OWN_DELETION_SOURCE_SHA256)
+        callers.update({DELETION_REQUEST_FUNCTION: operator, OWN_DELETION_FUNCTION: service})
     functions = []
     for name, (declared, digest) in expected.items():
         definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),
@@ -665,7 +691,8 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         pg_get_userbyid(a.grantor) FROM pg_attribute t JOIN pg_class c ON c.oid=t.attrelid
         CROSS JOIN LATERAL aclexplode(t.attacl) a WHERE c.oid=ANY(CAST(:o AS oid[])) AND pg_get_userbyid(a.grantee)=ANY(:r)""",
         r=roles_checked, o=list(relations.values()))}
-    columns_granted = (EXECUTOR_COLUMN_GRANTS_V4 if quarantining else EXECUTOR_COLUMN_GRANTS_V3 if resetting
+    columns_granted = (EXECUTOR_COLUMN_GRANTS_V5 if deleting else EXECUTOR_COLUMN_GRANTS_V4 if quarantining
+                       else EXECUTOR_COLUMN_GRANTS_V3 if resetting
                        else EXECUTOR_COLUMN_GRANTS_V2 if issuance else EXECUTOR_COLUMN_GRANTS)
     _require(granted == {("schema", None, executor, "USAGE", False, owner), ("schema", None, service, "USAGE", False, owner),
                          *([("schema", None, operator, "USAGE", False, owner)] if operator else []),

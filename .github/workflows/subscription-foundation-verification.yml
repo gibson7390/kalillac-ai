@@ -472,11 +472,11 @@ jobs:
           assert totals == {"tests": 154, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
-      # Actual collect-only result for the four explicit modules: 78 tests
-      # (D1: 44 unit + 18 real PostgreSQL, where S logs in with its own
-      # credential in the disposable database only; 0018 sign-out: 5 unit + 11
-      # real PostgreSQL). Missing PG fails as above.
-      - name: Run V1-02D service connection, sign-out, password-reset and password-change authority contracts
+      # Actual collect-only result for the explicit modules: 282 tests (219
+      # through 0022, plus 0023's deletion requests: 18 unit + 42 real
+      # PostgreSQL, and 3 more for S's own login). S logs in with its own
+      # credential in the disposable database only. Missing PG fails as above.
+      - name: Run V1-02D service connection, sign-out, password, quarantine and deletion-request authority contracts
         working-directory: candidate
         run: >-
           python -m pytest
@@ -492,10 +492,12 @@ jobs:
           tests/test_registration_email_guarantees_postgres.py
           tests/test_v1_quarantine.py
           tests/test_v1_quarantine_postgres.py
+          tests/test_v1_deletion_request.py
+          tests/test_v1_deletion_request_postgres.py
           -q -ra -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/v1-02d-authority.xml"
 
-      - name: Require every V1-02D service connection, sign-out, password-reset and password-change test
+      - name: Require every V1-02D service connection, sign-out, password, quarantine and deletion-request test
         run: |
           python - "$RUNNER_TEMP/v1-02d-authority.xml" <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -503,5 +505,5 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 219, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 282, "skipped": 0, "failures": 0, "errors": 0}
           PY

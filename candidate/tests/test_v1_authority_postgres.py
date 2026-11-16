@@ -152,6 +152,11 @@ def test_a_wrong_credential_is_refused(world, changes):
      "GRANT EXECUTE ON FUNCTION kalillac.v1_change_password(uuid,uuid,text,text,text) TO {service}"),
     ("GRANT SELECT (token_hash) ON kalillac.account_recovery_tokens TO {service}",
      "REVOKE SELECT (token_hash) ON kalillac.account_recovery_tokens FROM {service}"),
+    # 0023: S executes the customer's own deletion request, and never the operator's.
+    ("REVOKE EXECUTE ON FUNCTION kalillac.v1_request_own_deletion(uuid,uuid,text,text) FROM {service}",
+     "GRANT EXECUTE ON FUNCTION kalillac.v1_request_own_deletion(uuid,uuid,text,text) TO {service}"),
+    ("GRANT EXECUTE ON FUNCTION kalillac.v1_request_deletion(uuid,uuid) TO {service}",
+     "REVOKE EXECUTE ON FUNCTION kalillac.v1_request_deletion(uuid,uuid) FROM {service}"),
 ])
 def test_any_extra_or_missing_right_refuses_the_authority(world, grant, undo):
     w = world
@@ -271,3 +276,31 @@ def test_s_changes_a_password_through_its_own_login(world):
     stale = authority.change_password(operation_id=uuid.uuid4(), session_id=mine[0], token_hash=mine[1],
                                       verified_password_hash=old, new_password_hash=new_hash())
     assert (stale.outcome, stale.replayed) == ("not_authenticated", False) and stored(w, user)[0] == hashed
+
+
+def test_s_requests_the_customers_own_deletion_through_its_own_login(world):
+    w = world
+    authority = build(w)
+    user, stored = account(w)
+    mine, other = key(), key()
+    for k in (mine, other):
+        authority.issue_session(session_id=k[0], token_hash=k[1], user_id=user, verified_password_hash=stored,
+                                lifetime_days=14)
+    wrong = authority.request_own_deletion(operation_id=uuid.uuid4(), session_id=mine[0], token_hash=mine[1],
+                                           verified_password_hash=stored + "x")
+    assert (wrong.outcome, wrong.retry_after_seconds, wrong.replayed) == ("not_authenticated", None, False)
+    assert all(row[4] is None for row in sessions(w, user))
+    operation = uuid.uuid4()
+    done = authority.request_own_deletion(operation_id=operation, session_id=mine[0], token_hash=mine[1],
+                                          verified_password_hash=stored)
+    assert (done.outcome, done.retry_after_seconds, done.replayed) == ("requested", None, False)
+    assert all(row[4] is not None for row in sessions(w, user))                 # This session too.
+    with w.admin_engine.connect() as c:
+        assert c.scalar(text("SELECT deletion_requested_at = sessions_valid_after FROM kalillac.users"
+                             " WHERE id = :u"), {"u": user})
+    again = authority.request_own_deletion(operation_id=operation, session_id=mine[0], token_hash=mine[1],
+                                           verified_password_hash=stored)
+    assert (again.outcome, again.replayed) == ("requested", True)
+    signed = authority.issue_session(session_id=uuid.uuid4(), token_hash=secrets.token_hex(32), user_id=user,
+                                     verified_password_hash=stored, lifetime_days=14)
+    assert signed.outcome == "not_authenticated"

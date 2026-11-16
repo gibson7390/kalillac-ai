@@ -53,7 +53,7 @@ operation ids, admission where the contract requires it, and an audit event in t
 | `v1_change_password(session, token_hash, verified_hash, new_hash, op)` | Owner-requested (see section 4): proven by the original session and a just-verified current password; replace the hash, revoke every other session, audit. **Implemented, migration 0020** (`manual` admission class; new `password_change` event type). The epoch does not move (see section 4) |
 | ~~`v1_verify_email(token_hash, op)`~~ | Dropped (section 4): after activation no account can be unverified; migration 0021 makes activation prove it |
 | `v1_quarantine(account, reason, op)`, `v1_reinstate(account, op)` | Operator suspension and reinstatement: quarantine revokes every session and advances the epoch; reinstatement never happens as a side effect of anything else |
-| `v1_request_deletion(account, op)` | Sets the deletion marker, revokes every session, advances the epoch; erasure itself follows the retention rules (section 5) |
+| `v1_request_deletion(account, op)` | Sets the deletion marker, revokes every session, advances the epoch; erasure itself follows the retention rules (section 5). **Implemented, migration 0023**, with the customer's own `v1_request_own_deletion` (section 4, "Deletion requests") |
 
 The operator functions are executable by a separate NOLOGIN operator role P, used only by the operator
 tool (D4), never by S. New event types extend 0012's allowed list in the same migration.
@@ -181,6 +181,28 @@ three existing workflows plus the new PostgreSQL group with measured counts and 
 - **Operator role P.** The contract places support operations in operator tools, not the application;
   P keeps them out of S's reach.
 
+- **Deletion requests (migration 0023, implemented, default off, unexposed).** As designed above, with
+  these details fixed in the code:
+  - E's UPDATE on `users.deletion_requested_at` is granted by 0023, not 0022 as "Order of migrations"
+    said: 0022 granted only `quarantined_at`, and no 0022 function writes the marker.
+  - Both functions take the operation id first, as 0022's do: `v1_request_deletion(op, account)` (P) and
+    `v1_request_own_deletion(op, session, token_hash, verified_hash)` (S). Both set the marker and the epoch
+    to one effective time strictly after the current epoch, revoke every session (the presenting one too)
+    and record `account_deletion_request` at that time. No identity-guard change: the marker is not an
+    identity column, and the epoch moves through v2's forward transition.
+  - The operator's request answers `requested`, `already_requested` (marker already set; the first time is
+    kept, nothing recorded), `not_found` or `security_unavailable`, and is not charged admission (as
+    quarantine). The customer's is proven and admitted exactly as a password change is (`manual` class),
+    answers `not_authenticated` uniformly for any stale or wrong proof (including an account already
+    marked), `account_unavailable` when quarantined, and `too_many_operations` with the seconds to wait.
+    A recorded operation id is reported again (`replayed`) and never applied twice.
+  - One event type for both paths, as designed. The audit table has no actor column, so the event does
+    not say whether the customer or an operator asked; the operator tool (D4) records its reason with the
+    operation id.
+  - The request is the whole lifecycle: nothing withdraws it (no function clears the marker), reinstatement
+    of a quarantined account leaves it in place (sign-in stays refused), and nothing erases or purges an
+    account or its data. Erasure is a later checkpoint, after the owner's decisions in section 5.
+
 ## 5. Account deletion: retention proposal (for the owner's decision)
 
 Proposed, not decided. Figures are placeholders for the owner and, where applicable, legal review.
@@ -198,3 +220,9 @@ Proposed, not decided. Figures are placeholders for the owner and, where applica
 
 Backups age out on their own schedule; a restore re-applies outstanding deletions before reopening
 (contract document 03, section 6).
+
+Needed from the owner before erasure (the next deletion milestone) is built: the periods above (30 days,
+12 months, the billing retention period), whether a request can be withdrawn during the erasure window and
+by whom, whether the customer is sent a confirmation, and how the subscription is cancelled (the Stripe
+side stays with the billing work). A customer-facing deletion route is not in D3's table yet; adding one
+is part of that decision.
