@@ -763,7 +763,11 @@ def _inches(properties, name, default, signed=False):
 
 
 def _body_text(body):
-    return "\n".join("".join(node.text or "" for node in paragraph.iter(A + "t"))
+    """A text body's text: paragraphs on separate lines, and a line break inside a paragraph (a:br) a line
+    break too, never nothing (Codex reverification of 0ea08a8: dropping it joined "$" ending one line to
+    "300 licenses" starting the next). A tab is already a character inside a:t."""
+    return "\n".join("".join((node.text or "") if node.tag == A + "t" else "\n"
+                             for node in paragraph.iter(A + "t", A + "br"))
                      for paragraph in body.findall(A + "p"))
 
 
@@ -1710,11 +1714,25 @@ def outline(data, declared_name=None):
 # --- edit ------------------------------------------------------------------------------------
 
 
+# What a tab or a break inside a Word run reads as (as _w_text reads it).
+_RUN_SPACING = {W + "tab": "\t", W + "ptab": "\t", W + "br": "\n", W + "cr": "\n"}
+
+
 def _accepted_text(paragraph):
-    """A Word paragraph's text with every revision accepted: inserted text kept, deleted text dropped."""
+    """A Word paragraph's text with every revision accepted: inserted text kept, deleted text dropped. A
+    tab reads as a tab and a line break (w:br, w:cr) as a line break, as Word shows them, never as
+    nothing (Codex reverification of 0ea08a8: dropping a tab joined "USD" and "300" into "USD300", and
+    dropping a break joined the end of one line to the start of the next). A tab stop defined in the
+    paragraph's properties (w:pPr/w:tabs/w:tab) is not a character."""
     skipped = (W + "del", W + "moveFrom")
-    return "".join(node.text or "" for node in paragraph.iter(W + "t")
-                   if not any(ancestor.tag in skipped for ancestor in node.iterancestors()))
+    pieces = []
+    for node in paragraph.iter(W + "t", *_RUN_SPACING):
+        if node.tag != W + "t" and node.getparent().tag != W + "r":
+            continue
+        if any(ancestor.tag in skipped for ancestor in node.iterancestors()):
+            continue
+        pieces.append((node.text or "") if node.tag == W + "t" else _RUN_SPACING[node.tag])
+    return "".join(pieces)
 
 
 def _word_tables_accepted(data):

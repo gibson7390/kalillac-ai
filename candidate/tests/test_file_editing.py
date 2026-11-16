@@ -1313,3 +1313,129 @@ def test_horizontal_space_runs_never_cross_a_line():
                          ("$\n300", (300.0, "", "")), ("$300\nK", (300.0, "$", "")),
                          ("-\n$300", (300.0, "$", ""))]:
         assert _figures(broken) == {read: 1}, broken
+
+
+# --- tabs and line breaks inside a paragraph (Codex reverification of 0ea08a8) ----------------------
+
+MARK = "QQMARKQQ"
+WORD_TAB = '</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t xml:space="preserve">'
+WORD_BREAK = '</w:t></w:r><w:r><w:br/></w:r><w:r><w:t xml:space="preserve">'
+REVISION = 'w:id="{}" w:author="Reviewer" w:date="2026-11-01T00:00:00Z"'
+WORD_INSERTED_BREAK = (f'</w:t></w:r><w:ins {REVISION.format(9001)}><w:r><w:br/></w:r></w:ins>'
+                       '<w:r><w:t xml:space="preserve">')
+WORD_DELETED_BREAK = (f'</w:t></w:r><w:del {REVISION.format(9002)}><w:r><w:br/></w:r></w:del>'
+                      '<w:r><w:t xml:space="preserve">')
+DECK_BREAK = "</a:t></a:r><a:br/><a:r><a:t>"
+
+
+def _marked(kind, cell, prose, replacement):
+    """A real file from _styled whose summary has MARK replaced, in the file's XML, by a tab or break
+    run (or a tab character), so the regression exercises the editor's text extraction too."""
+    data = _styled(kind, cell, prose)
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        parts = [name for name in source.namelist()
+                 if name.endswith(".xml") and MARK.encode() in source.read(name)]
+    assert len(parts) == 1
+
+    def change(xml):
+        return xml.decode("utf-8").replace(MARK, replacement).encode("utf-8")
+    return rezip(data, change={parts[0]: change})
+
+
+def _read_back(data, kind):
+    """The file's text read by python-docx or python-pptx, not by the editor: Word shows a tab as "\\t"
+    and a line break as "\\n"; PowerPoint a line break as "\\v"."""
+    if kind == "docx":
+        return "\n".join(paragraph.text for paragraph in docx.Document(io.BytesIO(data)).paragraphs)
+    from pptx import Presentation
+    deck = Presentation(io.BytesIO(data))
+    return "\n".join(shape.text_frame.text for slide in deck.slides for shape in slide.shapes
+                     if shape.has_text_frame)
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_a_word_tab_inside_a_stale_total_keeps_the_total_recognized(tracked):
+    """"USD", a Word tab, "300": Word shows USD 300, so a table-only restatement to USD 400 is refused,
+    and restating the summary too is accepted."""
+    cell, name = STYLES["iso"], "t.docx"
+    options = {"track_changes": True} if tracked else {}
+    data = _marked("docx", cell, f"The total is USD{MARK}300.", WORD_TAB)
+    assert "The total is USD\t300." in _read_back(data, "docx")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    everywhere = table_only + [{"op": "replace_text", "find": "300.", "replace": "400.", "expect": 1}]
+    result = edit(data, name, everywhere, **options).data
+    if tracked:          # python-docx shows inserted and deleted text alike: read the accepted view.
+        text = accepted(document_xml(result))                              # Text runs only, no tab glyph.
+        assert "The total is USD400." in text and "USD300." not in text and "<w:tab/>" in document_xml(result)
+    else:
+        text = _read_back(result, "docx")
+        assert "The total is USD\t400." in text and "USD\t300." not in text
+    edit(data, name, table_only, exact=True, **options)                    # The customer's confirmed choice.
+
+
+def test_a_powerpoint_tab_inside_a_stale_total_keeps_the_total_recognized():
+    """Unchanged behaviour: a tab is a character inside a:t."""
+    cell, name = STYLES["iso"], "t.pptx"
+    data = _marked("pptx", cell, f"The total is USD{MARK}300.", "\t")
+    assert "The total is USD\t300." in _read_back(data, "pptx")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only) == "dependent_figure_unchanged"
+    everywhere = table_only + [{"op": "replace_text", "find": "300.", "replace": "400.", "expect": 1}]
+    text = _read_back(edit(data, name, everywhere).data, "pptx")
+    assert "The total is USD\t400." in text and "USD\t300." not in text
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+def test_a_line_break_inside_a_paragraph_separates_the_lines(kind, tracked):
+    """One line ends with "$", the next begins "300 licenses were issued.": not "$300", so restating a $300
+    total is accepted and the unrelated text is left exactly as it was."""
+    cell, name = STYLES["positive"], f"t.{kind}"
+    options = {"track_changes": True} if tracked else {}
+    data = _marked(kind, cell, f"Every fee below is quoted in ${MARK}300 licenses were issued.",
+                   WORD_BREAK if kind == "docx" else DECK_BREAK)
+    line = "\n" if kind == "docx" else "\v"
+    expected = f"Every fee below is quoted in ${line}300 licenses were issued."
+    assert expected in _read_back(data, kind)
+    text = _read_back(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert expected in text
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("revision,stale", [pytest.param(WORD_INSERTED_BREAK, False, id="inserted_break"),
+                                            pytest.param(WORD_DELETED_BREAK, True, id="deleted_break")])
+def test_a_tracked_line_break_counts_as_word_shows_it_once_accepted(tracked, revision, stale):
+    """A break inserted by an earlier tracked revision separates "$" from "300"; a break that revision
+    deleted does not, so the accepted text reads "$300", the old total, and the restatement is refused."""
+    cell, name = STYLES["positive"], "t.docx"
+    options = {"track_changes": True} if tracked else {}
+    data = _marked("docx", cell, f"Every fee below is quoted in ${MARK}300 licenses were issued.", revision)
+    table_only = _restated(data, name, cell)
+    if stale:
+        assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    else:
+        edit(data, name, table_only, **options)
+
+
+def test_word_tabs_and_breaks_read_as_word_shows_them_and_tab_stops_do_not():
+    from lxml import etree
+
+    from kalillac_files.editing import _accepted_text
+    namespace = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    paragraph = etree.fromstring(
+        f'<w:p {namespace}><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>'
+        '<w:r><w:t>USD</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>300</w:t></w:r>'
+        '<w:r><w:br/></w:r><w:r><w:t>end</w:t></w:r><w:r><w:cr/></w:r><w:r><w:t>x</w:t></w:r>'
+        '<w:del w:id="1" w:author="R" w:date="2026-11-01T00:00:00Z"><w:r><w:tab/></w:r></w:del></w:p>')
+    assert _accepted_text(paragraph) == "USD\t300\nend\nx"
+
+
+def test_a_powerpoint_line_break_reads_as_a_line_break():
+    from lxml import etree
+
+    from kalillac_files.editing import _body_text
+    namespace = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    body = etree.fromstring(f'<a:txBody {namespace}><a:p><a:r><a:t>quoted in $</a:t></a:r><a:br/>'
+                            '<a:r><a:t>300 licenses</a:t></a:r></a:p><a:p><a:r><a:t>USD\t300</a:t></a:r></a:p>'
+                            '</a:txBody>')
+    assert _body_text(body) == "quoted in $\n300 licenses\nUSD\t300"

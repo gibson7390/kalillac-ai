@@ -1,6 +1,6 @@
 # Corrections for the Codex audits: evidence for independent verification
 
-**Checkpoints (provenance).** Five different commits have been handed to Codex; they are not the same:
+**Checkpoints (provenance).** Six different commits have been handed to Codex; they are not the same:
 
 | Checkpoint | Full SHA | What it is |
 |---|---|---|
@@ -8,7 +8,8 @@
 | Second reverification handoff | `53869d73a509df07643e91dde7dff18ba6bbf984` (`feat/account-security-d2-quarantine`) | The checkpoint Codex reviewed on 2026-11-16: A to D corrected, migration 0022's 19 PostgreSQL tests passed independently; the confirmation lifecycle and the prose-total check had defects (below). |
 | Third reverification handoff | `c5291b4a732ec87a72fdbe3c39caebb339ce0452` (`fix/codex-reverification-3`) | Codex verified the confirmation lifecycle and the provenance corrections there, and found regression R1 in the amount matcher (below). |
 | Fourth reverification handoff | `856d9a53c25f6b3424326cb8d68532112d8b39e7` (`fix/codex-reverification-4`, unchanged) | The R1 correction. Codex verified its original examples and its 30-fail/33-pass comparison, and found that repeated horizontal spaces still escaped the prose matcher (below). |
-| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-5` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The bounded correction of the repeated-space gap, stacked on `856d9a5`. |
+| Fifth reverification handoff | `0ea08a8e40bd1c22be4e5166c275640ec7a6d495` (`fix/codex-reverification-5`, unchanged) | The repeated-space correction. Codex verified the 15 repeated-space cases fixed, and found two text-extraction gaps: Word tabs and soft line breaks (below). |
+| **Current correction checkpoint** | The HEAD of `fix/codex-reverification-6` (a commit cannot name its own SHA; the full SHA and its CI runs are given in the handoff) | The bounded correction of the two extraction gaps, stacked on `0ea08a8`. |
 
 Nothing in any checkpoint was changed to make CI pass without investigation.
 
@@ -176,7 +177,9 @@ In each, an ordinary edit was accepted with the stale summary left beside the re
 | Original failure | Run against the `856d9a5` editor (restored from that commit, then put back): **34 of the 97 new tests fail**. All 24 repeated-space reproductions fail (Codex's 15 among them). 9 cases fail where the summary itself uses a repeated or mixed run (`-` + no-break, space, no-break, `$300`; `USD` + space, no-break, space, `300`; `(  $300  )`). The unit test fails. 63 pass on both: summaries with a single space beside a repeated-space table (the parent already read the table cell correctly), restatements, formatting-only changes, unrelated amounts, and the container tests. They guard the change against false refusals and joined containers |
 | Corrected | All 97 pass. All 12 file suites locally: 1017 passed, 1 skipped (`test_memory_limit_stops_the_child`, POSIX-only; Linux CI runs it), 1 expected openpyxl warning. Ruff passes |
 
-The CI runs for the current checkpoint are listed in the handoff.
+CI on `0ea08a8e40bd1c22be4e5166c275640ec7a6d495`: `file-generation-verification` `43824203820` (1018
+tests), `subscription-foundation-verification` `43824208279`, `safety-helpfulness-regression`
+`43824213718` (820 tests), all success.
 
 **Still open after this correction, unchanged:**
 - **The exact-confirmation interface:** the backend only; there is no chat acceptance control.
@@ -185,7 +188,55 @@ The CI runs for the current checkpoint are listed in the handoff.
 - **Broader semantic dependencies:** growth rates and margins in prose.
 - **Native and cross-viewer presentation checks.**
 - **The one-attempt confirmation contract:** a stored output survives a later provider failure, without rollback or request-key deduplication.
-- **Line breaks inside a paragraph:** a Word or PowerPoint line break inside a paragraph contributes no character to the document text. An amount split by one, such as `USD` at the end of one line and `300` at the start of the next, reads as `USD300`. It is not recognized, so a stale total written across such a line break would not be found. Not reported by Codex and not exercised here; recorded so it is not mistaken for coverage.
+- **Line breaks inside a paragraph (as of `0ea08a8`):** a Word or PowerPoint line break inside a paragraph contributed no character to the document text, so an amount split by one read as `USD300`. Superseded by the extraction correction on `fix/codex-reverification-6` (below): the break now reads as a line break, and a split amount is the known limitation recorded there.
+
+### Codex's review of `0ea08a8e40bd1c22be4e5166c275640ec7a6d495` and the text-extraction correction (branch `fix/codex-reverification-6`)
+
+**Independently verified by Codex at `0ea08a8`:** the original 15 repeated-space cases are fixed. That correction and its 97 tests are kept unchanged; the amount matcher (`_GAP`, `_FIGURE`) is not modified here. `router.py` and `assistant.py` are untouched, so the exact-edit confirmation flow is unchanged.
+
+**Findings at `0ea08a8`, now corrected (implemented; awaiting Codex).** Both are in how the editor extracts text for the prose-total check, not in the matcher.
+
+**1. Word tabs were dropped.**
+- Problem: the accepted-revisions view read only `w:t`. A `w:tab` between `USD` and `300` disappeared, so the checker saw `USD300`, and a table-only restatement to `USD 400` was accepted with the summary still showing `USD<TAB>300`.
+- Source location: `kalillac_files/editing.py`: `_RUN_SPACING` (1718), `_accepted_text` (1721).
+- Correction: a run's `w:tab` and `w:ptab` read as a tab, and `w:br` and `w:cr` as a line break, as Word shows them (the same mapping as the editor's run reader `_w_text`). Tab stops defined in paragraph properties (`w:pPr/w:tabs/w:tab`) are not characters, and deleted runs (`w:del`, `w:moveFrom`) are still dropped.
+
+**2. Soft line breaks were dropped (Word and PowerPoint).**
+- Problem: the PowerPoint text reader (`_body_text`) ignored `a:br`, and the Word view ignored `w:br`, so the end of one line was joined to the start of the next. Codex's false refusal: a line ending `$` followed by `300 licenses were issued.` read as `$300`.
+- Source location: `editing.py`: `_body_text` (765) and `_accepted_text`.
+- Correction: a line break inside a paragraph reads as a line break, which the amount matcher never crosses. PowerPoint tabs were already characters inside `a:t`; their behaviour is unchanged.
+
+**Effect on table reading (stated so it is not missed):** `_accepted_text` also reads Word table cells for the total check (`_word_tables_accepted`). A Word cell containing a tab or a line break now reads with that whitespace instead of with its parts joined. That matches PowerPoint cells, which python-pptx already reads with a line break as `\v`, and what Word shows. No existing test changed. Generated documents contain no such cells.
+
+**Regressions.** All in `tests/test_file_editing.py`, on real DOCX and PPTX files: generated, then the summary's marker is replaced in the file's XML by a real `w:tab`, `w:br`, `a:br` or tracked-revision run. Results are read back with python-docx and python-pptx, not the editor's extraction.
+
+| Test (line) | Cases | What it asserts | On `0ea08a8` |
+|---|---|---|---|
+| `test_a_word_tab_inside_a_stale_total_keeps_the_total_recognized` (1357) | Word plain, Word tracked | A table-only `USD 300` → `USD 400` restatement is refused with `dependent_figure_unchanged` while the summary reads `USD<TAB>300`. Updating the summary too is accepted (plain: read back as `USD\t400`; tracked: accepted view, tab kept). The confirmed exact edit is accepted | **fail** (`DID NOT RAISE`: the inconsistent edit was accepted) |
+| `test_a_powerpoint_tab_inside_a_stale_total_keeps_the_total_recognized` (1377) | PowerPoint | The same, for a tab inside `a:t` | pass (existing behaviour preserved) |
+| `test_a_line_break_inside_a_paragraph_separates_the_lines` (1390) | Word plain, Word tracked, PowerPoint | Line `…quoted in $`, break, `300 licenses were issued.`: restating the `$300` total is accepted, and the unrelated text is intact in the returned file (`\n` in Word, `\v` in PowerPoint) | **fail** (false `dependent_figure_unchanged`) |
+| `test_a_tracked_line_break_counts_as_word_shows_it_once_accepted` (1407) | Inserted break and deleted break (earlier tracked revisions) × plain and tracked edit | An inserted break separates the lines, so the restatement is accepted. A deleted break does not, so the accepted text reads `$300` and the restatement is refused | inserted: **fail** (false refusal); deleted: pass (refused on both) |
+| `test_word_tabs_and_breaks_read_as_word_shows_them_and_tab_stops_do_not` (1420) | Unit | `USD`, tab, `300`, `w:br`, `w:cr`, a deleted tab and a `w:pPr` tab stop read as `USD\t300\nend\nx` | **fail** |
+| `test_a_powerpoint_line_break_reads_as_a_line_break` (1433) | Unit | `a:br` reads as `\n`, and a tab in `a:t` is kept | **fail** |
+
+**Original failure and correction.**
+- Run against the `0ea08a8` editor (restored from that commit, then put back): **9 of the 12 new tests fail**, for the reasons shown, and **3 pass**: the PowerPoint tab case and the two deleted-break cases.
+- On the correction, all 12 pass.
+- All 12 file suites locally: 1029 passed, 1 skipped (`test_memory_limit_stops_the_child`, POSIX-only; Linux CI runs it), 1 expected openpyxl warning. Ruff passes.
+- The earlier paragraph, cell and container boundary tests, the 97 repeated-space tests and the 63 R1 tests are unchanged and pass.
+
+**Known limitation kept for this pass (deliberate).** An amount deliberately split across a line break, such as `USD`, a break, then `300`, now reads as `USD\n300` and is not recognized as `USD 300`, because the matcher never crosses a line. A stale total written that way would not be found. Recognizing amounts split across a line, without joining unrelated lines (the false refusal above), is open.
+
+The CI runs for the current checkpoint are listed in the handoff.
+
+**Still open after this correction:**
+- **The exact-confirmation interface:** the backend only; there is no chat acceptance control.
+- **Word finalization:** page numbers and contents.
+- **Arabic PDF interoperability:** ligatures, diacritics, mixed-direction reading order and search.
+- **Broader semantic dependencies:** growth rates and margins in prose.
+- **Native and cross-viewer presentation checks.**
+- **The one-attempt confirmation contract:** a stored output survives a later provider failure, without rollback or request-key deduplication.
+- **Amounts split across a line break:** above.
 
 ## Findings from the first audit (CODEX-D1 to CODEX-D4)
 
