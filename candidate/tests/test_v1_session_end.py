@@ -23,9 +23,9 @@ def _module():
     return module
 
 
-def test_0018_is_the_head_directly_after_0017():
+def test_0018_sits_directly_after_0017_below_0019():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0018_v1_session_end"]
+    assert script.get_revision("0019_v1_password_reset").down_revision == "0018_v1_session_end"
     assert script.get_revision("0018_v1_session_end").down_revision == "0017_billing_cases"
     module = _module()
     assert (module.revision, module.down_revision, module.branch_labels, module.depends_on) == (

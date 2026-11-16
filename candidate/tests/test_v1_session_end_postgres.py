@@ -1,6 +1,7 @@
 """0018, the private sign-out authority (V1-02D, D2 first part), on real disposable PostgreSQL 16.
 
-The world stands on the head revision. S stays NOLOGIN here: it is exercised through SET LOCAL ROLE
+The world stands on the head revision (0019, which keeps 0018's function unchanged); tests of 0018's
+own downgrade first step down to 0018. S stays NOLOGIN here: it is exercised through SET LOCAL ROLE
 from the disposable superuser, which also seeds fixtures and tampers with the catalog. Every
 password hash is synthetic.
 """
@@ -24,6 +25,7 @@ from test_v1_revocation_postgres import admin_sql
 from test_v1_schema_postgres import classify, migrate, refused, sqlstate
 
 HEAD = "0018_v1_session_end"
+ABOVE = "0019_v1_password_reset"
 PREVIOUS = "0017_billing_cases"
 SIGNATURE = "kalillac.v1_end_session(uuid,text)"
 
@@ -73,7 +75,7 @@ def present(w):
         return c.scalar(text("SELECT to_regprocedure(:f) IS NOT NULL"), {"f": SIGNATURE})
 
 
-def test_the_head_classifies_as_prepared_with_three_authorities(world):
+def test_the_head_classifies_as_prepared_and_the_sign_out_acl_is_e_and_s(world):
     assert classify(world.owner_factory) == v1_schema.PREPARED
     # The runtime role cannot read the activation latch, by design.
     with pytest.raises(v1_schema.V1SchemaRefused, match="authority_state_unreadable"):
@@ -131,10 +133,14 @@ def test_downgrade_and_upgrade_restore_the_exact_catalogs(world):
     w = world
     user, mine = signed_in(w)
     assert end(w, *mine) == [("ended",)]
+    migrate(w, HEAD, down=True)
+    assert present(w) and classify(w.owner_factory) == v1_schema.PREPARED
     migrate(w, PREVIOUS, down=True)
     assert not present(w) and classify(w.owner_factory) == v1_schema.PREPARED
     assert {row[0]: row[4] for row in sessions(w, user)}[mine[0]] is not None   # Ended stays ended.
     migrate(w, HEAD)
+    assert present(w) and classify(w.owner_factory) == v1_schema.PREPARED
+    migrate(w, ABOVE)
     assert present(w) and classify(w.owner_factory) == v1_schema.PREPARED
 
 
@@ -147,6 +153,7 @@ def test_downgrade_and_upgrade_restore_the_exact_catalogs(world):
 ])
 def test_a_tampered_function_is_refused_by_startup_and_by_the_downgrade(world, tamper):
     w = world
+    migrate(w, HEAD, down=True)                  # 0018's own downgrade; 0019's is tested with 0019.
     admin_sql(w, tamper.format(**w.names))
     refused(w)
     with pytest.raises(DBAPIError, match="V1_SESSION_END_POSTCONDITION_INVALID"):
@@ -168,6 +175,8 @@ def test_the_upgrade_refuses_a_preexisting_sign_out_function(world):
         c.exec_driver_sql("SET ROLE " + w.names["owner"])
         c.exec_driver_sql("DROP FUNCTION kalillac.v1_end_session(uuid, text)")
     migrate(w, HEAD)
+    assert classify(w.owner_factory) == v1_schema.PREPARED
+    migrate(w, ABOVE)
     assert classify(w.owner_factory) == v1_schema.PREPARED
 
 

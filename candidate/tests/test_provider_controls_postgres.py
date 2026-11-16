@@ -53,8 +53,9 @@ WORKFLOW_FILE = ".github/workflows/provider-ceilings-postgres.yml"
 CANDIDATE_DIR = Path(__file__).resolve().parents[1]
 HOST = "127.0.0.1"
 PORT = 5432
-HEAD = "0018_v1_session_end"
+HEAD = "0019_v1_password_reset"
 CHAIN = (
+    "0019_v1_password_reset",
     "0018_v1_session_end",
     "0017_billing_cases",
     "0016_finance_provider_budgets",

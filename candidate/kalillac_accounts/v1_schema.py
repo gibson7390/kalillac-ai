@@ -201,6 +201,21 @@ END_SESSION_DEFINITION = ("p_session_id uuid, p_token_hash text", "TABLE(outcome
                           True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
 END_SESSION_SOURCE_SHA256 = "aebef4fe34fc886c5119c2b0461aab49bd21921a53adb8472da5b80054008d8a"
 
+# 0019: the private password-reset authority (V1-02D). E gains UPDATE on the two users columns a
+# reset writes, and the reset-token columns it reads and consumes.
+RESET_PASSWORD_FUNCTION = "v1_reset_password"
+RESET_PASSWORD_SIGNATURE = "kalillac.v1_reset_password(uuid,text,text)"
+RESET_PASSWORD_DEFINITION = ("p_operation_id uuid, p_token_hash text, p_new_password_hash text",
+                             "TABLE(outcome text, retry_after_seconds integer, replayed boolean)", "plpgsql", "v",
+                             True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+RESET_PASSWORD_SOURCE_SHA256 = "c4a4fa77b346d0015f51d35a6e39e5e3799adcede9fd7a232ca12e7358ab0dac"
+EXECUTOR_COLUMN_GRANTS_V3 = {**EXECUTOR_COLUMN_GRANTS_V2,
+                             ("users", "UPDATE"): ("updated_at", "sessions_valid_after", "password_hash",
+                                                   "password_reset_required"),
+                             ("account_recovery_tokens", "SELECT"): ("id", "user_id", "purpose", "token_hash",
+                                                                     "expires_at", "consumed_at"),
+                             ("account_recovery_tokens", "UPDATE"): ("consumed_at",)}
+
 
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
@@ -248,13 +263,13 @@ def classify(session) -> str:
     roles = _security_roles()
     installed = {r[0] for r in _rows(session, """SELECT p.proname FROM pg_proc p JOIN pg_namespace n
         ON n.oid=p.pronamespace WHERE n.nspname='kalillac' AND p.proname=ANY(:f)""",
-        f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION])}
+        f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION, RESET_PASSWORD_FUNCTION])}
     revocation, issuance = REVOCATION_FUNCTION in installed, ISSUANCE_FUNCTION in installed
-    ending = END_SESSION_FUNCTION in installed
-    _require((revocation or not issuance) and (issuance or not ending))
-    owner = _catalog(session, roles, revocation, issuance, ending)
+    ending, resetting = END_SESSION_FUNCTION in installed, RESET_PASSWORD_FUNCTION in installed
+    _require((revocation or not issuance) and (issuance or not ending) and (ending or not resetting))
+    owner = _catalog(session, roles, revocation, issuance, ending, resetting)
     principals = _authority(session, owner)
-    _security_principals(session, owner, roles, principals, revocation, issuance, ending)
+    _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting)
     # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
     from .registration_schema import EPOCH_ADVANCE
     guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -277,7 +292,7 @@ def _security_roles():
         raise V1SchemaRefused("authority_roles_unconfigured") from None
 
 
-def _catalog(session, roles, revocation, issuance, ending=False) -> str:
+def _catalog(session, roles, revocation, issuance, ending=False, resetting=False) -> str:
     """Exact definitions of every 0012 object, not names; returns their owner."""
     executor = roles[1]
     # Permanent ordinary tables (never UNLOGGED, temporary, partitioned, typed or
@@ -352,6 +367,7 @@ def _catalog(session, roles, revocation, issuance, ending=False) -> str:
     events = _rows(session, "SELECT evtname FROM pg_event_trigger WHERE evtenabled<>'D'")
     _require(triggers == TRIGGERS and functions == FUNCTIONS | ({REVOCATION_FUNCTION} if revocation else set())
              | ({ISSUANCE_FUNCTION} if issuance else set()) | ({END_SESSION_FUNCTION} if ending else set())
+             | ({RESET_PASSWORD_FUNCTION} if resetting else set())
              and not rules and not events)
     # No bridge, in any schema. A view runs with its owner's rights and a rule
     # action with its table owner's, so a view or rule over protected state
@@ -402,7 +418,8 @@ def _catalog(session, roles, revocation, issuance, ending=False) -> str:
           OR EXISTS (SELECT 1 FROM unnest(CAST(:c AS text[])) c CROSS JOIN unnest(ARRAY['INSERT','UPDATE']) r
                      WHERE has_column_privilege(o.oid,'kalillac.users',c,r)))""",
         g=[*REVIEWED_GUARDS, *([REVOCATION_SIGNATURE] if revocation else []),
-           *([ISSUANCE_SIGNATURE] if issuance else []), *([END_SESSION_SIGNATURE] if ending else [])],
+           *([ISSUANCE_SIGNATURE] if issuance else []), *([END_SESSION_SIGNATURE] if ending else []),
+           *([RESET_PASSWORD_SIGNATURE] if resetting else [])],
         t=list(TABLES),
         w=list(WRITE_RIGHTS), c=list(USER_COLUMNS))
     _require(not bridges and not definers)
@@ -475,7 +492,8 @@ def _authority(session, owner) -> None:
     return runtime, registration
 
 
-def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False) -> None:
+def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False,
+                         resetting=False) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
     edge, and no ownership, grant or default privilege but 0013's, or 0014's,
     exact set.
@@ -517,6 +535,8 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         expected[ISSUANCE_FUNCTION] = (ISSUANCE_DEFINITION, ISSUANCE_SOURCE_SHA256)
     if ending:
         expected[END_SESSION_FUNCTION] = (END_SESSION_DEFINITION, END_SESSION_SOURCE_SHA256)
+    if resetting:
+        expected[RESET_PASSWORD_FUNCTION] = (RESET_PASSWORD_DEFINITION, RESET_PASSWORD_SOURCE_SHA256)
     functions = []
     for name, (declared, digest) in expected.items():
         definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),
@@ -536,7 +556,8 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         functions.append(function)
     relations = {r[0]: r[1] for r in _rows(session, """SELECT c.relname,c.oid FROM pg_class c
         JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='kalillac' AND c.relname=ANY(:t)""",
-        t=["users", "account_sessions", *EXECUTOR_TABLE_GRANTS])}
+        t=["users", "account_sessions", *(["account_recovery_tokens"] if resetting else []),
+           *EXECUTOR_TABLE_GRANTS])}
     schema = _rows(session, "SELECT oid FROM pg_namespace WHERE nspname='kalillac'")[0][0]
     _require(dependencies == {(executor, "pg_namespace", schema, "a"), (service, "pg_namespace", schema, "a"),
                               *((executor, "pg_proc", function, "o") for function in functions),
@@ -554,7 +575,8 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         pg_get_userbyid(a.grantor) FROM pg_attribute t JOIN pg_class c ON c.oid=t.attrelid
         CROSS JOIN LATERAL aclexplode(t.attacl) a WHERE c.oid=ANY(CAST(:o AS oid[])) AND pg_get_userbyid(a.grantee)=ANY(:r)""",
         r=[service, executor], o=list(relations.values()))}
-    columns_granted = EXECUTOR_COLUMN_GRANTS_V2 if issuance else EXECUTOR_COLUMN_GRANTS
+    columns_granted = (EXECUTOR_COLUMN_GRANTS_V3 if resetting
+                       else EXECUTOR_COLUMN_GRANTS_V2 if issuance else EXECUTOR_COLUMN_GRANTS)
     _require(granted == {("schema", None, executor, "USAGE", False, owner), ("schema", None, service, "USAGE", False, owner),
                          *((table, None, executor, right, False, owner)
                            for table, rights in EXECUTOR_TABLE_GRANTS.items() for right in rights),

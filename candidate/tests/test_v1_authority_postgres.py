@@ -146,6 +146,10 @@ def test_a_wrong_credential_is_refused(world, changes):
      "GRANT EXECUTE ON FUNCTION kalillac.v1_issue_session(uuid,text,uuid,text,integer) TO {service}"),
     ("REVOKE EXECUTE ON FUNCTION kalillac.v1_end_session(uuid,text) FROM {service}",
      "GRANT EXECUTE ON FUNCTION kalillac.v1_end_session(uuid,text) TO {service}"),
+    ("REVOKE EXECUTE ON FUNCTION kalillac.v1_reset_password(uuid,text,text) FROM {service}",
+     "GRANT EXECUTE ON FUNCTION kalillac.v1_reset_password(uuid,text,text) TO {service}"),
+    ("GRANT SELECT (token_hash) ON kalillac.account_recovery_tokens TO {service}",
+     "REVOKE SELECT (token_hash) ON kalillac.account_recovery_tokens FROM {service}"),
 ])
 def test_any_extra_or_missing_right_refuses_the_authority(world, grant, undo):
     w = world
@@ -224,3 +228,23 @@ def test_loading_reads_the_credential_file_and_the_recorded_database_instance(wo
     with pytest.raises(V1AuthorityUnavailable):
         load_v1_authority(lambda: sessionmaker(bind=w.runtime_engine), {**environ, "KALILLAC_DEPLOYMENT_ID": "x"},
                           read_file=read_file)
+
+
+def test_s_completes_a_password_reset_through_its_own_login(world):
+    w = world
+    from test_v1_password_reset_postgres import new_hash, stored, token, tokens
+    authority = build(w)
+    user, old = account(w)
+    first = key()
+    authority.issue_session(session_id=first[0], token_hash=first[1], user_id=user,
+                            verified_password_hash=old, lifetime_days=14)
+    digest, operation, hashed = token(w, user), uuid.uuid4(), new_hash()
+    done = authority.reset_password(operation_id=operation, token_hash=digest, new_password_hash=hashed)
+    assert (done.outcome, done.retry_after_seconds, done.replayed) == ("reset", None, False)
+    assert stored(w, user)[0] == hashed and tokens(w, user)[digest] is not None
+    assert all(row[4] is not None for row in sessions(w, user))
+    again = authority.reset_password(operation_id=operation, token_hash=digest, new_password_hash=new_hash())
+    assert (again.outcome, again.replayed) == ("reset", True) and stored(w, user)[0] == hashed
+    unknown = authority.reset_password(operation_id=uuid.uuid4(), token_hash=secrets.token_hex(32),
+                                       new_password_hash=new_hash())
+    assert (unknown.outcome, unknown.retry_after_seconds, unknown.replayed) == ("invalid_token", None, False)

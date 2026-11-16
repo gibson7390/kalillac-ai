@@ -169,3 +169,28 @@ def test_end_session_arguments_outside_the_contract_send_nothing(change):
     with pytest.raises(V1AuthorityUnavailable):
         authority(log).end_session(**{"session_id": uuid.uuid4(), "token_hash": "c" * 64, **change})
     assert log == []
+
+
+GOOD_RESET = dict(operation_id=uuid.uuid4(), token_hash="d" * 64,
+                  new_password_hash="$argon2id$v=19$m=65536,t=3,p=4$" + "s" * 22 + "$" + "h" * 43)
+
+
+@pytest.mark.parametrize("change", [
+    {"operation_id": None}, {"operation_id": str(uuid.uuid4())}, {"token_hash": "D" * 64}, {"token_hash": None},
+    {"new_password_hash": None}, {"new_password_hash": ""}, {"new_password_hash": "correct horse battery staple"},
+    {"new_password_hash": "$argon2i$v=19$m=65536,t=3,p=4$" + "s" * 22 + "$" + "h" * 43},
+    {"new_password_hash": "$argon2id$v=19$m=65536,t=3,p=4$" + "s" * 22 + "$" + "h" * 250},
+    {"new_password_hash": GOOD_RESET["new_password_hash"] + "\n"},
+])
+def test_reset_arguments_outside_the_contract_send_nothing(change):
+    log = []
+    with pytest.raises(V1AuthorityUnavailable):
+        authority(log).reset_password(**{**GOOD_RESET, **change})
+    assert log == []
+
+
+def test_a_well_formed_reset_reaches_the_connection_check():
+    log = []
+    with pytest.raises(V1AuthorityUnavailable):
+        authority(log).reset_password(**GOOD_RESET)
+    assert log == ["invalidated", "closed"]
