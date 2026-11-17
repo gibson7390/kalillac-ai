@@ -54,7 +54,7 @@ def _render(revisions, downgrade=False):
 def test_0013_sits_directly_after_0012_and_below_0014():
     script = ScriptDirectory.from_config(_config())
     # 0014 (V1-02C) is directly above this revision; the sign-out authority (0018) is the head.
-    assert script.get_heads() == ["0024_v1_recovery_credential"]
+    assert script.get_heads() == ["0025_v1_row_lock_anchor"]
     assert script.get_revision("0014_v1_session_issuance").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     module = _module()
@@ -252,5 +252,7 @@ def test_runtime_never_imports_the_migration_or_names_its_sql():
             continue
         source = path.read_text(encoding="utf-8", errors="replace")
         assert "FROM kalillac.v1_revoke_sessions" not in source and "v1_revoke_sessions(:" not in source, path
-        if path.name not in ("v1_schema.py", "migration_roles.py"):
+        # The operator transition (E2) names the service role to give S its login; it is an operator
+        # tool, never imported by the application.
+        if path.name not in ("v1_schema.py", "migration_roles.py") and parts != ("tools", "v1_security_transition.py"):
             assert "V1_SECURITY_SERVICE_ROLE" not in source and "v1_security_service_role" not in source, path

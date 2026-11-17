@@ -14911,6 +14911,17 @@ api.add_event_handler("shutdown", _close_tavily_transport)
 # release does not install, so legacy and prepared (0012) schemas refuse.
 from kalillac_accounts.v1_security import load_v1_startup as _load_v1_startup
 _v1_account_security = _load_v1_startup()
+# The application's private connection as S (V1-02D, D1), built only once the gate above qualified an
+# active latch; any failure refuses startup rather than running V1 without its authorities.
+_v1_authority = None
+if _v1_account_security is not None:
+    from kalillac_accounts.v1_authority import load_v1_authority as _load_v1_authority
+    from kalillac_db.engine import get_session_factory as _v1_ordinary_factory
+    try:
+        _v1_authority = _load_v1_authority(_v1_ordinary_factory, os.environ)
+    except Exception:
+        raise RuntimeError("KALILLAC_V1_ACCOUNT_SECURITY_ENABLED requires the V1 service connection"
+                           " (KALILLAC_V1_SERVICE_CREDENTIALS_FILE).") from None
 
 # Optional account endpoints (/api/account/*). Off unless explicitly enabled;
 # when off, nothing account-related is imported. Accounts are identity only:
@@ -14969,7 +14980,7 @@ if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() in {
             _registration_authority._dispose()
         api.add_event_handler("shutdown", _close_registration_dispatcher)
     api.include_router(build_account_router(settings=_account_settings, registration_http=_registration_http,
-                                            v1_security=_v1_account_security))
+                                            v1_security=_v1_account_security, v1_authority=_v1_authority))
 
 
 # Account recovery and email verification are each default-off. While both are
@@ -14993,7 +15004,8 @@ if _recovery_enabled or _email_verification_enabled:
     if _recovery_enabled:
         from kalillac_accounts.recovery_router import build_recovery_router
 
-        api.include_router(build_recovery_router(gateway=_email_gateway, v1_security=_v1_account_security))
+        api.include_router(build_recovery_router(gateway=_email_gateway, v1_security=_v1_account_security,
+                                                 v1_authority=_v1_authority))
 
     if _email_verification_enabled:
         from kalillac_accounts.email_verification_router import (

@@ -244,7 +244,11 @@ def test_states_are_distinguishable_and_the_runtime_cannot_read_the_latch(world)
     migrate(w, HEAD)
     with owner(w) as c:
         c.exec_driver_sql(ACTIVATE)
-    assert classify(w.owner_factory) == v1_schema.ACTIVE
+    # Since E2 an active latch is a state only the operator transition produces, at this release's head
+    # with the final grants and logins (test_v1_transition_postgres classifies that one as ACTIVE). A latch
+    # activated by hand on this bare 0012 catalog is refused as inconsistent, never trusted.
+    with pytest.raises(v1_schema.V1SchemaRefused, match="inconsistent_schema"):
+        classify(w.owner_factory)
 
 
 WRITER = "CREATE FUNCTION kalillac.v1_writer() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$"
@@ -387,7 +391,8 @@ def test_v1_on_startup_refuses_every_state_read_only(world, state):
     record = lambda conn, cursor, sql, *a: statements.append(sql.split()[0].upper())
     expected = {"legacy": ("schema_not_prepared", "schema_not_prepared"),
                 "prepared": ("authority_state_unreadable", "prepared_inactive"),
-                "active": ("authority_state_unreadable", "authority_catalog_unqualified")}[state]
+                # A latch activated by hand below the head: unreadable to R, inconsistent to the owner.
+                "active": ("authority_state_unreadable", "inconsistent_schema")}[state]
     for factory, reason in zip((w.runtime_factory, w.owner_factory), expected):
         engine = factory.kw["bind"]
         event.listen(engine, "before_cursor_execute", record)
@@ -794,7 +799,11 @@ def test_complete_active_latch_is_accepted_and_incomplete_combinations_fail(worl
     with owner(w) as c:
         results = [(name, sqlstate(c, sql)) for name, sql, _ in cases]
     assert results == [(name, expected) for name, _, expected in cases]
-    assert latch(w)["state"] == "active" and classify(w.owner_factory) == v1_schema.ACTIVE
+    # The table accepts a complete binding; the classifier still refuses an active latch on a catalog
+    # the transition did not produce (E2).
+    assert latch(w)["state"] == "active"
+    with pytest.raises(v1_schema.V1SchemaRefused, match="inconsistent_schema"):
+        classify(w.owner_factory)
 
 
 # --- downgrade, failure and cancellation ---------------------------------------------------

@@ -32,9 +32,10 @@ def _module():
     return module
 
 
-def test_0024_is_the_head_directly_after_0023():
+def test_0024_sits_directly_after_0023_below_0025():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0024_v1_recovery_credential"]
+    assert script.get_heads() == ["0025_v1_row_lock_anchor"]
+    assert script.get_revision("0025_v1_row_lock_anchor").down_revision == "0024_v1_recovery_credential"
     module = _module()
     assert (module.revision, module.down_revision, module.branch_labels, module.depends_on) == (
         "0024_v1_recovery_credential", "0023_v1_deletion_request", None, None)

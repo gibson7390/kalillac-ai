@@ -156,11 +156,17 @@ def test_loading_without_a_database_is_refused():
         load_v1_authority(lambda: None, {}, read_file=lambda path, ceiling: credential())
 
 
-def test_the_application_does_not_load_the_authority_yet():
-    """D1 is not wired into startup: S stays NOLOGIN until the operator transition (E2)."""
+def test_the_application_loads_the_authority_only_after_the_gate_qualified():
+    """E2: S's connection is built in exactly one place, only when load_v1_startup qualified an active
+    latch, and startup refuses (never runs V1 without its authorities) if it cannot be built."""
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / "app_fastapi_candidate.py").read_text(encoding="utf-8")
-    assert "v1_authority" not in source
+    assert source.count("_load_v1_authority(_v1_ordinary_factory, os.environ)") == 1
+    start = source.index("_v1_authority = None")
+    block = source[start:source.index("_load_v1_authority(_v1_ordinary_factory, os.environ)")]
+    assert source.index("_v1_account_security = _load_v1_startup()") < start
+    assert "if _v1_account_security is not None:" in block
+    assert 'raise RuntimeError("KALILLAC_V1_ACCOUNT_SECURITY_ENABLED requires the V1 service connection"' in source
 
 
 @pytest.mark.parametrize("change", [{"session_id": str(uuid.uuid4())}, {"token_hash": "a" * 65}, {"token_hash": None}])

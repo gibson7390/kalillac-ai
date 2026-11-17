@@ -38,12 +38,12 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 | A3 | D3 V1 routes (login, logout, revoke, password, deletion request, recovery confirm) | ✔ | ✔ | login ✔ (`dcc0d44`) | Codex on `35f61c8` | A2 |
 | A4 | D5 reset-token issuance + credential read (0024) | ✔ | ✔ | | Codex on `9feb42b` | A3 |
 | A5 | D4 operator tool (suspend, reinstate, deletion request, bounded export) through P | ✔ | ✔ local | | CI + Codex | A2 |
-| A6 | E1 legacy-route removal (grants), incl. the row-lock design | | | | design + migration | A4, M3 billing writes |
-| A7 | E2 operator transition (S login, latch active, startup gate qualified) | | | | build; never run in production without the owner | A6 |
-| A8 | E3 synthetic lifecycle test under final grants | | | | build | A7 |
+| A6 | E1 legacy-route removal: E1a account grants + 0025 row-lock anchor | ✔ | ✔ local | | CI + Codex; **E1b** (entitlement/billing grants) after B2 | A4; E1b: B2 |
+| A7 | E2 operator transition (S/P login, latch active, startup gate qualified, rollback) | ✔ | ✔ local | | CI + Codex; running it anywhere real is the owner's decision | A6 |
+| A8 | E3 synthetic lifecycle test under final grants | ✔ | ✔ local | | CI + Codex | A7 |
 | A9 | Account management UI (sessions, password change, deletion request, recovery) | part (sign-in, create, recovery, overview) | part | | V1 pages: sessions, password, deletion; drop the verify page in V1 | A3 |
 | B1 | Stripe Checkout, portal, webhooks, reconciliation, refund/dispute cases | ✔ | ✔ | | test-mode lifecycle run (owner's test keys) | A1 |
-| B2 | Verified Premium entitlement on the chat request (PAID scope) | | | | the seam: V1-authorized account → entitlement → PAID scope, request ceiling, modes, files, images | A3, B1, F1 |
+| B2 | Verified Premium entitlement on the chat request (PAID scope) | in progress | | | `kalillac_accounts/paid_access.py`: V1-01's authorized read → effective entitlement → request-bound `issue_paid_entitlement` evidence at classification (chat and files) and the reasoning permission; matching account only; never on the legacy path. Then images | A3, B1, F1 |
 | B3 | Per-customer financial safeguards (allowance enforcement) | | | | mechanism built with allowances as configuration (values: owner) | B2, F1 |
 | B4 | Subscription management + cancellation in the UI | part (overview billing section) | | | cancel/manage via portal from the account page, status display | B1, A9 |
 | F1 | Financial Safeguards (ledger, ceilings, provider budgets, operator) | ✔ | ✔ | | owner budgets and activation (production) | — |

@@ -228,7 +228,12 @@ from the code. See "Owner decisions required".
 * **D4, operator tool** (`feat/account-security-d4-operator-tool`, on D5): `tools/v1_account_support.py`
   through P with P's own credential, dry-run by default, operation ids, fixed reason codes and an
   append-only record; bounded export without credentials. Implemented; awaiting Codex.
-* Then E1 (with the row-lock design: plan, D5) to E3; erasure after the owner's retention decisions.
+* **E1a, E2, E3** (`feat/account-security-e1-e3`, on D4): migration 0025 (the inert row-lock anchor),
+  the runtime login's final account grants, the operator transition with rollback
+  (`tools/v1_security_transition.py`), the startup gate qualifying an active latch bound to deployment and
+  release, and the lifecycle test through the routes under the final grants. Implemented; awaiting Codex.
+  E1b (entitlement and billing grants) waits on Milestone 3's reviewed billing path; erasure after the
+  owner's retention decisions.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

@@ -83,7 +83,7 @@ from typing import Callable
 import re
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -498,7 +498,7 @@ def _locate_user(session: Session, event: WebhookEvent) -> uuid.UUID | None:
             candidates.append(billing.user_id if billing else None)
 
     for user_id in candidates:
-        if user_id is not None and session.get(User, user_id) is not None:
+        if user_id is not None and session.scalar(select(User.id).where(User.id == user_id)) is not None:
             return user_id
 
     return None

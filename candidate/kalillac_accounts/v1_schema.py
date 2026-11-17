@@ -281,6 +281,10 @@ EXECUTOR_COLUMN_GRANTS_V6 = {**EXECUTOR_COLUMN_GRANTS_V5,
                              ("account_recovery_tokens", "INSERT"): RESET_TOKEN_INSERT_COLUMNS}
 
 
+# 0025: the inert row-lock anchor (E1 prerequisite); no grant. E1a later gives R UPDATE on it alone.
+ROW_LOCK_ANCHOR_CONSTRAINT = "ck_users_row_lock_anchor_null"
+
+
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
 
@@ -343,21 +347,59 @@ def classify(session) -> str:
              and (quarantining or not deleting) and (OWN_DELETION_FUNCTION in installed) == deleting)
     owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing, quarantining, deleting,
                      crediting)
-    principals = _authority(session, owner)
+    *principals, runtime_state = _authority(session, owner)
+    # The latch, when this role may read it. The runtime login can only once E1a granted it (an active
+    # latch); a role that cannot read it is checked against the prepared shape and, exactly as before,
+    # refused as unreadable only after every catalog check below has passed.
+    readable = _rows(session, "SELECT has_table_privilege('kalillac.account_security_activation','SELECT')")[0][0]
+    latch = _rows(session, "SELECT state FROM kalillac.account_security_activation") if readable else None
+    if latch is not None and (len(latch) != 1 or latch[0][0] not in (PREPARED, ACTIVE)):
+        raise V1SchemaRefused("inconsistent_schema")
+    active = latch is not None and latch[0][0] == ACTIVE
+    # Only the transition (E2) activates, and only at this release's head.
+    _require(not active or crediting)
     _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting, changing,
-                         quarantining, deleting, crediting)
+                         quarantining, deleting, crediting, active=active)
+    anchored = _row_lock_anchor(session)
+    _require(crediting or not anchored)
     # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
     from .registration_schema import EPOCH_ADVANCE, QUARANTINE
     guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname='kalillac' AND p.proname='registration_user_identity_guard'""")
     _require(len(guard) == 1 and (EPOCH_ADVANCE in guard[0][0]) == issuance
              and (QUARANTINE in guard[0][0]) == quarantining)
-    if not _rows(session, "SELECT has_table_privilege('kalillac.account_security_activation','SELECT')")[0][0]:
+    if not readable:
         raise V1SchemaRefused("authority_state_unreadable")
-    latch = _rows(session, "SELECT state FROM kalillac.account_security_activation")
-    if len(latch) != 1 or latch[0][0] not in (PREPARED, ACTIVE):
-        raise V1SchemaRefused("inconsistent_schema")
+    # The runtime login's account grants pair with the latch: prepared with the legacy grants, active
+    # only with E1a's final grants, which need the row-lock anchor (0025).
+    from . import v1_final_grants as grants
+    try:
+        tables_state = grants.runtime_account_state(session, principals[0])
+    except grants.GrantStateInvalid:
+        raise V1SchemaRefused("inconsistent_schema") from None
+    _require(tables_state == runtime_state
+             and runtime_state == (grants.FINAL if latch[0][0] == ACTIVE else grants.LEGACY)
+             and (anchored or runtime_state == grants.LEGACY))
     return latch[0][0]
+
+
+def _row_lock_anchor(session) -> bool:
+    """0025's inert column, exactly, when present: nullable smallint, no default, generation, identity or
+    collation, held NULL by exactly one validated immediate CHECK. Grants on it are checked with R's state."""
+    found = _rows(session, """SELECT pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull, a.atthasdef,
+        a.attidentity::text, a.attgenerated::text, a.attcollation
+        FROM pg_attribute a WHERE a.attrelid = 'kalillac.users'::regclass AND a.attname = 'row_lock_anchor'
+        AND a.attnum > 0 AND NOT a.attisdropped""")
+    if not found:
+        return False
+    checks = _rows(session, """SELECT c.conname, c.contype::text, c.convalidated, c.condeferrable,
+        pg_get_constraintdef(c.oid, false) FROM pg_constraint c
+        WHERE c.conrelid = 'kalillac.users'::regclass AND c.conkey @> ARRAY[(SELECT a.attnum FROM pg_attribute a
+              WHERE a.attrelid = 'kalillac.users'::regclass AND a.attname = 'row_lock_anchor')]::smallint[]""")
+    _require(tuple(found[0]) == ("smallint", False, False, "", "", 0)
+             and [tuple(c) for c in checks] == [(ROW_LOCK_ANCHOR_CONSTRAINT, "c", True, False,
+                                                 "CHECK ((row_lock_anchor IS NULL))")])
+    return True
 
 
 def _operator_role():
@@ -555,8 +597,16 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
         CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) a
         WHERE n.nspname='kalillac' AND (c.relname=ANY(:t) OR (c.relname='users' AND a.privilege_type IN ('INSERT','UPDATE')))
         AND a.grantee<>c.relowner""", t=list(TABLES))}
-    _require(exposed == ({(table, executor, right, False, owner) for table, rights in EXECUTOR_TABLE_GRANTS.items()
-                          for right in rights} if revocation else set()))
+    expected = ({(table, executor, right, False, owner) for table, rights in EXECUTOR_TABLE_GRANTS.items()
+                 for right in rights} if revocation else set())
+    # E1a's one read for R (the startup gate reads the latch as R); present exactly while the latch is
+    # active, which classify() checks with the runtime login's other grants.
+    from kalillac_db.migration_roles import migration_app_role
+    try:
+        latch_reader = {("account_security_activation", migration_app_role(), "SELECT", False, owner)}
+    except ValueError:
+        raise V1SchemaRefused("inconsistent_schema") from None
+    _require(expected <= exposed <= expected | latch_reader)
     return owner
 
 
@@ -583,16 +633,17 @@ def _authority(session, owner) -> None:
         registration = validate_role_name(receipt["registration_role"], "registration role")
         runtime = migration_app_role()
         _require(migration_owner_role() == owner and len({registration, runtime, owner}) == 3)
-        effective_privileges(session, registration, runtime, owner)
+        runtime_state = effective_privileges(session, registration, runtime, owner)
     except (RegistrationUnavailable, ValueError, TypeError, KeyError):
         raise V1SchemaRefused("inconsistent_schema") from None
     principals = [runtime, registration, "public"]
     reach = _rows(session, """SELECT 1 FROM unnest(CAST(:p AS text[])) p WHERE pg_has_role(p::name,:o,'MEMBER')
         OR pg_has_role(p::name,:o,'USAGE') OR pg_has_role(p::name,:o,'SET')""", p=principals[:2], o=owner)
     rights = _rows(session, """SELECT 1 FROM unnest(CAST(:p AS text[])) p CROSS JOIN unnest(CAST(:t AS text[])) t
-        CROSS JOIN unnest(CAST(:r AS text[])) r WHERE has_table_privilege(p::name,'kalillac.'||t,r)
-        OR (r=ANY(CAST(:c AS text[])) AND has_any_column_privilege(p::name,'kalillac.'||t,r))""",
-        p=principals, t=list(TABLES), r=list(TABLE_RIGHTS), c=list(COLUMN_RIGHTS))
+        CROSS JOIN unnest(CAST(:r AS text[])) r WHERE (has_table_privilege(p::name,'kalillac.'||t,r)
+        OR (r=ANY(CAST(:c AS text[])) AND has_any_column_privilege(p::name,'kalillac.'||t,r)))
+        AND NOT (p=:runtime AND t='account_security_activation' AND r='SELECT')""",
+        p=principals, t=list(TABLES), r=list(TABLE_RIGHTS), c=list(COLUMN_RIGHTS), runtime=runtime)
     user_columns = _rows(session, """SELECT 1 FROM unnest(CAST(:p AS text[])) p CROSS JOIN unnest(CAST(:c AS text[])) c
         CROSS JOIN unnest(ARRAY['INSERT','UPDATE','REFERENCES']) r
         WHERE has_column_privilege(p::name,'kalillac.users',c,r)""", p=principals, c=list(USER_COLUMNS))
@@ -612,12 +663,12 @@ def _authority(session, owner) -> None:
     defaults = _rows(session, """SELECT 1 FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
         WHERE pg_get_userbyid(d.defaclrole)=:o AND a.grantee<>d.defaclrole""", o=owner)
     _require(not (reach or rights or user_columns or sequences or schema or owned or defaults))
-    return runtime, registration
+    return runtime, registration, runtime_state
 
 
 def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False,
                          resetting=False, changing=False, quarantining=False, deleting=False,
-                         crediting=False) -> None:
+                         crediting=False, active=False) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
     edge, and no ownership, grant or default privilege but 0013's, or 0014's,
     exact set.
@@ -637,7 +688,9 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=ANY(:r)""",
         r=roles_checked)}
     _require(set(present) == set(roles_checked) if revocation else set(present) <= {service, executor})
-    _require(all(flags == (False,) * 7 for flags in present.values()))
+    # E is never a login. S and P are NOLOGIN until the transition (E2) gives them their logins, and logins
+    # exactly while the latch is active; no other attribute, ever.
+    _require(all(flags == ((active and name != executor),) + (False,) * 6 for name, flags in present.items()))
     edges = {tuple(r) for r in _rows(session, """SELECT pg_get_userbyid(m.roleid),pg_get_userbyid(m.member),
         m.admin_option,m.inherit_option,m.set_option FROM pg_auth_members m
         WHERE pg_get_userbyid(m.roleid)=ANY(:r) OR pg_get_userbyid(m.member)=ANY(:r)""", r=roles_checked)}
@@ -700,11 +753,15 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         t=["users", "account_sessions", *(["account_recovery_tokens"] if resetting else []),
            *EXECUTOR_TABLE_GRANTS])}
     schema = _rows(session, "SELECT oid FROM pg_namespace WHERE nspname='kalillac'")[0][0]
-    _require(dependencies == {(executor, "pg_namespace", schema, "a"), (service, "pg_namespace", schema, "a"),
-                              *((executor, "pg_proc", function, "o") for function, _caller in functions),
-                              *((caller, "pg_proc", function, "a") for function, caller in functions),
-                              *((executor, "pg_class", oid, "a") for oid in relations.values()),
-                              *([(operator, "pg_namespace", schema, "a")] if operator else [])})
+    expected_dependencies = {(executor, "pg_namespace", schema, "a"), (service, "pg_namespace", schema, "a"),
+                             *((executor, "pg_proc", function, "o") for function, _caller in functions),
+                             *((caller, "pg_proc", function, "a") for function, caller in functions),
+                             *((executor, "pg_class", oid, "a") for oid in relations.values()),
+                             *([(operator, "pg_namespace", schema, "a")] if operator else [])}
+    # Active only: a CONNECT grant on this database for S and P, when the transition had to make one.
+    here = _rows(session, "SELECT oid FROM pg_database WHERE datname=current_database()")[0][0]
+    optional = {(role, "pg_database", here, "a") for role in (service, operator) if role and active}
+    _require(expected_dependencies <= dependencies <= expected_dependencies | optional)
     # Exact grants on those objects: schema USAGE (never CREATE) for both,
     # E's table and column privileges, nothing for S.
     granted = {tuple(r) for r in _rows(session, """SELECT 'schema',NULL::text,pg_get_userbyid(a.grantee),
@@ -729,9 +786,20 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
                            for (table, right), columns in columns_granted.items() for column in columns)})
 
 
-def require_qualified_authority(session_factory) -> None:
-    """Application-startup gate for V1; refuses unless fully qualified (never, here)."""
+AUTHORITY_VERSION = 1           # The authority catalog this release qualifies: 0013 to 0025 with E1a.
+_RELEASE_SHA = __import__("re").compile(r"[0-9a-f]{40}")
+
+
+def require_qualified_authority(session_factory, environ=None) -> None:
+    """Application-startup gate for V1: refuses unless the latch is active and qualified for exactly this
+    release. Qualified means the classifier accepted the active catalog (this release's head: every
+    authority, guard v3, the row-lock anchor, E1a's final runtime grants, S and P logins) and the latch's
+    binding is this database instance (checked by the classifier's foreign key and receipt), this
+    deployment (KALILLAC_DEPLOYMENT_ID), this release (KALILLAC_RELEASE_SHA, 40 hex) and this authority
+    version. Only the operator transition (E2) activates; startup never changes anything."""
+    import os
     from sqlalchemy import text
+    env = os.environ if environ is None else environ
     try:
         factory = session_factory()
         if factory is None:
@@ -743,6 +811,11 @@ def require_qualified_authority(session_factory) -> None:
             session.execute(text("SET LOCAL lock_timeout = '3s'"))
             session.execute(text("SET LOCAL statement_timeout = '3s'"))
             state = classify(session)
+            binding = None
+            if state == ACTIVE:
+                binding = session.execute(text(
+                    "SELECT authority_version, deployment_id, release_sha FROM kalillac.account_security_activation"
+                    " WHERE singleton_id = 1")).one()
     except V1SchemaRefused:
         raise
     except Exception:
@@ -751,7 +824,8 @@ def require_qualified_authority(session_factory) -> None:
         raise V1SchemaRefused("schema_not_prepared")
     if state == PREPARED:
         raise V1SchemaRefused("prepared_inactive")
-    # An active latch without a catalog this release can qualify is refused,
-    # never trusted: the S/E inventory is incomplete until recovery and the
-    # application's exposure are ported in their reviewed slices.
-    raise V1SchemaRefused("authority_catalog_unqualified")
+    release = env.get("KALILLAC_RELEASE_SHA", "")
+    deployment = env.get("KALILLAC_DEPLOYMENT_ID", "")
+    if (binding is None or binding[0] != AUTHORITY_VERSION or not deployment or binding[1] != deployment
+            or not _RELEASE_SHA.fullmatch(release) or binding[2] != release):
+        raise V1SchemaRefused("authority_binding_mismatch")

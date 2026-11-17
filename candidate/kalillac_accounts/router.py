@@ -356,6 +356,11 @@ def build_account_router(
     async def register(request: Request):
         if registration_http is not None:
             return await registration_http.request(request)
+        if v1_security is not None:
+            # V1 mode creates accounts only through the registration authority (role A, email-first):
+            # under V1-02E's final grants the runtime login cannot insert an account, and the legacy
+            # path would also skip the ownership proof.
+            return _error(503, "registration_unavailable")
         credentials = await _read_credentials(request)
 
         if isinstance(credentials, JSONResponse):

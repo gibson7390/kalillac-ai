@@ -52,8 +52,9 @@ CHANGE = "0020_v1_password_change"    # The private password-change authority (V
 ACTIVATION = "0021_registration_activation"  # The registration activation guard, above 0020.
 QUARANTINE = "0022_v1_quarantine"     # Quarantine and reinstatement (V1-02D), above 0021.
 DELETION = "0023_v1_deletion_request"  # Deletion requests (V1-02D), above 0022.
-CREDENTIAL = "0024_v1_recovery_credential"  # Reset-token issuance and the credential read path (D5), the head, above 0023.
-CHAIN = (CREDENTIAL, DELETION, QUARANTINE, ACTIVATION, CHANGE, RESET, SESSION_END, BILLING_CASES, FINANCE_HEAD, FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
+CREDENTIAL = "0024_v1_recovery_credential"  # Reset-token issuance and the credential read path (D5), above 0023.
+ANCHOR = "0025_v1_row_lock_anchor"  # The inert row-lock anchor (E1 prerequisite), the head, above 0024.
+CHAIN = (ANCHOR, CREDENTIAL, DELETION, QUARANTINE, ACTIVATION, CHANGE, RESET, SESSION_END, BILLING_CASES, FINANCE_HEAD, FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
          "0008_account_recovery_tokens", "0007_anonymous_usage", "0006_provider_usage_pools",
          "0005_account_usage_slots", "0004_account_billing", "0003_account_usage_daily",
          "0002_account_entitlements", "0001_account_tables")
@@ -76,7 +77,8 @@ def forbidden():
 
 def test_0012_follows_the_exact_0011_chain_directly_below_0013():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [CREDENTIAL]
+    assert script.get_heads() == [ANCHOR]
+    assert script.get_revision(ANCHOR).down_revision == CREDENTIAL
     assert script.get_revision(CREDENTIAL).down_revision == DELETION
     assert script.get_revision(DELETION).down_revision == QUARANTINE
     assert script.get_revision(QUARANTINE).down_revision == ACTIVATION
@@ -276,8 +278,11 @@ class FakeSession:
     def get_bind(self):
         return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
 
+    binding = None                     # The active latch's (authority_version, deployment_id, release_sha).
+
     def execute(self, statement, params=None):
         self.log.append(str(statement))
+        return SimpleNamespace(one=lambda: self.binding)
 
     @contextmanager
     def begin(self):
@@ -291,9 +296,8 @@ class FakeSession:
 
 
 @pytest.mark.parametrize("state,reason", [(v1_schema.LEGACY, "schema_not_prepared"),
-                                          (v1_schema.PREPARED, "prepared_inactive"),
-                                          (v1_schema.ACTIVE, "authority_catalog_unqualified")])
-def test_every_schema_state_refuses_on_startup_in_a_read_only_transaction(monkeypatch, state, reason):
+                                          (v1_schema.PREPARED, "prepared_inactive")])
+def test_an_inactive_schema_refuses_on_startup_in_a_read_only_transaction(monkeypatch, state, reason):
     log = []
     monkeypatch.setattr(v1_schema, "classify", lambda session: log.append("classify") or state)
     monkeypatch.setattr(v1_security, "load_v1_security", lambda *a, **k: pytest.fail("V1 loaded without authority"))
@@ -301,6 +305,46 @@ def test_every_schema_state_refuses_on_startup_in_a_read_only_transaction(monkey
         load_v1_startup(lambda: (lambda: FakeSession(log)), ENV)
     assert log == ["SET TRANSACTION READ ONLY", "SET LOCAL lock_timeout = '3s'",
                    "SET LOCAL statement_timeout = '3s'", "classify"]
+
+
+ACTIVE_ENV = {**ENV, "KALILLAC_DEPLOYMENT_ID": "deployment-1", "KALILLAC_RELEASE_SHA": "a" * 40}
+BOUND = (v1_schema.AUTHORITY_VERSION, "deployment-1", "a" * 40)
+
+
+def _active_session(monkeypatch, binding, log):
+    monkeypatch.setattr(v1_schema, "classify", lambda session: log.append("classify") or v1_schema.ACTIVE)
+
+    class Session(FakeSession):
+        pass
+    Session.binding = binding
+    return lambda: (lambda: Session(log))
+
+
+def test_an_active_latch_bound_to_this_deployment_and_release_qualifies(monkeypatch):
+    """E2: startup qualifies only an active latch the classifier accepted, bound to exactly this
+    deployment, release and authority version; the binding is read in the same read-only transaction."""
+    log, loaded = [], []
+    monkeypatch.setattr(v1_security, "load_v1_security", lambda *a, **k: loaded.append(a) or "security")
+    assert load_v1_startup(_active_session(monkeypatch, BOUND, log), ACTIVE_ENV) == "security"
+    assert log[:4] == ["SET TRANSACTION READ ONLY", "SET LOCAL lock_timeout = '3s'",
+                       "SET LOCAL statement_timeout = '3s'", "classify"]
+    assert len(log) == 5 and log[4].startswith("SELECT authority_version, deployment_id, release_sha FROM")
+    assert len(loaded) == 1
+
+
+@pytest.mark.parametrize("binding, environ", [
+    ((v1_schema.AUTHORITY_VERSION, "another-deployment", "a" * 40), ACTIVE_ENV),
+    ((v1_schema.AUTHORITY_VERSION, "deployment-1", "b" * 40), ACTIVE_ENV),
+    ((v1_schema.AUTHORITY_VERSION + 1, "deployment-1", "a" * 40), ACTIVE_ENV),
+    (BOUND, {**ACTIVE_ENV, "KALILLAC_RELEASE_SHA": ""}),
+    (BOUND, {**ACTIVE_ENV, "KALILLAC_RELEASE_SHA": "A" * 40}),
+    (BOUND, {**ACTIVE_ENV, "KALILLAC_DEPLOYMENT_ID": ""}),
+    (BOUND, ENV),
+], ids=["deployment", "release", "authority_version", "no_release", "malformed_release", "no_deployment", "unset"])
+def test_an_active_latch_bound_to_anything_else_refuses(monkeypatch, binding, environ):
+    monkeypatch.setattr(v1_security, "load_v1_security", lambda *a, **k: pytest.fail("V1 loaded without authority"))
+    with pytest.raises(V1SecurityConfigError, match=re.escape("(authority_binding_mismatch)")):
+        load_v1_startup(_active_session(monkeypatch, binding, []), environ)
 
 
 def test_application_startup_uses_the_gate_and_never_migrates():
@@ -336,7 +380,10 @@ def test_off_mode_application_import_loads_no_v1_schema_or_migration_machinery()
 
 
 def test_no_runtime_module_writes_or_names_the_security_tables():
-    allowed = {CANDIDATE / "kalillac_accounts" / "v1_schema.py"}
+    # The classifier reads the latch; the operator transition (E2) is its only writer, run by an operator;
+    # the E1a grant definitions it applies name the latch table for the runtime login's one read of it.
+    allowed = {CANDIDATE / "kalillac_accounts" / "v1_schema.py", CANDIDATE / "tools" / "v1_security_transition.py",
+               CANDIDATE / "kalillac_accounts" / "v1_final_grants.py"}
     for path in CANDIDATE.rglob("*.py"):
         parts = path.relative_to(CANDIDATE).parts
         if parts[0] in ("tests", "migrations") or path in allowed or "__pycache__" in parts:

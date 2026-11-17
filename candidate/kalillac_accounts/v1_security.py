@@ -239,8 +239,10 @@ def _enabled(env):
 
 def load_v1_startup(session_factory=None, environ=None):
     """Application startup: V1 also requires the qualified private-authority
-    catalog. Legacy and merely prepared (0012) schemas refuse; off mode returns
-    None before any database or schema import."""
+    catalog: an active latch bound to this deployment and release, at this
+    release's head with the final grants (only the operator transition, E2,
+    activates). Legacy, prepared and mismatched schemas refuse; off mode
+    returns None before any database or schema import."""
     env = os.environ if environ is None else environ
     if not _enabled(env):
         return None
@@ -249,7 +251,7 @@ def load_v1_startup(session_factory=None, environ=None):
         session_factory = get_session_factory
     from .v1_schema import V1SchemaRefused, require_qualified_authority
     try:
-        require_qualified_authority(session_factory)
+        require_qualified_authority(session_factory, env)
     except V1SchemaRefused as refused:
         raise V1SecurityConfigError(
             FLAG + " requires a qualified V1 private-authority catalog (" + refused.reason + ").") from None

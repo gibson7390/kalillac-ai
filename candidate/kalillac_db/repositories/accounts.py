@@ -11,7 +11,7 @@ import uuid
 
 from sqlalchemy import select, update, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from ..models import AccountSession, User
 
@@ -75,10 +75,14 @@ def get_signed_in_user(
 ) -> User | None:
     """Return the active user for a live, unrevoked, unexpired session."""
 
+    # The hash is deferred: the usage meter, quota, billing and files call this as the runtime
+    # login, which cannot read password hashes under V1-02E's final grants. A legacy caller that
+    # needs it loads it on access, inside its own transaction.
     row = session.execute(
         select(AccountSession, User)
         .join(User, User.id == AccountSession.user_id)
         .where(AccountSession.token_hash == token_hash)
+        .options(defer(User.password_hash))
     ).first()
 
     if row is None:

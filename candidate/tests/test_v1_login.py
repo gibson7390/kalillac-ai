@@ -159,11 +159,15 @@ def test_v1_off_login_is_unchanged_and_ignores_an_authority(db):
     assert authority.calls == [] and sessions(db) == 1                            # The legacy session, as before.
 
 
-def test_the_application_still_passes_no_authority_and_keeps_its_startup_gate():
+def test_the_application_builds_its_authority_only_after_the_startup_gate_qualified():
+    """E2: the application passes S's authority only when the gate qualified an active latch; until
+    then (and with V1 off) _v1_authority stays None and V1 routes answer 503, never the legacy path."""
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / "app_fastapi_candidate.py").read_text(encoding="utf-8")
-    assert "v1_authority" not in source
-    assert "_v1_account_security = _load_v1_startup()" in source
+    gate = source.index("_v1_account_security = _load_v1_startup()")
+    built = source.index("_v1_authority = _load_v1_authority(_v1_ordinary_factory, os.environ)")
+    assert gate < source.index("_v1_authority = None") < source.index("if _v1_account_security is not None:") < built
+    assert source.count("_load_v1_authority(") == 1 and "v1_authority=_v1_authority" in source
 
 
 # --- malformed authority answers and the login limiter (Codex reverification of ac9f12c) -------------

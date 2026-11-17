@@ -198,6 +198,15 @@ def test_v1_off_logout_is_unchanged(db):
         assert session.scalar(select(AccountSession.revoked_at)) is not None      # Revoked as before.
 
 
+def test_v1_mode_never_registers_on_the_legacy_path(db):
+    """Without the registration authority, V1 mode refuses to create an account as the runtime role."""
+    with v1_client(db, Authority()) as client:
+        response = client.post("/api/account/register", json={"email": "new@example.com", "password": PASSWORD})
+    assert (response.status_code, response.json()) == (503, {"error": "registration_unavailable"})
+    with db() as session:
+        assert session.scalar(select(func.count()).select_from(User)) == 0
+
+
 # --- sign-out -----------------------------------------------------------------------------------------
 
 def test_v1_logout_ends_exactly_the_presented_session_through_the_authority(db):

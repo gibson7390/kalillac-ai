@@ -38,6 +38,8 @@ CREDENTIAL = "kalillac.v1_credential(text)"
 @pytest.fixture
 def db_world(monkeypatch):
     with head_world(monkeypatch) as w:
+        # 0024's own catalog exactly: later revisions (0025) test theirs.
+        migrate(w, HEAD, down=True)
         yield w
         assert w.admin_engine.pool.checkedout() == 0 and w.runtime_engine.pool.checkedout() == 0
 

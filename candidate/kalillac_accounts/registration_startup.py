@@ -154,7 +154,12 @@ def _check_credential(raw,role,instance,deployment,ordinary_password,ring):
     return password
 
 def effective_privileges(session,role,runtime,owner):
-    """Inspect effective grants, memberships, exposed definer functions and guards."""
+    """Inspect effective grants, memberships, exposed definer functions and guards.
+
+    Returns the runtime login's state on users: "legacy" (its grants before V1-02E) or "final" (E1a:
+    column SELECT on every users column but password_hash, UPDATE only on the inert row_lock_anchor,
+    no INSERT or DELETE). Each is checked exactly; anything else raises. Which state is allowed is
+    decided by the caller (the V1 classifier pairs "final" with an active latch)."""
     names=[role,runtime,owner]
     rows=session.execute(text("SELECT rolname,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls,rolcanlogin,rolinherit FROM pg_catalog.pg_roles WHERE rolname=ANY(:names)"),{"names":names}).all()
     by={r[0]:r for r in rows}
@@ -173,12 +178,15 @@ def effective_privileges(session,role,runtime,owner):
     intent_insert=set("id,address_id,generation,purpose,format_version,address_lookup_key_version,address_lookup_digest,token_digest,email_ciphertext,email_nonce,email_key_version,is_current,state,created_at,expires_at,consumed_at,superseded_at,expired_at".split(","))
     intent_update=set("email_ciphertext,email_nonce,email_key_version,is_current,state,consumed_at,superseded_at,expired_at".split(","))
     user_insert=set("id,email,password_hash,created_at,updated_at,is_active,email_verified_at,registration_intent_id,quarantined_at,sessions_valid_after".split(","))
+    anchored=session.execute(text("SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=CAST('kalillac.users' AS regclass) AND a.attname='row_lock_anchor' AND a.attnum>0 AND NOT a.attisdropped)")).scalar_one()
+    final=bool(anchored) and session.execute(text("SELECT pg_catalog.has_column_privilege(:p,'kalillac.users','row_lock_anchor','UPDATE')"),{"p":runtime}).scalar_one()
+    runtime_update={"row_lock_anchor"} if final else {"password_hash","updated_at","is_active","email_verified_at"}
     for principal in [runtime,role]:
         for table in ["account_registration_intents","account_registration_activation","users","account_entitlements"]:
             columns=list(session.execute(text("SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid=CAST(:t AS regclass) AND a.attnum>0 AND NOT a.attisdropped"),{"t":"kalillac."+table}).scalars())
             for right in ["INSERT","UPDATE"]:
                 expected=(intent_insert if right=="INSERT" else intent_update) if table=="account_registration_intents" and principal==role else set()
-                if table=="users":expected=user_insert if right=="INSERT" else ({"password_hash","updated_at","is_active","email_verified_at"} if principal==runtime else set())
+                if table=="users":expected=(set() if principal==runtime and final else user_insert) if right=="INSERT" else (runtime_update if principal==runtime else set())
                 if table=="account_entitlements":expected=set(columns) if principal==runtime or right=="INSERT" else set()
                 for col in columns:
                     has=session.execute(text("SELECT pg_catalog.has_column_privilege(:p,:t,:c,:r)"),{"p":principal,"t":"kalillac."+table,"c":col,"r":right}).scalar_one()
@@ -198,8 +206,13 @@ def effective_privileges(session,role,runtime,owner):
             if principal==runtime and table not in ("users","account_registration_intents","account_registration_activation"):continue
             for right in ["SELECT","DELETE"]:
                 expected = table in ("users","account_registration_intents","account_registration_activation","account_entitlements") if right=="SELECT" else (table=="account_registration_intents" if principal==role else table=="users")
+                if final and principal==runtime and table=="users":expected=False   # Column SELECT only; no DELETE.
                 actual=session.execute(text("SELECT pg_catalog.has_table_privilege(:p,:t,:r)"),{"p":principal,"t":"kalillac."+table,"r":right}).scalar_one()
                 if bool(actual)!=expected:raise RegistrationUnavailable()
+    if final:
+        # E1a: R reads every users column but the password hash.
+        for col in session.execute(text("SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid=CAST('kalillac.users' AS regclass) AND a.attnum>0 AND NOT a.attisdropped")).scalars():
+            if session.execute(text("SELECT pg_catalog.has_column_privilege(:p,'kalillac.users',:c,'SELECT')"),{"p":runtime,"c":col}).scalar_one()!=(col!="password_hash"):raise RegistrationUnavailable()
             if principal==role and table not in ("users","account_registration_intents","account_registration_activation","account_entitlements"):
                 for right in ["INSERT","UPDATE","TRUNCATE","REFERENCES","TRIGGER"]:
                     if session.execute(text("SELECT pg_catalog.has_table_privilege(:p,:t,:r)"),{"p":principal,"t":"kalillac."+table,"r":right}).scalar_one():raise RegistrationUnavailable()
@@ -220,6 +233,7 @@ def effective_privileges(session,role,runtime,owner):
                 if right in ("SELECT","INSERT","UPDATE","REFERENCES") and session.execute(text("SELECT pg_catalog.has_any_column_privilege(:p,:t,:r)"),{"p":principal,"t":"kalillac."+table,"r":right+" WITH GRANT OPTION"}).scalar_one():raise RegistrationUnavailable()
     from .registration_schema import validate_security_definitions
     validate_security_definitions(session,role,runtime,owner)
+    return "final" if final else "legacy"
 
 
 def _validate_aes_gcm():
@@ -297,7 +311,11 @@ def bootstrap(factory,gateway,env=None):
                 from datetime import datetime
                 if datetime.fromisoformat(activation[k].replace("Z","+00:00"))!=getattr(row,k):raise RegistrationUnavailable()
             if activation["deployment_id"]!=deployment or _uuid(activation["database_instance_id"])!=instance:raise RegistrationUnavailable()
-            effective_privileges(s,role,migration_app_role(),migration_owner_role())
+            if effective_privileges(s,role,migration_app_role(),migration_owner_role())=="final":
+                # E1a's grants are in place: only V1 mode may run (a V1-off binary is never a rollback).
+                from os import environ as _environ
+                from .v1_security import _enabled as _v1_enabled
+                if not _v1_enabled(_environ):raise RegistrationUnavailable()
             if s.scalar(select(func.count()).select_from(User).where(User.email_verified_at.is_(None)))!=0:raise RegistrationUnavailable()
             last=None
             while True:

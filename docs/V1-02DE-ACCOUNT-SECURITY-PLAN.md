@@ -5,7 +5,8 @@ implemented, keeping the private database authorities and adding no legacy path.
 (default off; the application's startup gate still refuses V1 mode and passes no authority): D1; every
 D2 authority (migrations 0018 to 0023); D3's routes (login, sign-out, revoking sessions, password
 change, the customer's deletion request, recovery confirmation; no email-verification routes in V1).
-D5 (migration 0024) and D4 (operator tool) implemented. Remaining: E1 to E3. Nothing here authorizes a production migration, a role or
+D5 (0024), D4 (operator tool), E1a (0025 and the final grants), E2 (transition) and E3 (lifecycle)
+implemented. Remaining: E1b (entitlement and billing grants, after Milestone 3's reviewed billing path). Nothing here authorizes a production migration, a role or
 credential change, or activation.
 
 Sources: the code on `feat/file-assistant-v1` (migrations 0012 to 0014, `kalillac_accounts/v1_security.py`,
@@ -203,12 +204,77 @@ final post-E1 grants: login succeeds through the new path, and R alone can no lo
 itself stays its own checkpoint. **Met by 0024** (above): the path exists and HTTP sign-in is tested with
 R's hash read revoked.
 
+#### E1 design (written 2026-11-17, from the code at `7c9ec7a`)
+
+**What R holds today** (0001, 0008, 0009, 0011; checked exactly by `registration_startup.effective_privileges`):
+`users` SELECT and DELETE (table), INSERT (all identity columns), UPDATE (`password_hash`, `updated_at`,
+`is_active`, `email_verified_at`); `account_sessions` SELECT, INSERT, UPDATE, DELETE; reset and
+verification tokens SELECT, INSERT, UPDATE; entitlements and billing their full DML.
+
+**What V1 mode needs from R after D3 and D5:** reads of non-credential `users` columns and of
+`account_sessions` (V1-01's authorization, the D3 routes' identity, the profile after sign-in), reads of
+reset-token rows (the precheck; digests of 32 random bytes), and row locks on `users` (V1-01, billing,
+Spaces). No write to any account table.
+
+**The row-lock anchor (migration 0025, self-applied, inert).** PostgreSQL grants `FOR UPDATE` (and every
+row-lock mode) only with UPDATE privilege on some column (measured, D5 table). 0025 adds
+`users.row_lock_anchor` (nullable, no default, so the column is metadata-only on existing rows) with
+`CHECK (row_lock_anchor IS NULL)`. After E1, R's only UPDATE right is on that column, so the only update
+R can make sets NULL to NULL: no state can change, no trigger or latch is consulted, and the identity
+guard is untouched. 0025 changes no grant; before E1 nothing uses the column.
+
+**E1a, the account grants (prepared statements in code, applied only by E2 inside its transaction):**
+on `users`, revoke R's table SELECT, DELETE, INSERT and every UPDATE, then grant SELECT on every column
+but `password_hash` and UPDATE (`row_lock_anchor`); on `account_sessions`, revoke INSERT, UPDATE, DELETE
+(SELECT stays); on `account_recovery_tokens`, revoke INSERT and UPDATE (SELECT stays); on
+`account_email_verification_tokens`, revoke everything. `registration_startup` and the classifier accept
+exactly one of the two states, paired with the latch: `prepared` ⇔ today's grants, `active` ⇔ E1a's.
+
+**Found while implementing E1a: whole-row reads of `users`.** `get_signed_in_user` (the usage meter, quota,
+billing routes, files' legacy path and the email-verification routes) and the billing service's account
+check loaded the whole `User` row, password hash included, so under E1a every one of them would fail with
+42501. They now defer the hash (`get_signed_in_user`) or select only the id (billing); legacy password
+paths still load it on access in their own transaction. Proven on PostgreSQL under the final grants
+(`test_under_e1a_every_runtime_read_of_an_account_still_works_without_the_hash`). A model-wide deferral
+was tried first and rejected: legacy code and tests read the hash from detached rows.
+
+**E1b, entitlements and billing:** R's DML on `account_entitlements`, `account_billing`, billing cases
+and webhook records moves behind a reviewed billing path first (Milestone 3, blueprint B2), then the
+same pattern. Until then E1a leaves those grants exactly as they are, and the blueprint shows E1b open.
+
+**Rollback.** E1a is reversible only by the operator, inside the transition tool's own rollback
+command, while ingress is closed: the inverse grants are generated from the same table, applied in
+one transaction, verified, and the latch returned to `prepared`. A V1-off binary refuses to start
+against an active latch (E2), so a downgrade of the application alone is never a rollback.
+
 ### E2. The operator transition
 
 `tools/v1_security_transition.py`: with ingress closed, checks the catalog exactly, gives S its login
 and credential, applies E1, moves the latch to `active` bound to the database instance, schema version
 and release, and records it. Dry-run and fixture tested. Once active, a V1-off or older binary refuses
 account startup (an old broad-grant binary is not a rollback).
+
+**Implemented** (`feat/account-security-e1-e3`, with E1 and E3). `check`, `activate --release-sha` and
+`rollback`, each one transaction on the operator's administrative login (a protected file holds its URL):
+the head (`0025`) and the classifier's `prepared` verdict; no open session of R, A, S or P (ingress
+closed, measured in `pg_stat_activity`); E1a; S and P get LOGIN from their own protected credential
+files, sent only as SCRAM-SHA-256 verifiers so no password reaches SQL or a server log, and CONNECT if
+they lack it; the latch becomes `active`, bound to the database instance, `KALILLAC_DEPLOYMENT_ID`, the
+release and `AUTHORITY_VERSION`; the classifier must then accept `active` inside the same transaction.
+Without `--apply` everything runs and verifies and is rolled back. With it, the tool logs in as S through
+the application's path after committing and rolls back automatically if that fails. `rollback` is the
+exact inverse, verified the same way. Intent and outcome go to the append-only operator record.
+
+What changed elsewhere for E2: the classifier pairs the latch with R's grants (`prepared` ⇔ legacy,
+`active` ⇔ E1a), accepts S and P as logins exactly while active, and allows their CONNECT dependency only
+then; E1a gives R SELECT on the latch table (the startup gate classifies as R and must read it), the only
+V1-table right R ever holds; `require_qualified_authority` now qualifies an active latch at this
+release's head bound to `KALILLAC_DEPLOYMENT_ID` and the new `KALILLAC_RELEASE_SHA` (refusing
+`authority_binding_mismatch` otherwise); `registration_startup.effective_privileges` accepts exactly
+the legacy or the final runtime state and a V1-off binary refuses to start against the final one; and
+the application builds S's authority only after the gate qualified. **Recorded constraint:** every
+migration's postcondition requires S and P to be NOLOGIN, so a migration after activation needs its own
+active-aware preflight (or a rollback, migration, activation sequence).
 
 ### E3. The synthetic lifecycle test
 
@@ -217,6 +283,13 @@ separate verification step in V1), log in twice, revoke others, change the passw
 recovery, reset, revoke all, operator quarantine (every session refused), reinstate, request deletion
 (login refused) — asserting sessions, epochs and audit events after each step, and that R cannot write
 any of it, under the final post-E1 grants.
+
+**Implemented** (`test_v1_lifecycle_postgres.py`): after `activate`, one account goes through every step
+above over HTTP behind the unsafe-request guard (registration through the email-first routes with
+authority A; the operator steps through the support tool as P). After each step it checks sessions,
+the epoch and audit events, and a statement trigger installed after activation shows every write was
+A's, S's or P's, never R's. The customer's admission budget is exercised too: a third manual operation
+within seconds answers `429 too_many_operations` with `Retry-After` and changes nothing.
 
 ## 3. Order and checkpoints
 
