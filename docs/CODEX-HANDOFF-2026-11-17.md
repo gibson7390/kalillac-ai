@@ -159,6 +159,15 @@ chat's daily quota (`kalillac_accounts/quota.py`) authorize through V1-01 in V1 
   `reasoning_mode` with the same permission as `/api/chat`. Can the PAID evidence reach a Space send for
   any account other than the one the send is saved and charged to?
 * `tools/owner_report.py`: counts only, one read-only snapshot; does any output carry a person's data?
+* `_file_request_scope` and `_file_failure` now live at module level (unchanged bodies) so the PostgreSQL
+  journey can run the real scope; `FILE_REQUEST_MODEL_ATTEMPTS` mirrors `MAX_TOOL_ROUNDS + 1`, checked
+  at startup with files on. Is there any path where the mirrored value is used without that check?
+* The chat's Spaces dialog: Space rename, instructions and delete; conversation rename and delete; each
+  write sends the version read just before it. The dialog's late `close` event no longer ends a newer
+  opening (it did, intermittently, in the browser tests).
+* Two new real-PostgreSQL journeys under V1: Space sends (FREE, PAID with DEEP after Stripe's webhook,
+  FREE again after cancellation) and files and images (refused on Free, the clean copy and a PAID-scope
+  image request on Premium, refused again after cancellation).
 
 ## Not in these checkpoints
 
