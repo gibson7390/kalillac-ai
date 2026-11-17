@@ -35,8 +35,10 @@ def build_authenticator(*, settings, v1_security=None, session_factory=None, clo
                 return None
 
             def payload(session, account):
-                tier = effective_entitlement(get_entitlement(session, account.id), account.authorized_at).tier
-                return FileAccount(str(account.id), tier == TIER_PAID)
+                from kalillac_accounts.paid_access import VerifiedAccount
+                effective = effective_entitlement(get_entitlement(session, account.id), account.authorized_at)
+                return FileAccount(str(account.id), effective.tier == TIER_PAID,
+                                   VerifiedAccount(account.id, effective))
             try:
                 return await v1_security.read_async(token_hash, payload)
             except (RequestRejected, V1SecurityUnavailable):

@@ -15024,6 +15024,9 @@ if _recovery_enabled or _email_verification_enabled:
 _usage_meter = None
 _usage_quota_context = ContextVar("account_quota_request", default=None)
 _anonymous_quota_context = ContextVar("anonymous_quota_request", default=None)
+# B2: the chat request's V1-verified account and effective entitlement (kalillac_accounts.paid_access),
+# or None. Set for exactly one request by api_chat and read where the request is classified.
+_verified_account_context = ContextVar("v1_verified_account", default=None)
 from kalillac_accounts.usage_limits import load_usage_limits
 _usage_limits = load_usage_limits()
 _usage_quota = None
@@ -15170,13 +15173,19 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
         reserves in the attempt pool and, with Financial Safeguards, in the ledger within the request
         ceiling of its scope. That scope is FREE, as for every chat request: nothing issues paid
         evidence until Milestone 3 links a verified subscription through the V1-authenticated identity,
-        so a paying customer's file request is bounded by the FREE request ceiling until then. With
-        ceilings or request budgets on: its own RequestBudget (a longer deadline, one model attempt per
-        tool round plus the reply, no search tool exists). With both off, nothing changes."""
+        so a paying customer's file request was bounded by the FREE request ceiling. Since B2 a V1-verified
+        paid account's request carries PAID evidence for this control request only (paid_access); the
+        legacy path never does. With ceilings or request budgets on: its own RequestBudget (a longer
+        deadline, one model attempt per tool round plus the reply, no search tool exists). With both off,
+        nothing changes."""
+        from kalillac_accounts.paid_access import paid_evidence as _paid_evidence
         control, control_token = provider_controls.begin_request()
         try:
             if control is not None:
-                provider_controls.account_status(True)   # Every file request is a signed-in account's.
+                verified = getattr(account, "verified", None)
+                # Every file request is a signed-in account's; paid only with V1 evidence for this request.
+                provider_controls.account_status(True, _paid_evidence(
+                    control, verified, verified.account_id if verified is not None else None))
             if control is None and _request_limits is None:
                 yield
                 return
@@ -15618,7 +15627,11 @@ async def _api_chat_with_budget(request, req, history, limits, session, binding=
         else:
             sid, session.work = binding.begin(budget)
         if provider_controls.SERVICE is not None:
-            provider_controls.account_status(meter_user_id is not None)
+            from kalillac_accounts.paid_access import paid_evidence as _paid_evidence, resolved_account
+            _verified = _verified_account_context.get()
+            _account = resolved_account(meter_user_id, _verified)
+            provider_controls.account_status(_account is not None, _paid_evidence(
+                provider_controls.current_request(), _verified, _account))
             provider_controls.session_admit(
                 get_session_state_by_id(sid) if binding is None else binding.workspace.state,
                 SESSION_LOCK,
@@ -16080,12 +16093,22 @@ async def _api_chat_response(request):
     # id, set by the dispatch the moment the id is resolved. The handler's own
     # claim on it is released here, exactly once; a worker that outlives the
     # handler holds its own claim until it really exits.
+    # B2: in V1 mode, the request's V1-authorized account and its effective
+    # entitlement, read once (kalillac_accounts.paid_access). It decides the
+    # reasoning permission here and the PAID evidence at classification; with
+    # V1 off, or any refusal, nothing is paid.
+    _verified = None
+    if _v1_account_security is not None:
+        from kalillac_accounts.paid_access import verified_account as _verified_account
+        _verified = await _verified_account(request, _v1_account_security, _account_settings.cookie_name)
+    _verified_token = _verified_account_context.set(_verified)
+
     # The request's reasoning mode, refused here before any work, quota or
-    # provider attempt. No request is treated as paid: nothing issues a paid
-    # entitlement yet, so a mode reserved for paid requests is refused for all.
+    # provider attempt. Paid modes need the verified paid entitlement above.
     try:
-        reasoning_mode = reasoning_modes.begin(req.reasoning_mode, paid=False)
+        reasoning_mode = reasoning_modes.begin(req.reasoning_mode, paid=_verified is not None and _verified.paid)
     except reasoning_modes.ReasoningModeRefused as refused:
+        _verified_account_context.reset(_verified_token)
         return JSONResponse(status_code=refused.status, content={"error": refused.code})
 
     session = SimpleNamespace(work=None)
@@ -16095,6 +16118,7 @@ async def _api_chat_response(request):
         response = _session_ended_response()
     finally:
         reasoning_modes.end(reasoning_mode)
+        _verified_account_context.reset(_verified_token)
         if session.work is not None:
             _release_session_work(session.work)
 

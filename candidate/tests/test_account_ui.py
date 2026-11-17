@@ -93,7 +93,7 @@ class FakeAccountApi:
         self.reset()
 
     def reset(self, *, enabled=True, non_json_404=False, signed_in=False, tier="free",
-              verification=None, billing=None):
+              verification=None, billing=None, security=False):
         with self.lock:
             self.enabled, self.non_json_404 = enabled, non_json_404
             self.password = PASSWORD
@@ -107,6 +107,9 @@ class FakeAccountApi:
             # None: verification off (no email_verified field); else verified?
             self.verified = verification
             self.billing = billing
+            # False: the server's account-security mode is off (the routes are not mounted).
+            self.security = security
+            self.deletion_requested = False
             self.recovery_tokens = {TOKEN}
             self.verification_tokens = {TOKEN}
             self.overrides: dict[tuple[str, str], list] = {}
@@ -211,6 +214,40 @@ class FakeAccountApi:
                 self.verified = True
                 return 200, {"ok": True}, {}
             return 400, {"error": "invalid_or_expired_token"}, {}
+        if path in ("/api/account/security", "/api/account/sessions/revoke-others",
+                    "/api/account/sessions/revoke-all", "/api/account/password", "/api/account/deletion-request"):
+            if not self.security:
+                return 404, {"detail": "Not Found"}, {}
+            if not authed:
+                return unauth
+            if (method, path) == ("GET", "/api/account/security"):
+                return 200, {"security": {"sessions": True, "password_change": True, "deletion_request": True}}, {}
+            if (method, path) == ("POST", "/api/account/sessions/revoke-others"):
+                if body != {}:
+                    return 400, {"error": "invalid_body"}, {}
+                self.sessions = {session}
+                return 200, {"ok": True}, {}
+            if (method, path) == ("POST", "/api/account/sessions/revoke-all"):
+                if body != {}:
+                    return 400, {"error": "invalid_body"}, {}
+                self.sessions.clear()
+                return 200, {"ok": True}, {"Set-Cookie": "kalillac_account=; Max-Age=0; Path=/; HttpOnly"}
+            if (method, path) == ("POST", "/api/account/password"):
+                if not exact("current_password", "new_password"):
+                    return 400, {"error": "invalid_body"}, {}
+                if body["current_password"] != self.password:
+                    return 403, {"error": "invalid_current_password"}, {}
+                self.password = body["new_password"]
+                self.sessions = {session}
+                return 200, {"ok": True}, {}
+            if (method, path) == ("POST", "/api/account/deletion-request"):
+                if not exact("current_password"):
+                    return 400, {"error": "invalid_body"}, {}
+                if body["current_password"] != self.password:
+                    return 403, {"error": "invalid_current_password"}, {}
+                self.deletion_requested = True
+                self.sessions.clear()
+                return 200, {"ok": True}, {"Set-Cookie": "kalillac_account=; Max-Age=0; Path=/; HttpOnly"}
         if path.startswith("/api/account/billing"):
             if self.billing is None:
                 return 404, {"detail": "Not Found"}, {}
@@ -438,6 +475,9 @@ def test_account_module_uses_only_fixed_same_origin_paths_and_safe_fetch_options
         "/api/account/entitlements", "/api/account/recovery/request", "/api/account/recovery/confirm",
         "/api/account/email-verification/request", "/api/account/email-verification/confirm",
         "/api/account/billing", "/api/account/billing/checkout", "/api/account/billing/portal",
+        # Account security (V1 mode): offered only when the server's /security route answers.
+        "/api/account/security", "/api/account/sessions/revoke-others", "/api/account/sessions/revoke-all",
+        "/api/account/password", "/api/account/deletion-request",
     }
     assert "'checkout.stripe.com'" in api and "'billing.stripe.com'" in api
     for name, source in account_sources().items():
@@ -1111,6 +1151,132 @@ def test_sign_out(page):
     assert page.text("[data-testid='account-notice']").startswith("You’re signed out")
     assert api_calls(page, "/api/account/logout")[0]["body"] is None
     assert page.site.api.sessions == set()
+
+
+# --- account security: sessions, password, deletion request ------------------------------------------------------
+
+
+SECURITY_SECTIONS = ("sessions-section", "password-section", "deletion-section")
+
+
+def open_security(page, **reset):
+    page.site.api.reset(signed_in=True, security=True, **reset)
+    page.open("/account")
+    page.wait_for("document.querySelector('[data-testid=\"deletion-section\"]')")
+
+
+def test_security_sections_appear_only_where_the_server_offers_them(page):
+    page.site.api.reset(signed_in=True)                      # The security route is not mounted.
+    page.open("/account")
+    page.wait_for("document.querySelector('[data-testid=\"button-sign-out\"]')")
+    page.after_json_reads(3)                                 # /me, /entitlements and the 404 probe are handled.
+    for section in SECURITY_SECTIONS:
+        assert page.eval(f"return document.querySelector('[data-testid=\"{section}\"]');") is None
+    assert [c["method"] for c in api_calls(page, "/api/account/security")] == ["GET"]
+    open_security(page)
+    for section in SECURITY_SECTIONS:
+        assert page.eval(f"return !!document.querySelector('[data-testid=\"{section}\"]');")
+    # A free account is not told to cancel a subscription it does not have.
+    assert page.eval("return document.querySelector('[data-testid=\"deletion-subscription-note\"]');") is None
+
+
+def test_sign_out_other_sessions_keeps_this_browser_signed_in(page):
+    open_security(page)
+    page.site.api.sessions.add("another-device")
+    page.click_selector("[data-testid='button-revoke-others']")
+    page.wait_for("document.querySelector('[data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='account-notice']") == "Other sessions were signed out\nThis browser stays signed in."
+    assert api_calls(page, "/api/account/sessions/revoke-others")[0]["body"] == {}
+    assert len(page.site.api.sessions) == 1 and "another-device" not in page.site.api.sessions
+    assert page.eval("return location.pathname;") == "/account"
+
+
+def test_sign_out_everywhere_returns_to_sign_in(page):
+    open_security(page)
+    page.click_selector("[data-testid='button-revoke-all']")
+    page.wait_for("location.pathname === '/account/sign-in' && document.querySelector('[data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='account-notice']") == "You’re signed out everywhere\nSign in again to continue."
+    assert api_calls(page, "/api/account/sessions/revoke-all")[0]["body"] == {} and page.site.api.sessions == set()
+
+
+def test_password_change_sends_exactly_both_passwords_and_handles_a_wrong_one(page):
+    open_security(page)
+    # Inline validation first: nothing is sent.
+    page.click_selector("[data-testid='password-section'] button[type=submit]")
+    page.wait_for("document.querySelector('#security-current-password-error').textContent")
+    assert page.text("#security-current-password-error") == "Enter your current password."
+    assert api_calls(page, "/api/account/password") == [] and page.active() == "security-current-password"
+    # A wrong current password is reported on its own field.
+    page.type_into("#security-current-password", "not the password")
+    page.type_into("#security-new-password", NEW_PASSWORD)
+    page.click_selector("[data-testid='password-section'] button[type=submit]")
+    page.wait_for("document.querySelector('#security-current-password-error').textContent.startsWith('That')")
+    assert page.text("#security-current-password-error") == "That isn’t your current password."
+    # The right one changes it; both inputs are emptied and never mirrored into attributes.
+    page.eval("document.querySelector('#security-current-password').value = '';")
+    page.type_into("#security-current-password", PASSWORD)
+    page.click_selector("[data-testid='password-section'] button[type=submit]")
+    page.wait_for("document.querySelector('[data-testid=\"password-section\"] [data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='password-section'] [data-testid='account-notice']").startswith("Your password was changed")
+    sent = api_calls(page, "/api/account/password")[-1]
+    assert sent["body"] == {"current_password": PASSWORD, "new_password": NEW_PASSWORD}
+    assert sent["content_type"] == "application/json" and page.site.api.password == NEW_PASSWORD
+    assert page.eval("return [...document.querySelectorAll('[data-testid=\"password-section\"] input')]"
+                     ".map(i => i.value + '|' + (i.getAttribute('value') ?? '')).join(',');") == "|,|"
+    assert page.eval("return location.pathname;") == "/account"
+
+
+@pytest.mark.parametrize("status, code, headers, title", [
+    (429, "too_many_attempts", {"Retry-After": "120"}, "Too many attempts"),
+    (429, "too_many_operations", {"Retry-After": "45"}, "Too many attempts"),
+    (403, "account_unavailable", {}, "This account can’t be changed right now"),
+    (503, "security_unavailable", {}, "That couldn’t be completed right now"),
+])
+def test_password_change_failures_are_explained_without_detail(page, status, code, headers, title):
+    open_security(page)
+    page.site.api.override("POST", "/api/account/password", status, {"error": code}, headers)
+    page.type_into("#security-current-password", PASSWORD)
+    page.type_into("#security-new-password", NEW_PASSWORD)
+    page.click_selector("[data-testid='password-section'] button[type=submit]")
+    page.wait_for("document.querySelector('[data-testid=\"password-section\"] [data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='password-section'] [data-testid='account-notice']").startswith(title)
+    assert page.site.api.password == PASSWORD
+
+
+def test_deletion_request_needs_the_password_and_signs_the_account_out(page):
+    billing = {"subscription_status": "active", "cancel_at_period_end": False,
+               "current_period_end": "2026-12-01T00:00:00+00:00", "portal_available": True}
+    open_security(page, tier="paid", billing=billing)
+    assert page.text("[data-testid='deletion-subscription-note']") == (
+        "This request doesn’t cancel a paid subscription. Cancel it first in Manage billing.")
+    # The form opens only on request, and nothing is sent without the password.
+    assert page.eval("return document.querySelector('#deletion-current-password');") is None
+    page.click_selector("[data-testid='button-open-deletion']")
+    page.wait_for("document.activeElement?.id === 'deletion-current-password'")
+    page.click_selector("[data-testid='button-request-deletion']")
+    page.wait_for("document.querySelector('#deletion-current-password-error').textContent")
+    assert api_calls(page, "/api/account/deletion-request") == []
+    page.type_into("#deletion-current-password", "not the password")
+    page.click_selector("[data-testid='button-request-deletion']")
+    page.wait_for("document.querySelector('#deletion-current-password-error').textContent.startsWith('That')")
+    assert not page.site.api.deletion_requested
+    page.eval("document.querySelector('#deletion-current-password').value = '';")
+    page.type_into("#deletion-current-password", PASSWORD)
+    page.click_selector("[data-testid='button-request-deletion']")
+    page.wait_for("location.pathname === '/account/sign-in' && document.querySelector('[data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='account-notice']") == (
+        "Your deletion request was received\n"
+        "This account is signed out everywhere and can no longer be used to sign in.")
+    assert api_calls(page, "/api/account/deletion-request")[-1]["body"] == {"current_password": PASSWORD}
+    assert page.site.api.deletion_requested and page.site.api.sessions == set()
+
+
+def test_an_expired_session_during_a_security_action_returns_to_sign_in(page):
+    open_security(page)
+    page.site.api.sessions.clear()
+    page.click_selector("[data-testid='button-revoke-others']")
+    page.wait_for("location.pathname === '/account/sign-in' && document.querySelector('[data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='account-notice']") == "Your session has ended\nSign in again to continue."
 
 
 # --- navigation, metadata and history ----------------------------------------------------------------------------

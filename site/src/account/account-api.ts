@@ -188,6 +188,53 @@ export async function getEntitlements(): Promise<ApiResult<Entitlements>> {
   return failure(response, json);
 }
 
+/* --- account security (sessions, password, deletion request) --------------------- */
+
+export type AccountSecurity = {
+  sessions: boolean;
+  password_change: boolean;
+  deletion_request: boolean;
+};
+
+/* What this server lets a signed-in account manage. The route exists only
+   where the server's account-security mode provides these operations; a 404
+   means none of them is offered here, and the page shows none. */
+export async function getAccountSecurity(): Promise<ApiResult<AccountSecurity>> {
+  const result = await request('GET', '/api/account/security');
+  if ('ok' in result) return result;
+  const { response, json } = result;
+  if (response.status === 200 && isRecord(json) && isRecord(json.security)) {
+    const s = json.security;
+    if (typeof s.sessions === 'boolean' && typeof s.password_change === 'boolean' &&
+        typeof s.deletion_request === 'boolean') {
+      return { ok: true, status: 200, data: {
+        sessions: s.sessions, password_change: s.password_change, deletion_request: s.deletion_request,
+      } };
+    }
+  }
+  return failure(response, json);
+}
+
+/* Ends every other session of this account; this browser stays signed in. */
+export function revokeOtherSessions(): Promise<ApiResult<null>> {
+  return acknowledge('POST', '/api/account/sessions/revoke-others', {});
+}
+
+/* Ends every session of this account, this browser's included. */
+export function revokeAllSessions(): Promise<ApiResult<null>> {
+  return acknowledge('POST', '/api/account/sessions/revoke-all', {});
+}
+
+export function changePassword(currentPassword: string, newPassword: string): Promise<ApiResult<null>> {
+  return acknowledge('POST', '/api/account/password',
+    { current_password: currentPassword, new_password: newPassword });
+}
+
+/* Requests deletion of the account: every session ends and sign-in closes. */
+export function requestAccountDeletion(currentPassword: string): Promise<ApiResult<null>> {
+  return acknowledge('POST', '/api/account/deletion-request', { current_password: currentPassword });
+}
+
 /* --- recovery and verification ------------------------------------------------- */
 
 export function requestRecovery(email: string): Promise<ApiResult<null>> {

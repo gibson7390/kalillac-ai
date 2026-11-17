@@ -82,6 +82,13 @@
 .acct-button-secondary:hover { border-color: #8faad6; background: #f7faff; }
 .acct-button-secondary:active { background: #edf3ff; box-shadow: none; }
 .acct-button-compact { min-height: var(--k-control-compact); padding: 10px 16px; font-size: 14px; }
+/* An irreversible request: a quiet outlined control, never a filled call to action. */
+.acct-button-danger { background: #fff; border-color: #e3b4b4; color: #8f1d1d; box-shadow: var(--k-inner-light), var(--k-shadow-1); }
+.acct-button-danger:hover { border-color: #c96a6a; background: #fff7f7; }
+.acct-button-danger:active { background: #fdecec; box-shadow: none; }
+.acct-button-danger[aria-disabled='true'] { color: #b06a6a; border-color: #ecd0d0; }
+/* A form inside an overview section keeps the section's measure. */
+.acct-form-inline { max-width: 440px; margin-top: 14px; }
 .acct-button[aria-disabled='true'] { cursor: progress; transform: none; }
 .acct-button-primary[aria-disabled='true'] { background-color: #2f7cf0; box-shadow: var(--k-shadow-1); }
 .acct-spinner { width: 14px; height: 14px; flex: none; border: 2px solid currentColor; border-right-color: transparent;

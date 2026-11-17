@@ -199,11 +199,18 @@ def test_the_application_classifies_signed_in_users_as_free(ledger):
     finally:
         provider_controls.SERVICE = provider_controls_service
     source = (CANDIDATE / "app_fastapi_candidate.py").read_text(encoding="utf-8")
-    # The chat's classification, and the file assistant's (only ever a signed-in account); neither
-    # passes paid evidence.
-    assert sorted(re.findall(r"provider_controls\.account_status\(([^)]*)\)", source)) == [
-        "True", "meter_user_id is not None"]
+    # The chat's classification, and the file assistant's (only ever a signed-in account). Since B2 each
+    # passes the evidence the paid seam returns for its own control request (None unless a V1-verified
+    # paid account matches); the application never issues evidence itself, and the seam is the only
+    # issuer outside the finance package.
+    assert sorted(re.findall(r"provider_controls\.account_status\(([^(]*)\(", source)) == [
+        "True, _paid_evidence", "_account is not None, _paid_evidence"]
     assert "issue_paid_entitlement" not in source
+    issuers = sorted("/".join(path.relative_to(CANDIDATE).parts) for path in CANDIDATE.rglob("*.py")
+                     if path.relative_to(CANDIDATE).parts[0] not in ("tests", "kalillac_finance")
+                     and "__pycache__" not in path.parts
+                     and "issue_paid_entitlement" in path.read_text(encoding="utf-8", errors="replace"))
+    assert issuers == ["kalillac_accounts/paid_access.py"]
 
 
 # --- reservation, release, settlement -----------------------------------------------------

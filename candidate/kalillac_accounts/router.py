@@ -868,6 +868,18 @@ def build_account_router(
         return response
 
     if v1_security is not None:
+        @router.get("/security")
+        async def account_security(request: Request):
+            """What a signed-in account can manage on this server; the account page offers exactly
+            these. Mounted only in V1 mode (elsewhere it is a 404 and the page offers none). It reads
+            nothing but the session's own authorization and calls no authority."""
+            found = await v1_identify(request)
+            if isinstance(found, JSONResponse):
+                return found
+            return JSONResponse(content={"security": {"sessions": True, "password_change": True,
+                                                      "deletion_request": True}},
+                                headers={"Cache-Control": "no-store"})
+
         @router.post("/sessions/revoke-others")
         async def revoke_other_sessions(request: Request):
             return await v1_revoke(request, "others")

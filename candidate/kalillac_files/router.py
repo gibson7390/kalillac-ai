@@ -54,6 +54,9 @@ _NO_STORE = {"Cache-Control": "no-store", "Vary": "Cookie"}
 class FileAccount:
     owner: str          # a stable account id
     paid: bool
+    # V1 mode: the V1-authorized account with its effective entitlement (kalillac_accounts.paid_access),
+    # from which the file request's PAID evidence is issued. None on the legacy path: never paid scope.
+    verified: object = None
 
 
 def _error(status, code):

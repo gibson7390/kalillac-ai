@@ -824,6 +824,7 @@ function AccountOverviewPage() {
   const { session, reload } = useSession();
   const [plan, setPlan] = useState<Loadable<api.Entitlements>>({ state: 'loading' });
   const [billing, setBilling] = useState<Loadable<api.BillingStatus>>({ state: 'loading' });
+  const [security, setSecurity] = useState<Loadable<api.AccountSecurity>>({ state: 'loading' });
 
   const sessionEnded = useCallback(() => {
     carryNotice(SESSION_ENDED);
@@ -847,10 +848,18 @@ function AccountOverviewPage() {
     else setBilling({ state: 'error' });
   }, [sessionEnded]);
 
+  // Offered only where the server provides them; anything but a clear answer shows none.
+  const loadSecurity = useCallback(async () => {
+    const result = await api.getAccountSecurity();
+    if (result.ok) setSecurity({ state: 'ready', value: result.data });
+    else if (result.status === 401) sessionEnded();
+    else setSecurity({ state: 'unavailable' });
+  }, [sessionEnded]);
+
   useEffect(() => {
     if (session.state === 'signed-out') navigate(ACCOUNT_PATHS.signIn, { replace: true });
-    if (session.state === 'signed-in') { void loadPlan(); void loadBilling(); }
-  }, [session, navigate, loadPlan, loadBilling]);
+    if (session.state === 'signed-in') { void loadPlan(); void loadBilling(); void loadSecurity(); }
+  }, [session, navigate, loadPlan, loadBilling, loadSecurity]);
 
   let body: ReactNode;
   let lede: ReactNode;
@@ -859,7 +868,9 @@ function AccountOverviewPage() {
   else if (session.state === 'error') body = <Unreachable onRetry={() => void reload()} />;
   else {
     lede = 'Your sign-in, verification, plan and billing settings, in one place.';
-    body = <Overview user={session.user} plan={plan} billing={billing} onRetryPlan={() => void loadPlan()}
+    body = <Overview user={session.user} plan={plan} billing={billing}
+                     security={security.state === 'ready' ? security.value : null}
+                     onRetryPlan={() => void loadPlan()}
                      onRetryBilling={() => void loadBilling()} onSessionEnded={sessionEnded} />;
   }
 
@@ -870,8 +881,9 @@ function AccountOverviewPage() {
   );
 }
 
-function Overview({ user, plan, billing, onRetryPlan, onRetryBilling, onSessionEnded }: {
+function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, onSessionEnded }: {
   user: api.AccountUser; plan: Loadable<api.Entitlements>; billing: Loadable<api.BillingStatus>;
+  security: api.AccountSecurity | null;
   onRetryPlan: () => void; onRetryBilling: () => void; onSessionEnded: () => void;
 }) {
   const [, navigate] = useLocation();
@@ -966,9 +978,222 @@ function Overview({ user, plan, billing, onRetryPlan, onRetryBilling, onSessionE
           </button>
         </div>
       </section>
+
+      {security?.sessions && <SessionsSection onSessionEnded={onSessionEnded} />}
+      {security?.password_change && <PasswordSection onSessionEnded={onSessionEnded} />}
+      {security?.deletion_request && <DeletionSection paid={tier === 'paid'} onSessionEnded={onSessionEnded} />}
     </div>
   );
 }
+
+/* --- account security: sessions, password, deletion request --------------------------------------------------- */
+
+const SECURITY_UNAVAILABLE: NoticeData = {
+  tone: 'error', title: 'That couldn’t be completed right now', body: 'Try again in a few minutes.',
+};
+
+/* Every failure these operations share. A wrong current password is handled by its own field. */
+function securityProblem(result: api.ApiError): NoticeData {
+  if (result.status === 0) return UNREACHABLE;
+  if (result.status === 429) return { tone: 'error', title: 'Too many attempts', body: waitPhrase(result.retryAfter) };
+  if (result.status === 403 && result.code === 'account_unavailable') {
+    return { tone: 'error', title: 'This account can’t be changed right now' };
+  }
+  return SECURITY_UNAVAILABLE;
+}
+
+function SessionsSection({ onSessionEnded }: { onSessionEnded: () => void }) {
+  const [, navigate] = useLocation();
+  const [notice, setNotice] = useState<NoticeData | null>(null);
+  const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
+  const others = usePendingGuard();
+  const everywhere = usePendingGuard();
+
+  const signOutOthers = () => void others.run(async () => {
+    setNotice(null);
+    const result = await api.revokeOtherSessions();
+    if (result.ok) {
+      setNotice({ tone: 'success', title: 'Other sessions were signed out', body: 'This browser stays signed in.' });
+    } else if (result.status === 401) { onSessionEnded(); return; }
+    else setNotice(securityProblem(result));
+    focusNotice();
+  });
+
+  const signOutEverywhere = () => void everywhere.run(async () => {
+    setNotice(null);
+    const result = await api.revokeAllSessions();
+    if (result.ok) {
+      carryNotice({ tone: 'info', title: 'You’re signed out everywhere', body: 'Sign in again to continue.' });
+      navigate(ACCOUNT_PATHS.signIn);
+      return;
+    }
+    if (result.status === 401) { onSessionEnded(); return; }
+    setNotice(securityProblem(result));
+    focusNotice();
+  });
+
+  return (
+    <section className="acct-section" aria-labelledby="acct-sessions-heading" data-testid="sessions-section">
+      <h2 id="acct-sessions-heading" className="acct-section-title">Signed-in sessions</h2>
+      <p className="acct-section-text">If you signed in on a device you no longer use, sign that session out here.</p>
+      {notice && <Notice notice={notice} focusRef={noticeRef} />}
+      <div className="acct-actions">
+        <button type="button" className="acct-button acct-button-secondary" aria-disabled={others.pending || undefined}
+                onClick={signOutOthers} data-testid="button-revoke-others">
+          {others.pending && <Spinner />}{others.pending ? 'Signing out…' : 'Sign out other sessions'}
+        </button>
+        <button type="button" className="acct-button acct-button-secondary" aria-disabled={everywhere.pending || undefined}
+                onClick={signOutEverywhere} data-testid="button-revoke-all">
+          {everywhere.pending && <Spinner />}{everywhere.pending ? 'Signing out…' : 'Sign out everywhere'}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function PasswordSection({ onSessionEnded }: { onSessionEnded: () => void }) {
+  const current = useRef<HTMLInputElement>(null);
+  const next = useRef<HTMLInputElement>(null);
+  const [currentError, setCurrentError] = useState<string | null>(null);
+  const [nextError, setNextError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeData | null>(null);
+  const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
+  const guard = usePendingGuard();
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    void guard.run(async () => {
+      const currentValue = current.current?.value ?? '';
+      const nextValue = next.current?.value ?? '';
+      const currentProblem = currentValue ? null : 'Enter your current password.';
+      const nextProblem = newPasswordProblem(nextValue);
+      setCurrentError(currentProblem);
+      setNextError(nextProblem);
+      setNotice(null);
+      if (currentProblem || nextProblem) {
+        focusFirstInvalid([[currentProblem, current], [nextProblem, next]]);
+        return;
+      }
+      const result = await api.changePassword(currentValue, nextValue);
+      if (result.ok) {
+        if (current.current) current.current.value = '';
+        if (next.current) next.current.value = '';
+        setNotice({ tone: 'success', title: 'Your password was changed',
+          body: 'Every other session of this account was signed out. This browser stays signed in.' });
+        focusNotice();
+        return;
+      }
+      if (result.status === 401) { onSessionEnded(); return; }
+      if (result.status === 403 && result.code === 'invalid_current_password') {
+        setCurrentError('That isn’t your current password.');
+        current.current?.focus();
+        return;
+      }
+      if (result.status === 422 && result.code === 'password_length') {
+        setNextError('Use 12–256 characters.');
+        next.current?.focus();
+        return;
+      }
+      setNotice(securityProblem(result));
+      focusNotice();
+    });
+  };
+
+  return (
+    <section className="acct-section" aria-labelledby="acct-password-heading" data-testid="password-section">
+      <h2 id="acct-password-heading" className="acct-section-title">Password</h2>
+      <p className="acct-section-text">Changing your password signs out every other session of this account.</p>
+      {notice && <Notice notice={notice} focusRef={noticeRef} />}
+      <form className="acct-form acct-form-inline" onSubmit={submit} noValidate aria-labelledby="acct-password-heading">
+        <Field id="security-current-password" label="Current password" kind="password" autoComplete="current-password"
+               inputRef={current} error={currentError} />
+        <Field id="security-new-password" label="New password" kind="password" autoComplete="new-password"
+               inputRef={next} error={nextError} hint="12–256 characters" />
+        <div className="acct-actions acct-actions-form">
+          <SubmitButton pending={guard.pending} idle="Change password" busy="Changing…" />
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function DeletionSection({ paid, onSessionEnded }: { paid: boolean; onSessionEnded: () => void }) {
+  const [, navigate] = useLocation();
+  const [open, setOpen] = useState(false);
+  const password = useRef<HTMLInputElement>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeData | null>(null);
+  const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
+  const guard = usePendingGuard();
+
+  useEffect(() => {
+    if (open) password.current?.focus();
+  }, [open]);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    void guard.run(async () => {
+      const value = password.current?.value ?? '';
+      const problem = value ? null : 'Enter your current password.';
+      setPasswordError(problem);
+      setNotice(null);
+      if (problem) { password.current?.focus(); return; }
+      const result = await api.requestAccountDeletion(value);
+      if (result.ok) {
+        carryNotice({ tone: 'info', title: 'Your deletion request was received',
+          body: 'This account is signed out everywhere and can no longer be used to sign in.' });
+        navigate(ACCOUNT_PATHS.signIn);
+        return;
+      }
+      if (result.status === 401) { onSessionEnded(); return; }
+      if (result.status === 403 && result.code === 'invalid_current_password') {
+        setPasswordError('That isn’t your current password.');
+        password.current?.focus();
+        return;
+      }
+      setNotice(securityProblem(result));
+      focusNotice();
+    });
+  };
+
+  return (
+    <section className="acct-section" aria-labelledby="acct-deletion-heading" data-testid="deletion-section">
+      <h2 id="acct-deletion-heading" className="acct-section-title">Delete this account</h2>
+      <p className="acct-section-text">
+        Requesting deletion signs this account out everywhere and closes sign-in to it. It can’t be undone from this page.
+      </p>
+      {paid && (
+        <p className="acct-section-text" data-testid="deletion-subscription-note">
+          This request doesn’t cancel a paid subscription. Cancel it first in Manage billing.
+        </p>
+      )}
+      {notice && <Notice notice={notice} focusRef={noticeRef} />}
+      {!open ? (
+        <div className="acct-actions">
+          <button type="button" className="acct-button acct-button-secondary" onClick={() => setOpen(true)}
+                  aria-expanded={false} data-testid="button-open-deletion">
+            Request account deletion
+          </button>
+        </div>
+      ) : (
+        <form className="acct-form acct-form-inline" onSubmit={submit} noValidate aria-labelledby="acct-deletion-heading">
+          <Field id="deletion-current-password" label="Current password, to confirm" kind="password"
+                 autoComplete="current-password" inputRef={password} error={passwordError} />
+          <div className="acct-actions acct-actions-form">
+            <button type="submit" className="acct-button acct-button-danger" aria-disabled={guard.pending || undefined}
+                    data-pending={guard.pending || undefined} data-testid="button-request-deletion">
+              {guard.pending && <Spinner />}{guard.pending ? 'Requesting…' : 'Request deletion of this account'}
+            </button>
+            <button type="button" className="acct-text-button" onClick={() => { setOpen(false); setNotice(null); }}>
+              Keep my account
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 
 const CHECKOUT_MESSAGES: Record<string, NoticeData> = {
   email_verification_required: { tone: 'info', title: 'Verify your email first',

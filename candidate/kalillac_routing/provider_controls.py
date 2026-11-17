@@ -257,6 +257,11 @@ def end_request(state, token):
         _REQUEST.reset(token)
 
 
+def current_request():
+    """This request's control state (the binding a PaidEntitlement is issued for), or None."""
+    return _REQUEST.get()
+
+
 def account_status(authenticated, paid_entitlement=None):
     """The request's only traffic classification (see kalillac_finance.traffic)."""
     from kalillac_finance.traffic import resolve_traffic_class

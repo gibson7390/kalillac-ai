@@ -659,8 +659,10 @@ def test_only_the_provider_control_seam_and_startup_use_the_financial_package():
             continue
         if "kalillac_finance" in path.read_text(encoding="utf-8", errors="replace"):
             users.append("/".join(relative))
-    assert sorted(users) == ["app_fastapi_candidate.py", "kalillac_routing/provider_controls.py",
-                             "tools/finance_ledger_admin.py"]
+    # B2 adds exactly one more: the paid seam, which issues the request-bound paid evidence
+    # (kalillac_finance.traffic) from a V1-verified entitlement.
+    assert sorted(users) == ["app_fastapi_candidate.py", "kalillac_accounts/paid_access.py",
+                             "kalillac_routing/provider_controls.py", "tools/finance_ledger_admin.py"]
 
 
 def test_application_starts_unchanged_when_the_flag_is_unset():

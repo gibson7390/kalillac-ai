@@ -22,7 +22,12 @@ import app_fastapi_candidate as a
 from fastapi.testclient import TestClient
 from kalillac_files.router import FileAccount
 
-ACCOUNTS = {"paid": FileAccount("acct-paid", True), "free": FileAccount("acct-free", False)}
+import uuid
+from kalillac_accounts.entitlements import PAID
+from kalillac_accounts.paid_access import VerifiedAccount
+ACCOUNTS = {"paid": FileAccount("acct-paid", True), "free": FileAccount("acct-free", False),
+            # V1 mode: the authenticator attaches the V1-authorized account and its effective entitlement.
+            "verified": FileAccount("acct-verified", True, VerifiedAccount(uuid.uuid4(), PAID))}
 async def authenticate(request):
     return ACCOUNTS.get(request.cookies.get("kalillac_session", ""))
 a._file_service.authenticate = authenticate
@@ -86,7 +91,8 @@ print(json.dumps({
 }))
 
 # Under provider ceilings and request budgets, each file request runs in its own control request and
-# budget, as a signed-in account's request in the FREE scope (nothing issues paid evidence yet).
+# budget, as a signed-in account's request: in the FREE scope on the legacy path, and in the PAID scope
+# only for a V1-verified paid account (B2), whose evidence is bound to that control request.
 from kalillac_routing import provider_controls
 from kalillac_routing.request_budget import RequestDeadlineExceeded, current_budget
 provider_controls.SERVICE = object()          # begin_request() only needs it to be set.
@@ -108,6 +114,11 @@ for error in (provider_controls.CeilingBusy(), provider_controls.RequestCostCeil
 print(json.dumps({"inside": inside, "statuses": statuses,
                   "outer_untouched": provider_controls._REQUEST.get() is outer[0]
                   and outer[0].traffic_class.value == "anonymous"}))
+failure[0] = None
+del inside[:]
+verified_status = handoff("verified", "Make me a PDF of the plan")
+print(json.dumps({"verified_traffic": [call["traffic"] for call in inside], "status": verified_status[0],
+                  "outer_still_anonymous": outer[0].traffic_class.value == "anonymous"}))
 '''
 
 
@@ -117,9 +128,11 @@ def test_a_file_request_in_the_chat_reaches_the_file_assistant_and_its_file(tmp_
     result = _run_app(environment, SCRIPT.replace("ORIGIN_VALUE", ORIGIN))
     assert result.returncode == 0, result.stderr[-3000:]
     # Diagnostic lines (a class name only) may interleave with the results.
-    lines = [json.loads(line) for line in result.stdout.strip().splitlines() if line.startswith("{")][-3:]
+    lines = [json.loads(line) for line in result.stdout.strip().splitlines() if line.startswith("{")][-4:]
     assert "WARN: FILE_ASSISTANT_FAILED ValueError" in result.stdout   # Only the unmapped defect is logged.
-    chat, handoffs, controls = lines
+    chat, handoffs, controls, verified = lines
+    # B2: only the V1-verified paid account's file request is in the PAID scope, on its own control request.
+    assert verified == {"verified_traffic": ["paid_account"], "status": 200, "outer_still_anonymous": True}
     assert chat == {"status": 200, "keys": ["files", "reply", "session_id"],
                     "reply": "Here is a two-slide launch deck.",
                     "filename": "launch-plan.pptx", "session_ok": True, "download": 200, "is_pptx": True,

@@ -254,6 +254,29 @@ def test_v1_logout_without_an_authority_or_a_read_path_is_503(db):
         assert "set-cookie" not in response.headers
 
 
+# --- what the account page may offer ------------------------------------------------------------------
+
+def test_the_security_route_reports_the_operations_to_a_live_session_only(db):
+    user_id, _, token, _ = signed_in(db)
+    authority, security = Authority(), FakeSecurity(db)
+    with legacy_client(db) as client:                                  # V1 off: not mounted.
+        assert client.get("/api/account/security", headers={"Cookie": f"{COOKIE}={token}"}).status_code == 404
+    with v1_client(db, authority, security=security) as client:
+        response = client.get("/api/account/security", headers={"Cookie": f"{COOKIE}={token}"})
+        assert (response.status_code, response.json()) == (200, {"security": {
+            "sessions": True, "password_change": True, "deletion_request": True}})
+        assert response.headers["cache-control"] == "no-store"
+        assert client.get("/api/account/security").status_code == 401
+        assert client.get("/api/account/security", headers={"Cookie": f"{COOKIE}=unknown"}).status_code == 401
+    assert authority.calls == [] and security.calls[0] == {"with_identity": True, "authorize": True}
+    with db() as session:
+        session.get(User, user_id).quarantined_at = datetime.now(timezone.utc)
+        session.commit()
+    with v1_client(db, authority) as client:
+        response = client.get("/api/account/security", headers={"Cookie": f"{COOKIE}={token}"})
+        assert (response.status_code, response.json()) == (403, {"error": "account_unavailable"})
+
+
 # --- revoking sessions --------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("scope", ["others", "all"])
