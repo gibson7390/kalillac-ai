@@ -238,7 +238,12 @@ def build_spaces_router(
     clock: Callable[[], datetime] = utc_now,
     new_budget: Callable[[], RequestBudget] | None = None,
     cleanup_seconds: float = CLEANUP_SECONDS,
+    v1_security: Any = None,
 ) -> APIRouter:
+    """With v1_security (V1 account-security mode), every Spaces request is authorized by V1-01's
+    original-session authorization, as /api/account and /api/files are, and a send's save transaction
+    rechecks it under the account's V1 lock, taken before any other lock of that transaction. Without
+    it, the legacy session lookup is used, unchanged."""
     router = APIRouter(prefix="/api/spaces")
     inflight = _InFlight(threading.Lock(), {})
     if new_budget is None:
@@ -266,11 +271,52 @@ def build_spaces_router(
             return _error(403, "email_verification_required")
         return None
 
+    async def v1_authorize(token_hash: str, budget: RequestBudget | None) -> AuthContext:
+        from kalillac_accounts.v1_security import V1SecurityUnavailable
+        if budget is not None:
+            budget.ensure_open()
+
+        def work(session, account):
+            # V1 admits only an active, verified, unquarantined account with a live original session.
+            return AuthContext(user_id=account.id, email_verified=True, token_hash=token_hash)
+        try:
+            auth = await v1_security.read_async(token_hash, work)
+        except RequestRejected as rejected:
+            raise _Failure(_error(rejected.status, rejected.code)) from None
+        except V1SecurityUnavailable:
+            raise _Failure(_error(503, "account_unavailable")) from None
+        if type(auth) is not AuthContext:
+            raise _Failure(_error(503, "account_unavailable"))
+        return auth
+
+    def v1_recheck(session: Session, auth: AuthContext) -> None:
+        """Inside a send's save transaction: V1-01's authorization of the same original session, which
+        locks the account row FOR UPDATE. The first call is the transaction's first account lock (the
+        quota's KEY SHARE lock on the same row comes after it), so two saves for one account queue on
+        that lock instead of each holding KEY SHARE and waiting to upgrade."""
+        from kalillac_accounts.auth import authorize_original_identity, resolve_original_identity
+        from kalillac_db.repositories.accounts import AccountAuthorizationUnavailable
+        identity = resolve_original_identity(session, auth.token_hash)
+        if identity is None or identity.user_id != auth.user_id:
+            raise _Failure(_error(401, "not_authenticated"))
+        try:
+            authorize_original_identity(session, identity)
+        except RequestRejected as rejected:
+            raise _Failure(_error(rejected.status, rejected.code)) from None
+        except AccountAuthorizationUnavailable:
+            raise _Failure(_error(503, "account_unavailable")) from None
+        denied = access(auth)
+        if denied is not None:
+            raise _Failure(denied)
+
     async def authorize(request: Request, budget: RequestBudget | None = None) -> AuthContext:
         token_hash = session_token_hash(request.cookies, cookie_name)
         if token_hash is None:
             raise _Failure(_error(401, "not_authenticated"))
-        auth = await run(lambda session: resolve_account(session, token_hash, clock()), budget)
+        if v1_security is not None:
+            auth = await v1_authorize(token_hash, budget)
+        else:
+            auth = await run(lambda session: resolve_account(session, token_hash, clock()), budget)
         denied = access(auth)
         if denied is not None:
             raise _Failure(denied)
@@ -545,6 +591,17 @@ def build_spaces_router(
                 return (await release()) or _error(422, "processing_limit_reached")
 
             def work(s, phase_bound):
+                if v1_security is not None:
+                    def lock_account():
+                        v1_recheck(s, auth)                 # The account's V1 lock, first.
+                        if settlement is not None:
+                            settlement.lock(s)
+                    return repo.finish_send(
+                        s, auth.user_id, sid, cid, attempt, request_id, message, reply, clock(),
+                        bound=phase_bound, lock_account=lock_account, verify=lambda: v1_recheck(s, auth),
+                        settle=(lambda: settlement.charge(s)) if settlement is not None else repo._no_op,
+                    )
+
                 def verify():
                     # The live session, account activity, verification, beta
                     # access and ownership, read after the locks are held.

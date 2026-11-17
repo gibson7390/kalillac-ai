@@ -255,6 +255,15 @@ from the code. See "Owner decisions required".
   the operator runbook. `tools/verify_provisioned_boot.py` runs the runbook's commands as root in CI:
   provision, the operator transition as an unprivileged identity, the controlled launcher from the
   template, real HTTP. Implemented; awaiting CI and Codex. Not run on any host.
+* **Spaces under V1 authorization** (`feat/v1-single-authorization-a10`, on staging provisioning): with V1
+  on, Spaces authorized accounts by the legacy session lookup, which does not check quarantine or the
+  session epoch (it relied on their revocations). Every Spaces request now goes through V1-01's
+  original-session authorization, as accounts and files do, and a send's save rechecks it inside the
+  save transaction under the account's V1 lock, taken before the quota's lock on the same row so two
+  saves for one account queue instead of deadlocking on a lock upgrade. Proved on PostgreSQL under the
+  final grants, including that the quarantine case fails on the legacy path. Remaining legacy lookups
+  in V1 mode (billing, usage, quota, email verification) are listed for the same change. Implemented;
+  awaiting CI and Codex.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

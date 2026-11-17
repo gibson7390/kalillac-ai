@@ -5,7 +5,7 @@ for it. It guides the work; `docs/DEVELOPMENT_ROADMAP.md` stays the evidence log
 regressions) and `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` the account-security design. When they
 disagree, this file is corrected first.
 
-Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/staging-provisioning-m9`
+Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/v1-single-authorization-a10`
 (`feat/account-security-d5-credential-path`).
 
 ## Statuses (never interchangeable)
@@ -50,7 +50,7 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 | R1 | QUICK / BALANCED / DEEP reasoning | ✔ backend, control, tier permission from the verified entitlement | ✔ local | | saved preference, a mode on Spaces sends; owner decision 9 (which modes each tier gets) | B2 |
 | D1f | File generation, editing, worker, document quality | ✔ | ✔ | part | open Codex items (Arabic ligatures, Word fields/decision 12, semantic consistency) | — |
 | D2f | File assistant in chat, `/api/files`, delivery | ✔ (flag off) | ✔ | | customer confirmation controls; Premium gate via B2; count vs allowance (owner) | B2 |
-| S1 | Spaces + persistent conversations (backend `/api/spaces`) | ✔ (flag off) | part | | re-verify; V1-01 authorization on Spaces; **frontend** (list, create, conversation history, instructions) | A3 |
+| S1 | Spaces + persistent conversations (backend `/api/spaces`) | ✔ (flag off); V1-01 authorization in V1 mode (every request, and the save transaction's recheck under the account's V1 lock, taken first) | part (1194 SQLite + 4 real PostgreSQL under the final grants) | | re-verify; **frontend** (list, create, conversation history, instructions) | A3 |
 | S2 | Saved conversations outside Spaces | | | | decide shape (a default Space vs separate history); build | S1 |
 | U1 | Code-block rendering with per-block copy | ✔ | ✔ local (browser) | | CI | — |
 | U2 | Responsive, coherent customer frontend (chat + account + Spaces) | part: chat ↔ account link on an accounts deployment, plan-aware refusal copy | part | | Spaces navigation; a responsive pass across chat, account and Spaces | A9, S1 |

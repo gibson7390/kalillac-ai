@@ -16661,6 +16661,7 @@ if os.getenv("KALILLAC_SPACES_ENABLED", "").strip().lower() in {
             cookie_name=_account_settings.cookie_name,
             generate=_space_generate,
             lease_seconds=_math.ceil(_request_limits.deadline_seconds) + LEASE_GRACE_SECONDS,
+            v1_security=_v1_account_security,
             new_budget=lambda: RequestBudget(
                 duration_seconds=_request_limits.deadline_seconds,
                 max_model_attempts=_request_limits.max_model_attempts,
