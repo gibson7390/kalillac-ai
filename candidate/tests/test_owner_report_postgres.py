@@ -28,9 +28,7 @@ def test_the_owner_report_reads_as_the_runtime_login_and_writes_nothing(live):
     assert sections["plan"] == {"paid_now": 0}
     assert sections["usage"]["today"]["chats"] == 0 and sections["saved_work"] == {
         "spaces": 0, "conversations": 0, "messages": 0}
-    # The security events belong to the V1 authorities; the runtime login may not read them, and the report
-    # says so for that section only.
-    assert sections["security_events_7_days"] == {"unavailable": "not permitted for this database role"}
-    assert [name for name, value in sections.items() if "unavailable" in value] == ["security_events_7_days"]
+    # Every section is readable by the runtime login under the final grants.
+    assert not [name for name, value in sections.items() if "unavailable" in value]
     assert EMAIL not in out.getvalue()
     assert w.names["app"] not in writers(w)

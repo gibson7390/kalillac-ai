@@ -11,9 +11,11 @@ finance_ledger_admin.py), which this report names but never runs.
 Sections: accounts (total, verified, quarantined, deletion requested, new in 7 and 30 days, live
 sessions), plan (accounts on the paid entitlement now), subscriptions by Stripe status (and how many
 end at the period's end), billing cases by kind and review status, usage today and over the last 7 UTC
-days, anonymous visitors today, security events of the last 7 days by type, and saved work (Spaces,
-conversations, messages). A section the database role may not read, or that this database does not
-have, is reported as unavailable with a fixed reason; the others are still reported.
+days, anonymous visitors today, and saved work (Spaces, conversations, messages). A section the
+database role may not read, or that this database does not have, is reported as unavailable with a
+fixed reason; the others are still reported. Account security events are not here: they belong to the
+V1 authorities, the runtime login may not read them, and no runtime module names their tables
+(test_v1_schema); the operator's support tool reads one account's history.
 
 --html writes one self-contained page (no script, no external resource) to a new file, mode 0600; it
 refuses an existing path. Exit codes: 0 done, 1 failed (rolled back), 2 refused.
@@ -138,16 +140,6 @@ def _anonymous(today):
     return read
 
 
-def _security_events(now):
-    def read(session):
-        from sqlalchemy import text
-        rows = session.execute(text("SELECT event_type, count(*) FROM kalillac.account_security_events"
-                                    " WHERE occurred_at > :since GROUP BY event_type ORDER BY event_type"),
-                               {"since": now - timedelta(days=7)}).all()
-        return {str(kind): int(count) for kind, count in rows}
-    return read
-
-
 def _saved_work(session):
     from sqlalchemy import func, select
     from kalillac_db.models import Conversation, Message, Space
@@ -155,8 +147,7 @@ def _saved_work(session):
             for name, model in (("spaces", Space), ("conversations", Conversation), ("messages", Message))}
 
 
-SECTIONS = ("accounts", "plan", "subscriptions", "billing_cases", "usage", "anonymous", "security_events_7_days",
-            "saved_work")
+SECTIONS = ("accounts", "plan", "subscriptions", "billing_cases", "usage", "anonymous", "saved_work")
 
 
 def collect(session, now):
@@ -164,7 +155,7 @@ def collect(session, now):
     today = now.date()
     readers = {"accounts": _accounts(now), "plan": _plan(now), "subscriptions": _subscriptions,
                "billing_cases": _billing_cases, "usage": _usage(today), "anonymous": _anonymous(today),
-               "security_events_7_days": _security_events(now), "saved_work": _saved_work}
+               "saved_work": _saved_work}
     return {name: _section(session, readers[name]) for name in SECTIONS}
 
 
@@ -175,8 +166,7 @@ def as_json(report, now):
 
 
 TITLES = {"accounts": "Accounts", "plan": "Plan", "subscriptions": "Subscriptions", "billing_cases": "Billing cases",
-          "usage": "Usage (signed-in accounts, UTC days)", "anonymous": "Anonymous use",
-          "security_events_7_days": "Security events, last 7 days", "saved_work": "Saved work"}
+          "usage": "Usage (signed-in accounts, UTC days)", "anonymous": "Anonymous use", "saved_work": "Saved work"}
 LABELS = {"total": "Accounts", "verified": "Verified", "quarantined": "Quarantined",
           "deletion_requested": "Deletion requested", "new_7_days": "New in 7 days", "new_30_days": "New in 30 days",
           "live_sessions": "Live sessions", "paid_now": "On the paid plan now",

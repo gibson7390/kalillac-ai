@@ -96,8 +96,7 @@ def test_the_report_counts_from_one_snapshot(factory):
     assert [d["chats"] for d in sections["usage"]["last_7_days"]] == [0, 0, 0, 0, 7, 0, 5]
     assert sections["anonymous"] == {"visitors_today": 1}
     assert sections["saved_work"] == {"spaces": 1, "conversations": 1, "messages": 1}
-    # The security events table belongs to PostgreSQL's V1 schema only.
-    assert sections["security_events_7_days"] == {"unavailable": "not in this database"}
+    assert set(sections) == set(owner_report.SECTIONS) and not any("unavailable" in v for v in sections.values())
 
 
 def test_nothing_about_a_person_is_ever_reported(factory, tmp_path):
