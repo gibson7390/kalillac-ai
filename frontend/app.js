@@ -674,6 +674,56 @@
     wrapTables(shell.body);
     hardenLinks(shell.body);
     highlightCode(shell.body);
+    addCodeCopy(shell.body);
+  }
+
+  /* Each fenced block gets its own header: the language the fence named (if
+     any) and a Copy control for that block alone. It copies the block's text
+     content exactly as the reply carried it, without the final line break;
+     highlighting never changes that text. The header is built with
+     createElement and textContent, so nothing from the reply is parsed as
+     HTML here. Inline code gets no control, and the answer's own Copy still
+     copies the whole stored reply. */
+  var CODE_LABEL_MAX = 24;
+
+  function addCodeCopy(container) {
+    if (!container) return;
+    var blocks = container.querySelectorAll("pre > code");
+    for (var i = 0; i < blocks.length; i++) {
+      var code = blocks[i];
+      var pre = code.parentNode;
+      var parent = pre.parentNode;
+      if (!parent || (parent.classList && parent.classList.contains("code-block"))) continue;
+
+      var wrap = document.createElement("div");
+      wrap.className = "code-block";
+      var bar = document.createElement("div");
+      bar.className = "code-bar";
+
+      var match = CODE_LANGUAGE_RE.exec(code.className || "");
+      var label = document.createElement("span");
+      label.className = "code-lang";
+      label.textContent = match ? match[1].slice(0, CODE_LABEL_MAX) : "";
+
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "code-copy";
+      button.setAttribute("aria-label", match ? "Copy " + label.textContent + " code" : "Copy code");
+      button.innerHTML = ICON_COPY + "<span>Copy</span>";
+      button.addEventListener("click", copyCodeHandler(code, button));
+
+      bar.appendChild(label);
+      bar.appendChild(button);
+      parent.insertBefore(wrap, pre);
+      wrap.appendChild(bar);
+      wrap.appendChild(pre);
+    }
+  }
+
+  function copyCodeHandler(code, button) {
+    return function () {
+      copyText((code.textContent || "").replace(/\n$/, ""), button);
+    };
   }
 
   /* Syntax highlighting for fenced code, presentation only. It runs on the

@@ -901,7 +901,70 @@ body {
   padding-bottom: 9px;
 }
 
+/* A fenced block with its own header: the fence's language and a Copy
+   control for that block. The block keeps the code surface and border; the
+   pre inside keeps its independent horizontal scrolling. */
+.msg-assistant .md .code-block {
+  margin: 12px 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  overflow: hidden;
+  max-width: 100%;
+}
+.msg-assistant .md .code-block > pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: none;
+}
+.code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  padding: 2px 6px 2px 15px;
+  border-bottom: 1px solid var(--line);
+}
+.code-lang {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color var(--ease), background var(--ease), border-color var(--ease);
+}
+.code-copy svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.code-copy:hover,
+.code-copy:focus-visible {
+  color: var(--blue-deep);
+  background: var(--blue-soft);
+  border-color: rgba(62, 91, 255, 0.2);
+}
+.code-copy:focus-visible { outline: 3px solid rgba(0, 105, 255, 0.35); outline-offset: 1px; }
+.code-copy.is-done { color: var(--live); background: var(--live-soft); }
+
 /* Keep consecutive structured blocks from colliding visually. */
+.msg-assistant .md .code-block + p,
 .msg-assistant .md pre + p,
 .msg-assistant .md .table-wrap + p,
 .msg-assistant .md blockquote + p {

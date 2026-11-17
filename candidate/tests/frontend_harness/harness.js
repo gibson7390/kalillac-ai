@@ -843,6 +843,26 @@
     a.snap("after-next");
   };
 
+  // Each fenced block has its own Copy control for exactly its source text;
+  // inline code has none, and the answer's Copy still copies the whole reply.
+  var BLOCK_COPY_REPLY = "Here:\n\n```python\ndef add(a, b):\n    return a + b\n```\n\nPlain:\n\n```\n" +
+    "x < y && \"q\"\n<script>alert(1)</script>\n```\n\nInline `z` stays.";
+
+  SCENARIOS.code_block_copy = async function (a) {
+    a.respondWith(ok(BLOCK_COPY_REPLY, "s-code"));
+    await a.send("show code");
+    a.snap("rendered");
+    var buttons = document.querySelectorAll("#thread .code-copy");
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].click();
+      await a.wait(60);
+    }
+    a.snap("blocks-copied");
+    await a.clickAction("Copy");
+    await a.wait(300);
+    a.snap("answer-copied");
+  };
+
   // The anonymous daily allowance is used up (with server text that must never
   // be shown).
   var DAILY_LIMIT = {

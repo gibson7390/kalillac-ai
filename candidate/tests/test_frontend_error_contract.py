@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261110-trust1"
-CSS_CACHE_KEY = "20261110-trust1"
+CACHE_KEY = "20261117-codecopy1"
+CSS_CACHE_KEY = "20261117-codecopy1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -191,7 +191,7 @@ SCENARIOS = (
     + [
         "success", "stop", "stop_then_retry", "retry_success", "retry_fails_again",
         "newer_draft_during_request", "edited_draft_then_retry", "unedited_draft_retry",
-        "history_too_long_new_conversation", "success_copy_and_retry",
+        "history_too_long_new_conversation", "success_copy_and_retry", "code_block_copy",
         "cleared_draft_then_retry", "retry_completed_with_later_failure",
         "message_too_long_4001",
     ]
@@ -1102,6 +1102,33 @@ def test_script_looking_code_is_displayed_and_never_executed(browser_results, na
 @pytest.mark.parametrize("name", CODE_SCENARIOS)
 def test_copy_returns_the_original_reply_text(browser_results, name):
     assert scenario(browser_results, name)["copied"] == [CODE_REPLY]
+
+
+# --- per-block copy -------------------------------------------------------------------------------
+
+BLOCK_COPY_REPLY = ("Here:\n\n```python\ndef add(a, b):\n    return a + b\n```\n\nPlain:\n\n```\n"
+                    "x < y && \"q\"\n<script>alert(1)</script>\n```\n\nInline `z` stays.")
+
+
+def test_each_fenced_block_has_its_own_copy_for_exactly_its_source(browser_results):
+    result = scenario(browser_results, "code_block_copy")
+    rendered = step(result, "rendered")["assistants"][0]
+    html_ = rendered["html"]
+    # Two fenced blocks, each wrapped with one header and one control; inline code has none.
+    assert html_.count('<div class="code-block">') == 2 and html_.count('class="code-copy"') == 2
+    assert html_.count("<pre>") == 2 and "<code>z</code>" in html_
+    assert '<span class="code-lang">python</span>' in html_ and '<span class="code-lang"></span>' in html_
+    assert 'aria-label="Copy python code"' in html_ and 'aria-label="Copy code"' in html_
+    # The script-looking line is text inside the block, never an element.
+    assert "<script" not in html_ and "&lt;script&gt;alert(1)&lt;/script&gt;" in html_
+    # Each control copies its own block's exact text, without the final line break; then the answer's
+    # own Copy still copies the whole stored reply.
+    assert result["copied"] == ["def add(a, b):\n    return a + b",
+                                'x < y && "q"\n<script>alert(1)</script>',
+                                BLOCK_COPY_REPLY]
+    done = step(result, "blocks-copied")["assistants"][0]["html"]
+    assert done.count("<span>Copied</span>") >= 1
+    assert_clean(result)
 
 
 def test_every_required_language_label_and_alias_is_highlighted(browser_results):
