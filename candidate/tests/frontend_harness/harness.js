@@ -93,6 +93,11 @@
     document.documentElement.setAttribute("data-kalillac-reasoning", "on");
   }
 
+  // Accounts scenarios: the page is marked as an accounts deployment before app.js runs.
+  if (scenarioName.indexOf("accounts_") === 0) {
+    document.documentElement.setAttribute("data-kalillac-accounts", "on");
+  }
+
   // Files scenarios: the page is marked as a files deployment before app.js runs, and the account
   // probe (GET /api/files) app.js then makes is answered first.
   if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access") {
@@ -578,6 +583,17 @@
         attachmentsShown: !!list && !list.hidden
       });
     },
+    // The header's account link (present only on an accounts deployment).
+    account: function (label) {
+      var links = document.querySelectorAll(".app-header .account-link");
+      steps.push({
+        label: label,
+        links: Array.prototype.map.call(links, function (l) {
+          return { href: l.getAttribute("href"), text: l.textContent, target: l.getAttribute("target") };
+        }),
+        requestCount: requests.length
+      });
+    },
     modes: function (label) {
       var picker = $("mode-picker");
       steps.push({
@@ -841,6 +857,22 @@
     a.snap("regenerated");
     await a.send("question two");
     a.snap("after-next");
+  };
+
+  // An accounts deployment links to the account pages and says where the plan is shown; the link
+  // costs no request. Without the mark neither exists (see the plain success scenario).
+  SCENARIOS.accounts_offered = async function (a) {
+    a.account("loaded");
+    a.respondWith({ status: 403, json: { error: "reasoning_mode_not_allowed" } },
+                  { status: 403, json: { error: "files_require_premium" } });
+    await a.send("first question");
+    a.snap("mode-refused");
+    await a.send("second question");
+    a.snap("files-refused");
+  };
+  SCENARIOS.success_no_account_link = async function (a) {
+    a.account("loaded");
+    a.snap("idle");
   };
 
   // Each fenced block has its own Copy control for exactly its source text;

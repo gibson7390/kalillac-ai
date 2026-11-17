@@ -158,6 +158,26 @@ body {
   min-width: 0;
 }
 
+/* The link to the account pages, on a deployment with accounts on. */
+.account-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--ease), border-color var(--ease), background var(--ease);
+}
+.account-link:hover { color: var(--blue-deep); border-color: #8faad6; background: #f7faff; }
+.account-link:focus-visible { outline: 3px solid rgba(0, 105, 255, 0.35); outline-offset: 2px; }
+
 /* Plain status text, not a control: what is true of this conversation now. */
 .session-status {
   display: inline-flex;

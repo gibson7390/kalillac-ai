@@ -1317,6 +1317,31 @@
     attachmentList.hidden = ATTACHED.length === 0;
   }
 
+  /* --- Account link ------------------------------------------------------
+     A deployment with accounts on marks the page
+     (<html data-kalillac-accounts="on">); only then does the header link to
+     the account pages, where the plan, billing and security settings live. It
+     is plain navigation: this page makes no request for it and learns nothing
+     about the visitor. On such a deployment the two plan refusals also say
+     where the plan is shown. */
+  var ACCOUNTS_OFFERED = document.documentElement.getAttribute("data-kalillac-accounts") === "on";
+  var accountTemplate = document.getElementById("account-link-template");
+  if (ACCOUNTS_OFFERED && accountTemplate && accountTemplate.content &&
+      accountTemplate.content.firstElementChild) {
+    accountTemplate.parentNode.insertBefore(
+      accountTemplate.content.firstElementChild.cloneNode(true), accountTemplate);
+  }
+  if (ACCOUNTS_OFFERED) {
+    ERROR_OUTCOMES.reasoning_mode_not_allowed = {
+      message: "That reasoning mode isn't part of this account's plan. Account shows your plan.",
+      kind: "error", action: null
+    };
+    ERROR_OUTCOMES.files_require_premium = {
+      message: "Files aren't part of this account's plan. Account shows your plan.",
+      kind: "error", action: null
+    };
+  }
+
   /* --- Reasoning modes ---------------------------------------------------
      A deployment with reasoning modes on marks the page
      (<html data-kalillac-reasoning="on">); only then is the picker shown and a

@@ -143,9 +143,10 @@ jobs:
       # release candidate carries the safety-release code, whose focused
       # modules collect more than main's 340
       # (test_anonymous_chat.py 55 + test_usage_limits.py 135 +
-      # test_usage_enforcement.py 67 + test_frontend_error_contract.py 113 +
-      # test_homepage_handoff.py 253 = 623; the error-contract suite grew by 14
-      # with the file assistant and by one with per-block code copy).
+      # test_usage_enforcement.py 67 + test_frontend_error_contract.py 115 +
+      # test_homepage_handoff.py 253 = 625; the error-contract suite grew by 14
+      # with the file assistant, one with per-block code copy and two with the
+      # chat's account link).
       - name: Require every focused test to have run
         run: |
           python - "$RUNNER_TEMP/anonymous-allowance-offline.xml" <<'PY'
@@ -155,6 +156,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 623, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 625, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused anonymous allowance verification did not run completely")
           PY

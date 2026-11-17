@@ -125,7 +125,7 @@ jobs:
           --junitxml="$RUNNER_TEMP/code-structure-frontend-verification.xml"
 
       # A green run must mean every focused test executed: exactly the
-      # expected number collected (1885, from `pytest --collect-only` over the
+      # expected number collected (1887, from `pytest --collect-only` over the
       # files above: the homepage composer is now native, so the 395 tests of
       # the framed homepage chat were replaced by 527 native-composer, handoff
       # (ledger, deadline, stall recovery, early Back and ownership) and /app/
@@ -133,8 +133,8 @@ jobs:
       # the file assistant (36e1053) added 14 error-contract tests: nine fixed-copy
       # cases for its refusal codes and five for file links, the attach control
       # and reasoning modes; the account page's security sections added ten
-      # account UI tests and per-block code copy one error-contract test),
-      # exactly 1866 passed and exactly 19 skipped --
+      # account UI tests, per-block code copy one error-contract test and the
+      # chat's account link two), exactly 1868 passed and exactly 19 skipped --
       # each skip one of the homepage tests' own per-viewport skips -- and none
       # failed or errored.
       # The suite totals and every test case's own outcome must both agree.
@@ -173,7 +173,7 @@ jobs:
                       unexpected.append(f"{case.get('classname')}::{case.get('name')}: {reason.strip()}")
           for line in unexpected:
               print("unexpected skip:", line)
-          expected = {"tests": 1885, "passed": 1866, "skipped": 19, "failures": 0, "errors": 0}
+          expected = {"tests": 1887, "passed": 1868, "skipped": 19, "failures": 0, "errors": 0}
           if totals != expected or counted != expected or unexpected:
               sys.exit("the focused verification did not run completely")
           PY

@@ -192,6 +192,7 @@ SCENARIOS = (
         "success", "stop", "stop_then_retry", "retry_success", "retry_fails_again",
         "newer_draft_during_request", "edited_draft_then_retry", "unedited_draft_retry",
         "history_too_long_new_conversation", "success_copy_and_retry", "code_block_copy",
+        "accounts_offered", "success_no_account_link",
         "cleared_draft_then_retry", "retry_completed_with_later_failure",
         "message_too_long_4001",
     ]
@@ -1102,6 +1103,29 @@ def test_script_looking_code_is_displayed_and_never_executed(browser_results, na
 @pytest.mark.parametrize("name", CODE_SCENARIOS)
 def test_copy_returns_the_original_reply_text(browser_results, name):
     assert scenario(browser_results, name)["copied"] == [CODE_REPLY]
+
+
+# --- the account link ------------------------------------------------------------------------------
+
+def test_an_accounts_deployment_links_to_the_account_pages_without_any_request(browser_results):
+    result = scenario(browser_results, "accounts_offered")
+    loaded = step(result, "loaded")
+    assert loaded["links"] == [{"href": "/account", "text": "Account", "target": None}]
+    assert loaded["requestCount"] == 0                       # Plain navigation: nothing is asked.
+    # The two plan refusals say where the plan is shown; nothing from the response is shown.
+    refused = step(result, "mode-refused")["assistants"][0]["notes"]
+    assert [n["text"] for n in refused] == [
+        "That reasoning mode isn't part of this account's plan. Account shows your plan."]
+    files = step(result, "files-refused")["assistants"][-1]["notes"]
+    assert [n["text"] for n in files] == ["Files aren't part of this account's plan. Account shows your plan."]
+
+
+def test_without_the_accounts_mark_the_page_has_no_account_link(browser_results):
+    result = scenario(browser_results, "success_no_account_link")
+    assert step(result, "loaded") == {"label": "loaded", "links": [], "requestCount": 0}
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    assert index.count('href="/account"') == 1 and '<template id="account-link-template">' in index
+    assert "data-kalillac-accounts" not in index            # A release marks the page; the source never does.
 
 
 # --- per-block copy -------------------------------------------------------------------------------
