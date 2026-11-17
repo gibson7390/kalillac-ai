@@ -1,6 +1,6 @@
 # Independent audit handoff, 2026-11-17
 
-For Codex, the independent read-only auditor. Seven checkpoints since the last independently
+For Codex, the independent read-only auditor. Ten checkpoints since the last independently
 verified one (`dcc0d44`, the D3 login-outcome fix). Each is on its own branch, stacked in this order;
 each branch contains everything below it. Nothing here has been merged, deployed or run against any
 real host or database. The statuses below are development statuses only: "CI green" means the
@@ -19,6 +19,8 @@ input or state, and the wrong result.
 | 6 | M9: staging provisioning | `feat/staging-provisioning-m9` | `70a09ed468c26ceea9aba41ad358138f91d8fe16` | subscription 44102277062 on it; provider 44100305520, safety 44100311426 on `aab49f6` (the same code): green |
 | 8 | S1: Spaces in the chat | `feat/spaces-frontend-s1` | `ba03512df40222754f5b617a98ec9f0f129c2e4d` | subscription 44115103292 and frontend 44115118022 on `60957ad`; frontend 44116824283 on `ba03512` (CSS and tests only): green |
 | 7 | A10: Spaces through V1 authorization | `feat/v1-single-authorization-a10` | `5ce57506c08c527f9b8d9cf12aacc3d3b3e579be` | 44102284051, 44102290116, 44102296120: green |
+| 9 | A11: billing, usage and quota through V1 | `feat/v1-auth-remaining-a11` | `3525fd8` (full SHA in `git log`) | subscription 44166877085, frontend 44166883328, anonymous allowance 44166895596, provider 44166917176: green |
+| 10 | I1 image upload and understanding, O1 owner report, D2f confirmation and Space management in the chat | `feat/image-intake-i1` | `796fabeb6e04e9ee0e165a30ff9989633e00a1c5` (I1, O1); Space management after it | files 44173313156 and provider 44173319299 green on `796fabe`; subscription, frontend and anonymous allowance running |
 
 ## 1. D3 (`35f61c8`)
 

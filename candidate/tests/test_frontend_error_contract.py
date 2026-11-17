@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-images1"
-CSS_CACHE_KEY = "20261117-images1"
+CACHE_KEY = "20261117-spaces2"
+CSS_CACHE_KEY = "20261117-spaces2"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -214,7 +214,7 @@ SCENARIOS = (
     + list(FILE_SCENARIOS)
     + list(REASONING_SCENARIOS)
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
-       "spaces_header_360x640"]
+       "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages"]
 )
 
 
@@ -1237,6 +1237,44 @@ def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_re
         ("POST", "/api/spaces", {"name": "Trip", "instructions": ""}),
         ("GET", f"/api/spaces/{SPACE_B}/conversations?limit=50", None),
         ("POST", f"/api/spaces/{SPACE_B}/conversations", {})]
+
+
+def test_a_space_is_renamed_given_instructions_and_deleted_with_its_version(browser_results):
+    result = scenario(browser_results, "spaces_manage")
+    assert step(result, "space-view")["buttons"] == ["Rename", "Instructions", "Delete"]
+    renaming = step(result, "renaming")
+    assert renaming["field"] == "Research" and renaming["buttons"] == ["Save", "Cancel"]
+    renamed = step(result, "renamed")
+    # The dialog, the open conversation's bar and the status follow the server's answer.
+    assert (renamed["title"], renamed["barName"], renamed["status"]) == ("Research 2026", "Research 2026", "Renamed.")
+    assert step(result, "instructions")["field"] == "Be brief."
+    conflict = step(result, "conflict")
+    assert conflict["status"] == "This Space was changed somewhere else. Open it again to see the latest."
+    assert conflict["field"] == "Cite sources."                    # Kept for the customer, not overwritten.
+    assert step(result, "instructions-saved")["status"] == "Instructions saved."
+    assert step(result, "confirm-delete")["buttons"] == ["Delete Space", "Cancel"]
+    deleted = step(result, "deleted")
+    assert deleted["title"] == "Spaces" and deleted["status"] == "Space deleted." and not deleted["barShown"]
+    writes = [(m, u, b) for m, u, b in spaces_requests(result) if m in ("PATCH", "PUT", "DELETE")]
+    assert writes == [
+        ("PATCH", f"/api/spaces/{SPACE_A}", {"name": "Research 2026", "expected_version": 3}),
+        ("PUT", f"/api/spaces/{SPACE_A}/instructions", {"instructions": "Cite sources.", "expected_version": 4}),
+        ("PUT", f"/api/spaces/{SPACE_A}/instructions", {"instructions": "Cite sources.", "expected_version": 5}),
+        ("DELETE", f"/api/spaces/{SPACE_A}", None)]
+    assert "RAW-SECRET" not in step(result, "deleted-page")["threadText"]
+
+
+def test_earlier_messages_of_a_long_conversation_load_above_with_their_copy(browser_results):
+    result = scenario(browser_results, "spaces_earlier_messages")
+    opened = [s_ for s_ in result["steps"] if s_["label"] == "opened" and "users" in s_][0]
+    assert opened["users"] == ["Third question"] and step(result, "earlier-shown")["count"] == 1
+    expanded = [s_ for s_ in result["steps"] if s_["label"] == "expanded" and "users" in s_][0]
+    assert expanded["users"] == ["First question", "Second question", "Third question"]
+    assert [a_["text"].strip() for a_ in expanded["assistants"]] == ["First answer", "Second answer", "Third answer"]
+    after = step(result, "earlier-after")
+    assert after["count"] == 0 and after["copies"] == 3            # No more pages; each answer has Copy.
+    assert spaces_requests(result)[-1] == (
+        "GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100&before_seq=5", None)
 
 
 def test_an_account_that_may_not_use_spaces_sees_no_spaces_control(browser_results):

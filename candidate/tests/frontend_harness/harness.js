@@ -222,7 +222,8 @@
       response = new Response(stream, { status: spec.status || 200, headers: headers });
     } else {
       var body = spec.json !== undefined ? JSON.stringify(spec.json) : (spec.body || "");
-      response = new Response(body, { status: spec.status || 200, headers: headers });
+      // A 204 has no body at all (the Response constructor refuses one, even empty).
+      response = new Response(spec.status === 204 ? null : body, { status: spec.status || 200, headers: headers });
     }
 
     if (!spec.delay) return Promise.resolve(response);
@@ -1582,6 +1583,91 @@
     await a.leaveSpace();
     a.spaces("left");
     a.snap("left");
+  };
+
+  function spaceRecord(name, instructions, version) {
+    return { status: 200, json: { space: { id: SPACE_A, name: name, instructions: instructions, version: version,
+                                           instructions_updated_at: null, created_at: AT, updated_at: AT } } };
+  }
+  function manage(label) {
+    var buttons = Array.prototype.map.call(document.querySelectorAll("#spaces-manage button"), text);
+    var field = document.getElementById("spaces-edit-field");
+    steps.push({ label: label, buttons: buttons, field: field ? field.value : null,
+                 title: text($("spaces-dialog-title")), status: text($("spaces-status")),
+                 barName: text($("space-bar-name")), barShown: !$("space-bar").hidden, requestCount: requests.length });
+  }
+  function clickManage(name) {
+    var button = Array.prototype.filter.call(document.querySelectorAll("#spaces-manage button"),
+                                             function (b) { return text(b) === name; })[0];
+    button.click();
+    return wait(80);
+  }
+  function submitEdit(value) {
+    document.getElementById("spaces-edit-field").value = value;
+    document.querySelector("#spaces-manage form").requestSubmit();
+    return wait(80);
+  }
+
+  // Inside an open Space conversation: rename the Space (the bar follows), a version conflict on the
+  // instructions is reported, not overwritten; saved instructions; then delete, which leaves the Space.
+  SCENARIOS.spaces_manage = async function (a) {
+    await a.wait(60);
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);                     // Open "Plan" in "Research".
+    a.respondWith(spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT }]),
+                  conversationsList([]));
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);                     // Back in the dialog, in the open Space.
+    manage("space-view");
+    a.respondWith(spaceRecord("Research", "Be brief.", 3), spaceRecord("Research 2026", "Be brief.", 4));
+    await clickManage("Rename");
+    manage("renaming");
+    await submitEdit("Research 2026");
+    manage("renamed");
+    a.respondWith(spaceRecord("Research 2026", "Be brief.", 4),
+                  { status: 409, json: { error: "version_conflict", detail: SECRET } });
+    await clickManage("Instructions");
+    manage("instructions");
+    await submitEdit("Cite sources.");
+    manage("conflict");
+    a.respondWith(spaceRecord("Research 2026", "Changed elsewhere.", 5),
+                  spaceRecord("Research 2026", "Cite sources.", 6));
+    await clickManage("Cancel");
+    await clickManage("Instructions");
+    await submitEdit("Cite sources.");
+    manage("instructions-saved");
+    await clickManage("Delete");
+    manage("confirm-delete");
+    a.respondWith({ status: 204, body: "" }, spacesList([]));
+    await clickManage("Delete Space");
+    await a.wait(80);
+    manage("deleted");
+    a.snap("deleted-page");
+  };
+
+  // A long saved conversation: earlier messages load above, each turn keeps Copy, the cursor moves on.
+  SCENARIOS.spaces_earlier_messages = async function (a) {
+    await a.wait(60);
+    a.respondWith(
+      spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT }]),
+      conversationsList([{ id: CONV_A, title: "Plan", message_count: 6, last_message_at: AT, updated_at: AT }]),
+      { status: 200, json: { conversation: { id: CONV_A, title: "Plan" }, next_before_seq: 5, messages: [
+        savedMessage(5, "user", "Third question"), savedMessage(6, "assistant", "Third answer")] } },
+      { status: 200, json: { conversation: { id: CONV_A, title: "Plan" }, next_before_seq: null, messages: [
+        savedMessage(1, "user", "First question"), savedMessage(2, "assistant", "First answer"),
+        savedMessage(3, "user", "Second question"), savedMessage(4, "assistant", "Second answer")] } });
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);
+    a.snap("opened");
+    steps.push({ label: "earlier-shown", count: document.querySelectorAll(".spaces-earlier").length });
+    document.querySelector(".spaces-earlier").click();
+    await a.wait(120);
+    a.snap("expanded");
+    steps.push({ label: "earlier-after", count: document.querySelectorAll(".spaces-earlier").length,
+                 copies: document.querySelectorAll("#thread .msg-actions").length });
   };
 
   // A failed send and a stopped one are retried with the same idempotency key; the next message gets

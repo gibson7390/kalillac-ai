@@ -1903,6 +1903,7 @@
     var view = spacesView = { kind: "spaces" };
     spacesTitle.textContent = "Spaces";
     spacesBack.hidden = true;
+    clearManage();
     spacesNewLabel.textContent = "New Space name";
     spacesNewName.placeholder = "New Space name";
     spacesNewName.maxLength = SPACE_NAME_MAX;
@@ -1936,6 +1937,7 @@
     spacesNewName.maxLength = SPACE_TITLE_MAX;
     spacesNewName.value = "";
     clearSpacesList();
+    manageBar(view);
     setSpacesStatus("Loading…");
     return spacesRequest("GET", spaceUrl(space.id, "/conversations?limit=" + SPACE_PAGE_MAX)).then(function (r) {
       if (spacesView !== view) return;
@@ -1955,6 +1957,153 @@
     }, function () {
       if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
     });
+  }
+
+  /* Managing the open Space (in the dialog's Space view): rename it, set its instructions, delete it.
+     Each change carries the version the page last read; a change made elsewhere meanwhile is refused
+     by the server (version_conflict) and the page says so instead of overwriting it. */
+  var SPACE_INSTRUCTIONS_MAX = 8000;
+  var COPY_SPACE_SAVE_FAILED = "Kalillac couldn't save that. Please try again.";
+  var COPY_SPACE_CHANGED = "This Space was changed somewhere else. Open it again to see the latest.";
+  var spacesManage = null;
+
+  function spacesButton(label, className, onClick) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function clearManage() {
+    if (!spacesManage) return;
+    while (spacesManage.firstChild) spacesManage.removeChild(spacesManage.firstChild);
+    spacesManage.hidden = true;
+  }
+
+  function manageBar(view) {
+    if (!spacesManage) {
+      spacesManage = document.createElement("div");
+      spacesManage.className = "spaces-manage";
+      spacesManage.id = "spaces-manage";
+      spacesList.parentNode.insertBefore(spacesManage, spacesList);
+    }
+    clearManage();
+    spacesManage.hidden = false;
+    spacesManage.appendChild(spacesButton("Rename", "spaces-manage-btn", function () { editSpace(view, "name"); }));
+    spacesManage.appendChild(spacesButton("Instructions", "spaces-manage-btn",
+      function () { editSpace(view, "instructions"); }));
+    spacesManage.appendChild(spacesButton("Delete", "spaces-manage-btn spaces-danger",
+      function () { confirmDeleteSpace(view); }));
+  }
+
+  // The Space as the server has it now (name, instructions, version), or null.
+  function readSpace(view) {
+    return spacesRequest("GET", spaceUrl(view.space.id)).then(function (r) {
+      var s = r.data && r.data.space;
+      if (spacesView !== view || r.status !== 200 || !s || s.id !== view.space.id || !validName(s.name, SPACE_NAME_MAX)
+          || typeof s.instructions !== "string" || typeof s.version !== "number") return null;
+      return s;
+    }, function () { return null; });
+  }
+
+  function editSpace(view, field) {
+    setSpacesStatus("Loading…");
+    readSpace(view).then(function (s) {
+      if (spacesView !== view) return;
+      if (!s) { setSpacesStatus(COPY_SPACES_FAILED); return; }
+      setSpacesStatus("");
+      clearManage();
+      spacesManage.hidden = false;
+      var form = document.createElement("form");
+      form.className = "spaces-edit";
+      var label = document.createElement("label");
+      label.className = "spaces-edit-label";
+      label.htmlFor = "spaces-edit-field";
+      label.textContent = field === "name" ? "Space name" : "Instructions for every conversation in this Space";
+      var box = document.createElement(field === "name" ? "input" : "textarea");
+      box.id = "spaces-edit-field";
+      box.className = "spaces-edit-field";
+      box.maxLength = field === "name" ? SPACE_NAME_MAX : SPACE_INSTRUCTIONS_MAX;
+      box.value = field === "name" ? s.name : s.instructions;
+      if (field !== "name") box.rows = 6;
+      var actions = document.createElement("div");
+      actions.className = "spaces-edit-actions";
+      var save = document.createElement("button");
+      save.type = "submit";
+      save.className = "spaces-manage-btn spaces-primary";
+      save.textContent = "Save";
+      actions.appendChild(save);
+      actions.appendChild(spacesButton("Cancel", "spaces-manage-btn", function () { manageBar(view); }));
+      form.appendChild(label);
+      form.appendChild(box);
+      form.appendChild(actions);
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var value = field === "name" ? box.value.trim() : box.value;
+        if (field === "name" && !value) { box.focus(); return; }
+        save.disabled = true;
+        setSpacesStatus("Saving…");
+        var request = field === "name"
+          ? spacesRequest("PATCH", spaceUrl(view.space.id), { name: value, expected_version: s.version })
+          : spacesRequest("PUT", spaceUrl(view.space.id, "/instructions"),
+                          { instructions: value, expected_version: s.version });
+        request.then(function (r) {
+          if (spacesView !== view) return;
+          var saved = r.data && r.data.space;
+          if (r.status === 200 && saved && saved.id === view.space.id && validName(saved.name, SPACE_NAME_MAX)) {
+            view.space.name = saved.name;
+            spacesTitle.textContent = saved.name;
+            if (SPACE && SPACE.space.id === saved.id) {
+              SPACE.space.name = saved.name;
+              spaceBarName.textContent = saved.name;
+            }
+            manageBar(view);
+            setSpacesStatus(field === "name" ? "Renamed." : "Instructions saved.");
+            return;
+          }
+          save.disabled = false;
+          setSpacesStatus(r.data && r.data.error === "version_conflict" ? COPY_SPACE_CHANGED : COPY_SPACE_SAVE_FAILED);
+        }, function () {
+          if (spacesView !== view) return;
+          save.disabled = false;
+          setSpacesStatus(COPY_SPACE_SAVE_FAILED);
+        });
+      });
+      spacesManage.appendChild(form);
+      box.focus();
+    });
+  }
+
+  function confirmDeleteSpace(view) {
+    clearManage();
+    spacesManage.hidden = false;
+    var note = document.createElement("p");
+    note.className = "spaces-confirm";
+    note.textContent = "Delete this Space and all its conversations? This can’t be undone.";
+    spacesManage.appendChild(note);
+    var remove = spacesButton("Delete Space", "spaces-manage-btn spaces-danger", function () {
+      if (inFlight) return;
+      remove.disabled = true;
+      setSpacesStatus("Deleting…");
+      spacesRequest("DELETE", spaceUrl(view.space.id)).then(function (r) {
+        if (spacesView !== view) return;
+        if (r.status !== 204) {
+          remove.disabled = false;
+          setSpacesStatus(COPY_SPACE_SAVE_FAILED);
+          return;
+        }
+        if (SPACE && SPACE.space.id === view.space.id) leaveSpace();
+        showSpacesList().then(function () { setSpacesStatus("Space deleted."); });
+      }, function () {
+        if (spacesView !== view) return;
+        remove.disabled = false;
+        setSpacesStatus(COPY_SPACE_SAVE_FAILED);
+      });
+    });
+    spacesManage.appendChild(remove);
+    spacesManage.appendChild(spacesButton("Cancel", "spaces-manage-btn", function () { manageBar(view); }));
   }
 
   function createInSpaces(event) {
@@ -2010,7 +2159,7 @@
           setSpacesStatus(COPY_SPACES_FAILED);
           return;
         }
-        enterSpace(space, conversation, r.data.messages);
+        enterSpace(space, conversation, r.data.messages, earlierCursor(r.data.next_before_seq));
       }, function () {
         if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
       });
@@ -2031,24 +2180,13 @@
     showSpacesList();
   }
 
-  function enterSpace(space, conversation, messages) {
-    var restore = SPACE ? SPACE.restore : {
-      picker: modePicker ? modePicker.hidden : null,
-      attach: attachBtn ? attachBtn.hidden : null
-    };
-    SPACE = null;
-    startNewConversation();          // The temporary conversation leaves the screen (as New conversation).
-    SPACE = { space: space, conversation: conversation, restore: restore };
-    spaceBarName.textContent = space.name;
-    spaceBarTitle.textContent = conversation.title ? " · " + conversation.title : "";
-    spaceBar.hidden = false;
-    if (sessionStatus) sessionStatus.hidden = true;
-    if (eraseBtn) eraseBtn.hidden = true;
-    if (modePicker) modePicker.hidden = true;
-    if (attachBtn) attachBtn.hidden = true;
-    clearAttached();
-    showAttachStatus("");
+  // A server cursor for the page before the shown messages: a positive whole number, else none.
+  function earlierCursor(value) {
+    return typeof value === "number" && value > 0 && Math.floor(value) === value ? value : null;
+  }
 
+  // Saved messages, oldest first, as completed turns (Copy only).
+  function renderSaved(messages) {
     var pending = null;
     for (var i = 0; i < messages.length; i++) {
       var m = messages[i];
@@ -2063,6 +2201,72 @@
         pending = null;
       }
     }
+  }
+
+  // "Show earlier messages" above the thread while the server has older ones.
+  function showEarlierControl() {
+    if (!SPACE || SPACE.earlier === null) return;
+    var row = document.createElement("div");
+    row.className = "spaces-earlier-row";
+    row.appendChild(spacesButton("Show earlier messages", "spaces-earlier", loadEarlier));
+    thread.insertBefore(row, thread.firstChild);
+  }
+
+  /* The page before the oldest shown message, placed above it. The thread is drawn again from what was
+     saved (the earlier page, then every turn on screen), so each turn keeps its own Copy. */
+  function loadEarlier(event) {
+    var open = SPACE;
+    if (!open || open.earlier === null || inFlight) return;
+    var button = event && event.currentTarget;
+    if (button) button.disabled = true;
+    spacesRequest("GET", spaceUrl(open.space.id, "/conversations/" + open.conversation.id +
+                  "?limit=" + SPACE_MESSAGES_MAX + "&before_seq=" + open.earlier)).then(function (r) {
+      if (SPACE !== open || inFlight) return;
+      if (r.status !== 200 || !r.data || !Array.isArray(r.data.messages)) {
+        if (button) {
+          button.disabled = false;
+          button.textContent = "Couldn’t load earlier messages. Try again";
+        }
+        return;
+      }
+      var shown = [];
+      TURNS.forEach(function (t) {
+        shown.push({ role: "user", content: t.user });
+        shown.push({ role: "assistant", content: t.assistant });
+      });
+      discardFailedExchange();
+      TURNS.length = 0;
+      while (thread.firstChild) thread.removeChild(thread.firstChild);
+      open.earlier = earlierCursor(r.data.next_before_seq);
+      renderSaved(r.data.messages.concat(shown));
+      showEarlierControl();
+      stickToBottom = false;              // Reading back: the earlier messages stay in view.
+      if (thread.firstChild && thread.firstChild.scrollIntoView) thread.firstChild.scrollIntoView({ block: "start" });
+    }, function () {
+      if (button && SPACE === open) button.disabled = false;
+    });
+  }
+
+  function enterSpace(space, conversation, messages, earlier) {
+    var restore = SPACE ? SPACE.restore : {
+      picker: modePicker ? modePicker.hidden : null,
+      attach: attachBtn ? attachBtn.hidden : null
+    };
+    SPACE = null;
+    startNewConversation();          // The temporary conversation leaves the screen (as New conversation).
+    SPACE = { space: space, conversation: conversation, restore: restore, earlier: earlier || null };
+    spaceBarName.textContent = space.name;
+    spaceBarTitle.textContent = conversation.title ? " · " + conversation.title : "";
+    spaceBar.hidden = false;
+    if (sessionStatus) sessionStatus.hidden = true;
+    if (eraseBtn) eraseBtn.hidden = true;
+    if (modePicker) modePicker.hidden = true;
+    if (attachBtn) attachBtn.hidden = true;
+    clearAttached();
+    showAttachStatus("");
+
+    renderSaved(messages);
+    showEarlierControl();
     closeSpacesDialog();
     stickToBottom = true;
     scrollToBottom(true);
