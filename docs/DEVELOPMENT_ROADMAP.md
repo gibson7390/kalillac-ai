@@ -307,10 +307,12 @@ from the code. See "Owner decisions required".
   CI; the confirmation now has its own guarded entry. New workflow `spaces-verification`: the 1,249 SQLite
   Spaces and reasoning-mode tests had been in no workflow.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
-* Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
+* Fixed flaky test: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
-  `pending` once in CI (run 43982872312, D3); it reads the slot right after the response, before the
-  lease release always lands. It passed 5 of 5 locally; the chat queue is untouched by D3.
+  `pending` once in CI (run 43982872312, D3). Cause: the lease release is a background task on the test
+  client's event loop, and the test read the slot after closing the client, which cancels a task that
+  has not run yet. The test now waits for the release while the client is open (20 of 20 locally). Not
+  a product defect: a running server keeps its loop.
 
 ### Milestone 3: Stripe billing (starting point)
 

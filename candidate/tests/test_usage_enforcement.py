@@ -1095,11 +1095,22 @@ def test_chat_queue_saturation_stays_busy_and_releases_the_lease(foundation, mon
     else:
         monkeypatch.setattr(app, "_chat_semaphore", asyncio.Semaphore(0))
         monkeypatch.setattr(app, "_chat_waiting", app.MAX_QUEUED_CHATS)
+    import time
+
+    def states():
+        with foundation["factory"]() as session:
+            return list(session.scalars(select(AccountUsageSlot.state)))
     with TestClient(app.api) as client:
         response = request(client)
+        # The release runs as a background task after the response, on the client's event loop: wait for
+        # it while that loop is still running (once the client closes, a not-yet-run task is cancelled,
+        # which is what made this test read the lease as "pending" now and then).
+        deadline = time.monotonic() + 5
+        while states() not in ([], ["released"]) and time.monotonic() < deadline:
+            time.sleep(0.02)
     assert response.status_code == 429 and response.json() == {"error": "busy"}
     assert not foundation["calls"]
+    # The admitted lease was released, so the allowance is untouched.
+    assert states() in ([], ["released"])
     with foundation["factory"]() as session:
-        # The admitted lease was released, so the allowance is untouched.
-        assert list(session.scalars(select(AccountUsageSlot.state))) in ([], ["released"])
         assert session.scalar(select(AccountUsageDaily)) is None

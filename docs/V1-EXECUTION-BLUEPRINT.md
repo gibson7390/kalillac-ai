@@ -67,7 +67,8 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 * Document quality: Arabic PDF ligature order (open), Word field caches (owner decision 12 pending
   acceptance of the finalization service), semantic-consistency contract (partly built). Details:
   `docs/CODEX-AUDIT-CORRECTIONS.md`.
-* Known flaky test (not a product finding): chat-queue saturation slot read (roadmap).
+* The chat-queue saturation test's occasional "pending" read is fixed (the test read the lease after its
+  event loop closed; roadmap).
 
 ## Owner decisions (recorded once; work continues around them)
 
