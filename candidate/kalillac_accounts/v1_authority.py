@@ -176,9 +176,19 @@ def parse_service_credential(raw, *, role, database_instance_id, deployment_id, 
     return password
 
 
-def verify_service_boundary(session, service, executor):
-    """Inside a transaction connected as S: S's attributes, memberships, rights and the exact executable
-    authority inventory. Raises V1AuthorityUnavailable on any difference."""
+def _operator_functions():
+    """{signature: SHA-256 of the reviewed body} for the operator role P's functions (0022, 0023): the
+    exact set P may execute, and never S's."""
+    from .v1_schema import (DELETION_REQUEST_SIGNATURE, DELETION_REQUEST_SOURCE_SHA256, QUARANTINE_SIGNATURE,
+                            QUARANTINE_SOURCE_SHA256, REINSTATE_SIGNATURE, REINSTATE_SOURCE_SHA256)
+    return {QUARANTINE_SIGNATURE: QUARANTINE_SOURCE_SHA256, REINSTATE_SIGNATURE: REINSTATE_SOURCE_SHA256,
+            DELETION_REQUEST_SIGNATURE: DELETION_REQUEST_SOURCE_SHA256}
+
+
+def verify_service_boundary(session, service, executor, reviewed=None):
+    """Inside a transaction connected as S (or, with reviewed=_operator_functions(), as P): the role's
+    attributes, memberships, rights and the exact executable function inventory. Raises
+    V1AuthorityUnavailable on any difference."""
     from sqlalchemy import text
 
     def rows(sql, **params):
@@ -212,7 +222,7 @@ def verify_service_boundary(session, service, executor):
     executable = {row[0] for row in rows("""SELECT p.oid::pg_catalog.regprocedure::text FROM pg_catalog.pg_proc p
         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'kalillac' AND pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')""")}
-    reviewed = _reviewed_functions()
+    reviewed = _reviewed_functions() if reviewed is None else reviewed
     if executable != set(reviewed):
         raise V1AuthorityUnavailable()
     if rows("""SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
@@ -453,11 +463,67 @@ class V1Authority:
             return SessionsRevoked(outcome, retry_after, replayed)
 
 
+QUARANTINE_OUTCOMES = frozenset({"quarantined", "already_quarantined", "not_found", "security_unavailable"})
+REINSTATE_OUTCOMES = frozenset({"reinstated", "not_quarantined", "not_found", "security_unavailable"})
+REQUEST_DELETION_OUTCOMES = frozenset({"requested", "already_requested", "not_found", "security_unavailable"})
+_OPERATOR_CALLS = {
+    "quarantine": ("SELECT outcome, replayed FROM kalillac.v1_quarantine(:o, :u)", QUARANTINE_OUTCOMES, "quarantined"),
+    "reinstate": ("SELECT outcome, replayed FROM kalillac.v1_reinstate(:o, :u)", REINSTATE_OUTCOMES, "reinstated"),
+    "request_deletion": ("SELECT outcome, replayed FROM kalillac.v1_request_deletion(:o, :u)",
+                         REQUEST_DELETION_OUTCOMES, "requested"),
+}
+
+
+@dataclass(frozen=True)
+class OperatorResult:
+    outcome: str
+    replayed: bool
+
+
+class V1Operator(V1Authority):
+    """The operator role P's calls (D4's support tool only, never the application): suspend, reinstate
+    and request deletion, each with an operation id. P's boundary is verified against exactly the
+    operator functions. Use build_v1_authority(..., authority_class=V1Operator)."""
+
+    def __repr__(self):
+        return "V1Operator()"
+
+    def verify(self):
+        with self._transaction() as session:
+            verify_service_boundary(session, self.role, self.executor, _operator_functions())
+
+    def operate(self, action, *, operation_id, account_id):
+        """One operator function; its contract outcome, or V1AuthorityUnavailable."""
+        from sqlalchemy import text
+        if action not in _OPERATOR_CALLS or type(operation_id) is not uuid.UUID or type(account_id) is not uuid.UUID:
+            raise V1AuthorityUnavailable()
+        sql, outcomes, success = _OPERATOR_CALLS[action]
+        with self._transaction() as session:
+            found = session.execute(text(sql), {"o": operation_id, "u": account_id}).all()
+            if len(found) != 1:
+                raise V1AuthorityUnavailable()
+            outcome, replayed = found[0]
+            if type(outcome) is not str or outcome not in outcomes or type(replayed) is not bool:
+                raise V1AuthorityUnavailable()
+            if replayed and outcome != success:
+                raise V1AuthorityUnavailable()
+            return OperatorResult(outcome, replayed)
+
+    # The application's calls are not P's.
+    def issue_session(self, **arguments):
+        raise V1AuthorityUnavailable()
+
+    end_session = reset_password = change_password = request_own_deletion = revoke_sessions = issue_session
+    issue_reset_token = credential = issue_session
+
+
 def build_v1_authority(ordinary_url, *, role, executor, credential, database_instance_id, deployment_id,
-                       ordinary_password=None, production=True):
+                       ordinary_password=None, production=True, authority_class=None):
     """The authority over its own small pool, logged in as S with the protected credential's password,
     after verifying S's boundary through that pool. Raises V1AuthorityUnavailable; the engine is
-    disposed on any failure. `credential` is the credential file's bytes."""
+    disposed on any failure. `credential` is the credential file's bytes. authority_class=V1Operator
+    builds the operator tool's connection as P instead (its own credential file, P's boundary)."""
+    authority_class = V1Authority if authority_class is None else authority_class
     from sqlalchemy import create_engine, event
     from sqlalchemy.orm import sessionmaker
     from kalillac_db.migration_roles import validate_role_name
@@ -486,8 +552,8 @@ def build_v1_authority(ordinary_url, *, role, executor, credential, database_ins
             if found[0] != role or found[1] != role or (production and found[2] != "scram-sha-256:" + role):
                 raise V1AuthorityUnavailable()
 
-        authority = V1Authority(sessionmaker(bind=engine, expire_on_commit=False), role=role, executor=executor,
-                                production=production)
+        authority = authority_class(sessionmaker(bind=engine, expire_on_commit=False), role=role,
+                                    executor=executor, production=production)
         authority.verify()
         authority.dispose = engine.dispose
         return authority

@@ -225,8 +225,11 @@ from the code. See "Owner decisions required".
   issued only by `v1_issue_reset_token` as S, and V1 sign-in, password change and the deletion request
   read the stored hash only through `v1_credential` as S; HTTP tests pass with R's read of
   `users.password_hash` revoked. Implemented; awaiting Codex.
-* Then D4 (operator tool), E1 (with the row-lock design: plan, D5) to E3; erasure after the owner's
-  retention decisions.
+* **D4, operator tool** (`feat/account-security-d4-operator-tool`, on D5): `tools/v1_account_support.py`
+  through P with P's own credential, dry-run by default, operation ids, fixed reason codes and an
+  append-only record; bounded export without credentials. Implemented; awaiting Codex.
+* Then E1 (with the row-lock design: plan, D5) to E3; erasure after the owner's retention decisions.
+  The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
   `pending` once in CI (run 43982872312, D3); it reads the slot right after the response, before the

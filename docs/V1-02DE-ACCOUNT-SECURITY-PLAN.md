@@ -5,7 +5,7 @@ implemented, keeping the private database authorities and adding no legacy path.
 (default off; the application's startup gate still refuses V1 mode and passes no authority): D1; every
 D2 authority (migrations 0018 to 0023); D3's routes (login, sign-out, revoking sessions, password
 change, the customer's deletion request, recovery confirmation; no email-verification routes in V1).
-D5 (migration 0024) implemented. Remaining: D4, E1 to E3. Nothing here authorizes a production migration, a role or
+D5 (migration 0024) and D4 (operator tool) implemented. Remaining: E1 to E3. Nothing here authorizes a production migration, a role or
 credential change, or activation.
 
 Sources: the code on `feat/file-assistant-v1` (migrations 0012 to 0014, `kalillac_accounts/v1_security.py`,
@@ -137,6 +137,21 @@ PostgreSQL through HTTP, with a test-only trigger proving every write is S's and
 held about an account, each through P with an operator credential that is not the application's,
 with a dry-run mode, a required reason code and an operation id. Tested against fixtures; writing it
 is not permission to run it against production.
+
+**Implemented** (`feat/account-security-d4-operator-tool`). `suspend`, `reinstate` and `request-deletion`
+call `v1_quarantine`, `v1_reinstate` and `v1_request_deletion` through `V1Operator`, built by
+`build_v1_authority(..., authority_class=V1Operator)` from P's own protected credential file (the S
+file's format, bound to P, this database instance and deployment, never the runtime password). P's
+boundary is verified before anything is called: exactly the three operator functions, no table right,
+no membership. Every call is dry-run unless `--apply`; has an operation id (given to retry, reported
+`replayed`, never applied twice) and a required reason code from a fixed list; and writes an intent
+line before the call and an outcome line after it to an append-only, owner-only record file
+(`KALILLAC_V1_OPERATOR_RECORD_FILE`; if the intent cannot be written nothing is called). That file is
+where the reason lives (the audit table has no reason column). `show` and `export` read through the
+runtime login from non-credential columns only: no password hash, session or token digest. The export
+is bounded (500 rows per collection, truncation reported) and cannot include the owner-only security
+events, which it states. `V1Operator` refuses every application call. Tests: 16 unit, 12 PostgreSQL
+(P given a login in the disposable database only).
 
 ### D5. Before E1: the remaining legacy account-state paths in V1 mode (inventory after D3)
 
