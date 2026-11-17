@@ -28,12 +28,55 @@ class Admission:
     reservation: object = None
 
 
+def _sqlstate(exc):
+    """The driver's five-character SQLSTATE, or "none": never a message, SQL or parameter."""
+    code = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return code if type(code) is str and len(code) == 5 and code.isascii() and code.isalnum() else "none"
+
+
+class QuotaAccountRefused(QuotaError):
+    """V1 refused the account itself (403 account_unavailable or email_verification_required)."""
+
+    def __init__(self, status_code, code):
+        super().__init__(code)
+        self.status_code, self.code = status_code, code
+
+
+def _v1_identity(session, token_hash):
+    """The account id V1-01 authorizes for token_hash, inside the quota's own transaction.
+
+    authorize_original_identity locks the account row FOR UPDATE, so it is this transaction's first lock
+    on that row; the quota's KEY SHARE lock that follows is weaker and never waits to upgrade (the same
+    order as a Space save, A10). A live, unexpired, unrevoked original session of an active, verified,
+    unquarantined account, inside its session epoch; anything else refuses the reservation."""
+    from .auth import RequestRejected, authorize_original_identity, resolve_original_identity
+    from kalillac_db.repositories.accounts import AccountAuthorizationUnavailable
+    identity = resolve_original_identity(session, token_hash)
+    if identity is None:
+        raise QuotaIdentityInvalid()
+    try:
+        account = authorize_original_identity(session, identity)
+    except RequestRejected as rejected:
+        if rejected.status == 401:
+            raise QuotaIdentityInvalid() from None
+        raise QuotaAccountRefused(rejected.status, rejected.code) from None
+    except AccountAuthorizationUnavailable:
+        raise QuotaUnavailable() from None
+    return account.id
+
+
 class UsageQuota:
-    def __init__(self, limits, session_factory=get_session_factory, settings=None, clock=None, ttl=RESERVATION_TTL):
+    def __init__(self, limits, session_factory=get_session_factory, settings=None, clock=None, ttl=RESERVATION_TTL,
+                 v1=False):
+        """v1=True (V1 account security on): a reservation is admitted only through V1-01's authorization
+        of the cookie's original session, never the legacy session lookup."""
         if ttl.total_seconds() <= 0:
             raise ValueError("Reservation lifetime must be positive.")
+        if type(v1) is not bool:
+            raise ValueError("v1 must be a bool.")
         self.limits, self._factory = limits, session_factory
         self.settings, self._clock, self.ttl = settings or load_account_settings(), clock, ttl
+        self._v1 = v1
 
     def new_request(self):
         return QuotaRequest(self)
@@ -68,7 +111,7 @@ class UsageQuota:
         except (QuotaError, RequestBudgetError):
             raise
         except Exception as exc:
-            print(f"WARN: USAGE_QUOTA_DATABASE_FAILED {type(exc).__name__}")
+            print(f"WARN: USAGE_QUOTA_DATABASE_FAILED {type(exc).__name__} sqlstate={_sqlstate(exc)}")
             raise QuotaUnavailable() from None
 
     def reserve(self, token_hash, request):
@@ -76,18 +119,22 @@ class UsageQuota:
             return Admission()  # Genuine anonymous: no DB or entitlement work.
         def operation(session):
             request.ensure_open()
-            user = get_signed_in_user(session, token_hash, self._now(session))
-            if user is None:
-                raise QuotaIdentityInvalid()
-            lock_account(session, user.id)
+            if self._v1:
+                user_id = _v1_identity(session, token_hash)
+            else:
+                user = get_signed_in_user(session, token_hash, self._now(session))
+                if user is None:
+                    raise QuotaIdentityInvalid()
+                user_id = user.id
+            lock_account(session, user_id)
             now = self._now(session)
-            limit = self._limit(session, user.id, now)
+            limit = self._limit(session, user_id, now)
             ttl = self.ttl
             if request.budget is not None:
                 ttl = max(ttl, timedelta(seconds=max(0, request.budget.deadline - time.monotonic()) + 5))
-            lease = reserve_slot(session, user.id, now.date(), limit, now, ttl)
+            lease = reserve_slot(session, user_id, now.date(), limit, now, ttl)
             request.ensure_open()
-            return Admission(user.id, lease)
+            return Admission(user_id, lease)
         return self._transaction(operation)
 
     def validate(self, admission, request):

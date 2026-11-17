@@ -15058,12 +15058,14 @@ if os.getenv("KALILLAC_USAGE_METERING_ENABLED", "").strip().lower() in {
 
     from kalillac_accounts.usage import UsageMeter, build_usage_router
 
-    _usage_meter = UsageMeter(settings=_account_settings)
-    api.include_router(build_usage_router(settings=_account_settings))
+    # V1 on: both resolve the account through V1-01's authorization, never the legacy lookup.
+    _usage_meter = UsageMeter(settings=_account_settings, v1_security=_v1_account_security)
+    api.include_router(build_usage_router(settings=_account_settings, v1_security=_v1_account_security))
 
 if _usage_limits is not None:
     from kalillac_accounts.quota import UsageQuota
-    _usage_quota = UsageQuota(_usage_limits, settings=_account_settings)
+    # V1 on: a reservation is admitted only through V1-01's authorization, in its own transaction.
+    _usage_quota = UsageQuota(_usage_limits, settings=_account_settings, v1=_v1_account_security is not None)
 
 
 # Optional Stripe billing (Checkout, Customer Portal, verified webhooks). Off
@@ -15097,6 +15099,7 @@ if os.getenv("KALILLAC_BILLING_ENABLED", "").strip().lower() in {
         build_billing_router(
             config=load_billing_config(),
             settings=_account_settings,
+            v1_security=_v1_account_security,
         )
     )
 

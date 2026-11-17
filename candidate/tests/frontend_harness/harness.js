@@ -683,6 +683,7 @@
     request_timeout: 504, internal_error: 500,
     session_ended: 409, unsupported_media_type: 415,
     reasoning_mode_not_allowed: 403, files_require_premium: 403, not_authenticated: 401,
+    daily_limit_reached: 429, account_unavailable: 403,
     file_not_found: 404, file_assistant_unavailable: 502, model_output_unusable: 502,
     model_output_incomplete: 502, model_refused: 502, tool_limit_exceeded: 502
   };
@@ -1028,6 +1029,11 @@
   SCENARIOS.daily_limit_wrong_status = function (a) {
     return failThenNewSend(
       { status: 503, json: { error: "anonymous_daily_limit_reached", detail: SECRET } }, a);
+  };
+  // The same for a signed-in account's own daily limit.
+  SCENARIOS.account_daily_limit_wrong_status = function (a) {
+    return failThenNewSend(
+      { status: 503, json: { error: "daily_limit_reached", detail: SECRET } }, a);
   };
 
   // Fenced code in several languages, an unknown label, an unlabeled fence,

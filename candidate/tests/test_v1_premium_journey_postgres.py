@@ -26,10 +26,12 @@ from sqlalchemy import text
 
 import app_fastapi_candidate as app
 from kalillac_accounts.recovery_router import build_recovery_router
+from kalillac_accounts.quota import UsageQuota
 from kalillac_accounts.registration_http import RegistrationHTTP
 from kalillac_accounts.request_guard import UnsafeRequestGuard
 from kalillac_accounts.router import build_account_router
-from kalillac_accounts.usage import UsageMeter
+from kalillac_accounts.usage import UsageMeter, build_usage_router
+from kalillac_accounts.usage_limits import UsageLimits
 from kalillac_billing.router import build_billing_router
 from kalillac_finance.scopes import TrafficClass
 from kalillac_routing import provider_controls
@@ -57,12 +59,18 @@ def journey(live, monkeypatch):
                                                  settings=SETTINGS, environ=recovery.ENV, v1_security=w.security,
                                                  v1_authority=w.service))
     app.api.include_router(build_billing_router(config=CONFIG, settings=SETTINGS, gateway=w.stripe,
-                                                session_factory=lambda: w.runtime_factory))
-    # The application's chat in V1 mode, metering for the signed-in account, the model scripted.
+                                                session_factory=lambda: w.runtime_factory, v1_security=w.security))
+    app.api.include_router(build_usage_router(session_factory=lambda: w.runtime_factory, settings=SETTINGS,
+                                              v1_security=w.security))
+    # The application's chat in V1 mode, metering for the signed-in account and enforcing its daily quota
+    # (synthetic test limits, not the commercial allowances), the model scripted.
     monkeypatch.setattr(app, "_v1_account_security", w.security)
     monkeypatch.setattr(app, "_account_settings", SETTINGS, raising=False)
-    monkeypatch.setattr(app, "_usage_meter", UsageMeter(session_factory=lambda: w.runtime_factory, settings=SETTINGS))
-    monkeypatch.setattr(app, "_usage_quota", None)
+    monkeypatch.setattr(app, "_usage_meter", UsageMeter(session_factory=lambda: w.runtime_factory, settings=SETTINGS,
+                                                         v1_security=w.security))
+    monkeypatch.setattr(app, "_usage_quota", UsageQuota(UsageLimits(free_daily_chats=20, paid_daily_chats=40),
+                                                         session_factory=lambda: w.runtime_factory, settings=SETTINGS,
+                                                         v1=True))
     monkeypatch.setattr(app, "SESSION_STATE", type(app.SESSION_STATE)())
     w.model_calls = []
 
@@ -162,6 +170,8 @@ def test_the_premium_journey_from_registration_to_the_deletion_request(journey):
     assert chat(w, cookie, "deep") == (403, "reasoning_mode_not_allowed", None)
     assert len(w.model_calls) == calls
     assert chat(w, cookie, "quick")[:2] == (200, None)
+    usage = get(w, "/api/account/usage", cookie)
+    assert usage.status_code == 200 and usage.json()["usage"]["successful_chats"] == 2
 
     # Checkout: the server chooses everything; nothing is granted until Stripe's webhook says so.
     checkout = post(w, "/api/account/billing/checkout", cookie=cookie)
@@ -204,7 +214,9 @@ def test_the_premium_journey_from_registration_to_the_deletion_request(journey):
     assert post(w, "/api/account/deletion-request", {"current_password": PASSWORDS[1]}, cookie=cookie).status_code == 200
     assert get(w, "/api/account/me", cookie).status_code == 401
     assert post(w, "/api/account/login", {"email": EMAIL, "password": PASSWORDS[1]}).status_code == 401
-    assert chat(w, cookie) == (200, None, TrafficClass.ANONYMOUS)           # The old cookie is nobody.
+    # The old cookie is nobody: refused by the quota's V1 authorization, never served anonymously.
+    assert chat(w, cookie) == (401, "not_authenticated", None)
+    assert get(w, "/api/account/usage", cookie).status_code == 401
 
     assert events(w, user) == ["password_change", "account_deletion_request"]
     # The runtime login wrote entitlement rows (billing; E1b moves that behind a reviewed path) and

@@ -146,7 +146,8 @@ jobs:
       # test_usage_enforcement.py 67 + test_frontend_error_contract.py 115 +
       # test_homepage_handoff.py 253 = 625; the error-contract suite grew by 14
       # with the file assistant, one with per-block code copy and two with the
-      # chat's account link).
+      # chat's account link; six with Spaces in the chat (S1) and three with the
+      # account outcomes in the chat (A11): 634).
       - name: Require every focused test to have run
         run: |
           python - "$RUNNER_TEMP/anonymous-allowance-offline.xml" <<'PY'
@@ -156,6 +157,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 625, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 634, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused anonymous allowance verification did not run completely")
           PY

@@ -35,7 +35,7 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-spaces1"
+CACHE_KEY = "20261117-account1"
 CSS_CACHE_KEY = "20261117-spaces1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
@@ -65,6 +65,9 @@ DAILY_LIMIT_DIALOG = " ".join((DAILY_LIMIT_TITLE, DAILY_LIMIT_NOTE, DAILY_LIMIT_
 DAILY_LIMIT_FORBIDDEN = ("tomorrow", "unlimited", "subscri", "upgrade", "premium", "pricing",
                          "sign up", "sign-up", "signup", "stripe")
 
+# A signed-in account's own daily limit: no number (the allowances are the deployment's), the UTC day.
+ACCOUNT_DAILY_LIMIT = "You’ve reached today’s message limit for this account. It resets at 12:00 AM UTC."
+
 COPY = {
     "invalid_json": UNREADABLE,
     "invalid_body": UNREADABLE,
@@ -92,11 +95,14 @@ COPY = {
     # End & erase: a chat request for an ended session, and the end endpoint's
     # content-type refusal (never expected from /api/chat; mapped so it is fixed copy).
     "session_ended": "This conversation was ended. Your next message starts a new one.",
+    # A signed-in account's own daily limit, and an account V1 refuses (accounts deployments).
+    "daily_limit_reached": ACCOUNT_DAILY_LIMIT,
+    "account_unavailable": "This account isn’t available right now.",
     "unsupported_media_type": UNREADABLE,
     # A reasoning mode the account may not use, and the file assistant's refusals (files deployments).
     "reasoning_mode_not_allowed": "That reasoning mode isn't available for this account.",
     "files_require_premium": "Files aren't available for this account.",
-    "not_authenticated": "Sign in to use files.",
+    "not_authenticated": "Sign in to continue.",
     "file_not_found": "An attached file is no longer available. Remove it and try again.",
     "file_assistant_unavailable": FILE_FAILED,
     "model_output_unusable": FILE_FAILED,
@@ -106,7 +112,7 @@ COPY = {
 }
 NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached",
             DAILY_LIMIT_CODE, "session_ended", "reasoning_mode_not_allowed", "files_require_premium",
-            "not_authenticated", "file_not_found"}
+            "not_authenticated", "file_not_found", "daily_limit_reached", "account_unavailable"}
 
 # Text that must never reach the page: raw response fields, HTML error pages,
 # provider names and exception messages.
@@ -132,6 +138,7 @@ GENERIC_FAILURES = {
     "success_reply_with_error": INCOMPLETE,
     "render_exception": INCOMPLETE,
     "daily_limit_wrong_status": INCOMPLETE,
+    "account_daily_limit_wrong_status": INCOMPLETE,
 }
 
 DAILY_LIMIT_SCENARIOS = (
@@ -970,8 +977,12 @@ def test_daily_limit_dialog_script_contract():
     source = js_source()
 
     # Only a 429 carrying the exact code opens it.
-    assert 'if (code === "anonymous_daily_limit_reached" && status !== 429) code = null;' in source
+    assert ('if ((code === "anonymous_daily_limit_reached" || code === "daily_limit_reached")'
+            ' && status !== 429) {') in source
     assert "anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT" in source
+    # The account's own limit is a different outcome, without the anonymous dialog.
+    assert "daily_limit_reached: OUTCOME_ACCOUNT_DAILY_LIMIT," in source
+    assert not re.search(r"OUTCOME_ACCOUNT_DAILY_LIMIT = \{[^}]*dialog", source)
     # Feature-detected, opened once, focus on Got it.
     assert 'typeof limitDialog.showModal !== "function"' in source
     assert "if (!limitDialog.open) limitDialog.showModal();" in source
@@ -1377,10 +1388,8 @@ def js_source() -> str:
 
 
 REPOSITORIES = REPO / "candidate" / "kalillac_db" / "repositories"
-# Account errors reach the chat only with accounts enabled; their frontend
-# copy is a separate, later change. Until then the chat shows an unmapped
-# 429 (daily_limit_reached) with its existing busy outcome.
-DEFERRED_UNMAPPED = {"not_authenticated", "daily_limit_reached"}
+# Every account error the chat can receive is mapped (A11); none is deferred.
+DEFERRED_UNMAPPED: set[str] = set()
 
 
 def quota_error_codes() -> set[str]:
@@ -1434,17 +1443,21 @@ def backend_error_codes() -> set[str]:
 def test_quota_error_codes_are_discovered_statically():
     codes = quota_error_codes()
     assert {DAILY_LIMIT_CODE, "busy", "service_unavailable"} <= codes, codes
-    # The deferred code is discovered too, so it cannot silently disappear.
-    assert DEFERRED_UNMAPPED <= codes
+    # The account codes are discovered too, so they cannot silently disappear.
+    assert {"daily_limit_reached", "not_authenticated"} <= codes
     assert DAILY_LIMIT_CODE in backend_error_codes()
 
 
-def test_account_daily_limit_falls_back_to_the_busy_outcome_until_mapped():
-    # No frontend copy yet: the code is unmapped, and a bare 429 is busy.
+def test_the_account_daily_limit_is_its_own_outcome_on_a_429_only():
     source = js_source()
     assert "daily_limit_reached" in quota_error_codes()
-    assert not re.search(r"(?<![a-z_])daily_limit_reached\s*:", source)
+    assert re.search(r"(?<![a-z_])daily_limit_reached: OUTCOME_ACCOUNT_DAILY_LIMIT,", source)
+    assert ('if ((code === "anonymous_daily_limit_reached" || code === "daily_limit_reached")'
+            ' && status !== 429) {') in source
     assert "if (status === 429) return OUTCOME_BUSY;" in source
+    # Neither a number nor a sales prompt: the allowances are the deployment's.
+    assert not re.search(r"\d", ACCOUNT_DAILY_LIMIT.replace("12:00", ""))
+    assert not any(word in ACCOUNT_DAILY_LIMIT.lower() for word in DAILY_LIMIT_FORBIDDEN)
 
 
 def test_every_backend_error_code_is_mapped():

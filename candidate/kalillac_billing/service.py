@@ -262,8 +262,12 @@ def checkout_idempotency_key(user_id: uuid.UUID, attempt_id: uuid.UUID) -> str:
     return f"kalillac-checkout-{user_id}-{attempt_id}"
 
 
-def _locked(session_factory: sessionmaker[Session], user_id: uuid.UUID, work):
+def _locked(session_factory: sessionmaker[Session], user_id: uuid.UUID, work, authorize=None):
     with session_factory() as session, session.begin():
+        # authorize(session), when given, runs first on a clean transaction and raises to refuse; it may
+        # lock the account row FOR UPDATE itself (the same lock taken next).
+        if authorize is not None:
+            authorize(session)
         if not lock_account(session, user_id):
             raise LookupError("account no longer exists")
 
@@ -377,10 +381,15 @@ def start_checkout(
     success_url: str,
     cancel_url: str,
     clock: Callable[[], datetime] = _utc_now,
+    authorize: Callable[[Session], None] | None = None,
 ) -> CheckoutResult:
     """Return one usable Checkout URL for the account, never a second
     subscription path. Raises BillingProviderError if Stripe fails; the
-    attempt is always kept, so the next request retries the same key."""
+    attempt is always kept, so the next request retries the same key.
+
+    authorize(session), when given (V1 account security), runs at the start
+    of every planning transaction, so each pass that can reach Stripe was
+    authorized under the account lock; whatever it raises propagates."""
 
     # Several passes cover a concurrent request replacing the attempt, and a
     # retried create whose session must then be re-read for its real state.
@@ -389,6 +398,7 @@ def start_checkout(
             session_factory,
             user_id,
             _plan_checkout(price_id, success_url, cancel_url, clock()),
+            authorize,
         )
 
         if plan.action == "subscribed":

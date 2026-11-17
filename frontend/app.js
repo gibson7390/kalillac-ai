@@ -964,6 +964,13 @@
   var OUTCOME_DAILY_LIMIT = { message: COPY_DAILY_LIMIT, kind: "notice", action: null, dialog: true };
   /* The conversation's session was ended (End & erase, possibly elsewhere): the
      next message starts a new session. */
+  /* A signed-in account's own daily limit (a 429 only). No number is shown: the
+     allowances are the deployment's, and the day is the UTC day. */
+  var OUTCOME_ACCOUNT_DAILY_LIMIT = {
+    message: "You’ve reached today’s message limit for this account. " +
+             "It resets at 12:00 AM UTC.",
+    kind: "notice", action: null
+  };
   var OUTCOME_SESSION_ENDED = {
     message: "This conversation was ended. Your next message starts a new one.",
     kind: "notice", action: null
@@ -1015,7 +1022,10 @@
       kind: "error", action: "retry"
     },
     anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT,
+    daily_limit_reached: OUTCOME_ACCOUNT_DAILY_LIMIT,
     session_ended: OUTCOME_SESSION_ENDED,
+    // The account itself was refused (V1 account security): no Retry.
+    account_unavailable: { message: "This account isn’t available right now.", kind: "error", action: null },
     unsupported_media_type: { message: COPY_UNREADABLE, kind: "error", action: "retry" },
     // A reasoning mode the account's tier may not use (never silently downgraded).
     reasoning_mode_not_allowed: {
@@ -1023,7 +1033,8 @@
     },
     // Files (a files deployment only).
     files_require_premium: { message: "Files aren't available for this account.", kind: "error", action: null },
-    not_authenticated: { message: "Sign in to use files.", kind: "error", action: null },
+    // The cookie's session is not live (signed out, expired or ended elsewhere): chat, files, Spaces.
+    not_authenticated: { message: "Sign in to continue.", kind: "error", action: null },
     file_not_found: {
       message: "An attached file is no longer available. Remove it and try again.", kind: "error", action: null
     },
@@ -1041,7 +1052,9 @@
 
     // The daily limit is only ever a 429; the same code on any other status
     // is not a usable outcome.
-    if (code === "anonymous_daily_limit_reached" && status !== 429) code = null;
+    if ((code === "anonymous_daily_limit_reached" || code === "daily_limit_reached") && status !== 429) {
+      code = null;
+    }
 
     if (code && Object.prototype.hasOwnProperty.call(ERROR_OUTCOMES, code)) {
       return ERROR_OUTCOMES[code];

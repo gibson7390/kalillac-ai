@@ -27,10 +27,13 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.concurrency import run_in_threadpool
 
+from kalillac_accounts.auth import (
+    RequestRejected, authorize_original_identity, resolve_original_identity,
+)
 from kalillac_accounts.router import AccountSettings, load_account_settings
 from kalillac_accounts.tokens import hash_session_token
 from kalillac_db.engine import get_session_factory
-from kalillac_db.repositories.accounts import get_signed_in_user
+from kalillac_db.repositories.accounts import AccountAuthorizationUnavailable, get_signed_in_user
 from kalillac_db.repositories.billing import get_billing
 
 from .config import BillingConfig
@@ -91,7 +94,12 @@ def build_billing_router(
     settings: AccountSettings | None = None,
     gateway: BillingGateway | None = None,
     session_factory: SessionFactoryProvider = get_session_factory,
+    v1_security: Any = None,
 ) -> APIRouter:
+    """v1_security (V1 account security on): every account route authorizes through V1-01's read of the
+    cookie's original session, never the legacy lookup, and returns its refusals as they are (401, 403;
+    503 account_unavailable when the authorization cannot be established). Checkout also repeats that
+    authorization inside each planning transaction, under the account lock, before any Stripe call."""
     settings = settings or load_account_settings()
 
     if gateway is None:
@@ -110,23 +118,50 @@ def build_billing_router(
         return resolved
 
     async def signed_in(request: Request, work: Callable[[Session, Any], Any]):
-        """Run work(session, user) for the signed-in account, or return
-        None when the request is not authenticated."""
+        """("ok", work(session, user)) for the signed-in account, else the
+        refusal response. user has .id and .email_verified_at."""
 
         token = request.cookies.get(settings.cookie_name)
 
         if not token:
-            return None
+            return _error(401, "not_authenticated")
 
         token_hash = hash_session_token(token)
+
+        if v1_security is not None:
+            from kalillac_accounts.v1_security import V1SecurityUnavailable
+
+            try:
+                return await v1_security.read_async(
+                    token_hash, lambda session, account: ("ok", work(session, account), token_hash),
+                )
+            except RequestRejected as rejected:
+                return _error(rejected.status, rejected.code)
+            except V1SecurityUnavailable:
+                return _error(503, "account_unavailable")
+
         now = datetime.now(timezone.utc)
 
         def run():
             with factory()() as session, session.begin():
                 user = get_signed_in_user(session, token_hash, now)
-                return None if user is None else ("ok", work(session, user))
+                return None if user is None else ("ok", work(session, user), token_hash)
 
-        return await run_in_threadpool(run)
+        found = await run_in_threadpool(run)
+        return _error(401, "not_authenticated") if found is None else found
+
+    def v1_recheck(token_hash: str, user_id):
+        """Inside a Checkout planning transaction, before its account lock: V1-01's authorization of the
+        same original session for the same account. It locks the account row FOR UPDATE, the same lock
+        billing then takes, so nothing waits to upgrade."""
+
+        def authorize(session: Session) -> None:
+            identity = resolve_original_identity(session, token_hash)
+            if identity is None or identity.user_id != user_id:
+                raise RequestRejected(401, "not_authenticated")
+            authorize_original_identity(session, identity)
+
+        return authorize
 
     @router.post("/api/account/billing/checkout")
     async def checkout(request: Request):
@@ -135,10 +170,10 @@ def build_billing_router(
             lambda session, user: (user.id, user.email_verified_at is not None),
         )
 
-        if found is None:
-            return _error(401, "not_authenticated")
+        if isinstance(found, JSONResponse):
+            return found
 
-        user_id, email_verified = found[1]
+        (user_id, email_verified), token_hash = found[1], found[2]
 
         # Read-only so far: refused before start_checkout, so before any
         # Stripe call or billing write. Portal, webhooks and reconciliation
@@ -157,6 +192,8 @@ def build_billing_router(
                     price_id=config.price_id,
                     success_url=config.success_url,
                     cancel_url=config.cancel_url,
+                    **({} if v1_security is None
+                       else {"authorize": v1_recheck(token_hash, user_id)}),
                 )
             )
         except BillingProviderError:
@@ -164,6 +201,11 @@ def build_billing_router(
             return _error(502, "billing_unavailable")
         except LookupError:
             return _error(401, "not_authenticated")
+        except RequestRejected as refused:
+            # Only the V1 recheck raises this (authorize is passed only in V1 mode).
+            return _error(refused.status, refused.code)
+        except AccountAuthorizationUnavailable:
+            return _error(503, "account_unavailable")
 
         if result.outcome == "already_subscribed":
             # One paid tier: manage the existing subscription in the Portal.
@@ -184,20 +226,19 @@ def build_billing_router(
 
     @router.post("/api/account/billing/portal")
     async def portal(request: Request):
-        found = await signed_in(
-            request,
-            lambda session, user: get_billing(session, user.id),
-        )
+        def customer(session: Session, user) -> str | None:
+            billing = get_billing(session, user.id)
+            return billing.stripe_customer_id if billing is not None else None
 
-        if found is None:
-            return _error(401, "not_authenticated")
+        found = await signed_in(request, customer)
 
-        billing = found[1]
+        if isinstance(found, JSONResponse):
+            return found
 
-        if billing is None or not billing.stripe_customer_id:
+        customer_id = found[1]
+
+        if not customer_id:
             return _error(409, "billing_profile_unavailable")
-
-        customer_id = billing.stripe_customer_id
 
         try:
             url = await run_in_threadpool(
@@ -240,8 +281,8 @@ def build_billing_router(
 
         found = await signed_in(request, describe)
 
-        if found is None:
-            return _error(401, "not_authenticated")
+        if isinstance(found, JSONResponse):
+            return found
 
         return _json(found[1])
 

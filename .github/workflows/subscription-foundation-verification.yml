@@ -475,7 +475,7 @@ jobs:
           assert totals == {"tests": 154, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
-      # Actual collect-only result for the explicit modules: 590 tests (219
+      # Actual collect-only result for the explicit modules: 600 tests (219
       # through 0022; 0023's deletion requests: 18 unit + 42 real PostgreSQL,
       # and 3 more for S's own login; D3's V1 login route: 23 unit, 13 of them
       # for malformed authority answers, outcome types and the login limiter, + 11 real
@@ -487,7 +487,8 @@ jobs:
       # PostgreSQL; E3 the whole lifecycle through the routes: 1 real PostgreSQL;
       # the Premium journey through the real application: 1 real PostgreSQL;
       # provisioning a new deployment: 18 real PostgreSQL; the staging files: 9
-      # unit; Spaces under V1 authorization: 4 real PostgreSQL). S logs in with its own credential in the
+      # unit; Spaces under V1 authorization: 4 real PostgreSQL; billing, usage and the daily quota under
+      # V1 authorization: 10 real PostgreSQL). S logs in with its own credential in the
       # disposable database only. Missing PG fails as above.
       - name: Run V1-02D service connection, sign-out, password, quarantine and deletion-request authority contracts and the V1 account routes
         working-directory: candidate
@@ -522,6 +523,7 @@ jobs:
           tests/test_provision_deployment_postgres.py
           tests/test_staging_files.py
           tests/test_spaces_v1_postgres.py
+          tests/test_v1_billing_usage_quota_postgres.py
           -q -ra -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/v1-02d-authority.xml"
 
@@ -533,7 +535,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 590, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 600, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       # The staging runbook's own commands (deploy/staging/README.md, steps 4, 7 and 8), as root on the
