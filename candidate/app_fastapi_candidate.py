@@ -15113,6 +15113,63 @@ FILE_ASSISTANT_TIMEOUT_SECONDS = 240
 # The whole file request's deadline when request budgets or provider ceilings are on: a few long model
 # calls (a plan and a full specification each) plus rendering in the worker.
 FILE_REQUEST_DEADLINE_SECONDS = 600
+import contextlib as _contextlib  # noqa: E402
+
+
+# The file assistant's request scope and failure mapping, defined whether or not files are on (they load
+# nothing of the files package), so the real ones can be exercised by tests. One model attempt per tool
+# round plus the reply: the assistant's own MAX_TOOL_ROUNDS + 1, checked when files are enabled.
+FILE_REQUEST_MODEL_ATTEMPTS = 7
+
+
+@_contextlib.contextmanager
+def _file_request_scope(account):
+    """The file assistant's provider work runs under the same controls as a chat request. With
+    provider ceilings on: its own control request for a signed-in account, so every model call
+    reserves in the attempt pool and, with Financial Safeguards, in the ledger within the request
+    ceiling of its scope. That scope is FREE, as for every chat request: nothing issues paid
+    evidence until Milestone 3 links a verified subscription through the V1-authenticated identity,
+    so a paying customer's file request was bounded by the FREE request ceiling. Since B2 a V1-verified
+    paid account's request carries PAID evidence for this control request only (paid_access); the
+    legacy path never does. With ceilings or request budgets on: its own RequestBudget (a longer
+    deadline, one model attempt per tool round plus the reply, no search tool exists). With both off,
+    nothing changes."""
+    from kalillac_accounts.paid_access import paid_evidence as _paid_evidence
+    control, control_token = provider_controls.begin_request()
+    try:
+        if control is not None:
+            verified = getattr(account, "verified", None)
+            # Every file request is a signed-in account's; paid only with V1 evidence for this request.
+            provider_controls.account_status(True, _paid_evidence(
+                control, verified, verified.account_id if verified is not None else None))
+        if control is None and _request_limits is None:
+            yield
+            return
+        budget = RequestBudget(duration_seconds=FILE_REQUEST_DEADLINE_SECONDS,
+                               max_model_attempts=FILE_REQUEST_MODEL_ATTEMPTS, max_search_attempts=1)
+        with budget_scope(budget):
+            yield
+    finally:
+        provider_controls.end_request(control, control_token)
+
+
+def _file_failure(error):
+    """The stable response for a stop the controls raised inside the file assistant, or None."""
+    if isinstance(error, provider_controls.CeilingStop):
+        return error.status_code, error.code
+    if isinstance(error, RequestCancelled):
+        return 499, "request_cancelled"
+    if isinstance(error, RequestDeadlineExceeded):
+        return 504, "request_timeout"
+    if isinstance(error, CallBudgetExhausted):
+        return 422, "processing_limit_reached"
+    if isinstance(error, LocalModelServiceUnavailable):
+        return 503, "service_unavailable"
+    if isinstance(error, ModelProviderUnavailable):
+        return 503, "model_provider_unavailable"
+    return None
+
+
 _file_chat_handoff = None   # Set below only when files are enabled; /api/chat is unchanged while it is None.
 if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
     if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
@@ -15163,57 +15220,12 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
             "max_output_tokens": FILE_ASSISTANT_MAX_OUTPUT_TOKENS,
         })
 
-    from contextlib import contextmanager as _files_contextmanager
     from kalillac_files.assistant import MAX_TOOL_ROUNDS as _FILE_MAX_TOOL_ROUNDS
     from kalillac_files.intent import wants_file as _wants_file
     from kalillac_files.router import (FileService, valid_assist_request as _valid_assist_request,
                                        valid_confirmations as _valid_confirmations)
-
-    @_files_contextmanager
-    def _file_request_scope(account):
-        """The file assistant's provider work runs under the same controls as a chat request. With
-        provider ceilings on: its own control request for a signed-in account, so every model call
-        reserves in the attempt pool and, with Financial Safeguards, in the ledger within the request
-        ceiling of its scope. That scope is FREE, as for every chat request: nothing issues paid
-        evidence until Milestone 3 links a verified subscription through the V1-authenticated identity,
-        so a paying customer's file request was bounded by the FREE request ceiling. Since B2 a V1-verified
-        paid account's request carries PAID evidence for this control request only (paid_access); the
-        legacy path never does. With ceilings or request budgets on: its own RequestBudget (a longer
-        deadline, one model attempt per tool round plus the reply, no search tool exists). With both off,
-        nothing changes."""
-        from kalillac_accounts.paid_access import paid_evidence as _paid_evidence
-        control, control_token = provider_controls.begin_request()
-        try:
-            if control is not None:
-                verified = getattr(account, "verified", None)
-                # Every file request is a signed-in account's; paid only with V1 evidence for this request.
-                provider_controls.account_status(True, _paid_evidence(
-                    control, verified, verified.account_id if verified is not None else None))
-            if control is None and _request_limits is None:
-                yield
-                return
-            budget = RequestBudget(duration_seconds=FILE_REQUEST_DEADLINE_SECONDS,
-                                   max_model_attempts=_FILE_MAX_TOOL_ROUNDS + 1, max_search_attempts=1)
-            with budget_scope(budget):
-                yield
-        finally:
-            provider_controls.end_request(control, control_token)
-
-    def _file_failure(error):
-        """The stable response for a stop the controls raised inside the file assistant, or None."""
-        if isinstance(error, provider_controls.CeilingStop):
-            return error.status_code, error.code
-        if isinstance(error, RequestCancelled):
-            return 499, "request_cancelled"
-        if isinstance(error, RequestDeadlineExceeded):
-            return 504, "request_timeout"
-        if isinstance(error, CallBudgetExhausted):
-            return 422, "processing_limit_reached"
-        if isinstance(error, LocalModelServiceUnavailable):
-            return 503, "service_unavailable"
-        if isinstance(error, ModelProviderUnavailable):
-            return 503, "model_provider_unavailable"
-        return None
+    if FILE_REQUEST_MODEL_ATTEMPTS != _FILE_MAX_TOOL_ROUNDS + 1:
+        raise RuntimeError("FILE_REQUEST_MODEL_ATTEMPTS must be the file assistant's MAX_TOOL_ROUNDS + 1.")
 
     # Images (I1): uploads re-encoded clean by the worker, and shown to GPT-6 Luna by the file assistant.
     # Default off. With Financial Safeguards on, every image needs the per-image input bound

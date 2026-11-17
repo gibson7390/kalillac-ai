@@ -272,6 +272,14 @@ def test_the_chats_copy_states_the_assistants_image_limit():
     assert f'"Attach at most {MAX_IMAGES} images to one message."' in app_js
 
 
+def test_the_applications_file_scope_allows_one_attempt_per_tool_round_plus_the_reply():
+    # Mirrored in the application so its file scope loads nothing of kalillac_files; startup with files
+    # on refuses a mismatch, and this keeps it from drifting with files off.
+    import app_fastapi_candidate as app
+    from kalillac_files.assistant import MAX_TOOL_ROUNDS
+    assert app.FILE_REQUEST_MODEL_ATTEMPTS == MAX_TOOL_ROUNDS + 1
+
+
 def test_a_message_without_images_is_sent_exactly_as_before(tmp_path):
     from kalillac_files.assistant import FileRequest, run_file_assistant
     sent = []
