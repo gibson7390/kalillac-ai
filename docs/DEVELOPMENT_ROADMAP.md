@@ -221,8 +221,16 @@ from the code. See "Owner decisions required".
   no erasure); recovery confirmation through `v1_reset_password`; no email-verification routes. Each
   only through its authority as S, never the legacy path; real PostgreSQL HTTP tests prove R writes
   nothing. Implemented; awaiting Codex.
-* Then D5 (migration 0024: reset-token issuance authority and the credential read path), D4 (operator
-  tool), E1 (with the row-lock design: plan, D5) to E3; erasure after the owner's retention decisions.
+* **D5, migration 0024** (`feat/account-security-d5-credential-path`, on the D3 branch). Reset tokens are
+  issued only by `v1_issue_reset_token` as S, and V1 sign-in, password change and the deletion request
+  read the stored hash only through `v1_credential` as S; HTTP tests pass with R's read of
+  `users.password_hash` revoked. Implemented; awaiting Codex.
+* Then D4 (operator tool), E1 (with the row-lock design: plan, D5) to E3; erasure after the owner's
+  retention decisions.
+* Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
+  test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
+  `pending` once in CI (run 43982872312, D3); it reads the slot right after the response, before the
+  lease release always lands. It passed 5 of 5 locally; the chat queue is untouched by D3.
 
 ### Milestone 3: Stripe billing (starting point)
 

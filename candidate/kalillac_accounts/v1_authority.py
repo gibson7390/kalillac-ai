@@ -53,6 +53,8 @@ CHANGE_OUTCOMES = frozenset({"changed", "not_authenticated", "account_unavailabl
                              "security_unavailable"})
 OWN_DELETION_OUTCOMES = frozenset({"requested", "not_authenticated", "account_unavailable", "too_many_operations",
                                    "security_unavailable"})
+RESET_ISSUE_OUTCOMES = frozenset({"issued", "not_issued", "security_unavailable"})
+MAX_EMAIL_LENGTH = 320
 
 # The only statements this module sends as S, besides its fixed transaction settings and identity and
 # catalog checks. Function arguments are bound, never interpolated.
@@ -64,6 +66,8 @@ _CHANGE = ("SELECT outcome, retry_after_seconds, replayed"
            " FROM kalillac.v1_change_password(:o, :s, :t, :v, :h)")
 _OWN_DELETION = ("SELECT outcome, retry_after_seconds, replayed"
                  " FROM kalillac.v1_request_own_deletion(:o, :s, :t, :v)")
+_ISSUE_RESET = "SELECT outcome FROM kalillac.v1_issue_reset_token(:i, :e, :t)"
+_CREDENTIAL = "SELECT account_id, stored_hash FROM kalillac.v1_credential(:e)"
 # The Argon2id encoding the application's hasher produces; the function re-checks the same shape.
 _ARGON2ID = re.compile(r"\$argon2id\$v=19\$m=[0-9]{1,10},t=[0-9]{1,10},p=[0-9]{1,3}\$[A-Za-z0-9+/]{11,}"
                        r"\$[A-Za-z0-9+/]{16,}")
@@ -115,17 +119,22 @@ class PasswordReset:
 
 def _reviewed_functions():
     """{signature: SHA-256 of the reviewed body} for the authorities S may execute at this release's
-    head (0023): revocation v2, issuance, sign-out, password reset, password change and the customer's own
-    deletion request. The operator functions (0022, 0023) belong to P and are never S's."""
-    from .v1_schema import (CHANGE_PASSWORD_SIGNATURE, CHANGE_PASSWORD_SOURCE_SHA256, END_SESSION_SIGNATURE,
-                            END_SESSION_SOURCE_SHA256, ISSUANCE_SIGNATURE, ISSUANCE_SOURCE_SHA256,
-                            OWN_DELETION_SIGNATURE, OWN_DELETION_SOURCE_SHA256, RESET_PASSWORD_SIGNATURE,
-                            RESET_PASSWORD_SOURCE_SHA256, REVOCATION_SIGNATURE, REVOCATION_SOURCE_SHA256_V2)
+    head (0024): revocation v2, issuance, sign-out, password reset, password change, the customer's own
+    deletion request, reset-token issuance and the credential read path. The operator functions (0022,
+    0023) belong to P and are never S's."""
+    from .v1_schema import (CHANGE_PASSWORD_SIGNATURE, CHANGE_PASSWORD_SOURCE_SHA256, CREDENTIAL_SIGNATURE,
+                            CREDENTIAL_SOURCE_SHA256, END_SESSION_SIGNATURE, END_SESSION_SOURCE_SHA256,
+                            ISSUANCE_SIGNATURE, ISSUANCE_SOURCE_SHA256, ISSUE_RESET_SIGNATURE,
+                            ISSUE_RESET_SOURCE_SHA256, OWN_DELETION_SIGNATURE, OWN_DELETION_SOURCE_SHA256,
+                            RESET_PASSWORD_SIGNATURE, RESET_PASSWORD_SOURCE_SHA256, REVOCATION_SIGNATURE,
+                            REVOCATION_SOURCE_SHA256_V2)
     return {REVOCATION_SIGNATURE: REVOCATION_SOURCE_SHA256_V2, ISSUANCE_SIGNATURE: ISSUANCE_SOURCE_SHA256,
             END_SESSION_SIGNATURE: END_SESSION_SOURCE_SHA256,
             RESET_PASSWORD_SIGNATURE: RESET_PASSWORD_SOURCE_SHA256,
             CHANGE_PASSWORD_SIGNATURE: CHANGE_PASSWORD_SOURCE_SHA256,
-            OWN_DELETION_SIGNATURE: OWN_DELETION_SOURCE_SHA256}
+            OWN_DELETION_SIGNATURE: OWN_DELETION_SOURCE_SHA256,
+            ISSUE_RESET_SIGNATURE: ISSUE_RESET_SOURCE_SHA256,
+            CREDENTIAL_SIGNATURE: CREDENTIAL_SOURCE_SHA256}
 
 
 def parse_service_credential(raw, *, role, database_instance_id, deployment_id, forbidden_passwords=()):
@@ -385,6 +394,39 @@ class V1Authority:
             if replayed and outcome != "requested":
                 raise V1AuthorityUnavailable()
             return DeletionRequested(outcome, retry_after, replayed)
+
+    def issue_reset_token(self, *, token_id, email, token_hash):
+        """A reset token (its digest, never the token) for exactly this normalized email, only when the
+        account may reset; 'issued' or 'not_issued' (send the link only for 'issued'), or
+        'security_unavailable'. The caller has already answered the public request."""
+        from sqlalchemy import text
+        if (type(token_id) is not uuid.UUID or type(email) is not str or not email
+                or len(email) > MAX_EMAIL_LENGTH or email != email.strip().lower()
+                or type(token_hash) is not str or not _TOKEN_HASH.fullmatch(token_hash)):
+            raise V1AuthorityUnavailable()
+        with self._transaction() as session:
+            found = session.execute(text(_ISSUE_RESET), {"i": token_id, "e": email, "t": token_hash}).all()
+            if len(found) != 1 or type(found[0][0]) is not str or found[0][0] not in RESET_ISSUE_OUTCOMES:
+                raise V1AuthorityUnavailable()
+            return found[0][0]
+
+    def credential(self, *, email):
+        """(account id, stored password hash) for exactly this normalized email, or None. The hash is only
+        ever verified against and handed back to an authority, which compares it under the account lock."""
+        from sqlalchemy import text
+        if type(email) is not str or not email or len(email) > MAX_EMAIL_LENGTH or email != email.strip().lower():
+            raise V1AuthorityUnavailable()
+        with self._transaction() as session:
+            found = session.execute(text(_CREDENTIAL), {"e": email}).all()
+            if not found:
+                return None
+            if len(found) != 1:
+                raise V1AuthorityUnavailable()
+            account_id, stored = found[0]
+            if (type(account_id) is not uuid.UUID or type(stored) is not str or not stored
+                    or len(stored) > 255):
+                raise V1AuthorityUnavailable()
+            return account_id, stored
 
     def revoke_sessions(self, *, operation_id, session_id, token_hash, scope):
         """Revoke the account's other sessions, or all of them, proven by the exact original session."""

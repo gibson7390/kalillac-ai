@@ -264,6 +264,22 @@ EXECUTOR_COLUMN_GRANTS_V5 = {**EXECUTOR_COLUMN_GRANTS_V4,
                              ("users", "UPDATE"): EXECUTOR_COLUMN_GRANTS_V4[("users", "UPDATE")]
                              + ("deletion_requested_at",)}
 
+# 0024: reset-token issuance and the credential read path, both executable only by S. E gains SELECT
+# (email) on users and INSERT on the reset token's own columns. No event type; guard v3 unchanged.
+ISSUE_RESET_FUNCTION, CREDENTIAL_FUNCTION = "v1_issue_reset_token", "v1_credential"
+ISSUE_RESET_SIGNATURE = "kalillac.v1_issue_reset_token(uuid,text,text)"
+CREDENTIAL_SIGNATURE = "kalillac.v1_credential(text)"
+ISSUE_RESET_DEFINITION = ("p_token_id uuid, p_email text, p_token_hash text", "TABLE(outcome text)", "plpgsql", "v",
+                          True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+CREDENTIAL_DEFINITION = ("p_email text", "TABLE(account_id uuid, stored_hash text)", "plpgsql", "v",
+                         True, False, False, "u", "f", ["search_path=pg_catalog, pg_temp"], 100.0, 1000.0)
+ISSUE_RESET_SOURCE_SHA256 = "84b5a4cf6d85753fec67036e68ea64a3514754edb5ed385a483dd57e55e1702a"
+CREDENTIAL_SOURCE_SHA256 = "1e0ad2fe3451984e162e6a6f0205c6b2aca6fc0434ffaf72cd12ba7dbb45575a"
+RESET_TOKEN_INSERT_COLUMNS = ("id", "user_id", "purpose", "token_hash", "created_at", "expires_at")
+EXECUTOR_COLUMN_GRANTS_V6 = {**EXECUTOR_COLUMN_GRANTS_V5,
+                             ("users", "SELECT"): EXECUTOR_COLUMN_GRANTS_V5[("users", "SELECT")] + ("email",),
+                             ("account_recovery_tokens", "INSERT"): RESET_TOKEN_INSERT_COLUMNS}
+
 
 class V1SchemaRefused(RuntimeError):
     """A fixed, non-secret refusal reason."""
@@ -313,20 +329,23 @@ def classify(session) -> str:
         ON n.oid=p.pronamespace WHERE n.nspname='kalillac' AND p.proname=ANY(:f)""",
         f=[REVOCATION_FUNCTION, ISSUANCE_FUNCTION, END_SESSION_FUNCTION, RESET_PASSWORD_FUNCTION,
            CHANGE_PASSWORD_FUNCTION, QUARANTINE_FUNCTION, REINSTATE_FUNCTION, DELETION_REQUEST_FUNCTION,
-           OWN_DELETION_FUNCTION])}
+           OWN_DELETION_FUNCTION, ISSUE_RESET_FUNCTION, CREDENTIAL_FUNCTION])}
     revocation, issuance = REVOCATION_FUNCTION in installed, ISSUANCE_FUNCTION in installed
     ending, resetting = END_SESSION_FUNCTION in installed, RESET_PASSWORD_FUNCTION in installed
     changing = CHANGE_PASSWORD_FUNCTION in installed
     quarantining = QUARANTINE_FUNCTION in installed
     deleting = DELETION_REQUEST_FUNCTION in installed
+    crediting = ISSUE_RESET_FUNCTION in installed
+    _require((deleting or not crediting) and (CREDENTIAL_FUNCTION in installed) == crediting)
     _require((revocation or not issuance) and (issuance or not ending) and (ending or not resetting)
              and (resetting or not changing) and (changing or not quarantining)
              and (REINSTATE_FUNCTION in installed) == quarantining
              and (quarantining or not deleting) and (OWN_DELETION_FUNCTION in installed) == deleting)
-    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing, quarantining, deleting)
+    owner = _catalog(session, roles, revocation, issuance, ending, resetting, changing, quarantining, deleting,
+                     crediting)
     principals = _authority(session, owner)
     _security_principals(session, owner, roles, principals, revocation, issuance, ending, resetting, changing,
-                         quarantining, deleting)
+                         quarantining, deleting, crediting)
     # _authority accepted the identity guard as exactly v1 or v2; v2 belongs to 0014 alone.
     from .registration_schema import EPOCH_ADVANCE, QUARANTINE
     guard = _rows(session, """SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -360,7 +379,7 @@ def _security_roles():
 
 
 def _catalog(session, roles, revocation, issuance, ending=False, resetting=False, changing=False,
-             quarantining=False, deleting=False) -> str:
+             quarantining=False, deleting=False, crediting=False) -> str:
     """Exact definitions of every 0012 object, not names; returns their owner."""
     executor = roles[1]
     # Permanent ordinary tables (never UNLOGGED, temporary, partitioned, typed or
@@ -448,6 +467,7 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
              | ({ACTIVATION_GUARD_FUNCTION} if activation_guard else set())
              | ({QUARANTINE_FUNCTION, REINSTATE_FUNCTION} if quarantining else set())
              | ({DELETION_REQUEST_FUNCTION, OWN_DELETION_FUNCTION} if deleting else set())
+             | ({ISSUE_RESET_FUNCTION, CREDENTIAL_FUNCTION} if crediting else set())
              and not rules and not events)
     if activation_guard:
         import hashlib
@@ -521,7 +541,8 @@ def _catalog(session, roles, revocation, issuance, ending=False, resetting=False
            *([RESET_PASSWORD_SIGNATURE] if resetting else []),
            *([CHANGE_PASSWORD_SIGNATURE] if changing else []),
            *([QUARANTINE_SIGNATURE, REINSTATE_SIGNATURE] if quarantining else []),
-           *([DELETION_REQUEST_SIGNATURE, OWN_DELETION_SIGNATURE] if deleting else [])],
+           *([DELETION_REQUEST_SIGNATURE, OWN_DELETION_SIGNATURE] if deleting else []),
+           *([ISSUE_RESET_SIGNATURE, CREDENTIAL_SIGNATURE] if crediting else [])],
         t=list(TABLES),
         w=list(WRITE_RIGHTS), c=list(USER_COLUMNS))
     _require(not bridges and not definers)
@@ -595,7 +616,8 @@ def _authority(session, owner) -> None:
 
 
 def _security_principals(session, owner, roles, principals, revocation, issuance, ending=False,
-                         resetting=False, changing=False, quarantining=False, deleting=False) -> None:
+                         resetting=False, changing=False, quarantining=False, deleting=False,
+                         crediting=False) -> None:
     """S and E: exact NOLOGIN attributes, the operator's single owner->E SET
     edge, and no ownership, grant or default privilege but 0013's, or 0014's,
     exact set.
@@ -652,6 +674,10 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         expected[DELETION_REQUEST_FUNCTION] = (OPERATOR_DEFINITION, DELETION_REQUEST_SOURCE_SHA256)
         expected[OWN_DELETION_FUNCTION] = (OWN_DELETION_DEFINITION, OWN_DELETION_SOURCE_SHA256)
         callers.update({DELETION_REQUEST_FUNCTION: operator, OWN_DELETION_FUNCTION: service})
+    if crediting:
+        expected[ISSUE_RESET_FUNCTION] = (ISSUE_RESET_DEFINITION, ISSUE_RESET_SOURCE_SHA256)
+        expected[CREDENTIAL_FUNCTION] = (CREDENTIAL_DEFINITION, CREDENTIAL_SOURCE_SHA256)
+        callers.update({ISSUE_RESET_FUNCTION: service, CREDENTIAL_FUNCTION: service})
     functions = []
     for name, (declared, digest) in expected.items():
         definition = _rows(session, """SELECT p.oid,pg_get_function_identity_arguments(p.oid),
@@ -691,7 +717,8 @@ def _security_principals(session, owner, roles, principals, revocation, issuance
         pg_get_userbyid(a.grantor) FROM pg_attribute t JOIN pg_class c ON c.oid=t.attrelid
         CROSS JOIN LATERAL aclexplode(t.attacl) a WHERE c.oid=ANY(CAST(:o AS oid[])) AND pg_get_userbyid(a.grantee)=ANY(:r)""",
         r=roles_checked, o=list(relations.values()))}
-    columns_granted = (EXECUTOR_COLUMN_GRANTS_V5 if deleting else EXECUTOR_COLUMN_GRANTS_V4 if quarantining
+    columns_granted = (EXECUTOR_COLUMN_GRANTS_V6 if crediting
+                       else EXECUTOR_COLUMN_GRANTS_V5 if deleting else EXECUTOR_COLUMN_GRANTS_V4 if quarantining
                        else EXECUTOR_COLUMN_GRANTS_V3 if resetting
                        else EXECUTOR_COLUMN_GRANTS_V2 if issuance else EXECUTOR_COLUMN_GRANTS)
     _require(granted == {("schema", None, executor, "USAGE", False, owner), ("schema", None, service, "USAGE", False, owner),

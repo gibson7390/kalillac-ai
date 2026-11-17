@@ -53,7 +53,23 @@ def db():
     engine.dispose()
 
 
+def attach_credentials(authority, db):
+    """The credential read path (v1_credential, as S), answered from the fixture database for a fake
+    authority that does not define it; it records each email it is asked for."""
+    if authority is not None and not hasattr(authority, "credential"):
+        authority.credential_calls = []
+
+        def credential(*, email):
+            authority.credential_calls.append(email)
+            with db() as session:
+                user = session.scalar(select(User).where(User.email == email))
+                return None if user is None else (user.id, user.password_hash)
+        authority.credential = credential
+    return authority
+
+
 def client_for(db, *, v1_security=V1_ON, v1_authority=None):
+    attach_credentials(v1_authority, db)
     api = FastAPI()
     api.include_router(build_account_router(session_factory=lambda: db, settings=SETTINGS,
                                             v1_security=v1_security, v1_authority=v1_authority))
@@ -200,6 +216,7 @@ class Answers:
 
 
 def limited_client(db, limiter, authority, raise_server_exceptions=False):
+    attach_credentials(authority, db)
     api = FastAPI()
     api.include_router(build_account_router(session_factory=lambda: db, settings=SETTINGS, limiter=limiter,
                                             v1_security=V1_ON, v1_authority=authority))

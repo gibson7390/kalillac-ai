@@ -52,7 +52,8 @@ def test_single_head_revision():
 
     script = ScriptDirectory.from_config(_config())
 
-    assert script.get_heads() == ["0023_v1_deletion_request"]
+    assert script.get_heads() == ["0024_v1_recovery_credential"]
+    assert script.get_revision("0024_v1_recovery_credential").down_revision == "0023_v1_deletion_request"
     assert script.get_revision("0023_v1_deletion_request").down_revision == "0022_v1_quarantine"
     assert script.get_revision("0022_v1_quarantine").down_revision == "0021_registration_activation"
     assert script.get_revision("0021_registration_activation").down_revision == "0020_v1_password_change"

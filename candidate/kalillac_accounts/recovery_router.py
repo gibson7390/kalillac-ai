@@ -112,8 +112,11 @@ def build_recovery_router(
             decision = limiter.request(client(request), email)
             if not decision.allowed:
                 return _limited(decision)
-            # Account existence is not read until after the public response.
-            background = BackgroundTask(service.request_reset, email) if decision.send else None
+            # Account existence is not read until after the public response. In V1 mode the token is
+            # issued only through the issuance authority as S, never written as the runtime role.
+            work = (lambda: service.v1_request_reset(email, v1_authority)) if v1_security is not None else (
+                lambda: service.request_reset(email))
+            background = BackgroundTask(work) if decision.send else None
             return _response(202, background=background)
         except Exception:
             print("ACCOUNT_RECOVERY_REQUEST_FAILED")

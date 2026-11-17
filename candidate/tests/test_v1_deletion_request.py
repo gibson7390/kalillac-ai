@@ -30,9 +30,10 @@ def _module():
     return module
 
 
-def test_0023_is_the_head_directly_after_0022():
+def test_0023_sits_directly_after_0022_below_0024():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0023_v1_deletion_request"]
+    assert script.get_heads() == ["0024_v1_recovery_credential"]
+    assert script.get_revision("0024_v1_recovery_credential").down_revision == "0023_v1_deletion_request"
     module = _module()
     assert (module.revision, module.down_revision, module.branch_labels, module.depends_on) == (
         "0023_v1_deletion_request", "0022_v1_quarantine", None, None)

@@ -226,6 +226,25 @@ async def _read_exact_body(request: Request, fields: set[str]) -> dict[str, Any]
     return body
 
 
+_UNAVAILABLE = object()       # The credential read could not answer (None means "no such account").
+
+
+def _credential_shape(credential: Any) -> bool:
+    """None (no account for the email), or exactly (account id, stored hash) from v1_credential."""
+    return credential is None or (
+        type(credential) is tuple and len(credential) == 2 and type(credential[0]) is uuid.UUID
+        and type(credential[1]) is str and 0 < len(credential[1]) <= 255)
+
+
+def _profile(session: Session, user_id: uuid.UUID) -> dict[str, Any] | None:
+    """The sign-in response's identity, read as R from non-credential columns only (never the hash)."""
+    from sqlalchemy import select
+    row = session.execute(select(User.id, User.email, User.created_at).where(User.id == user_id)).one_or_none()
+    if row is None:
+        return None
+    return {"user": {"id": str(row.id), "email": row.email, "created_at": row.created_at.isoformat()}}
+
+
 def _contract_outcome(result: Any, kind: type, outcomes: frozenset[str]) -> str | None:
     """The outcome of the authority's own result type, only when it is exactly a str and one the
     contract defines; None (an unavailable authority) for anything else."""
@@ -489,16 +508,20 @@ def build_account_router(
         answer: 503, no cookie, and never the legacy path."""
         from .v1_authority import SessionIssued, V1AuthorityUnavailable
 
-        def verify(session: Session):
-            user = get_user_by_email(session, email)
-            # Unknown email still runs Argon2 (dummy hash) for equal timing.
-            password_ok = verify_password(user.password_hash if user else None, password)
-            if user is None or not password_ok:
-                return None
-            return user.id, user.password_hash, _user_json(user)
+        # The stored hash comes only through the reviewed credential read path (v1_credential, as S);
+        # the runtime role never reads a password hash in V1 mode.
+        try:
+            credential = await call_authority("credential", email=email)
+        except BaseException:
+            limiter.release(limit_keys)
+            raise
+        if credential is _UNAVAILABLE or not _credential_shape(credential):
+            limiter.release(limit_keys)
+            return _error(503, "account_unavailable")
 
         try:
-            verified = await password_gate.run(run_in_transaction, verify)
+            # Unknown email still runs Argon2 (dummy hash) for equal timing.
+            password_ok = await password_gate.run(verify_password, credential[1] if credential else None, password)
         except PasswordWorkBusy:
             limiter.release(limit_keys)
             return _error(503, "busy")
@@ -506,11 +529,19 @@ def build_account_router(
             limiter.release(limit_keys)
             raise
 
-        if verified is None:
+        if credential is None or password_ok is not True:
             limiter.record_failure(limit_keys)
             return _error(401, "invalid_credentials")
 
-        user_id, verified_hash, payload = verified
+        user_id, verified_hash = credential
+        try:
+            payload = await run_in_threadpool(run_in_transaction, lambda session: _profile(session, user_id))
+        except BaseException:
+            limiter.release(limit_keys)
+            raise
+        if payload is None:
+            limiter.release(limit_keys)
+            return _error(503, "account_unavailable")
         token = new_session_token()
         try:
             if v1_authority is None:
@@ -678,37 +709,41 @@ def build_account_router(
 
     async def v1_identify(request: Request, *, with_password: bool = False):
         """(identity, email, stored password hash or None) for the presented cookie's exact original
-        session, through the authorized read as R (which writes nothing); or the error response."""
-        from sqlalchemy import select
+        session, through the authorized read as R (which writes nothing and never reads a hash); the
+        stored hash, when asked for, only through the credential read path as S. Or the error response."""
         from .auth import RequestRejected, session_token_hash
         from .v1_security import V1SecurityUnavailable
         token_hash = session_token_hash(request.cookies, settings.cookie_name)
         if token_hash is None:
             return _error(401, "not_authenticated")
-
-        def work(session, account, identity):
-            stored = None
-            if with_password:
-                stored = session.scalar(select(User.password_hash).where(User.id == account.id))
-            return identity, account.email, stored
-
         try:
-            return await v1_security.read_async(token_hash, work, with_identity=True)
+            identity, email = await v1_security.read_async(
+                token_hash, lambda session, account, identity: (identity, account.email), with_identity=True)
         except RequestRejected as rejected:
             return _error(rejected.status, rejected.code)
         except V1SecurityUnavailable:
             return _error(503, "account_unavailable")
+        if not with_password:
+            return identity, email, None
+        credential = await call_authority("credential", email=email)
+        # The account the session belongs to, and no other.
+        if (credential is _UNAVAILABLE or credential is None or not _credential_shape(credential)
+                or credential[0] != identity.user_id):
+            return _error(503, "account_unavailable")
+        return identity, email, credential[1]
 
     async def call_authority(name: str, **arguments):
-        """The authority's answer, or None when there is none or it cannot answer. Anything else
-        raised (cancellation, a server error) propagates to the caller."""
+        """The authority's answer, or None when there is none or it cannot answer (the credential read
+        answers _UNAVAILABLE instead, since None is its "no such account"). Anything else raised
+        (cancellation, a server error) propagates to the caller."""
         from .v1_authority import V1AuthorityUnavailable
+        unavailable = _UNAVAILABLE if name == "credential" else None
         if v1_authority is None:
-            return None
+            return unavailable
         try:
             return await run_in_threadpool(lambda: getattr(v1_authority, name)(**arguments))
         except V1AuthorityUnavailable:
-            return None
+            return unavailable
 
     async def v1_logout(request: Request) -> JSONResponse:
         """End exactly the presented session through v1_end_session. No cookie, or a digest bound to no

@@ -90,6 +90,34 @@ class RecoveryService:
         with self.transaction() as session:
             repository.validate_token(session, hash_recovery_token(token), self._clock())
 
+    def v1_request_reset(self, email, authority):
+        """V1 mode, after the public response: the token is issued only by v1_issue_reset_token as S (which
+        decides eligibility under the account lock and consumes the open tokens), and the link is sent
+        only when it answers 'issued'. Unlike the legacy path the token is committed before delivery, so
+        a failed send leaves an unused token that expires; no link is ever sent for a token not recorded."""
+        import uuid
+        if authority is None:
+            print("ACCOUNT_RECOVERY_REQUEST_FAILED")
+            return
+        token = new_recovery_token()
+        try:
+            try:
+                outcome = authority.issue_reset_token(token_id=uuid.uuid4(), email=email,
+                                                      token_hash=hash_recovery_token(token))
+            except Exception:
+                # The authority's own failure carries no detail; nothing else is reported either.
+                outcome = None
+            if not (type(outcome) is str and outcome == "issued"):
+                if not (type(outcome) is str and outcome == "not_issued"):
+                    print("ACCOUNT_RECOVERY_REQUEST_FAILED")
+                return
+            try:
+                self._gateway.send_password_reset(email, self._config.recovery_url + "#token=" + token)
+            except Exception:
+                print("ACCOUNT_RECOVERY_DELIVERY_FAILED")
+        finally:
+            token = None
+
     def prevalidate_reset_email(self, token):
         """V1 mode: the same non-consuming, read-only precheck, returning the account's email for the
         notification sent after the reset authority succeeds. Nothing is written."""

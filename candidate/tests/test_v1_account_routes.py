@@ -133,6 +133,8 @@ def legacy_client(db):
 
 
 def v1_client(db, authority, *, security=None, limiter=None, raise_server_exceptions=True):
+    from test_v1_login import attach_credentials
+    attach_credentials(authority, db)
     api = FastAPI()
     api.include_router(build_account_router(session_factory=lambda: db, settings=SETTINGS,
                                             limiter=limiter or LoginRateLimiter(),

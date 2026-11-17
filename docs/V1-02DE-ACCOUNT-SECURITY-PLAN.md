@@ -5,7 +5,7 @@ implemented, keeping the private database authorities and adding no legacy path.
 (default off; the application's startup gate still refuses V1 mode and passes no authority): D1; every
 D2 authority (migrations 0018 to 0023); D3's routes (login, sign-out, revoking sessions, password
 change, the customer's deletion request, recovery confirmation; no email-verification routes in V1).
-Remaining: D5 (below), D4, E1 to E3. Nothing here authorizes a production migration, a role or
+D5 (migration 0024) implemented. Remaining: D4, E1 to E3. Nothing here authorizes a production migration, a role or
 credential change, or activation.
 
 Sources: the code on `feat/file-assistant-v1` (migrations 0012 to 0014, `kalillac_accounts/v1_security.py`,
@@ -144,12 +144,34 @@ What V1 mode still does as the runtime role R once D3's routes are in place, and
 
 | Path | Writes or reads as R | Needed before E1 |
 |---|---|---|
-| `POST /api/account/recovery/request` | inserts a reset token and consumes the account's open ones (`account_recovery_tokens`) | an issuance authority (`v1_issue_reset_token`, S-executable, account lock, uniform outcome, no account-existence signal), migration 0024 |
-| V1 login, password change, deletion request | read `users.password_hash` | the reviewed credential read path (below, E1 dependency), migration 0024 |
-| Recovery precheck | reads `account_recovery_tokens.token_hash` | the reset authority already re-checks the token; the precheck only saves password work for a dead link. Either a narrow S lookup or dropping the precheck, decided with 0024 |
+| `POST /api/account/recovery/request` | inserted a reset token and consumed the account's open ones (`account_recovery_tokens`) | **Done, migration 0024**: `v1_issue_reset_token` as S (below) |
+| V1 login, password change, deletion request | read `users.password_hash` | **Done, migration 0024**: the credential read path `v1_credential` as S (below, the E1 dependency) |
+| Recovery precheck | reads `account_recovery_tokens.token_hash` | **Kept, decided with 0024**: a reset token is 32 random bytes, so its SHA-256 digest gives nothing to guess offline (unlike a password hash), and the reset authority re-checks the token under the lock anyway. The read only spares password work for a dead link. E1 keeps R's SELECT on reset-token rows and revokes its DML |
 | V1-01 read path (`/me`, `/entitlements`, files, the D3 routes' identity), billing, Spaces | `SELECT … FOR UPDATE` on `users` | **row locks need UPDATE privilege** (measured on PostgreSQL 16.2: `FOR UPDATE`, `FOR SHARE` and `FOR KEY SHARE` are each refused with SELECT alone; column-level UPDATE on one column suffices). E1 cannot revoke every UPDATE on `users` from R without breaking every account lock. Design to write with E1: R keeps column UPDATE on exactly one inert column, and a guard refuses any actual UPDATE by R |
 | `POST /api/account/register` without registration v2 | inserts users and entitlements | V1 mode must require registration v2 (role A); to be enforced at startup with E2 |
 | Billing (Checkout, portal, Stripe webhooks) | writes `account_billing`, `account_entitlements`, webhook and case records | Milestone 3: the entitlement and billing writes move behind their own reviewed path before E1 revokes R's DML on them (E1's list names entitlements and billing) |
+
+**Migration 0024 (`0024_v1_recovery_credential`, implemented, default off).** Two E-owned SECURITY DEFINER
+functions executable only by E and S, and E's SELECT (`email`) on `users` and INSERT on the reset token's
+own columns; no table, column, role, event type or guard change:
+
+- `v1_issue_reset_token(token_id, email, token_hash)`: the account for exactly this normalized email,
+  locked; only an active, verified account that is neither quarantined nor deletion-requested gets a
+  token: its open reset tokens are consumed and one digest is inserted for 30 minutes. Everything else is
+  `not_issued` and writes nothing; a taken id or digest is `security_unavailable` and consumes nothing.
+  The route answers 202 before this runs, and the link is sent only for `issued`. Unlike the legacy path
+  the token is committed before delivery (a failed send leaves an unused token that expires; a link is
+  never sent for a token not recorded).
+- `v1_credential(email)`: the account id and stored hash for exactly this email, or no row; it writes
+  and locks nothing. V1 login, password change and the customer's deletion request now obtain the hash
+  only here, and every caller hands that exact hash back to an authority that compares it under the
+  account lock. Login reads the response's identity as R from `id`, `email` and `created_at` only.
+
+PostgreSQL tests (`test_v1_recovery_credential_postgres.py`, 41) cover the functions, roles, races, lock
+timeouts, downgrade, tampering and refused upgrades, and HTTP sign-in, password change, deletion request
+and recovery (request and confirmation) **with R's SELECT on `users.password_hash` revoked**, as E1 will:
+all work, R cannot read a hash (42501), and a statement trigger shows R writes nothing. Unit tests:
+`test_v1_recovery_credential.py` (33).
 
 ### E1. Removing the legacy route (a later migration, prepared, not self-applied)
 
@@ -163,7 +185,8 @@ stored password hash (`users.password_hash`) through the runtime role R, then pa
 read path must exist (for example an S-executable SECURITY DEFINER lookup returning only the account id
 and hash for an email, with its own catalog proof and tests), and HTTP login must be tested against the
 final post-E1 grants: login succeeds through the new path, and R alone can no longer read a digest. E1
-itself stays its own checkpoint.
+itself stays its own checkpoint. **Met by 0024** (above): the path exists and HTTP sign-in is tested with
+R's hash read revoked.
 
 ### E2. The operator transition
 

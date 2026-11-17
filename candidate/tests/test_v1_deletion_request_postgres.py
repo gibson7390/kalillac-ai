@@ -1,7 +1,7 @@
 """0023, deletion requests by the operator role P and by the customer through S, on real disposable
 PostgreSQL 16.
 
-The world stands on the head revision (0023). P and S stay NOLOGIN: each is exercised through SET LOCAL
+The world stands on 0023 (stepped down from the head, 0024, which tests its own catalog). P and S stay NOLOGIN: each is exercised through SET LOCAL
 ROLE from the disposable superuser, which also seeds fixtures, holds locks and tampers with the catalog.
 Every password hash is synthetic. Nothing here erases an account: a request marks it, ends every session
 and moves the epoch, and that is the whole lifecycle of this checkpoint.
@@ -35,6 +35,8 @@ UNAVAILABLE = ("security_unavailable", None, False)
 @pytest.fixture
 def world(monkeypatch):
     with head_world(monkeypatch) as w:
+        # 0023's own catalog exactly: later revisions (0024) test theirs.
+        migrate(w, HEAD, down=True)
         yield w
         assert w.admin_engine.pool.checkedout() == 0 and w.runtime_engine.pool.checkedout() == 0
 
