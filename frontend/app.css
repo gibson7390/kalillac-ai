@@ -190,6 +190,9 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
   font-size: 13px;
 }
 .space-bar[hidden] { display: none; }
+/* While a Space conversation is open, the temporary-session status and End & erase are hidden; their own
+   display rules would otherwise keep them on screen. */
+.session-status[hidden], .erase-btn[hidden] { display: none; }
 .space-bar-inner {
   display: flex;
   align-items: center;
@@ -763,6 +766,22 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
 }
 @media (max-width: 374px) {
   .session-status-extra { display: none; }
+}
+/* Phones on an accounts deployment: the logo, Account, Spaces and the status text do not fit in one bar.
+   The buttons tighten and the status keeps its icon on screen; its words stay in the accessibility tree
+   and the tooltip. A visitor's page without account controls is unchanged. */
+@media (max-width: 520px) {
+  .app-header-end:has(.account-link) { gap: 8px; }
+  .app-header-end:has(.account-link) .account-link { padding: 0 11px; }
+  .app-header-end:has(.account-link) .session-status > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 /* ---------------- Responsive ---------------- */

@@ -201,7 +201,8 @@ SCENARIOS = (
     + ["highlight_languages"]
     + list(FILE_SCENARIOS)
     + list(REASONING_SCENARIOS)
-    + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered"]
+    + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
+       "spaces_header_360x640"]
 )
 
 
@@ -1226,6 +1227,14 @@ def test_an_account_that_may_not_use_spaces_sees_no_spaces_control(browser_resul
     calls = spaces_requests(result)
     assert calls[0] == ("GET", "/api/spaces?limit=1", None) and calls[1][1] == "/api/chat"
     assert step(result, "idle")["assistants"][0]["text"].strip() == "Answer."
+
+
+def test_the_phone_header_fits_the_logo_the_buttons_and_the_status(browser_results):
+    header = step(scenario(browser_results, "spaces_header_360x640"), "header")
+    assert header["viewport"] == 360 and header["scrollWidth"] <= 360
+    assert header["logoRight"] <= header["endLeft"] and header["endRight"] <= 360 and header["buttonRight"] <= 360
+    # The words stay for assistive technology; the icon stays on screen.
+    assert header["statusText"].startswith("Temporary session") and header["statusIconShown"]
 
 
 def test_without_the_spaces_mark_the_page_asks_nothing_about_spaces(browser_results):

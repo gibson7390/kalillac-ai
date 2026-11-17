@@ -611,8 +611,9 @@
         back: !!$("spaces-back") && !$("spaces-back").hidden,
         barShown: !!bar && !bar.hidden,
         barText: bar ? bar.textContent.replace(/\s+/g, " ").trim() : null,
-        sessionStatusShown: !!status && !status.hidden,
-        eraseShown: !!erase && !erase.hidden,
+        // What is on screen, not only the attribute: a display rule can override [hidden].
+        sessionStatusShown: !!status && getComputedStyle(status).display !== "none",
+        eraseShown: !!erase && getComputedStyle(erase).display !== "none",
         requestCount: requests.length
       });
     },
@@ -1549,6 +1550,21 @@
     a.spaces("created-space");
     await a.createInSpaces("");
     a.spaces("created-conversation");
+    a.snap("idle");
+  };
+
+  // On a 360 px phone, the logo, Account-style buttons and the status icon fit in the header without
+  // overlapping or overflowing.
+  SCENARIOS.spaces_header_360x640 = async function (a) {
+    await a.wait(80);
+    var logo = document.getElementById("brand-logo").getBoundingClientRect();
+    var end = document.querySelector(".app-header-end").getBoundingClientRect();
+    var button = document.querySelector(".app-header .spaces-button").getBoundingClientRect();
+    var status = document.getElementById("session-status");
+    a.push({ label: "header", viewport: window.innerWidth, logoRight: logo.right, endLeft: end.left,
+             endRight: end.right, buttonRight: button.right, scrollWidth: document.documentElement.scrollWidth,
+             statusText: status.textContent.replace(/\s+/g, " ").trim(),
+             statusIconShown: getComputedStyle(status.querySelector("svg")).display !== "none" });
     a.snap("idle");
   };
 
