@@ -64,12 +64,15 @@ def test_every_setting_a_loader_requires_is_in_the_template():
                 *[f"KALILLAC_{p}_{k}" for p in ("OPENAI", "BRAVE", "TAVILY")
                   for k in ("TOTAL_ATTEMPTS", "ANONYMOUS_ATTEMPTS", "PERIOD_SECONDS")]}
     assert not required - set(have)
+    # Images with Financial Safeguards on need the per-image bound, or startup refuses.
+    assert pricing.OPENAI_IMAGE_TOKENS in have
     for flag in ("KALILLAC_ACCOUNTS_ENABLED", "KALILLAC_V1_ACCOUNT_SECURITY_ENABLED",
                  "KALILLAC_ACCOUNT_REGISTRATION_V2_ENABLED", "KALILLAC_ACCOUNT_RECOVERY_ENABLED",
                  "KALILLAC_USAGE_METERING_ENABLED", "KALILLAC_USAGE_ENFORCEMENT_ENABLED",
                  "KALILLAC_REQUEST_BUDGET_ENABLED", "KALILLAC_PROVIDER_CEILINGS_ENABLED",
                  "KALILLAC_FINANCIAL_SAFEGUARDS_ENABLED", "KALILLAC_REASONING_MODES_ENABLED",
-                 "KALILLAC_BILLING_ENABLED", "KALILLAC_FILES_ENABLED", "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED"):
+                 "KALILLAC_BILLING_ENABLED", "KALILLAC_FILES_ENABLED", "KALILLAC_FILES_IMAGES_ENABLED",
+                 "KALILLAC_ANONYMOUS_DAILY_LIMIT_ENABLED"):
         assert have[flag] == "true", flag
 
 
@@ -122,10 +125,11 @@ def test_the_web_root_marks_exactly_what_the_chat_reads(tmp_path):
     frontend = CANDIDATE.parent / "frontend"
     read = set(re.findall(r'getAttribute\("data-kalillac-([a-z]+)"\)', (frontend / "app.js").read_text(encoding="utf-8")))
     assert read == set(webroot.MARKS)
-    out = webroot.build(site(tmp_path), frontend, tmp_path / "out", ["reasoning", "accounts", "files", "spaces"])
+    out = webroot.build(site(tmp_path), frontend, tmp_path / "out",
+                        ["reasoning", "accounts", "files", "spaces", "images"])
     page = (out / "app" / "index.html").read_text(encoding="utf-8")
-    assert ('<html lang="en" data-kalillac-accounts="on" data-kalillac-files="on" data-kalillac-reasoning="on"'
-            ' data-kalillac-spaces="on">') in page
+    assert ('<html lang="en" data-kalillac-accounts="on" data-kalillac-files="on" data-kalillac-images="on"'
+            ' data-kalillac-reasoning="on" data-kalillac-spaces="on">') in page
     original = (frontend / "index.html").read_text(encoding="utf-8")
     assert page == original.replace('<html lang="en">', page[page.index("<html"):page.index(">", page.index("<html")) + 1])
     assert (out / "index.html").read_text(encoding="utf-8").count("data-kalillac") == 0

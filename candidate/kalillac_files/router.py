@@ -33,6 +33,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
+from . import images
 from .intake import MAX_UPLOAD_BYTES, display_name
 from .store import FileNotFound, QuotaExceeded
 
@@ -106,12 +107,17 @@ class FileService:
     def __init__(self, *, store, authenticate: Callable[[Request], Awaitable[FileAccount | None]],
                  call_model: Callable[[list], Any], required_tier: str = "paid", max_concurrent_assists: int = 2,
                  worker_module=None, request_scope: Callable[[FileAccount], Any] | None = None,
-                 failure_status: Callable[[BaseException], tuple[int, str] | None] | None = None):
+                 failure_status: Callable[[BaseException], tuple[int, str] | None] | None = None,
+                 images: bool = False):
         """request_scope(account) is a context manager entered in the worker thread around one assistant
         run (the application's request budget and provider controls); failure_status maps an exception
-        those controls raise to (status, stable code)."""
+        those controls raise to (status, stable code). images=True accepts image uploads (I1): each is
+        re-encoded clean by the worker (kalillac_files.images) and only that copy is stored."""
         if required_tier not in ("paid", "any"):
             raise ValueError("required_tier must be 'paid' or 'any'")
+        if type(images) is not bool:
+            raise ValueError("images must be a bool")
+        self.images = images
         from . import worker as default_worker
         self.store, self.authenticate, self.call_model = store, authenticate, call_model
         self.request_scope = request_scope or (lambda account: nullcontext())
@@ -226,12 +232,19 @@ def build_files_router(*, service: FileService | None = None, **options) -> APIR
         if not data:
             return _error(400, "empty_file")
         try:
-            inspected = await run_in_threadpool(worker.run_inspect, data, name)
+            if service.images and (images.sniff(data) is not None or images.is_image_name(name)):
+                # An image is decoded once in the worker and replaced by Kalillac's own clean copy;
+                # the uploaded bytes are never stored.
+                sanitized = await run_in_threadpool(worker.run_image, data, name)
+                data, name, media_type = sanitized.data, images.output_name(name, sanitized.kind), \
+                    images.MEDIA[sanitized.kind]
+            else:
+                inspected = await run_in_threadpool(worker.run_inspect, data, name)
+                media_type = MEDIA_BY_KIND[inspected.kind]
         except worker.WorkerError as refused:
             return _error(422 if refused.code not in ("busy", "timeout", "worker_failed") else 503, refused.code)
         try:
-            stored = await run_in_threadpool(store.put, found.owner, data, name, MEDIA_BY_KIND[inspected.kind],
-                                             "uploaded")
+            stored = await run_in_threadpool(store.put, found.owner, data, name, media_type, "uploaded")
         except QuotaExceeded as full:
             return _error(413 if full.code == "file_too_large" else 409, full.code)
         return JSONResponse(status_code=201, content={"file": stored.public()}, headers=_NO_STORE)

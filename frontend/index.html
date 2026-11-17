@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261117-spaces1">
+  <link rel="stylesheet" href="app.css?v=20261117-images1">
 </head>
 <body>
   <!-- The chat workspace at /app/: reached directly, or from the homepage's
@@ -102,6 +102,8 @@
       <form class="composer" id="composer" autocomplete="off">
         <!-- Files attached to the next message. Shown only when the server offers files to this account. -->
         <ul class="attachments" id="attachments" aria-label="Attached files" hidden></ul>
+        <!-- Why the last file could not be attached (fixed copy). -->
+        <p class="attach-status" id="attach-status" role="status" hidden></p>
         <!-- How much reasoning the next message gets. Shown only on a deployment with reasoning modes on. -->
         <div class="mode-picker" id="mode-picker" role="radiogroup" aria-label="Reasoning" hidden>
           <button type="button" role="radio" class="mode-option" data-mode="quick" aria-checked="false"
@@ -219,6 +221,6 @@
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261117-account1"></script>
+  <script src="app.js?v=20261117-images1"></script>
 </body>
 </html>

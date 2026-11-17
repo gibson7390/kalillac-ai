@@ -221,6 +221,21 @@ def run_inspect(data, declared_name=None, timeout_seconds=DEFAULT_TIMEOUT_SECOND
     return Inspected(kind, text, truncated, units)
 
 
+def run_image(data, declared_name=None, timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+              max_memory_bytes=MAX_MEMORY_BYTES):
+    """images.sanitize(data, declared_name) in an isolated process: SanitizedImage, or WorkerError."""
+    from .images import MAX_OUTPUT_BYTES, MAX_OUTPUT_SIDE, SanitizedImage
+    _upload_checks(data, declared_name)
+    reply = _run({"task": "image", "name": declared_name}, data, timeout_seconds, max_memory_bytes)
+    kind, width, height = reply.header.get("kind"), reply.header.get("width"), reply.header.get("height")
+    signature = {"png": b"\x89PNG\r\n\x1a\n", "jpeg": b"\xff\xd8\xff"}.get(kind)
+    if signature is None or type(width) is not int or type(height) is not int \
+            or not (1 <= width <= MAX_OUTPUT_SIDE and 1 <= height <= MAX_OUTPUT_SIDE) \
+            or not reply.data.startswith(signature) or len(reply.data) > MAX_OUTPUT_BYTES:
+        raise WorkerError("worker_failed")
+    return SanitizedImage(kind, reply.data, width, height)
+
+
 def _upload_checks(data, declared_name):
     if type(data) is not bytes:
         raise WorkerError("invalid_upload")
@@ -319,6 +334,7 @@ def main():
         _forbid_new_tasks()
         payload = stdin.read(MAX_SPEC_BYTES + MAX_UPLOAD_BYTES + 1)
         from .intake import IntakeError, inspect
+        from .images import ImageError
         from .generation import generate
         from .spec import SpecError
         try:
@@ -329,6 +345,11 @@ def main():
                 found = inspect(payload, header.get("name"))
                 reply = _frame({"ok": True, "kind": found.kind, "truncated": found.truncated, "units": found.units},
                                found.text.encode("utf-8", "replace"))
+            elif header["task"] == "image":
+                from .images import sanitize
+                found = sanitize(payload, header.get("name"))
+                reply = _frame({"ok": True, "kind": found.kind, "width": found.width, "height": found.height},
+                               found.data)
             elif header["task"] == "outline":
                 from .editing import outline
                 found = outline(payload, header.get("name"))
@@ -344,7 +365,7 @@ def main():
                 reply = _frame({"ok": True, "filename": result.filename, "media_type": result.media_type}, result.data)
             else:
                 reply = _frame({"ok": False, "code": "worker_failed"})
-        except (SpecError, IntakeError) as refused:
+        except (SpecError, IntakeError, ImageError) as refused:
             reply = _frame({"ok": False, "code": refused.code})
         except MemoryError:
             reply = _frame({"ok": False, "code": "out_of_memory"})

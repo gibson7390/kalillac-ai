@@ -15215,6 +15215,14 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
             return 503, "model_provider_unavailable"
         return None
 
+    # Images (I1): uploads re-encoded clean by the worker, and shown to GPT-6 Luna by the file assistant.
+    # Default off. With Financial Safeguards on, every image needs the per-image input bound
+    # (KALILLAC_FINANCE_OPENAI_IMAGE_INPUT_TOKENS), or the deployment refuses to start rather than refuse
+    # every image request at dispatch.
+    _files_images = os.getenv("KALILLAC_FILES_IMAGES_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    if _files_images and _financial_config is not None and _financial_config.prices.openai.image_input_tokens is None:
+        raise RuntimeError("KALILLAC_FILES_IMAGES_ENABLED with Financial Safeguards requires "
+                           "KALILLAC_FINANCE_OPENAI_IMAGE_INPUT_TOKENS.")
     _file_service = FileService(
         store=_file_store,
         authenticate=_files_authenticator(settings=_account_settings, v1_security=_v1_account_security,
@@ -15223,6 +15231,7 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
         required_tier=_files_tier,
         request_scope=_file_request_scope,
         failure_status=_file_failure,
+        images=_files_images,
     )
     api.include_router(build_files_router(service=_file_service))
 

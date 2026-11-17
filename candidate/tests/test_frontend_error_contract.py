@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-account1"
-CSS_CACHE_KEY = "20261117-spaces1"
+CACHE_KEY = "20261117-images1"
+CSS_CACHE_KEY = "20261117-images1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -109,10 +109,14 @@ COPY = {
     "model_output_incomplete": FILE_FAILED,
     "model_refused": FILE_FAILED,
     "tool_limit_exceeded": FILE_FAILED,
+    # The file assistant's image refusals (images deployments).
+    "too_many_images": "Attach at most 4 images to one message.",
+    "image_unavailable": "An attached image is no longer available. Remove it and try again.",
 }
 NO_RETRY = {"empty_message", "message_too_long", "history_too_long", "processing_limit_reached",
             DAILY_LIMIT_CODE, "session_ended", "reasoning_mode_not_allowed", "files_require_premium",
-            "not_authenticated", "file_not_found", "daily_limit_reached", "account_unavailable"}
+            "not_authenticated", "file_not_found", "daily_limit_reached", "account_unavailable",
+            "too_many_images", "image_unavailable"}
 
 # Text that must never reach the page: raw response fields, HTML error pages,
 # provider names and exception messages.
@@ -147,7 +151,8 @@ DAILY_LIMIT_SCENARIOS = (
 )
 
 # Files: download links in a reply, and the attach control of a files deployment.
-FILE_SCENARIOS = ("files_in_reply", "files_offered", "files_offered_no_access")
+FILE_SCENARIOS = ("files_in_reply", "files_offered", "files_offered_no_access", "images_attach_send",
+                  "images_refused", "files_edit_confirm")
 REASONING_SCENARIOS = ("reasoning_offered",)
 
 # Syntax highlighting of rendered fenced code (frontend presentation only).
@@ -458,8 +463,11 @@ def test_every_scenario_completed(browser_results):
 def test_no_request_left_the_page(browser_results):
     for name, result in browser_results["results"].items():
         for request in result["requests"]:
-            if name.startswith("files_offered") and request["url"] == "/api/files":
+            if name.startswith(("files_offered", "files_edit_confirm")) and request["url"] == "/api/files":
                 continue                      # A files deployment's account probe and upload (tested below).
+            if name.startswith("images_") and (request["url"] == "/api/files" or (
+                    request["url"].startswith("/api/files/") and request["method"] == "GET")):
+                continue                      # An images deployment's upload and preview (tested below).
             if name.startswith("spaces_") and request["url"].startswith("/api/spaces"):
                 continue                      # A Spaces deployment's requests (tested below).
             assert request["url"] == "/api/chat" and request["method"] == "POST", name
@@ -1586,6 +1594,51 @@ def test_a_files_deployment_offers_attachments_to_an_account_with_access(browser
     sent = step(result, "sent")
     assert sent["attachments"] == [] and sent["attachmentsShown"] is False   # Cleared once the reply is shown.
     assert [chip["name"] for chip in sent["chips"]] == ["launch-plan.pptx"]
+
+
+def test_an_attached_image_is_previewed_from_the_stored_copy_and_sent(browser_results):
+    result = scenario(browser_results, "images_attach_send")
+    offered = step(result, "offered")
+    assert offered["attachShown"] is True and offered["accept"].endswith(",.png,.jpg,.jpeg,.webp,.gif")
+    attached = step(result, "attached")
+    assert attached["attachments"] == ["receipt.jpg"] and attached["thumbs"] == [{"blob": True, "alt": ""}]
+    probe, upload, preview, chat = result["requests"]
+    assert (upload["url"], upload["method"]) == ("/api/files", "POST")
+    assert (preview["url"], preview["method"]) == ("/api/files/DdDdDdDdDdDdDdDdDdDdDd", "GET")
+    assert chat["body"]["file_ids"] == ["DdDdDdDdDdDdDdDdDdDdDd"]
+    assert step(result, "sent")["attachments"] == [] and step(result, "sent")["thumbs"] == []
+
+
+def test_a_refused_image_shows_one_fixed_line_and_attaches_nothing(browser_results):
+    result = scenario(browser_results, "images_refused")
+    refused = step(result, "refused")
+    assert refused["status"] == "Animated images can’t be attached. Try a still image."
+    assert refused["attachments"] == [] and refused["attachmentsShown"] is False
+    assert step(result, "unknown-code")["status"] == "Kalillac couldn’t attach that file. Please try again."
+    accepted = step(result, "accepted")
+    assert accepted["status"] is None and accepted["attachments"] == ["notes.txt"] and accepted["thumbs"] == []
+    page = step(result, "refused-page")["threadText"]
+    assert not any(sentinel in page for sentinel in SENTINELS)
+
+
+def test_a_held_back_edit_is_confirmed_with_one_fixed_message_and_its_single_use_id(browser_results):
+    result = scenario(browser_results, "files_edit_confirm")
+    offered = step(result, "offered")
+    assert offered["buttons"] == 1                                  # The malformed id is not offered.
+    assert offered["text"].startswith("This edit was held back because a total would no longer add up.")
+    probe, first, confirmed = result["requests"]
+    assert "file_confirmations" not in first["body"]
+    assert confirmed["body"]["message"] == "Apply that edit exactly as I asked."
+    assert confirmed["body"]["file_confirmations"] == ["conf_1-x"]
+    assert confirmed["body"]["file_ids"] == ["CcCcCcCcCcCcCcCcCcCcCc"]
+    after = step(result, "confirmed")
+    assert after["draft"] == "my unsent draft" and after["disabled"] == [True]   # Pressed twice: sent once.
+    page = step(result, "confirmed-page")["threadText"]
+    assert "Apply that edit exactly as I asked." in page and "Applied." in page and "<b>" not in page
+
+
+def test_without_the_images_mark_the_chooser_offers_no_image_type(browser_results):
+    assert ".png" not in step(scenario(browser_results, "files_offered"), "offered")["accept"]
 
 
 def test_a_files_deployment_offers_nothing_to_an_account_without_access(browser_results):

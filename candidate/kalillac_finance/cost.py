@@ -41,6 +41,13 @@ underestimate the tokens derived from Kalillac's own text:
    response whose reported input_tokens exceed the bound, so a wrong
    overhead is detected rather than silently undercharged.
 
+Images (input_image parts) are billed by their pixels, not their bytes,
+so the bytes of an image's data URL are left out of the body count and each
+image adds the configured per-image bound instead
+(KALILLAC_FINANCE_OPENAI_IMAGE_INPUT_TOKENS). Only inline data URLs are
+accepted; without that bound, or for any other image reference, the payload
+is refused before dispatch. The same overrun flag applies.
+
 Output tokens are bounded by the request's max_output_tokens, which the
 Responses API applies to visible and reasoning tokens together.
 """
@@ -115,15 +122,35 @@ class OpenAIReservation:
     output_token_bound: int
 
 
-def openai_input_token_bound(payload, overhead_tokens):
+def _without_image_data(value, found):
+    """A copy of value with every input_image's data URL emptied; found counts the images."""
+    if type(value) is dict:
+        if value.get("type") == "input_image":
+            url = value.get("image_url")
+            inline = type(url) is str and url.startswith(("data:image/png;base64,", "data:image/jpeg;base64,"))
+            if set(value) - {"type", "image_url", "detail"} or not inline:
+                raise ReservationError("Only inline PNG or JPEG images can be reserved.")
+            found.append(1)
+            return {**value, "image_url": ""}
+        return {key: _without_image_data(item, found) for key, item in value.items()}
+    if type(value) is list:
+        return [_without_image_data(item, found) for item in value]
+    return value
+
+
+def openai_input_token_bound(payload, overhead_tokens, image_tokens=None):
     """Upper bound on billed input tokens for this exact payload (see module doc)."""
     if type(payload) is not dict or not is_count(overhead_tokens, MAX_INPUT_BOUND_TOKENS):
         raise ReservationError()
+    images = []
+    counted = _without_image_data(payload, images)
+    if images and (type(image_tokens) is not int or image_tokens < 1):
+        raise ReservationError("Image input has no configured bound.")
     try:
-        body = _encode_payload(payload)
+        body = _encode_payload(counted)
     except ValueError:
         raise ReservationError() from None
-    bound = len(body) + overhead_tokens
+    bound = len(body) + overhead_tokens + len(images) * (image_tokens or 0)
     if bound > MAX_INPUT_BOUND_TOKENS:
         raise ReservationError("Request input exceeds the reservable bound.")
     return bound
@@ -141,7 +168,7 @@ def reserve_openai(pricing, payload):
     output_bound = payload.get("max_output_tokens")
     if type(output_bound) is not int or not 1 <= output_bound <= MAX_OUTPUT_TOKENS:
         raise ReservationError("Payload has no bounded max_output_tokens.")
-    input_bound = openai_input_token_bound(payload, pricing.input_overhead_tokens)
+    input_bound = openai_input_token_bound(payload, pricing.input_overhead_tokens, pricing.image_input_tokens)
     rates = pricing.reservation_rates(input_bound)
     units = input_bound * rates.max_input + output_bound * rates.output
     return OpenAIReservation(amount(ceil_div(units, TOKENS_PER_MTOK)), input_bound, output_bound)

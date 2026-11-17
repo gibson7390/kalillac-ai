@@ -122,10 +122,40 @@ lookups remain in V1 mode, on purpose for now: billing, the usage meter, the quo
 verification router. Each relies on V1's revocations having ended the session row. Whether that is
 acceptable for launch is a question for this audit.
 
+## 9. A11: the last legacy account paths through V1 (`feat/v1-auth-remaining-a11`)
+
+Billing (`kalillac_billing/router.py`), the usage route and meter (`kalillac_accounts/usage.py`) and the
+chat's daily quota (`kalillac_accounts/quota.py`) authorize through V1-01 in V1 mode. Questions:
+
+* Checkout: `start_checkout(authorize=...)` runs the V1 authorization at the start of every planning
+  transaction, before `lock_account`. Can any pass reach `gateway.create_checkout_session` or
+  `retrieve_checkout_session` without a planning transaction that authorized in the same pass?
+* Quota: `_v1_identity` inside `reserve`'s transaction (READ COMMITTED, 3 s lock and statement timeouts),
+  FOR UPDATE before the quota's KEY SHARE. Is there any transaction that holds KEY SHARE on the account
+  row and then asks for FOR UPDATE (a lock-upgrade deadlock with this order)? `validate`, `complete`,
+  `record_sent` and `release` do not re-authorize: is that acceptable given the reservation is bound to
+  the account and the request?
+* The chat's 401 with the quota on in V1 mode is now `not_authenticated` for a dead session cookie
+  (before: the same for the legacy quota; the meter-only path still treats it as anonymous).
+
+## 10. I1: secure image upload and image understanding (`feat/image-intake-i1`); D2f confirmation in the chat
+
+* `kalillac_files/images.py` (runs only in the worker, `worker.run_image`): can any input make the stored
+  bytes anything other than Kalillac's own PNG/JPEG encoding of the decoded pixels? Can metadata (EXIF,
+  XMP, ICC, text chunks) survive `Image.frombytes`? Are the header checks before `load()` enough against
+  decompression bombs in every accepted format (PNG, JPEG with `draft`, WebP, GIF)?
+* `kalillac_finance/cost.py` `_without_image_data`: images are reserved at the configured per-image bound,
+  not their bytes. Can a payload carry image input the walk does not see (another key, another type),
+  or a reference other than an inline PNG/JPEG data URL, and still be reserved?
+* `kalillac_files/assistant.py` `_image_parts`: only attached files of this owner, at most four, re-checked
+  signature and size.
+* The chat's confirmation control (`frontend/app.js` `renderConfirmations`, `send(fixedText)`): the id is
+  only ever sent with the one fixed message it was pressed for; a retry of that exchange keeps it.
+
 ## Not in these checkpoints
 
-E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), the
-Spaces frontend, image upload, the owner dashboard. Open document-quality findings are tracked in
+E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
+generation (design only: `docs/I2-IMAGE-GENERATION-DESIGN.md`), the owner dashboard. Open document-quality findings are tracked in
 `docs/CODEX-AUDIT-CORRECTIONS.md`.
 
 ## Reproducing

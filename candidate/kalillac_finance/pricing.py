@@ -19,6 +19,11 @@ surcharge applies. If the model bills a whole request at different rates
 above an input-token threshold, set that threshold and its four rates;
 otherwise set the threshold to "none".
 
+Images (I1) are optional: KALILLAC_FINANCE_OPENAI_IMAGE_INPUT_TOKENS is the
+most input tokens the model bills for one image Kalillac sends (its own
+re-encoding, at most 2048 pixels a side). It is a measured technical bound,
+not a price; unset, any payload carrying an image is refused before dispatch.
+
 Brave is priced per dispatched request: its responses carry no usage, so
 the request is the only unit the application can authoritatively count.
 Tavily is priced per credit. The per-operation credit maxima are the most
@@ -67,6 +72,7 @@ LONG_CONTEXT_RATES = {
     "output": "KALILLAC_PRICE_OPENAI_LONG_CONTEXT_OUTPUT_USD_PER_MTOK",
 }
 OPENAI_OVERHEAD = "KALILLAC_FINANCE_OPENAI_INPUT_OVERHEAD_TOKENS"
+OPENAI_IMAGE_TOKENS = "KALILLAC_FINANCE_OPENAI_IMAGE_INPUT_TOKENS"
 BRAVE_REQUEST = "KALILLAC_PRICE_BRAVE_USD_PER_REQUEST"
 TAVILY_CREDIT = "KALILLAC_PRICE_TAVILY_USD_PER_CREDIT"
 TAVILY_MAX_CREDITS = {op: "KALILLAC_FINANCE_TAVILY_MAX_CREDITS_" + op[0].upper() + "_" + op[1].upper()
@@ -75,7 +81,8 @@ TAVILY_MAX_CREDITS = {op: "KALILLAC_FINANCE_TAVILY_MAX_CREDITS_" + op[0].upper()
 REQUIRED = (OPENAI_MODEL, *OPENAI_RATES.values(), LONG_CONTEXT_ABOVE, OPENAI_OVERHEAD,
             BRAVE_REQUEST, TAVILY_CREDIT, *TAVILY_MAX_CREDITS.values())
 # Ceilings (limits.py) share the KALILLAC_FINANCE_ family, so they are known names here.
-KNOWN = frozenset(REQUIRED) | frozenset(LONG_CONTEXT_RATES.values()) | frozenset(LIMIT_VARIABLES)
+KNOWN = (frozenset(REQUIRED) | frozenset(LONG_CONTEXT_RATES.values()) | frozenset(LIMIT_VARIABLES)
+         | {OPENAI_IMAGE_TOKENS})
 _FAMILIES = ("KALILLAC_PRICE_", "KALILLAC_FINANCE_")
 
 
@@ -131,6 +138,8 @@ class OpenAIPricing:
     standard: TokenRates
     long_context: LongContext | None
     input_overhead_tokens: int
+    # The most input tokens one image is billed as; None: no image may be reserved (see the module doc).
+    image_input_tokens: int | None = None
 
     def __post_init__(self):
         if type(self.model) is not str or _MODEL_ID.fullmatch(self.model) is None:
@@ -139,6 +148,9 @@ class OpenAIPricing:
             raise MoneyError("Invalid OpenAI pricing.")
         if not is_count(self.input_overhead_tokens, MAX_OVERHEAD_TOKENS):
             raise MoneyError("Invalid input overhead.")
+        if self.image_input_tokens is not None and (not is_count(self.image_input_tokens, MAX_OVERHEAD_TOKENS)
+                                                    or self.image_input_tokens == 0):
+            raise MoneyError("Invalid image input bound.")
 
     def rates_for(self, input_tokens):
         """The rates billed for a request with exactly input_tokens."""
@@ -260,7 +272,9 @@ def load_pricing(environ=None):
         threshold = _count(environ, LONG_CONTEXT_ABOVE, 1, MAX_INPUT_BOUND_TOKENS)
         long_context = LongContext(threshold, _rates(environ, LONG_CONTEXT_RATES))
     openai = OpenAIPricing(model, _rates(environ, OPENAI_RATES), long_context,
-                           _count(environ, OPENAI_OVERHEAD, 0, MAX_OVERHEAD_TOKENS))
+                           _count(environ, OPENAI_OVERHEAD, 0, MAX_OVERHEAD_TOKENS),
+                           _count(environ, OPENAI_IMAGE_TOKENS, 1, MAX_OVERHEAD_TOKENS)
+                           if OPENAI_IMAGE_TOKENS in environ else None)
     brave = BravePricing(_usd(environ, BRAVE_REQUEST, MAX_OPERATION_PRICE, 1))
     tavily = TavilyPricing(_usd(environ, TAVILY_CREDIT, MAX_OPERATION_PRICE, 1),
                            tuple((*op, _count(environ, name, 1, MAX_CREDITS_PER_OPERATION))

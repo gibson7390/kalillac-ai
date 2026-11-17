@@ -109,9 +109,15 @@
 
   // Files scenarios: the page is marked as a files deployment before app.js runs, and the account
   // probe (GET /api/files) app.js then makes is answered first.
-  if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access") {
+  if (scenarioName.indexOf("images_") === 0) {
     document.documentElement.setAttribute("data-kalillac-files", "on");
-    queue.push(scenarioName === "files_offered" ? { status: 200, json: { files: [] } }
+    document.documentElement.setAttribute("data-kalillac-images", "on");
+    queue.push({ status: 200, json: { files: [] } });
+  }
+  if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access"
+      || scenarioName === "files_edit_confirm") {
+    document.documentElement.setAttribute("data-kalillac-files", "on");
+    queue.push(scenarioName !== "files_offered_no_access" ? { status: 200, json: { files: [] } }
                                                 : { status: 403, json: { error: "files_require_premium" } });
   }
 
@@ -589,7 +595,12 @@
         }),
         attachShown: !!attach && !attach.hidden,
         attachments: list ? Array.prototype.map.call(list.querySelectorAll(".attachment span"), text) : null,
-        attachmentsShown: !!list && !list.hidden
+        attachmentsShown: !!list && !list.hidden,
+        thumbs: list ? Array.prototype.map.call(list.querySelectorAll(".attachment img"), function (img) {
+          return { blob: img.src.indexOf("blob:") === 0, alt: img.getAttribute("alt") };
+        }) : null,
+        accept: $("attach-input") ? $("attach-input").accept : null,
+        status: $("attach-status") && !$("attach-status").hidden ? text($("attach-status")) : null
       });
     },
     // The header's account link (present only on an accounts deployment).
@@ -683,7 +694,7 @@
     request_timeout: 504, internal_error: 500,
     session_ended: 409, unsupported_media_type: 415,
     reasoning_mode_not_allowed: 403, files_require_premium: 403, not_authenticated: 401,
-    daily_limit_reached: 429, account_unavailable: 403,
+    daily_limit_reached: 429, account_unavailable: 403, too_many_images: 502, image_unavailable: 502,
     file_not_found: 404, file_assistant_unavailable: 502, model_output_unusable: 502,
     model_output_incomplete: 502, model_refused: 502, tool_limit_exceeded: 502
   };
@@ -1435,6 +1446,60 @@
     await a.send("raise the rent line by 5%");
     a.snap("sent-page");
     a.files("sent");
+  };
+
+  // Images on: an image is attached, its stored clean copy is previewed, and it goes with the message.
+  SCENARIOS.images_attach_send = async function (a) {
+    await a.wait(60);
+    a.files("offered");
+    a.respondWith({ status: 201, json: { file: { id: "DdDdDdDdDdDdDdDdDdDdDd", filename: "receipt.jpg", size: 4000,
+                                                 media_type: "image/jpeg" } } },
+                  { status: 200, contentType: "image/jpeg", body: "synthetic-jpeg" },
+                  ok("It is a receipt for 3 items.", "s-1"));
+    await a.chooseFile("receipt.jpeg", "\xff\xd8\xff synthetic");
+    await a.wait(80);
+    a.files("attached");
+    await a.send("what is this?");
+    a.snap("sent-page");
+    a.files("sent");
+  };
+
+  // Images on: a refused image shows one fixed line and attaches nothing; the next success clears it.
+  SCENARIOS.images_refused = async function (a) {
+    await a.wait(60);
+    a.respondWith({ status: 422, json: { error: "animated_image_unsupported", detail: SECRET } });
+    await a.chooseFile("dance.gif", "GIF89a synthetic");
+    a.snap("refused-page");
+    a.files("refused");
+    a.respondWith({ status: 422, json: { error: "something_new", detail: SECRET } });
+    await a.chooseFile("odd.png", "\x89PNG synthetic");
+    a.files("unknown-code");
+    a.respondWith({ status: 201, json: { file: { id: "EeEeEeEeEeEeEeEeEeEeEe", filename: "notes.txt", size: 10,
+                                                 media_type: "text/plain; charset=utf-8" } } });
+    await a.chooseFile("notes.txt", "hello");
+    a.files("accepted");
+  };
+
+  // A held-back edit: the reply offers a confirmation; confirming sends one fixed message with the
+  // confirmation id and the file, keeps the composer's draft, and cannot be pressed twice.
+  SCENARIOS.files_edit_confirm = async function (a) {
+    await a.wait(60);
+    a.respondWith(
+      { status: 200, json: { reply: "The total would no longer add up, so I held that edit back.", session_id: "s-1",
+                             files: [], confirmations: [{ id: "conf_1-x", file_id: "CcCcCcCcCcCcCcCcCcCcCc" },
+                                                        { id: "<b>bad</b>", file_id: "CcCcCcCcCcCcCcCcCcCcCc" }] } },
+      { status: 200, json: { reply: "Applied.", session_id: "s-1", files: [GOOD_FILE] } });
+    await a.send("set the rent to 900");
+    $("composer-input").value = "my unsent draft";
+    var buttons = document.querySelectorAll(".edit-confirm-btn");
+    steps.push({ label: "offered", buttons: buttons.length, text: text(document.querySelector(".edit-confirm")) });
+    buttons[0].click();
+    buttons[0].click();
+    await a.wait(120);
+    a.snap("confirmed-page");
+    steps.push({ label: "confirmed", draft: $("composer-input").value,
+                 disabled: Array.prototype.map.call(document.querySelectorAll(".edit-confirm-btn"),
+                                                    function (b) { return b.disabled; }) });
   };
 
   // A files deployment, but this account has no access: nothing is offered.

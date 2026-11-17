@@ -1038,6 +1038,11 @@
     file_not_found: {
       message: "An attached file is no longer available. Remove it and try again.", kind: "error", action: null
     },
+    // Images (an images deployment): more than one message shows, or a stored image that cannot be used.
+    too_many_images: { message: "Attach at most 4 images to one message.", kind: "error", action: null },
+    image_unavailable: {
+      message: "An attached image is no longer available. Remove it and try again.", kind: "error", action: null
+    },
     file_assistant_unavailable: OUTCOME_FILE_FAILED,
     model_output_unusable: OUTCOME_FILE_FAILED,
     model_output_incomplete: OUTCOME_FILE_FAILED,
@@ -1248,9 +1253,30 @@
     "text/csv; charset=utf-8": "CSV",
     "text/markdown; charset=utf-8": "Markdown",
     "text/plain; charset=utf-8": "Text",
-    "application/json": "JSON"
+    "application/json": "JSON",
+    "image/png": "PNG image",
+    "image/jpeg": "JPEG image"
   };
+  /* Images (a files deployment that also marks <html data-kalillac-images="on">): photos and
+     screenshots can be attached too. The server keeps only its own clean copy of each; the
+     attachment shows that copy as a small preview, fetched as a blob, never the file the
+     visitor chose. */
+  var IMAGES_OFFERED = document.documentElement.getAttribute("data-kalillac-images") === "on";
+  var IMAGE_MEDIA = { "image/png": true, "image/jpeg": true };
+  // A refused upload gets one fixed line; nothing from the response is shown.
+  var UPLOAD_REFUSALS = {
+    file_too_large: "That file is larger than 10 MB.",
+    image_too_large: "That image is too large. Try a smaller one.",
+    animated_image_unsupported: "Animated images can’t be attached. Try a still image.",
+    unreadable_image: "That image couldn’t be read.",
+    unsupported_type: "That type of file can’t be attached.",
+    type_mismatch: "That file’s name doesn’t match its contents.",
+    file_count_quota_exceeded: "Your files are full. Delete some to attach more.",
+    storage_quota_exceeded: "Your files are full. Delete some to attach more."
+  };
+  var UPLOAD_FAILED = "Kalillac couldn’t attach that file. Please try again.";
   var attachmentList = document.getElementById("attachments");
+  var attachStatus = document.getElementById("attach-status");
   // The attach button and its file chooser exist only on a files deployment: the page itself carries
   // neither, so an ordinary visitor's page exposes no upload control at all. The button stays hidden
   // until the server says this account may use files.
@@ -1265,10 +1291,34 @@
     attachInput.type = "file";
     attachInput.id = "attach-input";
     attachInput.hidden = true;
-    attachInput.accept = ".docx,.xlsx,.pptx,.pdf,.txt,.md,.csv,.json";
+    attachInput.accept = ".docx,.xlsx,.pptx,.pdf,.txt,.md,.csv,.json" +
+      (IMAGES_OFFERED ? ",.png,.jpg,.jpeg,.webp,.gif" : "");
     attachBtn.parentNode.insertBefore(attachInput, attachBtn.nextSibling);
   }
-  var ATTACHED = [];   // [{id, filename}] for the next message
+  var ATTACHED = [];   // [{id, filename, thumb}] for the next message; thumb: a blob URL or null
+
+  function clearAttached() {
+    ATTACHED.forEach(function (f) { if (f.thumb) URL.revokeObjectURL(f.thumb); });
+    ATTACHED = [];
+    renderAttachments();
+  }
+
+  function showAttachStatus(message) {
+    if (!attachStatus) return;
+    attachStatus.textContent = message || "";
+    attachStatus.hidden = !message;
+  }
+
+  // The stored copy of an attached image, as a preview. Only a PNG or JPEG blob is shown.
+  function loadThumb(entry) {
+    fetch("/api/files/" + encodeURIComponent(entry.id), { method: "GET" })
+      .then(function (res) { return res.ok ? res.blob() : null; })
+      .then(function (blob) {
+        if (!blob || !IMAGE_MEDIA[blob.type] || ATTACHED.indexOf(entry) === -1) return;
+        entry.thumb = URL.createObjectURL(blob);
+        renderAttachments();
+      }, function () {});
+  }
 
   function fileSize(bytes) {
     if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
@@ -1314,6 +1364,13 @@
     ATTACHED.forEach(function (f, index) {
       var item = document.createElement("li");
       item.className = "attachment";
+      if (f.thumb) {
+        var preview = document.createElement("img");
+        preview.className = "attachment-thumb";
+        preview.src = f.thumb;
+        preview.alt = "";                 // The name beside it says what it is.
+        item.appendChild(preview);
+      }
       var name = document.createElement("span");
       name.textContent = f.filename;
       var remove = document.createElement("button");
@@ -1322,7 +1379,8 @@
       remove.setAttribute("aria-label", "Remove " + f.filename);
       remove.textContent = "×";
       remove.addEventListener("click", function () {
-        ATTACHED.splice(index, 1);
+        var removed = ATTACHED.splice(index, 1)[0];
+        if (removed && removed.thumb) URL.revokeObjectURL(removed.thumb);
         renderAttachments();
       });
       item.appendChild(name);
@@ -1401,7 +1459,12 @@
   }
 
   function uploadFile(file) {
-    if (file.size > MAX_UPLOAD_BYTES || ATTACHED.length >= 5) return;
+    if (ATTACHED.length >= 5) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      showAttachStatus(UPLOAD_REFUSALS.file_too_large);
+      return;
+    }
+    showAttachStatus("");
     attachBtn.disabled = true;
     fetch("/api/files", {
       method: "POST",
@@ -1415,10 +1478,16 @@
       .then(function (result) {
         var f = result.ok && result.data && result.data.file;
         if (f && typeof f.id === "string" && FILE_ID_RE.test(f.id)) {
-          ATTACHED.push({ id: f.id, filename: typeof f.filename === "string" ? f.filename : file.name });
+          var entry = { id: f.id, filename: typeof f.filename === "string" ? f.filename : file.name, thumb: null };
+          ATTACHED.push(entry);
           renderAttachments();
+          if (IMAGES_OFFERED && IMAGE_MEDIA[f.media_type]) loadThumb(entry);
+          return;
         }
-      }, function () {})
+        var code = result.data && typeof result.data.error === "string" ? result.data.error : null;
+        showAttachStatus(code && Object.prototype.hasOwnProperty.call(UPLOAD_REFUSALS, code)
+          ? UPLOAD_REFUSALS[code] : UPLOAD_FAILED);
+      }, function () { showAttachStatus(UPLOAD_FAILED); })
       .then(function () { attachBtn.disabled = false; });
   }
 
@@ -1439,15 +1508,53 @@
 
   /* Render the reply and its actions first; only a fully rendered answer
      becomes a completed turn. */
-  function completeExchange(exchange, reply, sessionId, sourceList, files) {
+  /* Exact-edit confirmations (files): when the file assistant holds back an edit because a total would
+     no longer add up, the reply carries single-use confirmation ids the server issued for exactly that
+     edit. The customer may confirm one here; it goes with one fixed message and the file, and the server
+     applies the edit only if it is exactly the one confirmed. */
+  var CONFIRM_TEXT = "Apply that edit exactly as I asked.";
+  var pendingConfirmation = null;   // {id, fileId}, taken by the next request only
+
+  function confirmationsFrom(data) {
+    if (!data || !Array.isArray(data.confirmations)) return [];
+    return data.confirmations.filter(function (c) {
+      return c && typeof c.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(c.id) &&
+        typeof c.file_id === "string" && FILE_ID_RE.test(c.file_id);
+    }).slice(0, 4);
+  }
+
+  function renderConfirmations(shell, confirmations) {
+    if (!confirmations || !confirmations.length) return;
+    var box = document.createElement("div");
+    box.className = "edit-confirm";
+    var note = document.createElement("p");
+    note.textContent = "This edit was held back because a total would no longer add up.";
+    box.appendChild(note);
+    confirmations.forEach(function (c) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "edit-confirm-btn";
+      button.textContent = "Apply exactly as asked";
+      button.addEventListener("click", function () {
+        if (inFlight || limitHeld || !hasAuthority()) return;
+        Array.prototype.forEach.call(box.querySelectorAll("button"), function (b) { b.disabled = true; });
+        pendingConfirmation = { id: c.id, fileId: c.file_id };
+        send(CONFIRM_TEXT);
+      });
+      box.appendChild(button);
+    });
+    shell.bubble.appendChild(box);
+  }
+
+  function completeExchange(exchange, reply, sessionId, sourceList, files, confirmations) {
     var index = TURNS.length;
 
     try {
       renderAssistantText(exchange.shell, reply, sourceList);
       renderFiles(exchange.shell, files || []);
+      renderConfirmations(exchange.shell, confirmations);
       if (exchange.fileIds && exchange.fileIds.length) {
-        ATTACHED = [];
-        renderAttachments();
+        clearAttached();
       }
       clearActions(exchange.shell);
       addActions(exchange.shell, index);
@@ -1492,7 +1599,8 @@
         return;
       }
 
-      completeExchange(exchange, reply, data.session_id, sourceListMeta(data), filesFrom(data));
+      completeExchange(exchange, reply, data.session_id, sourceListMeta(data), filesFrom(data),
+                       FILES_OFFERED ? confirmationsFrom(data) : []);
     }, function (err) {
       if (exchange.epoch !== conversationEpoch) return;   // erased meanwhile
       // The response arrived but its body could not be read.
@@ -1515,8 +1623,19 @@
       history: exchange.history,
       session_id: SESSION_ID
     };
+    // A confirmation belongs to the exchange it was given for; a retry of that exchange keeps it.
+    if (exchange.confirmation === undefined) {
+      exchange.confirmation = pendingConfirmation;
+      pendingConfirmation = null;
+    }
     // Attachments go with this message; they are cleared once its reply is shown.
     exchange.fileIds = ATTACHED.map(function (f) { return f.id; });
+    if (exchange.confirmation) {
+      if (exchange.fileIds.indexOf(exchange.confirmation.fileId) === -1) {
+        exchange.fileIds.push(exchange.confirmation.fileId);
+      }
+      payload.file_confirmations = [exchange.confirmation.id];
+    }
     if (exchange.fileIds.length) payload.file_ids = exchange.fileIds;
     if (reasoningMode) payload.reasoning_mode = reasoningMode;
 
@@ -1571,9 +1690,13 @@
   }
 
   // ---- send ----------------------------------------------------------------
-  function send() {
+  /* fixedText: a message the page sends for the customer (a confirmation); the composer and its draft
+     are left exactly as they are. */
+  function send(fixedText) {
     if (!hasAuthority()) return;     // before anything in the page changes
-    var text = input.value.trim();
+    var fixed = typeof fixedText === "string";
+    var text = fixed ? fixedText : input.value.trim();
+    if (fixed && (inFlight || limitHeld)) pendingConfirmation = null;   // Never left for a later message.
     // Paused by the daily limit: Enter, Send and touch all end here.
     if (!text || inFlight || limitHeld) return;
 
@@ -1586,9 +1709,11 @@
     var history = buildHistory();
 
     var userRow = addUserMessage(text);
-    input.value = "";
-    autoGrow();
-    syncSendEnabled();
+    if (!fixed) {
+      input.value = "";
+      autoGrow();
+      syncSendEnabled();
+    }
 
     stickToBottom = true;
     var shell = addAssistantShell();
@@ -1921,8 +2046,8 @@
     if (eraseBtn) eraseBtn.hidden = true;
     if (modePicker) modePicker.hidden = true;
     if (attachBtn) attachBtn.hidden = true;
-    ATTACHED = [];
-    renderAttachments();
+    clearAttached();
+    showAttachStatus("");
 
     var pending = null;
     for (var i = 0; i < messages.length; i++) {

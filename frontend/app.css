@@ -1634,6 +1634,45 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
   cursor: pointer;
 }
 .attachment-remove:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.attachment-thumb {
+  width: 28px;
+  height: 28px;
+  margin-left: -4px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: none;
+}
+.attach-status {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.attach-status[hidden] { display: none; }
+.edit-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.edit-confirm p { margin: 0; flex: 1 1 220px; font-size: 14px; color: var(--ink); }
+.edit-confirm-btn {
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.edit-confirm-btn:disabled { opacity: 0.5; cursor: default; }
+.edit-confirm-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .file-list {
   display: flex;
   flex-wrap: wrap;

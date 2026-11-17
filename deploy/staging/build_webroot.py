@@ -17,7 +17,7 @@ from pathlib import Path
 import shutil
 import sys
 
-MARKS = ("accounts", "files", "reasoning", "spaces")
+MARKS = ("accounts", "files", "images", "reasoning", "spaces")
 HTML = '<html lang="en">'
 
 

@@ -187,8 +187,14 @@ once the journey below passes.
 ```
 (cd REL/site && npm ci && npm run build)
 python3 REL/deploy/staging/build_webroot.py --site REL/site/dist/public --frontend REL/frontend \
-    --out /var/www/UNIT --marks accounts,files,reasoning,spaces
+    --out /var/www/UNIT --marks accounts,files,images,reasoning,spaces
 ```
+
+The `images` mark matches `KALILLAC_FILES_IMAGES_ENABLED=true` in the settings. Its one required value,
+`KALILLAC_FINANCE_OPENAI_IMAGE_INPUT_TOKENS`, is measured, not chosen: send a few 2048-pixel test images
+through the file assistant with Financial Safeguards on and read the reported `input_tokens` against the
+same request without the image; set the bound above the largest difference. A response that exceeds it
+is flagged by the ledger's settlement, never silently undercharged.
 
 For Nginx, start from production's own site file (`nginx -T`) and change only: `server_name` (the
 staging hostname), `root` (`/var/www/UNIT`), the upstream port (`PORT`), and add

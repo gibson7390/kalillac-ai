@@ -281,6 +281,20 @@ from the code. See "Owner decisions required".
   because their display rules overrode [hidden]; the phone header overflowed with account controls);
   fixed in `ba03512` with tests that check what is on screen and a 360x640 header test (frontend CI
   44116824283 green).
+* **The last legacy account paths through V1** (`feat/v1-auth-remaining-a11`, on S1, `3525fd8`): billing
+  (status, portal, Checkout), the usage route and meter, and the chat's daily quota now authorize through
+  V1-01 in V1 mode and return its refusals (a quarantined account with a live session row is refused;
+  before, it kept billing, usage and its quota). Checkout repeats the authorization in every planning
+  transaction under the account lock, before any Stripe call; the quota authorizes inside its own
+  reservation transaction, V1's FOR UPDATE before its KEY SHARE lock. Email verification already mounted
+  no routes in V1 mode. The chat now shows fixed copy for `daily_limit_reached` (a 429 only),
+  `account_unavailable` and `not_authenticated`. 10 real PostgreSQL tests, the Premium journey with the V1
+  quota. Locally, under heavy load from another project on the machine, two rare timeouts appeared: once
+  a concurrent reservation (now logged with its SQLSTATE; the test accepts only a lock or statement
+  timeout and fails on a deadlock) and twice the shared V1 fixture's S connection at setup (not
+  reproduced in three later runs). Implemented; awaiting Codex.
+* **Secure image upload and image understanding** (`feat/image-intake-i1`, on A11): see the blueprint's
+  I1 row. Off by default; the per-image token bound is measured in staging, never chosen.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
