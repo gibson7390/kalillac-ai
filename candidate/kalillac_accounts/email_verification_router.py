@@ -50,8 +50,8 @@ def build_email_verification_router(
 
     V1 mode (v1_security set) mounts no routes: registration proves email ownership before an account
     exists (owner decision 14; migration 0021 makes activation prove no unverified account remains), the
-    identity guard refuses any later change to email or email_verified_at, and the retired
-    v1_verify_email authority is not reintroduced. Both endpoints wrote as the runtime role."""
+    identity guard refuses any later change to email or email_verified_at, and no V1 verification
+    authority exists or is added. Both endpoints wrote as the runtime role."""
     config = load_verification_config(gateway, environ)
     router = APIRouter(prefix="/api/account/email-verification")
     if config is None or v1_security is not None:
