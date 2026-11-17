@@ -382,8 +382,14 @@ def test_off_mode_application_import_loads_no_v1_schema_or_migration_machinery()
 def test_no_runtime_module_writes_or_names_the_security_tables():
     # The classifier reads the latch; the operator transition (E2) is its only writer, run by an operator;
     # the E1a grant definitions it applies name the latch table for the runtime login's one read of it.
+    # The provisioning tool for a new, empty deployment (M9) only reads the latch, to refuse a deployment in use.
+    provisioning = CANDIDATE / "tools" / "provision_deployment.py"
     allowed = {CANDIDATE / "kalillac_accounts" / "v1_schema.py", CANDIDATE / "tools" / "v1_security_transition.py",
-               CANDIDATE / "kalillac_accounts" / "v1_final_grants.py"}
+               CANDIDATE / "kalillac_accounts" / "v1_final_grants.py", provisioning}
+    tool = provisioning.read_text(encoding="utf-8")
+    assert [t for t in v1_schema.TABLES if t in tool] == ["account_security_activation"]
+    assert tool.count("account_security_activation") == 2 and tool.count(
+        "SELECT state FROM kalillac.account_security_activation") == 1
     for path in CANDIDATE.rglob("*.py"):
         parts = path.relative_to(CANDIDATE).parts
         if parts[0] in ("tests", "migrations") or path in allowed or "__pycache__" in parts:

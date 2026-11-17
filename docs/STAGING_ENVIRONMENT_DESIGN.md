@@ -1,5 +1,8 @@
 # Isolated staging environment: design proposal
 
+Procedure: `deploy/staging/README.md` (the operator runbook; its provisioning, transition and start-up
+steps run in CI on synthetic data).
+
 Status: **proposal for the owner's decision**. Nothing here has been provisioned, and nothing in this
 document is done by a development session: no SSH, no host change, no service, database or
 credential is created. Every step below is for the owner or an operator, on their authorization.

@@ -5,7 +5,7 @@ for it. It guides the work; `docs/DEVELOPMENT_ROADMAP.md` stays the evidence log
 regressions) and `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` the account-security design. When they
 disagree, this file is corrected first.
 
-Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/premium-paid-scope-b2`
+Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/staging-provisioning-m9`
 (`feat/account-security-d5-credential-path`).
 
 ## Statuses (never interchangeable)
@@ -57,7 +57,7 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 | I1 | Secure image upload + image understanding | | | | intake (type sniffing, size/pixel caps, re-encode, strip metadata), GPT-6 Luna vision call under Financial Safeguards with measured cost | B2, F1 |
 | I2 | Image generation | | | | **design only**: cost-control architecture; no model activated, no allowance (owner) | F1 |
 | O1 | Owner administration dashboard | | | | read-only first: accounts, subscriptions, ledger/costs, billing cases, security events; actions only through reviewed tools | A5, B1, F1 |
-| M9 | Staging environment + end-to-end journey suite | part: the Premium journey test (`test_v1_premium_journey_postgres.py`: register → Free → Checkout + webhook → Premium → manage → cancel → deletion request, real application, disposable PostgreSQL, final grants, Stripe faked at the gateway) | ✔ local | | staging configuration template and runbook; files and Spaces in the journey; the run against Stripe test mode on the owner's staging host | all |
+| M9 | Staging environment + end-to-end journey suite | part: the Premium journey test (`test_v1_premium_journey_postgres.py`); **staging provisioning**: `tools/provision_deployment.py` (roles, database, migrations, protected files and the registration activation of a new, empty deployment; only creates, refuses anything it did not mark), `deploy/staging/` (the settings template, the unit template, the web-root builder and the operator runbook), and `tools/verify_provisioned_boot.py`, which runs the runbook's own commands as root in CI and starts the real application from the template | ✔ local (18 PostgreSQL + 9 unit tests; boot verifier 15/15) | | CI + Codex; the systemd-run and unit forms exercised on a runner with systemd; files and Spaces in the journey; then the run on the owner's staging host with Stripe test mode (decision 17) | all |
 
 ## Codex findings outstanding
 

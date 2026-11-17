@@ -245,6 +245,16 @@ from the code. See "Owner decisions required".
   page's sessions, password and deletion sections with `GET /api/account/security`; per-block code copy;
   the chat's account link; and `test_v1_premium_journey_postgres.py`, the whole Premium journey through
   the real application on disposable PostgreSQL under the final grants. Implemented; awaiting Codex.
+* **Staging provisioning** (`feat/staging-provisioning-m9`, on the Premium branch): until now nothing
+  could stand up a new deployment except test fixtures. `tools/provision_deployment.py` creates a new,
+  empty deployment's roles and database, migrates it, writes the protected files the application reads
+  at startup and records the registration activation (the database itself refuses unless no unverified
+  account exists); it only creates, marks what it creates, and refuses anything else, so it cannot touch
+  another deployment's roles on a shared cluster. `deploy/staging/` holds the settings template (no
+  allowance, budget, price or Stripe id is decided in it), the unit template, the web-root builder and
+  the operator runbook. `tools/verify_provisioned_boot.py` runs the runbook's commands as root in CI:
+  provision, the operator transition as an unprivileged identity, the controlled launcher from the
+  template, real HTTP. Implemented; awaiting CI and Codex. Not run on any host.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

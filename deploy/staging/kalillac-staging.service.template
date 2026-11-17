@@ -1,0 +1,46 @@
+# Kalillac AI staging service. Copy to /etc/systemd/system/<UNIT_NAME>.service, replace every <PLACEHOLDER>,
+# then `systemctl daemon-reload`. Do not enable or start it before the runbook's step 8.
+#
+# <UNIT_NAME> must not be production's unit name (kalillac-ai-fastapi-staging.service, a historical name).
+# The design proposes kalillac-staging-v1.
+
+[Unit]
+Description=Kalillac AI staging (<DEPLOYMENT_ID>)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<SERVICE_USER>
+Group=<SERVICE_GROUP>
+UMask=0077
+WorkingDirectory=<RELEASE_DIR>/candidate
+
+# Order matters: later files win. deployment.env is written by provision_deployment.py.
+EnvironmentFile=<DIR>/deployment.env
+EnvironmentFile=<DIR>/settings.env
+EnvironmentFile=<DIR>/private/provider-keys.env
+
+# Secrets the application reads from $CREDENTIALS_DIRECTORY (root-only sources, visible to this unit only).
+LoadCredential=kalillac_db_password:<DIR>/private/kalillac_db_password
+LoadCredential=stripe_secret_key:<DIR>/private/stripe_secret_key
+LoadCredential=stripe_webhook_secret:<DIR>/private/stripe_webhook_secret
+
+# /var/lib/<UNIT_NAME> and its files directory, owned by the service user. KALILLAC_FILES_ROOT in
+# settings.env is /var/lib/<UNIT_NAME>/files.
+StateDirectory=<UNIT_NAME> <UNIT_NAME>/files
+StateDirectoryMode=0700
+
+# The controlled single-worker launcher: one process per deployment id, enforced in the database.
+ExecStart=<VENV>/bin/python3 -B kalillac_server.py --host 127.0.0.1 --port <PORT>
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Staging can never starve production on a shared host.
+MemoryMax=<MEMORY_MAX>
+CPUQuota=<CPU_QUOTA>
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

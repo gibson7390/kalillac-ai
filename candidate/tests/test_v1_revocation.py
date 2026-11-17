@@ -254,5 +254,7 @@ def test_runtime_never_imports_the_migration_or_names_its_sql():
         assert "FROM kalillac.v1_revoke_sessions" not in source and "v1_revoke_sessions(:" not in source, path
         # The operator transition (E2) names the service role to give S its login; it is an operator
         # tool, never imported by the application.
-        if path.name not in ("v1_schema.py", "migration_roles.py") and parts != ("tools", "v1_security_transition.py"):
+        # The provisioning tool (M9) names it to create the role, NOLOGIN, for a new and empty deployment.
+        if path.name not in ("v1_schema.py", "migration_roles.py") and parts not in (
+                ("tools", "v1_security_transition.py"), ("tools", "provision_deployment.py")):
             assert "V1_SECURITY_SERVICE_ROLE" not in source and "v1_security_service_role" not in source, path
