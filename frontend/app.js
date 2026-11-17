@@ -1539,7 +1539,7 @@
         if (inFlight || limitHeld || !hasAuthority()) return;
         Array.prototype.forEach.call(box.querySelectorAll("button"), function (b) { b.disabled = true; });
         pendingConfirmation = { id: c.id, fileId: c.file_id };
-        send(CONFIRM_TEXT);
+        sendFixed(CONFIRM_TEXT);
       });
       box.appendChild(button);
     });
@@ -1690,12 +1690,22 @@
   }
 
   // ---- send ----------------------------------------------------------------
-  /* fixedText: a message the page sends for the customer (a confirmation); the composer and its draft
-     are left exactly as they are. */
-  function send(fixedText) {
+  function send() {
     if (!hasAuthority()) return;     // before anything in the page changes
-    var fixed = typeof fixedText === "string";
-    var text = fixed ? fixedText : input.value.trim();
+    sendText(input.value.trim(), false);
+  }
+
+  /* A message the page sends for the customer (a confirmation): the composer and its draft are left
+     exactly as they are. Like every way into a request, it refuses without the send authority. */
+  function sendFixed(text) {
+    if (!hasAuthority()) {
+      pendingConfirmation = null;
+      return;
+    }
+    sendText(text, true);
+  }
+
+  function sendText(text, fixed) {
     if (fixed && (inFlight || limitHeld)) pendingConfirmation = null;   // Never left for a later message.
     // Paused by the daily limit: Enter, Send and touch all end here.
     if (!text || inFlight || limitHeld) return;

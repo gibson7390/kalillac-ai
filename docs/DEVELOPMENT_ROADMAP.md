@@ -294,7 +294,18 @@ from the code. See "Owner decisions required".
   timeout and fails on a deadlock) and twice the shared V1 fixture's S connection at setup (not
   reproduced in three later runs). Implemented; awaiting Codex.
 * **Secure image upload and image understanding** (`feat/image-intake-i1`, on A11): see the blueprint's
-  I1 row. Off by default; the per-image token bound is measured in staging, never chosen.
+  I1 row. Off by default; the per-image token bound is measured in staging, never chosen. CI on
+  `796fabe`: files 44173313156 and provider 44173319299 green; subscription 44173294705 failed on a guard
+  (the owner report named a V1 security table), fixed in `1eabbd2` by leaving that section out.
+* On the same branch: the read-only owner report (O1, `tools/owner_report.py`), the exact-edit
+  confirmation in the chat (D2f), Space management and earlier messages in the chat (S1b), and reasoning
+  modes and the paid scope on Space sends (R1/B2): until R1 a Premium customer's Space send was always
+  classified FREE. A screenshot review of the new UI and repeated browser runs found three defects, all
+  fixed with tests: Send at the left of the phone composer inside a Space (present since S1), earlier
+  messages not brought into view, and the Spaces dialog's late close event ending a reopened dialog. A
+  source guard (every send path begins with the authority check) caught a changed `send()` signature in
+  CI; the confirmation now has its own guarded entry. New workflow `spaces-verification`: the 1,249 SQLite
+  Spaces and reasoning-mode tests had been in no workflow.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

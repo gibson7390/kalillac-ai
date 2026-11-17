@@ -151,7 +151,7 @@ chat's daily quota (`kalillac_accounts/quota.py`) authorize through V1-01 in V1 
   or a reference other than an inline PNG/JPEG data URL, and still be reserved?
 * `kalillac_files/assistant.py` `_image_parts`: only attached files of this owner, at most four, re-checked
   signature and size.
-* The chat's confirmation control (`frontend/app.js` `renderConfirmations`, `send(fixedText)`): the id is
+* The chat's confirmation control (`frontend/app.js` `renderConfirmations`, `sendFixed`): the id is
   only ever sent with the one fixed message it was pressed for; a retry of that exchange keeps it.
 * Space sends (`app_fastapi_candidate.py` `_space_generate`): before this, a Space send never set the
   verified-account context, so a Premium customer's Space send was always classified FREE. It now reads
