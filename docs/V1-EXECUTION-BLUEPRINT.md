@@ -5,7 +5,7 @@ for it. It guides the work; `docs/DEVELOPMENT_ROADMAP.md` stays the evidence log
 regressions) and `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` the account-security design. When they
 disagree, this file is corrected first.
 
-Last reconciled with the repository: 2026-11-17, at `9feb42bab929cba091891831f91f3c8dc290f2c3`
+Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/premium-paid-scope-b2`
 (`feat/account-security-d5-credential-path`).
 
 ## Statuses (never interchangeable)
@@ -37,27 +37,27 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 | A2 | V1 authorities D1–D2 (0013–0023) | ✔ | ✔ | 0022 ✔, 0023 source+CI | — | — |
 | A3 | D3 V1 routes (login, logout, revoke, password, deletion request, recovery confirm) | ✔ | ✔ | login ✔ (`dcc0d44`) | Codex on `35f61c8` | A2 |
 | A4 | D5 reset-token issuance + credential read (0024) | ✔ | ✔ | | Codex on `9feb42b` | A3 |
-| A5 | D4 operator tool (suspend, reinstate, deletion request, bounded export) through P | ✔ | ✔ local | | CI + Codex | A2 |
-| A6 | E1 legacy-route removal: E1a account grants + 0025 row-lock anchor | ✔ | ✔ local | | CI + Codex; **E1b** (entitlement/billing grants) after B2 | A4; E1b: B2 |
-| A7 | E2 operator transition (S/P login, latch active, startup gate qualified, rollback) | ✔ | ✔ local | | CI + Codex; running it anywhere real is the owner's decision | A6 |
-| A8 | E3 synthetic lifecycle test under final grants | ✔ | ✔ local | | CI + Codex | A7 |
-| A9 | Account management UI (sessions, password change, deletion request, recovery) | part (sign-in, create, recovery, overview) | part | | V1 pages: sessions, password, deletion; drop the verify page in V1 | A3 |
+| A5 | D4 operator tool (suspend, reinstate, deletion request, bounded export) through P | ✔ | ✔ CI (`f554c2f`) | | Codex | A2 |
+| A6 | E1 legacy-route removal: E1a account grants + 0025 row-lock anchor | ✔ | ✔ CI (`dc24d1b`) | | Codex; **E1b** (entitlement/billing grants) after a reviewed billing write path | A4; E1b: B1 |
+| A7 | E2 operator transition (S/P login, latch active, startup gate qualified, rollback) | ✔ | ✔ CI (`dc24d1b`) | | Codex; running it anywhere real is the owner's decision | A6 |
+| A8 | E3 synthetic lifecycle test under final grants | ✔ | ✔ CI (`dc24d1b`) | | Codex | A7 |
+| A9 | Account management UI (sessions, password change, deletion request, recovery) | ✔ | ✔ local (96 browser tests) | | CI + Codex; drop the legacy verify page when V1 is the only mode | A3 |
 | B1 | Stripe Checkout, portal, webhooks, reconciliation, refund/dispute cases | ✔ | ✔ | | test-mode lifecycle run (owner's test keys) | A1 |
-| B2 | Verified Premium entitlement on the chat request (PAID scope) | in progress | | | `kalillac_accounts/paid_access.py`: V1-01's authorized read → effective entitlement → request-bound `issue_paid_entitlement` evidence at classification (chat and files) and the reasoning permission; matching account only; never on the legacy path. Then images | A3, B1, F1 |
-| B3 | Per-customer financial safeguards (allowance enforcement) | | | | mechanism built with allowances as configuration (values: owner) | B2, F1 |
-| B4 | Subscription management + cancellation in the UI | part (overview billing section) | | | cancel/manage via portal from the account page, status display | B1, A9 |
+| B2 | Verified Premium entitlement on the chat request (PAID scope) | ✔ | ✔ local | | CI + Codex. `kalillac_accounts/paid_access.py`: V1-01's authorized read → effective entitlement → request-bound evidence at classification (chat and files) and the reasoning permission; matching account only; never the legacy path | A3, B1, F1 |
+| B3 | Per-customer financial safeguards | ✔ (allowance × request ceiling) | ✔ | | Each customer is bounded per day by the tier's response allowance (`KALILLAC_USAGE_LIMIT_{FREE,PAID}_DAILY`, chosen from the effective entitlement) times the scope's request ceiling. An explicit per-account dollar budget is designed (per-account ledger buckets, identity kept out of reservations) and waits on owner decision 18 | B2, F1 |
+| B4 | Subscription management + cancellation in the UI | ✔ (upgrade, Manage billing → Stripe portal, period and cancellation state) | ✔ local | | Stripe test-mode run in staging (owner's keys) | B1, A9 |
 | F1 | Financial Safeguards (ledger, ceilings, provider budgets, operator) | ✔ | ✔ | | owner budgets and activation (production) | — |
-| R1 | QUICK / BALANCED / DEEP reasoning | backend + control ✔ | ✔ | | tier permission from B2, saved preference, Spaces sends, final UI | B2 |
+| R1 | QUICK / BALANCED / DEEP reasoning | ✔ backend, control, tier permission from the verified entitlement | ✔ local | | saved preference, a mode on Spaces sends; owner decision 9 (which modes each tier gets) | B2 |
 | D1f | File generation, editing, worker, document quality | ✔ | ✔ | part | open Codex items (Arabic ligatures, Word fields/decision 12, semantic consistency) | — |
 | D2f | File assistant in chat, `/api/files`, delivery | ✔ (flag off) | ✔ | | customer confirmation controls; Premium gate via B2; count vs allowance (owner) | B2 |
 | S1 | Spaces + persistent conversations (backend `/api/spaces`) | ✔ (flag off) | part | | re-verify; V1-01 authorization on Spaces; **frontend** (list, create, conversation history, instructions) | A3 |
 | S2 | Saved conversations outside Spaces | | | | decide shape (a default Space vs separate history); build | S1 |
-| U1 | Code-block rendering with per-block copy | | | | build in the chat renderer (copy keeps exact source text) | — |
-| U2 | Responsive, coherent customer frontend (chat + account + Spaces) | part | part | | navigation between chat, Spaces, account; mobile layouts; one design language | A9, S1 |
+| U1 | Code-block rendering with per-block copy | ✔ | ✔ local (browser) | | CI | — |
+| U2 | Responsive, coherent customer frontend (chat + account + Spaces) | part: chat ↔ account link on an accounts deployment, plan-aware refusal copy | part | | Spaces navigation; a responsive pass across chat, account and Spaces | A9, S1 |
 | I1 | Secure image upload + image understanding | | | | intake (type sniffing, size/pixel caps, re-encode, strip metadata), GPT-6 Luna vision call under Financial Safeguards with measured cost | B2, F1 |
 | I2 | Image generation | | | | **design only**: cost-control architecture; no model activated, no allowance (owner) | F1 |
 | O1 | Owner administration dashboard | | | | read-only first: accounts, subscriptions, ledger/costs, billing cases, security events; actions only through reviewed tools | A5, B1, F1 |
-| M9 | Staging environment + end-to-end journey suite | design doc | | | isolated staging (no production data), E2E through the real app, Stripe test mode | all |
+| M9 | Staging environment + end-to-end journey suite | part: the Premium journey test (`test_v1_premium_journey_postgres.py`: register → Free → Checkout + webhook → Premium → manage → cancel → deletion request, real application, disposable PostgreSQL, final grants, Stripe faked at the gateway) | ✔ local | | staging configuration template and runbook; files and Spaces in the journey; the run against Stripe test mode on the owner's staging host | all |
 
 ## Codex findings outstanding
 
@@ -82,6 +82,7 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 | 15 | Image generation: model, cost, allowance | keep off for V1 launch; design ready | I2 |
 | 16 | Whether a file request / image counts as one chat against Free allowances | count each as one response | D2f, I1 allowances |
 | 17 | Staging host and test-mode Stripe keys | provision per `docs/STAGING_ENVIRONMENT_DESIGN.md` | M9, B1 lifecycle |
+| 18 | An explicit per-account dollar budget on top of allowance × request ceiling | not needed for launch; revisit with real usage | B3 extension |
 
 ## Order of work (no stopping between items)
 

@@ -232,8 +232,19 @@ from the code. See "Owner decisions required".
   the runtime login's final account grants, the operator transition with rollback
   (`tools/v1_security_transition.py`), the startup gate qualifying an active latch bound to deployment and
   release, and the lifecycle test through the routes under the final grants. Implemented; awaiting Codex.
+  CI on `492ad2f` failed once and was right to (subscription run 44090797912, the root-run bootstrap
+  verifier, "unrelated column grant refuses"): the E1a column check had been inserted inside the startup
+  privilege loop, so a stray grant to the registration role on an unrelated table no longer stopped
+  startup. Fixed in `dc24d1bdb7a3dc076047bc323de2779b01df0339` with regression tests that need no root
+  (six, all failing on `492ad2f`); green on it: subscription 44094320838, provider 44094326597, safety
+  44094334097. Development verification only, not an independent one.
   E1b (entitlement and billing grants) waits on Milestone 3's reviewed billing path; erasure after the
   owner's retention decisions.
+* **Premium seam, account pages, chat polish and the journey** (`feat/premium-paid-scope-b2`, on E1–E3):
+  the PAID scope and paid reasoning modes from the V1-verified entitlement (`paid_access.py`); the account
+  page's sessions, password and deletion sections with `GET /api/account/security`; per-block code copy;
+  the chat's account link; and `test_v1_premium_journey_postgres.py`, the whole Premium journey through
+  the real application on disposable PostgreSQL under the final grants. Implemented; awaiting Codex.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

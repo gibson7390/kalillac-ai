@@ -472,16 +472,17 @@ jobs:
           assert totals == {"tests": 154, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
-      # Actual collect-only result for the explicit modules: 555 tests (219
+      # Actual collect-only result for the explicit modules: 559 tests (219
       # through 0022; 0023's deletion requests: 18 unit + 42 real PostgreSQL,
       # and 3 more for S's own login; D3's V1 login route: 23 unit, 13 of them
       # for malformed authority answers, outcome types and the login limiter, + 11 real
-      # PostgreSQL through HTTP; D3's remaining routes: 89 unit + 14 real
+      # PostgreSQL through HTTP; D3's remaining routes: 90 unit + 14 real
       # PostgreSQL through HTTP; 0024's reset-token issuance and credential read
       # path: 33 unit + 41 real PostgreSQL, HTTP under the final hash grant; D4's
       # operator tool through P: 16 unit + 12 real PostgreSQL; E1/E2 the row-lock
       # anchor, final grants and the operator transition: 14 unit + 19 real
-      # PostgreSQL; E3 the whole lifecycle through the routes: 1 real PostgreSQL). S logs in with its own credential in the
+      # PostgreSQL; E3 the whole lifecycle through the routes: 1 real PostgreSQL;
+      # the Premium journey through the real application: 1 real PostgreSQL). S logs in with its own credential in the
       # disposable database only. Missing PG fails as above.
       - name: Run V1-02D service connection, sign-out, password, quarantine and deletion-request authority contracts and the V1 account routes
         working-directory: candidate
@@ -512,6 +513,7 @@ jobs:
           tests/test_v1_transition.py
           tests/test_v1_transition_postgres.py
           tests/test_v1_lifecycle_postgres.py
+          tests/test_v1_premium_journey_postgres.py
           -q -ra -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/v1-02d-authority.xml"
 
@@ -523,5 +525,5 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 557, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 559, "skipped": 0, "failures": 0, "errors": 0}
           PY
