@@ -248,8 +248,10 @@ def test_application_applies_modes_outside_the_financial_reservation():
     assert app._post_openai_for_attempt.__name__ == "_post_openai_for_attempt"
     # B2: a mode reserved for paid requests needs the V1-verified paid entitlement, and the evidence is
     # issued only through the seam (kalillac_accounts.paid_access), never directly by the application.
+    # Exactly two call sites: /api/chat and a Space send (R1), each from its own V1-verified read.
     assert re.findall(r"reasoning_modes\.begin\(([^)]*)\)", source) == [
-        "req.reasoning_mode, paid=_verified is not None and _verified.paid"]
+        "req.reasoning_mode, paid=_verified is not None and _verified.paid",
+        "reasoning_mode, paid=verified is not None and verified.paid"]
     assert "issue_paid_entitlement" not in source and source.count("_paid_evidence(") == 2
     # Kalillac's self-description reports the effort the request actually uses.
     assert source.count("reasoning_modes.effective_effort(OPENAI_REASONING_EFFORT)") == 2

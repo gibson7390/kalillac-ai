@@ -547,7 +547,7 @@ def build_spaces_router(
         # or Space cancels this send at any stage.
         inflight.add(sid, cid, budget)
         try:
-            return await send_within(auth, sid, cid, request_id, message, budget, request)
+            return await send_within(auth, sid, cid, request_id, message, budget, request, data.reasoning_mode)
         except BaseException:
             # The handler stopped (cancelled, disconnected or failed): any
             # database work still running in a worker sees the cancelled
@@ -557,7 +557,7 @@ def build_spaces_router(
         finally:
             inflight.remove(sid, cid, budget)
 
-    async def send_within(auth, sid, cid, request_id, message, budget, request) -> Response:
+    async def send_within(auth, sid, cid, request_id, message, budget, request, reasoning_mode=None) -> Response:
         # Transaction A: replay, refuse, or take a lease under a fresh
         # server attempt token, and read the context. The budget is checked
         # again once the conversation row is locked.
@@ -642,6 +642,8 @@ def build_spaces_router(
                 workspace=workspace,
                 budget=budget,
                 finalize=finalize,
+                # Passed only when the send names a mode, so a generator without modes is unchanged.
+                **({} if reasoning_mode is None else {"reasoning_mode": reasoning_mode}),
             )
         except BaseException:
             await release()

@@ -1316,6 +1316,11 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
   .composer-shell { flex-wrap: wrap; row-gap: 6px; }
   .composer textarea { order: -1; flex: 1 0 100%; }
   .erase-btn { margin-right: auto; }
+  /* In a Space End & erase is hidden: the first visible control after it takes the free space, so
+     Send (and attach, when shown) stay on the right. */
+  .erase-btn[hidden] ~ .action-btn,
+  .erase-btn[hidden] ~ .attach-btn:not([hidden]) { margin-left: auto; }
+  .erase-btn[hidden] ~ .attach-btn:not([hidden]) ~ .action-btn { margin-left: 0; }
 }
 
 /* The receipt: what End & erase did and did not erase. One box above the

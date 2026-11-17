@@ -1803,8 +1803,9 @@
 
      A conversation opened from a Space is saved to the account. While one is open: the bar above the
      thread says so and the "Temporary session" status is hidden (it would be untrue); End & erase,
-     which is for the temporary session, is hidden; files and reasoning modes are not offered (a Space
-     message carries neither). Each message is sent to that conversation with an idempotency key; a
+     which is for the temporary session, is hidden; files are not offered (a Space message carries
+     none); a reasoning mode, when offered, goes with the message. Each message is sent to that
+     conversation with an idempotency key; a
      retry of a failed or stopped send reuses it, so the server can never save the same message
      twice. Leaving returns to a new temporary conversation. Names and messages from the server are
      only ever set as text, or rendered through the same sanitizer as any reply. */
@@ -2238,10 +2239,12 @@
       TURNS.length = 0;
       while (thread.firstChild) thread.removeChild(thread.firstChild);
       open.earlier = earlierCursor(r.data.next_before_seq);
+      stickToBottom = false;              // Reading back: drawing the thread must not jump to its end,
       renderSaved(r.data.messages.concat(shown));
       showEarlierControl();
-      stickToBottom = false;              // Reading back: the earlier messages stay in view.
-      if (thread.firstChild && thread.firstChild.scrollIntoView) thread.firstChild.scrollIntoView({ block: "start" });
+      window.requestAnimationFrame(function () {   // and the earlier messages are what is shown.
+        if (SPACE === open) conversation.scrollTop = 0;
+      });
     }, function () {
       if (button && SPACE === open) button.disabled = false;
     });
@@ -2260,7 +2263,6 @@
     spaceBar.hidden = false;
     if (sessionStatus) sessionStatus.hidden = true;
     if (eraseBtn) eraseBtn.hidden = true;
-    if (modePicker) modePicker.hidden = true;
     if (attachBtn) attachBtn.hidden = true;
     clearAttached();
     showAttachStatus("");
@@ -2292,6 +2294,10 @@
     exchange.epoch = conversationEpoch;
     // The idempotency key: the same for every retry of this message, new for the next one.
     if (!exchange.requestId) exchange.requestId = newRequestId();
+    // The reasoning mode chosen when the message was first sent; a retry keeps it with its key.
+    if (exchange.mode === undefined) exchange.mode = reasoningMode;
+    var spaceBody = { message: exchange.text, client_request_id: exchange.requestId };
+    if (exchange.mode) spaceBody.reasoning_mode = exchange.mode;
     setBusy(true);
     clearActions(exchange.shell);
     setThinking(exchange.shell);
@@ -2301,7 +2307,7 @@
     return fetch(spaceUrl(open.space.id, "/conversations/" + open.conversation.id + "/messages"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: exchange.text, client_request_id: exchange.requestId }),
+      body: JSON.stringify(spaceBody),
       signal: controller.signal
     })
       .then(function (res) {
@@ -2344,6 +2350,9 @@
     spacesBack.addEventListener("click", function () { showSpacesList(); });
     spacesClose.addEventListener("click", closeSpacesDialog);
     spacesDialog.addEventListener("close", function () {
+      // The close event arrives after the dialog closed; when it was opened again meanwhile, this late
+      // event belongs to the earlier opening and must not end the new one.
+      if (spacesDialog.open) return;
       spacesView = null;
       if (spacesBtn) spacesBtn.focus();
     });

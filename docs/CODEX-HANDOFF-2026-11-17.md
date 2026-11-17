@@ -153,6 +153,12 @@ chat's daily quota (`kalillac_accounts/quota.py`) authorize through V1-01 in V1 
   signature and size.
 * The chat's confirmation control (`frontend/app.js` `renderConfirmations`, `send(fixedText)`): the id is
   only ever sent with the one fixed message it was pressed for; a retry of that exchange keeps it.
+* Space sends (`app_fastapi_candidate.py` `_space_generate`): before this, a Space send never set the
+  verified-account context, so a Premium customer's Space send was always classified FREE. It now reads
+  the V1-verified account and entitlement (only for the Space's own account) and applies an optional
+  `reasoning_mode` with the same permission as `/api/chat`. Can the PAID evidence reach a Space send for
+  any account other than the one the send is saved and charged to?
+* `tools/owner_report.py`: counts only, one read-only snapshot; does any output carry a person's data?
 
 ## Not in these checkpoints
 

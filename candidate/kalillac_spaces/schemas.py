@@ -112,6 +112,16 @@ class RenameConversation(_Body):
 class SendMessage(_Body):
     message: StrictStr
     client_request_id: StrictStr
+    # R1: the reasoning mode for this send, resolved and permitted by the application exactly as for
+    # /api/chat (an unknown mode, or one the account's plan does not include, is refused there).
+    reasoning_mode: StrictStr | None = None
+
+    @field_validator("reasoning_mode")
+    @classmethod
+    def _mode(cls, value):
+        if value is not None and not (1 <= len(value) <= 32 and value.isascii()):
+            raise ValueError("invalid_request")
+        return value
 
     @field_validator("message")
     @classmethod

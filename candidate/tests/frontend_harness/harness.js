@@ -89,7 +89,7 @@
   var deferred = {};
 
   // Reasoning scenarios: the page is marked as a reasoning-modes deployment before app.js runs.
-  if (scenarioName.indexOf("reasoning_") === 0) {
+  if (scenarioName.indexOf("reasoning_") === 0 || scenarioName === "spaces_with_modes") {
     document.documentElement.setAttribute("data-kalillac-reasoning", "on");
   }
 
@@ -630,8 +630,10 @@
       });
     },
     clickSpaces: function () { document.querySelector(".app-header .spaces-button").click(); return wait(80); },
-    clickSpacesItem: function (index) {
-      document.querySelectorAll("#spaces-list .spaces-item")[index].click();
+    clickSpacesItem: async function (index) {
+      // The list is drawn after its scripted response: wait for it rather than for a fixed pause.
+      var item = await until(function () { return document.querySelectorAll("#spaces-list .spaces-item")[index]; }, "spaces item " + index);
+      item.click();
       return wait(80);
     },
     createInSpaces: function (value) {
@@ -1596,14 +1598,27 @@
                  title: text($("spaces-dialog-title")), status: text($("spaces-status")),
                  barName: text($("space-bar-name")), barShown: !$("space-bar").hidden, requestCount: requests.length });
   }
-  function clickManage(name) {
-    var button = Array.prototype.filter.call(document.querySelectorAll("#spaces-manage button"),
-                                             function (b) { return text(b) === name; })[0];
+  // Waits (up to 3 s) for what the page draws after a scripted response, instead of a fixed pause.
+  async function until(find, label) {
+    for (var waited = 0; waited < 3000; waited += 20) {
+      var found = find();
+      if (found) return found;
+      await wait(20);
+    }
+    throw new Error("HARNESS: never appeared: " + (label || "?") + " | queue " + queue.length +
+                    " | requests " + requests.map(function (r) { return (r.method || "GET") + " " + r.url; }).join(", "));
+  }
+  async function clickManage(name) {
+    var button = await until(function () {
+      return Array.prototype.filter.call(document.querySelectorAll("#spaces-manage button"),
+                                         function (b) { return text(b) === name && !b.disabled; })[0];
+    }, "manage " + name);
     button.click();
     return wait(80);
   }
-  function submitEdit(value) {
-    document.getElementById("spaces-edit-field").value = value;
+  async function submitEdit(value) {
+    var field = await until(function () { return document.getElementById("spaces-edit-field"); }, "edit field");
+    field.value = value;
     document.querySelector("#spaces-manage form").requestSubmit();
     return wait(80);
   }
@@ -1616,6 +1631,7 @@
     await a.clickSpaces();
     await a.clickSpacesItem(0);
     await a.clickSpacesItem(0);                     // Open "Plan" in "Research".
+    await until(function () { return !$("space-bar").hidden; }, "space bar");
     a.respondWith(spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT }]),
                   conversationsList([]));
     await a.clickSpaces();
@@ -1642,9 +1658,28 @@
     manage("confirm-delete");
     a.respondWith({ status: 204, body: "" }, spacesList([]));
     await clickManage("Delete Space");
-    await a.wait(80);
+    await until(function () { return text($("spaces-status")) === "Space deleted."; }, "deleted status");
     manage("deleted");
     a.snap("deleted-page");
+  };
+
+  // Reasoning modes on a Spaces deployment: the picker stays in a Space and the chosen mode goes with the
+  // message; a retry keeps the mode it was sent with, even after the picker changed.
+  SCENARIOS.spaces_with_modes = async function (a) {
+    await a.wait(60);
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);
+    a.modes("in-space");
+    await a.clickMode("deep");
+    a.respondWith({ status: 503, json: { error: "service_unavailable" } }, savedExchange("Deep answer."));
+    await a.send("Hard question");
+    await a.wait(60);
+    await a.clickMode("quick");
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.snap("retried");
   };
 
   // A long saved conversation: earlier messages load above, each turn keeps Copy, the cursor moves on.

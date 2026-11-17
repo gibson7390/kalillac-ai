@@ -16621,13 +16621,39 @@ class _SpaceBinding:
         return None if self.settlement is None else self.settlement.day
 
 
-async def _space_generate(request, *, user_id, lock_key, message, history, workspace, budget, finalize):
+async def _space_generate(request, *, user_id, lock_key, message, history, workspace, budget, finalize,
+                          reasoning_mode=None):
     """Generate a Space reply through the /api/chat lifecycle, under the
     send's own budget, and save it with finalize(reply, settlement).
-    Returns the response to send."""
+    Returns the response to send.
+
+    Like /api/chat (B2, R1): in V1 mode the send's V1-authorized account and
+    effective entitlement are read once; they decide the reasoning mode's
+    permission here and the PAID evidence at classification, and only for
+    the very account the Space send is for. Otherwise nothing is paid."""
     limits = _request_limits
     if limits is None or _usage_quota is None:
         return _budget_error(503, "service_unavailable")
+    verified = None
+    if _v1_account_security is not None:
+        from kalillac_accounts.paid_access import verified_account as _verified_space_account
+        verified = await _verified_space_account(request, _v1_account_security, _account_settings.cookie_name)
+        if verified is not None and verified.account_id != user_id:
+            verified = None
+    try:
+        mode = reasoning_modes.begin(reasoning_mode, paid=verified is not None and verified.paid)
+    except reasoning_modes.ReasoningModeRefused as refused:
+        return JSONResponse(status_code=refused.status, content={"error": refused.code})
+    verified_token = _verified_account_context.set(verified)
+    try:
+        return await _space_generate_within(request, user_id, lock_key, message, history, workspace, budget,
+                                            finalize, limits)
+    finally:
+        _verified_account_context.reset(verified_token)
+        reasoning_modes.end(mode)
+
+
+async def _space_generate_within(request, user_id, lock_key, message, history, workspace, budget, finalize, limits):
     workspace.state = _space_search_state(user_id)
     binding = _SpaceBinding(user_id, lock_key, workspace, budget, finalize, receive=request.receive)
     req = SimpleNamespace(message=message, session_id=None)

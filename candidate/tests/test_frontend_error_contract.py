@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-spaces2"
-CSS_CACHE_KEY = "20261117-spaces2"
+CACHE_KEY = "20261117-spaces3"
+CSS_CACHE_KEY = "20261117-spaces3"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -214,7 +214,7 @@ SCENARIOS = (
     + list(FILE_SCENARIOS)
     + list(REASONING_SCENARIOS)
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
-       "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages"]
+       "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes"]
 )
 
 
@@ -1262,6 +1262,16 @@ def test_a_space_is_renamed_given_instructions_and_deleted_with_its_version(brow
         ("PUT", f"/api/spaces/{SPACE_A}/instructions", {"instructions": "Cite sources.", "expected_version": 5}),
         ("DELETE", f"/api/spaces/{SPACE_A}", None)]
     assert "RAW-SECRET" not in step(result, "deleted-page")["threadText"]
+
+
+def test_a_space_send_carries_the_chosen_mode_and_a_retry_keeps_it(browser_results):
+    result = scenario(browser_results, "spaces_with_modes")
+    assert step(result, "in-space")["pickerShown"] is True
+    posts = [body for method, url, body in spaces_requests(result) if method == "POST"]
+    assert [b["reasoning_mode"] for b in posts] == ["deep", "deep"]           # The retry: same mode, same key.
+    assert posts[0]["client_request_id"] == posts[1]["client_request_id"]
+    assert set(posts[0]) == {"message", "client_request_id", "reasoning_mode"}
+    assert step(result, "retried")["assistants"][-1]["text"].strip() == "Deep answer."
 
 
 def test_earlier_messages_of_a_long_conversation_load_above_with_their_copy(browser_results):
