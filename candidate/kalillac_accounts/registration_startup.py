@@ -209,15 +209,15 @@ def effective_privileges(session,role,runtime,owner):
                 if final and principal==runtime and table=="users":expected=False   # Column SELECT only; no DELETE.
                 actual=session.execute(text("SELECT pg_catalog.has_table_privilege(:p,:t,:r)"),{"p":principal,"t":"kalillac."+table,"r":right}).scalar_one()
                 if bool(actual)!=expected:raise RegistrationUnavailable()
-    if final:
-        # E1a: R reads every users column but the password hash.
-        for col in session.execute(text("SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid=CAST('kalillac.users' AS regclass) AND a.attnum>0 AND NOT a.attisdropped")).scalars():
-            if session.execute(text("SELECT pg_catalog.has_column_privilege(:p,'kalillac.users',:c,'SELECT')"),{"p":runtime,"c":col}).scalar_one()!=(col!="password_hash"):raise RegistrationUnavailable()
             if principal==role and table not in ("users","account_registration_intents","account_registration_activation","account_entitlements"):
                 for right in ["INSERT","UPDATE","TRUNCATE","REFERENCES","TRIGGER"]:
                     if session.execute(text("SELECT pg_catalog.has_table_privilege(:p,:t,:r)"),{"p":principal,"t":"kalillac."+table,"r":right}).scalar_one():raise RegistrationUnavailable()
                 for right in ["SELECT","INSERT","UPDATE","REFERENCES"]:
                     if session.execute(text("SELECT pg_catalog.has_any_column_privilege(:p,:t,:r)"),{"p":principal,"t":"kalillac."+table,"r":right}).scalar_one():raise RegistrationUnavailable()
+    if final:
+        # E1a: R reads every users column but the password hash.
+        for col in session.execute(text("SELECT a.attname FROM pg_catalog.pg_attribute a WHERE a.attrelid=CAST('kalillac.users' AS regclass) AND a.attnum>0 AND NOT a.attisdropped")).scalars():
+            if session.execute(text("SELECT pg_catalog.has_column_privilege(:p,'kalillac.users',:c,'SELECT')"),{"p":runtime,"c":col}).scalar_one()!=(col!="password_hash"):raise RegistrationUnavailable()
     for principal in [role,runtime]:
         if session.execute(text("SELECT count(*) FROM pg_catalog.pg_foreign_server WHERE pg_catalog.has_server_privilege(:p,oid,'USAGE')"),{"p":principal}).scalar_one():raise RegistrationUnavailable()
     # Explicit grants can bypass role-membership checks; inspect credential

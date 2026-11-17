@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
 import kalillac_accounts.v1_schema as v1_schema
+from kalillac_accounts.registration_crypto import RegistrationUnavailable
 from kalillac_accounts.registration_startup import effective_privileges
 from kalillac_accounts.v1_authority import V1Operator, build_v1_authority
 from kalillac_accounts.v1_final_grants import FINAL, LEGACY, runtime_account_state
@@ -325,6 +326,18 @@ def test_activating_twice_is_refused_and_tampering_while_active_stops_startup(wo
     admin_sql(w, f"ALTER ROLE {w.names['service']} NOLOGIN")            # A half-undone activation.
     with pytest.raises(Exception, match="inconsistent_schema"):
         qualifies(w)
+
+
+@pytest.mark.parametrize("grant", ["SELECT (id) ON kalillac.spaces", "INSERT ON kalillac.spaces"])
+def test_under_e1a_a_grant_to_the_registration_role_on_an_unrelated_table_is_still_refused(world, grant):
+    w = world
+    assert run(w, "activate", "--release-sha", RELEASE, "--apply") == 0
+    assert runtime_state(w)[0] == "final"
+    admin_sql(w, f"GRANT {grant} TO {w.registration_role}")
+    with pytest.raises(RegistrationUnavailable):
+        runtime_state(w)
+    admin_sql(w, f"REVOKE {grant} FROM {w.registration_role}")
+    assert runtime_state(w)[0] == "final"
 
 
 def test_a_migration_cannot_run_down_past_an_active_latch(world):

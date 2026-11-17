@@ -353,6 +353,19 @@ def owner_definition(w,sql,values=None):
         result=connection.execute(text(sql),values or {})
         return result.scalar() if result.returns_rows else None
 
+@pytest.mark.parametrize("grant",["SELECT(id) ON kalillac.spaces","REFERENCES(id) ON kalillac.spaces","INSERT ON kalillac.spaces","TRIGGER ON kalillac.account_sessions"])
+def test_any_grant_to_the_registration_role_on_an_unrelated_table_is_refused(world,grant):
+    # The registration role holds nothing outside its own tables, the account row and the
+    # entitlement insert. The root-run bootstrap verifier proves the same for a whole process;
+    # this is that boundary where every test run reaches it.
+    w=world
+    owner_definition(w,"GRANT "+grant+" TO "+w.names["registration"])
+    try:
+        with w.factory.begin() as s:
+            with pytest.raises(RegistrationUnavailable):effective_privileges(s,w.names["registration"],w.names["app"],w.names["owner"])
+    finally:owner_definition(w,"REVOKE "+grant+" FROM "+w.names["registration"])
+    with w.factory.begin() as s:assert effective_privileges(s,w.names["registration"],w.names["app"],w.names["owner"])=="legacy"
+
 @pytest.mark.parametrize("access",[(),("schema",),("database",),("schema","database")])
 def test_unactivated_downgrade_revokes_only_migration_owned_access(monkeypatch,access):
     import json
