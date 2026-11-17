@@ -275,7 +275,12 @@ from the code. See "Owner decisions required".
   each message carries an idempotency key that a retry reuses, so it is never saved twice; a saved answer
   has Copy and no Retry; leaving returns to a new temporary conversation. Five browser tests (Edge) on
   the real page; the staging template turns Spaces on for the owner's listed account, and the boot
-  verifier now starts the application with Spaces on (16 cases). Implemented; awaiting CI and Codex.
+  verifier now starts the application with Spaces on (16 cases). Implemented; awaiting Codex. CI green at
+  `60957ad` (subscription 44115103292, frontend 44115118022). Screenshots of the real page then showed two
+  defects the tests missed (the temporary-session status and End & erase stayed visible inside a Space,
+  because their display rules overrode [hidden]; the phone header overflowed with account controls);
+  fixed in `ba03512` with tests that check what is on screen and a 360x640 header test (frontend CI
+  44116824283 green).
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

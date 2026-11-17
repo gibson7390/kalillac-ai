@@ -17,6 +17,7 @@ input or state, and the wrong result.
 | 4 | E1a, E2, E3: final grants, operator transition, lifecycle | `feat/account-security-e1-e3` | `dc24d1bdb7a3dc076047bc323de2779b01df0339` | 44094320838, 44094326597, 44094334097: green |
 | 5 | B2, A9, U1, U2 (part), the Premium journey | `feat/premium-paid-scope-b2` | `84cc7f1790ed37a1fac75ceceb51000c533dae94` | subscription 44102235903 on it; provider 44098090955, safety 44098099108, frontend 44098200220, anonymous allowance 44098265034 on `abbe498` (`84cc7f1` changes only the job timeout): green |
 | 6 | M9: staging provisioning | `feat/staging-provisioning-m9` | `70a09ed468c26ceea9aba41ad358138f91d8fe16` | subscription 44102277062 on it; provider 44100305520, safety 44100311426 on `aab49f6` (the same code): green |
+| 8 | S1: Spaces in the chat | `feat/spaces-frontend-s1` | `ba03512df40222754f5b617a98ec9f0f129c2e4d` | subscription 44115103292 and frontend 44115118022 on `60957ad`; frontend 44116824283 on `ba03512` (CSS and tests only): green |
 | 7 | A10: Spaces through V1 authorization | `feat/v1-single-authorization-a10` | `5ce57506c08c527f9b8d9cf12aacc3d3b3e579be` | 44102284051, 44102290116, 44102296120: green |
 
 ## 1. D3 (`35f61c8`)
