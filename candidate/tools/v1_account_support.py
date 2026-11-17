@@ -81,7 +81,7 @@ def account_state(session, account_id):
 
 def export_account(session, account_id):
     """What is held about the account, bounded per collection; None if absent."""
-    from sqlalchemy import func, select, text
+    from sqlalchemy import func, select
     from kalillac_db.models import (AccountBilling, AccountEntitlement, AccountSession, AccountUsageDaily,
                                     BillingCase, Conversation, Message, Space, User)
     user = session.execute(select(User.id, User.email, User.created_at, User.updated_at, User.is_active,
@@ -139,26 +139,11 @@ def export_account(session, account_id):
                                        "messages": r.message_count, "created_at": _iso(r.created_at)}))
     document["messages_held"] = session.scalar(select(func.count()).select_from(Message)
                                                .where(Message.user_id == account_id))
-    events = session.execute(text("SELECT event_type, occurred_at FROM kalillac.account_security_events"
-                                  " WHERE user_id = :u ORDER BY occurred_at LIMIT :n"),
-                             {"u": account_id, "n": EXPORT_LIMIT + 1}).all() \
-        if _readable(session, "kalillac.account_security_events") else None
-    document["security_events"] = None if events is None else [
-        {"type": e.event_type, "at": _iso(e.occurred_at)} for e in events[:EXPORT_LIMIT]]
-    document["security_events_truncated"] = bool(events) and len(events) > EXPORT_LIMIT
-    if events is None:
-        # The audit table is owner-only by design (V1-02A): the runtime login cannot read it, so this
-        # export does not hold it. The database owner can export it separately.
-        document["security_events_note"] = "not readable through the runtime login; held by the owner"
+    # The security audit is owner-only by design (V1-02A): the runtime login cannot read it and no
+    # application module names it, so this export does not hold it. The database owner exports it separately.
+    document["security_events"] = None
+    document["security_events_note"] = "not readable through the runtime login; held by the owner"
     return document
-
-
-def _readable(session, relation):
-    from sqlalchemy import text
-    if session.get_bind().dialect.name != "postgresql":
-        return False
-    return bool(session.scalar(text("SELECT to_regclass(:r) IS NOT NULL AND has_table_privilege(:r, 'SELECT')"),
-                               {"r": relation}))
 
 
 def append_record(path, entry):
