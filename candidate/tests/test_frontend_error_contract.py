@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-codecopy1"
-CSS_CACHE_KEY = "20261117-codecopy1"
+CACHE_KEY = "20261117-spaces1"
+CSS_CACHE_KEY = "20261117-spaces1"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -201,6 +201,7 @@ SCENARIOS = (
     + ["highlight_languages"]
     + list(FILE_SCENARIOS)
     + list(REASONING_SCENARIOS)
+    + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered"]
 )
 
 
@@ -451,6 +452,8 @@ def test_no_request_left_the_page(browser_results):
         for request in result["requests"]:
             if name.startswith("files_offered") and request["url"] == "/api/files":
                 continue                      # A files deployment's account probe and upload (tested below).
+            if name.startswith("spaces_") and request["url"].startswith("/api/spaces"):
+                continue                      # A Spaces deployment's requests (tested below).
             assert request["url"] == "/api/chat" and request["method"] == "POST", name
 
 
@@ -931,8 +934,9 @@ def test_daily_limit_markup_is_fixed_accessible_copy():
     markup = daily_limit_markup()
     page = INDEX_HTML.read_text(encoding="utf-8")
 
-    # Exactly two native dialogs: this one and the End & erase confirmation.
-    assert page.count("<dialog") == 2
+    # Exactly three native dialogs: this one, the End & erase confirmation and Spaces.
+    assert page.count("<dialog") == 3
+    assert page.count('<dialog class="spaces-dialog" id="spaces-dialog"') == 1
     assert page.count('<dialog class="erase-dialog" id="erase-dialog"') == 1
     assert ('<dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" '
             'aria-describedby="limit-dialog-text limit-dialog-reset">') in markup
@@ -1126,6 +1130,110 @@ def test_without_the_accounts_mark_the_page_has_no_account_link(browser_results)
     index = INDEX_HTML.read_text(encoding="utf-8")
     assert index.count('href="/account"') == 1 and '<template id="account-link-template">' in index
     assert "data-kalillac-accounts" not in index            # A release marks the page; the source never does.
+
+
+# --- Spaces: saved conversations ----------------------------------------------------------------
+
+SPACE_A = "11111111-1111-4111-8111-111111111111"
+SPACE_B = "22222222-2222-4222-8222-222222222222"
+CONV_A = "33333333-3333-4333-8333-333333333333"
+CONV_B = "44444444-4444-4444-8444-444444444444"
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+
+def spaces_requests(result):
+    return [(r["method"] or "GET", r["url"], r["body"]) for r in result["requests"]]
+
+
+def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results):
+    result = scenario(browser_results, "spaces_open_send_leave")
+    loaded = step(result, "loaded")
+    assert loaded["button"] == ["Spaces"] and loaded["requestCount"] == 1 and not loaded["barShown"]
+    assert loaded["sessionStatusShown"] and loaded["eraseShown"]
+    # Only well-formed ids are listed; a name is text, never markup.
+    listed = step(result, "listed")
+    assert listed["dialogOpen"] and listed["title"] == "Spaces" and not listed["back"]
+    assert listed["items"] == ["Research1 conversation", "<img src=x onerror=alert(1)>0 conversations"]
+    space = step(result, "space")
+    assert space["title"] == "Research" and space["back"] and space["items"] == ["Plan2 messages"]
+    # Opened: the saved messages are on screen, the page says they are saved, and the temporary-session
+    # controls are gone.
+    opened = step(result, "opened")
+    assert not opened["dialogOpen"] and opened["barShown"]
+    assert opened["barText"] == "Saved to your account in Research · Plan Leave Space"
+    assert not opened["sessionStatusShown"] and not opened["eraseShown"]
+    snap = step(result, "opened")
+    view = [s_ for s_ in result["steps"] if s_["label"] == "opened" and "users" in s_][0]
+    assert view["users"] == ["Earlier question"]
+    assert view["assistants"][0]["text"].startswith("Earlier answer")
+    assert "<script" not in view["assistants"][0]["html"] and "<strong>answer</strong>" in view["assistants"][0]["html"]
+    assert view["assistants"][0]["actions"] == ["Copy"]              # A saved answer: no Retry.
+    del snap
+    # The send goes to that conversation with a fresh key and nothing else: no history, session, files or mode.
+    sent = [s_ for s_ in result["steps"] if s_["label"] == "sent"][0]
+    assert sent["users"] == ["Earlier question", "New question"]
+    assert sent["assistants"][-1]["text"].strip() == "Saved reply." and sent["assistants"][-1]["actions"] == ["Copy"]
+    calls = spaces_requests(result)
+    assert calls[:4] == [
+        ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations?limit=50", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)]
+    method, url, body = calls[4]
+    assert (method, url) == ("POST", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}/messages")
+    assert set(body) == {"message", "client_request_id"} and body["message"] == "New question"
+    assert UUID_RE.match(body["client_request_id"])
+    # Leaving: a new temporary conversation, and every temporary-session control back.
+    left = step(result, "left")
+    assert not left["barShown"] and left["sessionStatusShown"] and left["eraseShown"] and left["button"] == ["Spaces"]
+    after = [s_ for s_ in result["steps"] if s_["label"] == "left" and "users" in s_][0]
+    assert after["users"] == [] and after["emptyShown"] and len(result["requests"]) == 5
+
+
+def test_a_retried_space_message_keeps_its_key_and_the_next_message_gets_a_new_one(browser_results):
+    result = scenario(browser_results, "spaces_retry_keeps_the_key")
+    failed = step(result, "failed")["assistants"][-1]
+    assert "RAW-SECRET" not in str(failed)
+    posts = [body for method, url, body in spaces_requests(result) if method == "POST"]
+    assert [b["message"] for b in posts] == ["Question", "Question", "Another", "Another"]
+    keys = [b["client_request_id"] for b in posts]
+    assert keys[0] == keys[1] and keys[2] == keys[3] and keys[0] != keys[2]   # Retry, stopped or failed, reuses it.
+    assert all(UUID_RE.match(k) for k in keys)
+    retried = step(result, "retried")
+    assert retried["assistants"][-1]["text"].strip() == "Saved once." and retried["assistants"][-1]["actions"] == ["Copy"]
+    assert step(result, "after-stop")["assistants"][-1]["text"].strip() == "Second."
+
+
+def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_results):
+    result = scenario(browser_results, "spaces_create")
+    empty = step(result, "empty")
+    assert empty["items"] == [] and empty["status"] == "No Spaces yet. Create one below."
+    created = step(result, "created-space")
+    assert created["title"] == "Trip" and created["status"] == "No conversations in this Space yet. Start one below."
+    opened = step(result, "created-conversation")
+    assert not opened["dialogOpen"] and opened["barShown"]
+    assert opened["barText"] == "Saved to your account in Trip Leave Space"
+    assert spaces_requests(result) == [
+        ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
+        ("POST", "/api/spaces", {"name": "Trip", "instructions": ""}),
+        ("GET", f"/api/spaces/{SPACE_B}/conversations?limit=50", None),
+        ("POST", f"/api/spaces/{SPACE_B}/conversations", {})]
+
+
+def test_an_account_that_may_not_use_spaces_sees_no_spaces_control(browser_results):
+    result = scenario(browser_results, "spaces_not_offered")
+    loaded = step(result, "loaded")
+    assert loaded["button"] == [] and loaded["requestCount"] == 1 and not loaded["barShown"]
+    calls = spaces_requests(result)
+    assert calls[0] == ("GET", "/api/spaces?limit=1", None) and calls[1][1] == "/api/chat"
+    assert step(result, "idle")["assistants"][0]["text"].strip() == "Answer."
+
+
+def test_without_the_spaces_mark_the_page_asks_nothing_about_spaces(browser_results):
+    for name, result in browser_results["results"].items():
+        if not name.startswith("spaces_"):
+            assert not any("/api/spaces" in r["url"] for r in result["requests"]), name
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    assert "data-kalillac-spaces" not in index and '<template id="spaces-button-template">' in index
 
 
 # --- per-block copy -------------------------------------------------------------------------------
@@ -1360,11 +1468,16 @@ def test_only_the_fetch_rejection_path_uses_network_wording():
 
     assert source.count(UNREACHABLE) == 1
     assert "couldn't reach" not in source.replace(UNREACHABLE, "")
-    # The outcome carrying it is defined once and used once, for a rejected fetch.
-    assert source.count("OUTCOME_UNREACHABLE") == 2
+    # The outcome carrying it is defined once and used twice, each for a rejected fetch: a chat
+    # message's and a Space message's.
+    assert source.count("OUTCOME_UNREACHABLE") == 3
     rejection = source[source.index("No HTTP response was received"):]
     rejection = rejection[: rejection.index("})")]
     assert "OUTCOME_UNREACHABLE" in rejection
+    space = source[source.index("function requestSpaceReply"):]
+    space = space[space.index("// Stopping does not stop the server"):]
+    space = space[: space.index("})")]
+    assert "OUTCOME_UNREACHABLE" in space
 
 
 def test_later_stage_failures_use_completion_wording():

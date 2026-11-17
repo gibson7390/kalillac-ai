@@ -98,6 +98,15 @@
     document.documentElement.setAttribute("data-kalillac-accounts", "on");
   }
 
+  // Spaces scenarios: the page is marked as a Spaces deployment before app.js runs, and the one
+  // question app.js then asks (may this account use Spaces?) is answered first.
+  if (scenarioName.indexOf("spaces_") === 0) {
+    document.documentElement.setAttribute("data-kalillac-spaces", "on");
+    queue.push(scenarioName === "spaces_not_offered"
+      ? { status: 401, json: { error: "not_authenticated" } }
+      : { status: 200, json: { spaces: [], next_cursor: null } });
+  }
+
   // Files scenarios: the page is marked as a files deployment before app.js runs, and the account
   // probe (GET /api/files) app.js then makes is answered first.
   if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access") {
@@ -584,6 +593,41 @@
       });
     },
     // The header's account link (present only on an accounts deployment).
+    // What the Spaces controls show, and how many requests have been made.
+    spaces: function (label) {
+      var dialog = $("spaces-dialog");
+      var bar = $("space-bar");
+      var status = $("session-status");
+      var erase = $("erase-btn");
+      steps.push({
+        label: label,
+        button: Array.prototype.map.call(document.querySelectorAll(".app-header .spaces-button"), text),
+        dialogOpen: !!(dialog && dialog.open),
+        title: text($("spaces-dialog-title")),
+        status: text($("spaces-status")),
+        items: Array.prototype.map.call(document.querySelectorAll("#spaces-list .spaces-item"), function (b) {
+          return b.textContent;
+        }),
+        back: !!$("spaces-back") && !$("spaces-back").hidden,
+        barShown: !!bar && !bar.hidden,
+        barText: bar ? bar.textContent.replace(/\s+/g, " ").trim() : null,
+        sessionStatusShown: !!status && !status.hidden,
+        eraseShown: !!erase && !erase.hidden,
+        requestCount: requests.length
+      });
+    },
+    clickSpaces: function () { document.querySelector(".app-header .spaces-button").click(); return wait(80); },
+    clickSpacesItem: function (index) {
+      document.querySelectorAll("#spaces-list .spaces-item")[index].click();
+      return wait(80);
+    },
+    createInSpaces: function (value) {
+      $("spaces-new-name").value = value;
+      $("spaces-new").requestSubmit();
+      return wait(80);
+    },
+    spacesBack: function () { $("spaces-back").click(); return wait(80); },
+    leaveSpace: function () { $("space-leave").click(); return wait(40); },
     account: function (label) {
       var links = document.querySelectorAll(".app-header .account-link");
       steps.push({
@@ -1416,6 +1460,105 @@
     a.snap("ended");
     await a.send("question three");
     a.snap("after-new-send");
+  };
+
+  // ---- Spaces -----------------------------------------------------------------------
+  var SPACE_A = "11111111-1111-4111-8111-111111111111";
+  var SPACE_B = "22222222-2222-4222-8222-222222222222";
+  var CONV_A = "33333333-3333-4333-8333-333333333333";
+  var CONV_B = "44444444-4444-4444-8444-444444444444";
+  var AT = "2026-10-30T12:00:00Z";
+
+  function spacesList(items) { return { status: 200, json: { spaces: items, next_cursor: null } }; }
+  function conversationsList(items) { return { status: 200, json: { conversations: items, next_cursor: null } }; }
+  function savedMessage(seq, role, content) {
+    return { id: "55555555-5555-4555-8555-55555555555" + seq, seq: seq, role: role, content: content, created_at: AT };
+  }
+  function savedExchange(content) {
+    return { status: 200, json: { user_message: savedMessage(3, "user", "x"),
+                                  assistant_message: savedMessage(4, "assistant", content),
+                                  conversation: { id: CONV_A } } };
+  }
+  function openResearchPlan(a) {
+    a.respondWith(
+      spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT },
+                  { id: "../../api/chat", name: "Not an id", conversation_count: 0, updated_at: AT },
+                  { id: SPACE_B, name: "<img src=x onerror=alert(1)>", conversation_count: 0, updated_at: AT }]),
+      conversationsList([{ id: CONV_A, title: "Plan", message_count: 2, last_message_at: AT, updated_at: AT }]),
+      { status: 200, json: { conversation: { id: CONV_A, title: "Plan" }, next_before_seq: null, messages: [
+        savedMessage(1, "user", "Earlier question"),
+        savedMessage(2, "assistant", "Earlier **answer** <script>alert(1)</script>")] } });
+  }
+
+  // The account may use Spaces: open a saved conversation, send in it, leave it.
+  SCENARIOS.spaces_open_send_leave = async function (a) {
+    await a.wait(60);
+    a.spaces("loaded");
+    a.snap("idle");
+    openResearchPlan(a);
+    await a.clickSpaces();
+    a.spaces("listed");
+    await a.clickSpacesItem(0);
+    a.spaces("space");
+    await a.clickSpacesItem(0);
+    a.spaces("opened");
+    a.snap("opened");
+    a.respondWith(savedExchange("Saved reply."));
+    await a.send("New question");
+    await a.wait(60);
+    a.snap("sent");
+    await a.leaveSpace();
+    a.spaces("left");
+    a.snap("left");
+  };
+
+  // A failed send and a stopped one are retried with the same idempotency key; the next message gets
+  // a new one; a saved answer has Copy and no Retry.
+  SCENARIOS.spaces_retry_keeps_the_key = async function (a) {
+    await a.wait(60);
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);
+    a.respondWith({ status: 503, json: { error: "service_unavailable", detail: SECRET } }, savedExchange("Saved once."),
+                  { hang: true }, savedExchange("Second."));
+    await a.send("Question");
+    await a.wait(60);
+    a.snap("failed");
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.snap("retried");
+    await a.send("Another");
+    await a.stop();
+    await a.wait(60);
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.snap("after-stop");
+  };
+
+  // Create a Space, then a conversation in it: the new conversation opens without loading anything.
+  SCENARIOS.spaces_create = async function (a) {
+    await a.wait(60);
+    a.respondWith(spacesList([]),
+                  { status: 201, json: { space: { id: SPACE_B, name: "Trip", instructions: "" } } },
+                  conversationsList([]),
+                  { status: 201, json: { conversation: { id: CONV_B, title: null } } });
+    await a.clickSpaces();
+    a.spaces("empty");
+    await a.createInSpaces("  Trip  ");
+    a.spaces("created-space");
+    await a.createInSpaces("");
+    a.spaces("created-conversation");
+    a.snap("idle");
+  };
+
+  // Spaces on, but this account may not use them: no button, and the chat is unchanged.
+  SCENARIOS.spaces_not_offered = async function (a) {
+    await a.wait(60);
+    a.spaces("loaded");
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.snap("idle");
   };
 
   // ---- run ---------------------------------------------------------------------

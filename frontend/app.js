@@ -800,7 +800,9 @@
     retryBtn.addEventListener("click", function () { retryTurn(turnIndex); });
 
     bar.appendChild(copyBtn);
-    bar.appendChild(retryBtn);
+    // A saved Space answer is already stored: regenerating it here would leave the screen and the
+    // saved conversation different, so it has Copy only.
+    if (!SPACE) bar.appendChild(retryBtn);
     shell.row.appendChild(bar);
     return bar;
   }
@@ -1487,6 +1489,7 @@
 
   function requestReply(exchange) {
     if (!hasAuthority()) return Promise.resolve();   // never a request without authority
+    if (SPACE) return requestSpaceReply(exchange);
     exchange.epoch = conversationEpoch;
     setBusy(true);
     clearActions(exchange.shell);
@@ -1653,6 +1656,363 @@
     if (controller) {
       try { controller.abort(); } catch (e) { /* already settled */ }
     }
+  }
+
+  // ---- Spaces (saved conversations) ------------------------------------------------
+  /* A deployment with Spaces on marks the page (<html data-kalillac-spaces="on">). Only then does
+     the page ask, once, whether this browser's account may use Spaces (GET /api/spaces); only if it
+     may is the Spaces button shown. Without the mark nothing here runs and nothing is asked.
+
+     A conversation opened from a Space is saved to the account. While one is open: the bar above the
+     thread says so and the "Temporary session" status is hidden (it would be untrue); End & erase,
+     which is for the temporary session, is hidden; files and reasoning modes are not offered (a Space
+     message carries neither). Each message is sent to that conversation with an idempotency key; a
+     retry of a failed or stopped send reuses it, so the server can never save the same message
+     twice. Leaving returns to a new temporary conversation. Names and messages from the server are
+     only ever set as text, or rendered through the same sanitizer as any reply. */
+  var SPACES_OFFERED = document.documentElement.getAttribute("data-kalillac-spaces") === "on";
+  var SPACE = null;            // {space: {id, name}, conversation: {id, title}, restore} while one is open
+  var SPACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var SPACE_NAME_MAX = 80;
+  var SPACE_TITLE_MAX = 120;
+  var SPACE_PAGE_MAX = 50;
+  var SPACE_MESSAGES_MAX = 100;
+  var COPY_SPACES_FAILED = "Kalillac couldn't load your Spaces. Please try again.";
+  var COPY_SPACES_CREATE_FAILED = "Kalillac couldn't create that. Please check the name and try again.";
+  var COPY_SPACES_EMPTY = "No Spaces yet. Create one below.";
+  var COPY_CONVERSATIONS_EMPTY = "No conversations in this Space yet. Start one below.";
+  var spacesBtn = null;
+  var spacesTemplate = document.getElementById("spaces-button-template");
+  var spacesDialog = document.getElementById("spaces-dialog");
+  var spacesTitle = document.getElementById("spaces-dialog-title");
+  var spacesStatus = document.getElementById("spaces-status");
+  var spacesList = document.getElementById("spaces-list");
+  var spacesNew = document.getElementById("spaces-new");
+  var spacesNewName = document.getElementById("spaces-new-name");
+  var spacesNewLabel = document.getElementById("spaces-new-label");
+  var spacesBack = document.getElementById("spaces-back");
+  var spacesClose = document.getElementById("spaces-close");
+  var spaceBar = document.getElementById("space-bar");
+  var spaceBarName = document.getElementById("space-bar-name");
+  var spaceBarTitle = document.getElementById("space-bar-title");
+  var spaceLeave = document.getElementById("space-leave");
+  var sessionStatus = document.getElementById("session-status");
+  var spacesView = null;       // {kind: "spaces"} or {kind: "space", space}; replaced on every change
+
+  function newRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+    var b = new Uint8Array(16);
+    window.crypto.getRandomValues(b);
+    b[6] = (b[6] & 15) | 64;
+    b[8] = (b[8] & 63) | 128;
+    var h = Array.prototype.map.call(b, function (x) { return (x + 256).toString(16).slice(1); }).join("");
+    return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+  }
+
+  function spacesRequest(method, url, body) {
+    var init = { method: method };
+    if (body !== undefined) {
+      init.headers = { "Content-Type": "application/json" };
+      init.body = JSON.stringify(body);
+    }
+    return fetch(url, init).then(function (res) {
+      return res.text().then(function (text) {
+        return { status: res.status, ok: res.ok, data: parseJson(text) };
+      });
+    });
+  }
+
+  function validName(value, max) {
+    return typeof value === "string" && value.length > 0 && value.length <= max;
+  }
+
+  function spaceUrl(spaceId, rest) {
+    return "/api/spaces/" + spaceId + (rest || "");
+  }
+
+  function setSpacesStatus(text) { spacesStatus.textContent = text || ""; }
+
+  function clearSpacesList() {
+    while (spacesList.firstChild) spacesList.removeChild(spacesList.firstChild);
+  }
+
+  function addSpacesItem(name, detail, onChoose) {
+    var item = document.createElement("li");
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "spaces-item";
+    var label = document.createElement("span");
+    label.className = "spaces-item-name";
+    label.textContent = name;
+    button.appendChild(label);
+    if (detail) {
+      var extra = document.createElement("span");
+      extra.className = "spaces-item-detail";
+      extra.textContent = detail;
+      button.appendChild(extra);
+    }
+    button.addEventListener("click", onChoose);
+    item.appendChild(button);
+    spacesList.appendChild(item);
+  }
+
+  function countLabel(count, one, many) {
+    if (typeof count !== "number" || count < 0 || Math.floor(count) !== count) return "";
+    return count + " " + (count === 1 ? one : many);
+  }
+
+  function showSpacesList() {
+    var view = spacesView = { kind: "spaces" };
+    spacesTitle.textContent = "Spaces";
+    spacesBack.hidden = true;
+    spacesNewLabel.textContent = "New Space name";
+    spacesNewName.placeholder = "New Space name";
+    spacesNewName.maxLength = SPACE_NAME_MAX;
+    clearSpacesList();
+    setSpacesStatus("Loading…");
+    return spacesRequest("GET", "/api/spaces?limit=" + SPACE_PAGE_MAX).then(function (r) {
+      if (spacesView !== view) return;
+      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) {
+        setSpacesStatus(COPY_SPACES_FAILED);
+        return;
+      }
+      var shown = 0;
+      r.data.spaces.forEach(function (space) {
+        if (!space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) return;
+        shown += 1;
+        addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
+          function () { showSpace({ id: space.id, name: space.name }); });
+      });
+      setSpacesStatus(shown ? "" : COPY_SPACES_EMPTY);
+    }, function () {
+      if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
+    });
+  }
+
+  function showSpace(space) {
+    var view = spacesView = { kind: "space", space: space };
+    spacesTitle.textContent = space.name;
+    spacesBack.hidden = false;
+    spacesNewLabel.textContent = "New conversation title (optional)";
+    spacesNewName.placeholder = "New conversation (title optional)";
+    spacesNewName.maxLength = SPACE_TITLE_MAX;
+    spacesNewName.value = "";
+    clearSpacesList();
+    setSpacesStatus("Loading…");
+    return spacesRequest("GET", spaceUrl(space.id, "/conversations?limit=" + SPACE_PAGE_MAX)).then(function (r) {
+      if (spacesView !== view) return;
+      if (r.status !== 200 || !r.data || !Array.isArray(r.data.conversations)) {
+        setSpacesStatus(COPY_SPACES_FAILED);
+        return;
+      }
+      var shown = 0;
+      r.data.conversations.forEach(function (c) {
+        if (!c || !SPACE_ID_RE.test(c.id)) return;
+        var title = validName(c.title, SPACE_TITLE_MAX) ? c.title : null;
+        shown += 1;
+        addSpacesItem(title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
+          function () { openSpaceConversation(space, { id: c.id, title: title }, true); });
+      });
+      setSpacesStatus(shown ? "" : COPY_CONVERSATIONS_EMPTY);
+    }, function () {
+      if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
+    });
+  }
+
+  function createInSpaces(event) {
+    event.preventDefault();
+    var view = spacesView;
+    if (!view) return;
+    var value = spacesNewName.value.trim();
+    if (view.kind === "spaces") {
+      if (!value) { spacesNewName.focus(); return; }
+      setSpacesStatus("Creating…");
+      spacesRequest("POST", "/api/spaces", { name: value, instructions: "" }).then(function (r) {
+        if (spacesView !== view) return;
+        var space = r.data && r.data.space;
+        if (r.status !== 201 || !space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) {
+          setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+          return;
+        }
+        spacesNewName.value = "";
+        showSpace({ id: space.id, name: space.name });
+      }, function () {
+        if (spacesView === view) setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+      });
+      return;
+    }
+    setSpacesStatus("Creating…");
+    spacesRequest("POST", spaceUrl(view.space.id, "/conversations"), value ? { title: value } : {}).then(function (r) {
+      if (spacesView !== view) return;
+      var c = r.data && r.data.conversation;
+      if (r.status !== 201 || !c || !SPACE_ID_RE.test(c.id)) {
+        setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+        return;
+      }
+      spacesNewName.value = "";
+      // A new conversation has no messages: it opens without another request.
+      openSpaceConversation(view.space, { id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null }, false);
+    }, function () {
+      if (spacesView === view) setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+    });
+  }
+
+  function openSpaceConversation(space, conversation, load) {
+    if (inFlight) return;
+    var view = spacesView;
+    if (!load) {
+      enterSpace(space, conversation, []);
+      return;
+    }
+    setSpacesStatus("Opening…");
+    spacesRequest("GET", spaceUrl(space.id, "/conversations/" + conversation.id + "?limit=" + SPACE_MESSAGES_MAX))
+      .then(function (r) {
+        if (spacesView !== view || inFlight) return;
+        if (r.status !== 200 || !r.data || !Array.isArray(r.data.messages)) {
+          setSpacesStatus(COPY_SPACES_FAILED);
+          return;
+        }
+        enterSpace(space, conversation, r.data.messages);
+      }, function () {
+        if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
+      });
+  }
+
+  function closeSpacesDialog() {
+    spacesView = null;
+    if (spacesDialog.open) {
+      if (typeof spacesDialog.close === "function") spacesDialog.close();
+      else spacesDialog.removeAttribute("open");
+    }
+  }
+
+  function openSpacesDialog() {
+    if (inFlight) return;
+    if (typeof spacesDialog.showModal === "function") spacesDialog.showModal();
+    else spacesDialog.setAttribute("open", "");
+    showSpacesList();
+  }
+
+  function enterSpace(space, conversation, messages) {
+    var restore = SPACE ? SPACE.restore : {
+      picker: modePicker ? modePicker.hidden : null,
+      attach: attachBtn ? attachBtn.hidden : null
+    };
+    SPACE = null;
+    startNewConversation();          // The temporary conversation leaves the screen (as New conversation).
+    SPACE = { space: space, conversation: conversation, restore: restore };
+    spaceBarName.textContent = space.name;
+    spaceBarTitle.textContent = conversation.title ? " · " + conversation.title : "";
+    spaceBar.hidden = false;
+    if (sessionStatus) sessionStatus.hidden = true;
+    if (eraseBtn) eraseBtn.hidden = true;
+    if (modePicker) modePicker.hidden = true;
+    if (attachBtn) attachBtn.hidden = true;
+    ATTACHED = [];
+    renderAttachments();
+
+    var pending = null;
+    for (var i = 0; i < messages.length; i++) {
+      var m = messages[i];
+      if (!m || typeof m.content !== "string") continue;
+      if (m.role === "user") {
+        pending = { text: m.content, row: addUserMessage(m.content) };
+      } else if (m.role === "assistant" && pending) {
+        var shell = addAssistantShell();
+        renderAssistantText(shell, m.content, null);
+        addActions(shell, TURNS.length);
+        TURNS.push({ user: pending.text, assistant: m.content, userRow: pending.row, row: shell.row });
+        pending = null;
+      }
+    }
+    closeSpacesDialog();
+    stickToBottom = true;
+    scrollToBottom(true);
+    input.focus();
+  }
+
+  function leaveSpace() {
+    if (!SPACE || inFlight) return;
+    var restore = SPACE.restore;
+    SPACE = null;
+    spaceBar.hidden = true;
+    spaceBarName.textContent = "";
+    spaceBarTitle.textContent = "";
+    if (sessionStatus) sessionStatus.hidden = false;
+    if (eraseBtn) eraseBtn.hidden = false;
+    if (modePicker && restore.picker !== null) modePicker.hidden = restore.picker;
+    if (attachBtn && restore.attach !== null) attachBtn.hidden = restore.attach;
+    startNewConversation();
+  }
+
+  function requestSpaceReply(exchange) {
+    var open = SPACE;
+    exchange.epoch = conversationEpoch;
+    // The idempotency key: the same for every retry of this message, new for the next one.
+    if (!exchange.requestId) exchange.requestId = newRequestId();
+    setBusy(true);
+    clearActions(exchange.shell);
+    setThinking(exchange.shell);
+    controller = new AbortController();
+    var stale = function () { return exchange.epoch !== conversationEpoch || SPACE !== open; };
+
+    return fetch(spaceUrl(open.space.id, "/conversations/" + open.conversation.id + "/messages"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: exchange.text, client_request_id: exchange.requestId }),
+      signal: controller.signal
+    })
+      .then(function (res) {
+        if (stale()) return;
+        return res.text().then(function (body) {
+          if (stale()) return;
+          var data = parseJson(body);
+          if (!res.ok) {
+            failExchange(exchange, outcomeForResponse(res.status, data));
+            return;
+          }
+          var saved = data && data.assistant_message;
+          var reply = saved && typeof saved.content === "string" ? saved.content : "";
+          if ((data && typeof data.error === "string") || !reply.trim()) {
+            failExchange(exchange, OUTCOME_INCOMPLETE);
+            return;
+          }
+          completeExchange(exchange, reply, null, null, []);
+        }, function (err) {
+          if (!stale()) failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
+        });
+      }, function (err) {
+        // Stopping does not stop the server from saving; a retry with the same key shows what it saved.
+        if (!stale()) failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
+      })
+      .then(null, function () {
+        if (!stale()) failExchange(exchange, OUTCOME_INCOMPLETE);
+      })
+      .then(function () {
+        if (exchange.epoch !== conversationEpoch) return;
+        controller = null;
+        setBusy(false);
+        autoGrow();
+      });
+  }
+
+  if (SPACES_OFFERED && spacesTemplate && spacesTemplate.content && spacesTemplate.content.firstElementChild &&
+      spacesDialog && spaceBar) {
+    spacesNew.addEventListener("submit", createInSpaces);
+    spacesBack.addEventListener("click", function () { showSpacesList(); });
+    spacesClose.addEventListener("click", closeSpacesDialog);
+    spacesDialog.addEventListener("close", function () {
+      spacesView = null;
+      if (spacesBtn) spacesBtn.focus();
+    });
+    spaceLeave.addEventListener("click", leaveSpace);
+    // The one question asked on load: may this account use Spaces? Anything but a list is "no".
+    spacesRequest("GET", "/api/spaces?limit=1").then(function (r) {
+      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return;
+      spacesBtn = spacesTemplate.content.firstElementChild.cloneNode(true);
+      spacesTemplate.parentNode.insertBefore(spacesBtn, spacesTemplate);
+      spacesBtn.addEventListener("click", openSpacesDialog);
+    }, function () { /* not offered */ });
   }
 
   // ---- End & erase ---------------------------------------------------------------

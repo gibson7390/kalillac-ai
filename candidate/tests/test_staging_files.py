@@ -122,9 +122,10 @@ def test_the_web_root_marks_exactly_what_the_chat_reads(tmp_path):
     frontend = CANDIDATE.parent / "frontend"
     read = set(re.findall(r'getAttribute\("data-kalillac-([a-z]+)"\)', (frontend / "app.js").read_text(encoding="utf-8")))
     assert read == set(webroot.MARKS)
-    out = webroot.build(site(tmp_path), frontend, tmp_path / "out", ["reasoning", "accounts", "files"])
+    out = webroot.build(site(tmp_path), frontend, tmp_path / "out", ["reasoning", "accounts", "files", "spaces"])
     page = (out / "app" / "index.html").read_text(encoding="utf-8")
-    assert '<html lang="en" data-kalillac-accounts="on" data-kalillac-files="on" data-kalillac-reasoning="on">' in page
+    assert ('<html lang="en" data-kalillac-accounts="on" data-kalillac-files="on" data-kalillac-reasoning="on"'
+            ' data-kalillac-spaces="on">') in page
     original = (frontend / "index.html").read_text(encoding="utf-8")
     assert page == original.replace('<html lang="en">', page[page.index("<html"):page.index(">", page.index("<html")) + 1])
     assert (out / "index.html").read_text(encoding="utf-8").count("data-kalillac") == 0

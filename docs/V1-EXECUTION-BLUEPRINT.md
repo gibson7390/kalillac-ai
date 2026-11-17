@@ -5,7 +5,7 @@ for it. It guides the work; `docs/DEVELOPMENT_ROADMAP.md` stays the evidence log
 regressions) and `docs/V1-02DE-ACCOUNT-SECURITY-PLAN.md` the account-security design. When they
 disagree, this file is corrected first.
 
-Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/v1-single-authorization-a10`
+Last reconciled with the repository: 2026-11-17, at the integrated branch `feat/spaces-frontend-s1`
 (`feat/account-security-d5-credential-path`).
 
 ## Statuses (never interchangeable)
@@ -41,23 +41,23 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 | A6 | E1 legacy-route removal: E1a account grants + 0025 row-lock anchor | ✔ | ✔ CI (`dc24d1b`) | | Codex; **E1b** (entitlement/billing grants) after a reviewed billing write path | A4; E1b: B1 |
 | A7 | E2 operator transition (S/P login, latch active, startup gate qualified, rollback) | ✔ | ✔ CI (`dc24d1b`) | | Codex; running it anywhere real is the owner's decision | A6 |
 | A8 | E3 synthetic lifecycle test under final grants | ✔ | ✔ CI (`dc24d1b`) | | Codex | A7 |
-| A9 | Account management UI (sessions, password change, deletion request, recovery) | ✔ | ✔ local (96 browser tests) | | CI + Codex; drop the legacy verify page when V1 is the only mode | A3 |
+| A9 | Account management UI (sessions, password change, deletion request, recovery) | ✔ | ✔ CI (`84cc7f1`; 96 browser tests) | | CI + Codex; drop the legacy verify page when V1 is the only mode | A3 |
 | B1 | Stripe Checkout, portal, webhooks, reconciliation, refund/dispute cases | ✔ | ✔ | | test-mode lifecycle run (owner's test keys) | A1 |
-| B2 | Verified Premium entitlement on the chat request (PAID scope) | ✔ | ✔ local | | CI + Codex. `kalillac_accounts/paid_access.py`: V1-01's authorized read → effective entitlement → request-bound evidence at classification (chat and files) and the reasoning permission; matching account only; never the legacy path | A3, B1, F1 |
+| B2 | Verified Premium entitlement on the chat request (PAID scope) | ✔ | ✔ CI (`84cc7f1`) | | CI + Codex. `kalillac_accounts/paid_access.py`: V1-01's authorized read → effective entitlement → request-bound evidence at classification (chat and files) and the reasoning permission; matching account only; never the legacy path | A3, B1, F1 |
 | B3 | Per-customer financial safeguards | ✔ (allowance × request ceiling) | ✔ | | Each customer is bounded per day by the tier's response allowance (`KALILLAC_USAGE_LIMIT_{FREE,PAID}_DAILY`, chosen from the effective entitlement) times the scope's request ceiling. An explicit per-account dollar budget is designed (per-account ledger buckets, identity kept out of reservations) and waits on owner decision 18 | B2, F1 |
 | B4 | Subscription management + cancellation in the UI | ✔ (upgrade, Manage billing → Stripe portal, period and cancellation state) | ✔ local | | Stripe test-mode run in staging (owner's keys) | B1, A9 |
 | F1 | Financial Safeguards (ledger, ceilings, provider budgets, operator) | ✔ | ✔ | | owner budgets and activation (production) | — |
 | R1 | QUICK / BALANCED / DEEP reasoning | ✔ backend, control, tier permission from the verified entitlement | ✔ local | | saved preference, a mode on Spaces sends; owner decision 9 (which modes each tier gets) | B2 |
 | D1f | File generation, editing, worker, document quality | ✔ | ✔ | part | open Codex items (Arabic ligatures, Word fields/decision 12, semantic consistency) | — |
 | D2f | File assistant in chat, `/api/files`, delivery | ✔ (flag off) | ✔ | | customer confirmation controls; Premium gate via B2; count vs allowance (owner) | B2 |
-| S1 | Spaces + persistent conversations (backend `/api/spaces`) | ✔ (flag off); V1-01 authorization in V1 mode (every request, and the save transaction's recheck under the account's V1 lock, taken first) | part (1194 SQLite + 4 real PostgreSQL under the final grants) | | re-verify; **frontend** (list, create, conversation history, instructions) | A3 |
+| S1 | Spaces + persistent conversations (backend `/api/spaces`) | ✔ (flag off); V1-01 authorization in V1 mode (every request, and the save transaction's recheck under the account's V1 lock, taken first) | part (1194 SQLite + 4 real PostgreSQL under the final grants, CI `5ce5750`); **frontend in the chat** (pick or create a Space and a conversation, saved history, sends with an idempotency key, leave): 5 browser tests | | re-verify; Space instructions, rename and delete in the UI; earlier pages of a long conversation | A3 |
 | S2 | Saved conversations outside Spaces | | | | decide shape (a default Space vs separate history); build | S1 |
-| U1 | Code-block rendering with per-block copy | ✔ | ✔ local (browser) | | CI | — |
-| U2 | Responsive, coherent customer frontend (chat + account + Spaces) | part: chat ↔ account link on an accounts deployment, plan-aware refusal copy | part | | Spaces navigation; a responsive pass across chat, account and Spaces | A9, S1 |
+| U1 | Code-block rendering with per-block copy | ✔ | ✔ CI (`84cc7f1`; browser) | | CI | — |
+| U2 | Responsive, coherent customer frontend (chat + account + Spaces) | part: chat ↔ account link on an accounts deployment, plan-aware refusal copy, Spaces in the chat | part | | a responsive pass across chat, account and Spaces | A9, S1 |
 | I1 | Secure image upload + image understanding | | | | intake (type sniffing, size/pixel caps, re-encode, strip metadata), GPT-6 Luna vision call under Financial Safeguards with measured cost | B2, F1 |
 | I2 | Image generation | | | | **design only**: cost-control architecture; no model activated, no allowance (owner) | F1 |
 | O1 | Owner administration dashboard | | | | read-only first: accounts, subscriptions, ledger/costs, billing cases, security events; actions only through reviewed tools | A5, B1, F1 |
-| M9 | Staging environment + end-to-end journey suite | part: the Premium journey test (`test_v1_premium_journey_postgres.py`); **staging provisioning**: `tools/provision_deployment.py` (roles, database, migrations, protected files and the registration activation of a new, empty deployment; only creates, refuses anything it did not mark), `deploy/staging/` (the settings template, the unit template, the web-root builder and the operator runbook), and `tools/verify_provisioned_boot.py`, which runs the runbook's own commands as root in CI and starts the real application from the template | ✔ local (18 PostgreSQL + 9 unit tests; boot verifier 15/15) | | CI + Codex; the systemd-run and unit forms exercised on a runner with systemd; files and Spaces in the journey; then the run on the owner's staging host with Stripe test mode (decision 17) | all |
+| M9 | Staging environment + end-to-end journey suite | part: the Premium journey test (`test_v1_premium_journey_postgres.py`); **staging provisioning**: `tools/provision_deployment.py` (roles, database, migrations, protected files and the registration activation of a new, empty deployment; only creates, refuses anything it did not mark), `deploy/staging/` (the settings template, the unit template, the web-root builder and the operator runbook), and `tools/verify_provisioned_boot.py`, which runs the runbook's own commands as root in CI and starts the real application from the template | ✔ CI (`70a09ed`; 18 PostgreSQL + 9 unit tests; boot verifier 15/15) | | CI + Codex; the systemd-run and unit forms exercised on a runner with systemd; files and Spaces in the journey; then the run on the owner's staging host with Stripe test mode (decision 17) | all |
 
 ## Codex findings outstanding
 

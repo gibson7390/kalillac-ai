@@ -187,7 +187,7 @@ once the journey below passes.
 ```
 (cd REL/site && npm ci && npm run build)
 python3 REL/deploy/staging/build_webroot.py --site REL/site/dist/public --frontend REL/frontend \
-    --out /var/www/UNIT --marks accounts,files,reasoning
+    --out /var/www/UNIT --marks accounts,files,reasoning,spaces
 ```
 
 For Nginx, start from production's own site file (`nginx -T`) and change only: `server_name` (the
@@ -213,6 +213,12 @@ In a browser, as the owner, with Stripe's test cards only:
 | Manage billing: cancel in the Stripe portal | the account page shows the cancellation and the period end |
 | Recover the password by email | the link works once; every session ends |
 | Request deletion of the account | signed out; sign-in is refused |
+
+Spaces are offered only to the accounts in `KALILLAC_SPACES_BETA_ACCOUNT_IDS`. Before the journey,
+create the owner's account, read its id
+(`sudo -u postgres psql -d kalillac_staging_v1 -Atc "SELECT id FROM kalillac.users WHERE email = '<the owner's email>'"`),
+put it in `settings.env` and restart the unit. Then, in the chat: Spaces → create a Space and a
+conversation, send a message, reload the page and open it again (it is still there), and leave it.
 
 Operator support (suspend, reinstate, a deletion request, a bounded export) is
 `tools/v1_account_support.py`, run in the same `systemd-run` context as step 7 without the

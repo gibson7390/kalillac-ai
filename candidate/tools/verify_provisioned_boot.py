@@ -62,6 +62,7 @@ SYNTHETIC = {
     "OWNER_BALANCED_EXTRA_OUTPUT_TOKENS": "0", "OWNER_DEEP_EXTRA_OUTPUT_TOKENS": "8000",
     "OWNER_FREE_REASONING_MODES": "quick,balanced", "OWNER_PAID_REASONING_MODES": "quick,balanced,deep",
     "OWNER_STRIPE_TEST_PRICE_ID": "price_synthetic0000000001",
+    "OWNER_SPACES_BETA_ACCOUNT_IDS": "00000000-0000-4000-8000-000000000001",
     "PROD_REQUEST_DEADLINE_SECONDS": "60",
     "PROD_REQUEST_QUEUE_WAIT_SECONDS": "5",
     "PROD_REQUEST_MAX_MODEL_ATTEMPTS": "6",
@@ -234,7 +235,8 @@ def main():
         for case, method, path in (("the account security route needs a session", "GET", "/api/account/security"),
                                    ("Checkout needs a session", "POST", "/api/account/billing/checkout"),
                                    ("the entitlement route needs a session", "GET", "/api/account/entitlements"),
-                                   ("the usage route needs a session", "GET", "/api/account/usage")):
+                                   ("the usage route needs a session", "GET", "/api/account/usage"),
+                                   ("Spaces need a session", "GET", "/api/spaces")):
             record(case, http(port, method, path, {} if method == "POST" else None)[0] == 401)
         status, body = http(port, "POST", "/api/billing/stripe/webhook", {"id": "evt_unsigned"})
         record("an unsigned webhook is refused", status == 400)

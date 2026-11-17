@@ -550,5 +550,5 @@ jobs:
           from pathlib import Path
           result = json.loads(Path(sys.argv[1]).read_text().splitlines()[-1])
           print([case for case in result["results"] if not case["passed"]])
-          assert result["tests"] == 15 and result["failures"] == 0 and result["synthetic_only"]
+          assert result["tests"] == 16 and result["failures"] == 0 and result["synthetic_only"]
           PY

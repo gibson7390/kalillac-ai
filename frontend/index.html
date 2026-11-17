@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261117-codecopy1">
+  <link rel="stylesheet" href="app.css?v=20261117-spaces1">
 </head>
 <body>
   <!-- The chat workspace at /app/: reached directly, or from the homepage's
@@ -31,13 +31,23 @@
           <!-- Where accounts are on, a plain link to the account pages (plan, billing, security).
                This page asks nothing about the visitor for it. -->
           <template id="account-link-template"><a class="account-link" href="/account">Account</a></template>
-          <span class="session-status" title="This conversation uses temporary session memory. It is not saved to an account or a chat history, and reloading starts a new session.">
+          <!-- Where Spaces are on and this browser's account may use them, the button that opens them. -->
+          <template id="spaces-button-template"><button type="button" class="account-link spaces-button" id="spaces-btn" aria-haspopup="dialog">Spaces</button></template>
+          <span class="session-status" id="session-status" title="This conversation uses temporary session memory. It is not saved to an account or a chat history, and reloading starts a new session.">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
             <span>Temporary session</span><span class="session-status-extra"><span class="sr-only">,</span><span aria-hidden="true">·</span><span>Not saved</span></span>
           </span>
         </div>
       </div>
     </header>
+
+    <!-- Shown only while a conversation from a Space is open: it is saved to the account. -->
+    <div class="space-bar" id="space-bar" hidden>
+      <div class="space-bar-inner">
+        <span class="space-bar-label">Saved to your account in <strong id="space-bar-name"></strong><span class="space-bar-title" id="space-bar-title"></span></span>
+        <button type="button" class="space-leave" id="space-leave">Leave Space</button>
+      </div>
+    </div>
 
     <main class="conversation" id="conversation">
       <!-- The thread carries margin-top:auto so a short conversation sits just
@@ -184,12 +194,31 @@
       </div>
     </div>
   </dialog>
+  <!-- Spaces: pick or create a Space and a conversation. Names come from the account's own data and
+       are only ever set as text. -->
+  <dialog class="spaces-dialog" id="spaces-dialog" aria-labelledby="spaces-dialog-title">
+    <div class="spaces-dialog-panel">
+      <h2 class="spaces-dialog-title" id="spaces-dialog-title">Spaces</h2>
+      <p class="spaces-dialog-hint">Conversations in a Space are saved to your account. Opening one replaces the temporary conversation on this screen.</p>
+      <p class="spaces-status" id="spaces-status" role="status" aria-live="polite"></p>
+      <ul class="spaces-list" id="spaces-list"></ul>
+      <form class="spaces-new" id="spaces-new" autocomplete="off">
+        <label class="sr-only" for="spaces-new-name" id="spaces-new-label">New Space name</label>
+        <input type="text" id="spaces-new-name" placeholder="New Space name">
+        <button type="submit" class="spaces-new-submit" id="spaces-new-submit">Create</button>
+      </form>
+      <div class="spaces-dialog-actions">
+        <button type="button" class="spaces-secondary" id="spaces-back" hidden>All Spaces</button>
+        <button type="button" class="spaces-secondary" id="spaces-close">Close</button>
+      </div>
+    </div>
+  </dialog>
   <!-- Local vendored libraries only; no CDN, no remote runtime fetches. -->
   <script src="vendor/marked/marked.min.js"></script>
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261117-codecopy1"></script>
+  <script src="app.js?v=20261117-spaces1"></script>
 </body>
 </html>

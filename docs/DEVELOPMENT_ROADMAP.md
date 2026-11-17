@@ -245,6 +245,9 @@ from the code. See "Owner decisions required".
   page's sessions, password and deletion sections with `GET /api/account/security`; per-block code copy;
   the chat's account link; and `test_v1_premium_journey_postgres.py`, the whole Premium journey through
   the real application on disposable PostgreSQL under the final grants. Implemented; awaiting Codex.
+  CI green at `84cc7f1` (subscription 44102235903; provider 44098090955, safety 44098099108, frontend
+  44098200220 and anonymous allowance 44098265034 on `abbe498`). The first subscription run (44098082640)
+  was cancelled by the 20-minute job timeout with no failure; `84cc7f1` raises it to 45.
 * **Staging provisioning** (`feat/staging-provisioning-m9`, on the Premium branch): until now nothing
   could stand up a new deployment except test fixtures. `tools/provision_deployment.py` creates a new,
   empty deployment's roles and database, migrates it, writes the protected files the application reads
@@ -254,7 +257,8 @@ from the code. See "Owner decisions required".
   allowance, budget, price or Stripe id is decided in it), the unit template, the web-root builder and
   the operator runbook. `tools/verify_provisioned_boot.py` runs the runbook's commands as root in CI:
   provision, the operator transition as an unprivileged identity, the controlled launcher from the
-  template, real HTTP. Implemented; awaiting CI and Codex. Not run on any host.
+  template, real HTTP. Implemented; awaiting Codex. Not run on any host. CI green at `70a09ed`
+  (subscription 44102277062; provider 44100305520 and safety 44100311426 on `aab49f6`).
 * **Spaces under V1 authorization** (`feat/v1-single-authorization-a10`, on staging provisioning): with V1
   on, Spaces authorized accounts by the legacy session lookup, which does not check quarantine or the
   session epoch (it relied on their revocations). Every Spaces request now goes through V1-01's
@@ -263,7 +267,15 @@ from the code. See "Owner decisions required".
   saves for one account queue instead of deadlocking on a lock upgrade. Proved on PostgreSQL under the
   final grants, including that the quarantine case fails on the legacy path. Remaining legacy lookups
   in V1 mode (billing, usage, quota, email verification) are listed for the same change. Implemented;
-  awaiting CI and Codex.
+  awaiting Codex. CI green at `5ce5750` (44102284051, 44102290116, 44102296120).
+* **Spaces in the chat** (`feat/spaces-frontend-s1`, on A10): on a page marked `data-kalillac-spaces="on"`
+  the chat asks once whether the account may use Spaces and only then shows a Spaces button: pick or
+  create a Space and a conversation; an opened conversation is saved to the account (a bar says so; the
+  "Temporary session" status and End & erase are hidden; files and reasoning modes are not offered);
+  each message carries an idempotency key that a retry reuses, so it is never saved twice; a saved answer
+  has Copy and no Retry; leaving returns to a new temporary conversation. Five browser tests (Edge) on
+  the real page; the staging template turns Spaces on for the owner's listed account, and the boot
+  verifier now starts the application with Spaces on (16 cases). Implemented; awaiting CI and Codex.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
 * Known flaky test, to fix in its own checkpoint: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as

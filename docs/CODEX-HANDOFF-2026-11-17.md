@@ -15,9 +15,9 @@ input or state, and the wrong result.
 | 2 | D5: reset-token issuance and credential read path (0024) | `feat/account-security-d5-credential-path` | `9feb42bab929cba091891831f91f3c8dc290f2c3` | 43993703621, 43993709925, 43993715548: green |
 | 3 | D4: operator support tool through P | `feat/account-security-d4-operator-tool` | `f554c2fd91fd2254db6918ac3cdd4312f4f18d8a` | 44009415730, 44009421529, 44009427152: green |
 | 4 | E1a, E2, E3: final grants, operator transition, lifecycle | `feat/account-security-e1-e3` | `dc24d1bdb7a3dc076047bc323de2779b01df0339` | 44094320838, 44094326597, 44094334097: green |
-| 5 | B2, A9, U1, U2 (part), the Premium journey | `feat/premium-paid-scope-b2` | `84cc7f1790ed37a1fac75ceceb51000c533dae94` | see the roadmap entry for the final run ids |
-| 6 | M9: staging provisioning | `feat/staging-provisioning-m9` | `70a09ed468c26ceea9aba41ad358138f91d8fe16` | see the roadmap entry |
-| 7 | A10: Spaces through V1 authorization | `feat/v1-single-authorization-a10` | `5ce57506c08c527f9b8d9cf12aacc3d3b3e579be` | see the roadmap entry |
+| 5 | B2, A9, U1, U2 (part), the Premium journey | `feat/premium-paid-scope-b2` | `84cc7f1790ed37a1fac75ceceb51000c533dae94` | subscription 44102235903 on it; provider 44098090955, safety 44098099108, frontend 44098200220, anonymous allowance 44098265034 on `abbe498` (`84cc7f1` changes only the job timeout): green |
+| 6 | M9: staging provisioning | `feat/staging-provisioning-m9` | `70a09ed468c26ceea9aba41ad358138f91d8fe16` | subscription 44102277062 on it; provider 44100305520, safety 44100311426 on `aab49f6` (the same code): green |
+| 7 | A10: Spaces through V1 authorization | `feat/v1-single-authorization-a10` | `5ce57506c08c527f9b8d9cf12aacc3d3b3e579be` | 44102284051, 44102290116, 44102296120: green |
 
 ## 1. D3 (`35f61c8`)
 
