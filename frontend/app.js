@@ -1956,15 +1956,13 @@
         setSpacesStatus(COPY_SPACES_FAILED);
         return;
       }
-      var shown = 0;
+      view.conversations = [];
       r.data.conversations.forEach(function (c) {
         if (!c || !SPACE_ID_RE.test(c.id)) return;
-        var title = validName(c.title, SPACE_TITLE_MAX) ? c.title : null;
-        shown += 1;
-        addSpacesItem(title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
-          function () { openSpaceConversation(space, { id: c.id, title: title }, true); });
+        view.conversations.push({ id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null,
+                                  message_count: c.message_count });
       });
-      setSpacesStatus(shown ? "" : COPY_CONVERSATIONS_EMPTY);
+      renderConversations(view);
     }, function () {
       if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
     });
@@ -2007,6 +2005,134 @@
       function () { editSpace(view, "instructions"); }));
     spacesManage.appendChild(spacesButton("Delete", "spaces-manage-btn spaces-danger",
       function () { confirmDeleteSpace(view); }));
+    spacesManage.appendChild(spacesButton(view.editing ? "Done" : "Edit conversations", "spaces-manage-btn",
+      function () {
+        view.editing = !view.editing;
+        manageBar(view);
+        renderConversations(view);
+      }));
+  }
+
+  /* The open Space's conversations: opened by a click, or, while editing, renamed or deleted in place.
+     A rename reads the conversation first and sends the version it read, like a Space rename. */
+  function renderConversations(view) {
+    if (spacesView !== view || !view.conversations) return;
+    clearSpacesList();
+    view.conversations.forEach(function (c) {
+      if (!view.editing) {
+        addSpacesItem(c.title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
+          function () { openSpaceConversation(view.space, { id: c.id, title: c.title }, true); });
+        return;
+      }
+      var item = document.createElement("li");
+      item.className = "spaces-edit-row";
+      var name = document.createElement("span");
+      name.className = "spaces-item-name";
+      name.textContent = c.title || "Untitled conversation";
+      item.appendChild(name);
+      item.appendChild(spacesButton("Rename", "spaces-manage-btn", function () { renameConversation(view, c, item); }));
+      item.appendChild(spacesButton("Delete", "spaces-manage-btn spaces-danger",
+        function () { confirmDeleteConversation(view, c, item); }));
+      spacesList.appendChild(item);
+    });
+    setSpacesStatus(view.conversations.length ? "" : COPY_CONVERSATIONS_EMPTY);
+  }
+
+  function conversationUrl(view, c) {
+    return spaceUrl(view.space.id, "/conversations/" + c.id);
+  }
+
+  function renameConversation(view, c, item) {
+    while (item.firstChild) item.removeChild(item.firstChild);
+    var form = document.createElement("form");
+    form.className = "spaces-edit spaces-edit-inline";
+    var label = document.createElement("label");
+    label.className = "sr-only";
+    label.htmlFor = "spaces-rename-conversation";
+    label.textContent = "Conversation title";
+    var box = document.createElement("input");
+    box.id = "spaces-rename-conversation";
+    box.className = "spaces-edit-field";
+    box.maxLength = SPACE_TITLE_MAX;
+    box.value = c.title || "";
+    var actions = document.createElement("div");
+    actions.className = "spaces-edit-actions";
+    var save = document.createElement("button");
+    save.type = "submit";
+    save.className = "spaces-manage-btn spaces-primary";
+    save.textContent = "Save";
+    actions.appendChild(save);
+    actions.appendChild(spacesButton("Cancel", "spaces-manage-btn", function () { renderConversations(view); }));
+    form.appendChild(label);
+    form.appendChild(box);
+    form.appendChild(actions);
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var title = box.value.trim();
+      if (!title) { box.focus(); return; }
+      save.disabled = true;
+      setSpacesStatus("Saving…");
+      spacesRequest("GET", conversationUrl(view, c) + "?limit=1").then(function (r) {
+        var current = r.data && r.data.conversation;
+        if (spacesView !== view) return null;
+        if (r.status !== 200 || !current || current.id !== c.id || typeof current.version !== "number") {
+          throw new Error("read");
+        }
+        return spacesRequest("PATCH", conversationUrl(view, c), { title: title, expected_version: current.version });
+      }).then(function (r) {
+        if (!r || spacesView !== view) return;
+        var saved = r.data && r.data.conversation;
+        if (r.status === 200 && saved && saved.id === c.id && validName(saved.title, SPACE_TITLE_MAX)) {
+          c.title = saved.title;
+          if (SPACE && SPACE.conversation.id === c.id) {
+            SPACE.conversation.title = saved.title;
+            spaceBarTitle.textContent = " · " + saved.title;
+          }
+          renderConversations(view);
+          setSpacesStatus("Renamed.");
+          return;
+        }
+        save.disabled = false;
+        setSpacesStatus(r.data && r.data.error === "version_conflict" ? COPY_SPACE_CHANGED : COPY_SPACE_SAVE_FAILED);
+      }).then(null, function () {
+        if (spacesView !== view) return;
+        save.disabled = false;
+        setSpacesStatus(COPY_SPACE_SAVE_FAILED);
+      });
+    });
+    item.appendChild(form);
+    box.focus();
+  }
+
+  function confirmDeleteConversation(view, c, item) {
+    while (item.firstChild) item.removeChild(item.firstChild);
+    var note = document.createElement("span");
+    note.className = "spaces-confirm";
+    note.textContent = "Delete “" + (c.title || "Untitled conversation") + "”? This can’t be undone.";
+    item.appendChild(note);
+    var remove = spacesButton("Delete conversation", "spaces-manage-btn spaces-danger", function () {
+      if (inFlight) return;
+      remove.disabled = true;
+      setSpacesStatus("Deleting…");
+      spacesRequest("DELETE", conversationUrl(view, c)).then(function (r) {
+        if (spacesView !== view) return;
+        if (r.status !== 204) {
+          remove.disabled = false;
+          setSpacesStatus(COPY_SPACE_SAVE_FAILED);
+          return;
+        }
+        if (SPACE && SPACE.conversation.id === c.id) leaveSpace();
+        view.conversations = view.conversations.filter(function (other) { return other !== c; });
+        renderConversations(view);
+        setSpacesStatus("Conversation deleted.");
+      }, function () {
+        if (spacesView !== view) return;
+        remove.disabled = false;
+        setSpacesStatus(COPY_SPACE_SAVE_FAILED);
+      });
+    });
+    item.appendChild(remove);
+    item.appendChild(spacesButton("Cancel", "spaces-manage-btn", function () { renderConversations(view); }));
   }
 
   // The Space as the server has it now (name, instructions, version), or null.

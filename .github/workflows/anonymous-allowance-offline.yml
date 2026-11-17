@@ -149,7 +149,7 @@ jobs:
       # chat's account link; six with Spaces in the chat (S1) and three with the
       # account outcomes in the chat (A11); five with image attachments (I1) and one with
       # the exact-edit confirmation (D2f); two with Space management and
-      # earlier messages (S1b); one with a mode on Space sends (R1): 643).
+      # earlier messages (S1b); one with a mode on Space sends (R1); one with conversation editing: 644).
       - name: Require every focused test to have run
         run: |
           python - "$RUNNER_TEMP/anonymous-allowance-offline.xml" <<'PY'
@@ -159,6 +159,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 643, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 644, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the focused anonymous allowance verification did not run completely")
           PY

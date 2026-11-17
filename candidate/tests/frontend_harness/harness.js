@@ -1682,6 +1682,47 @@
     a.snap("retried");
   };
 
+  // Editing a Space's conversations: rename one (with the version read first; the open conversation's
+  // bar follows), then delete the open one, which leaves it.
+  SCENARIOS.spaces_conversations_edit = async function (a) {
+    await a.wait(60);
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);                     // Open "Plan".
+    await until(function () { return !$("space-bar").hidden; }, "space bar");
+    a.respondWith(spacesList([{ id: SPACE_A, name: "Research", conversation_count: 2, updated_at: AT }]),
+                  conversationsList([{ id: CONV_A, title: "Plan", message_count: 2, last_message_at: AT, updated_at: AT },
+                                     { id: CONV_B, title: "Notes", message_count: 0, last_message_at: null,
+                                       updated_at: AT }]));
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await clickManage("Edit conversations");
+    steps.push({ label: "editing", rows: Array.prototype.map.call(
+      document.querySelectorAll("#spaces-list .spaces-edit-row .spaces-item-name"), function (r) { return text(r); }) });
+    a.respondWith({ status: 200, json: { conversation: { id: CONV_A, title: "Plan", version: 2 }, messages: [],
+                                         next_before_seq: null } },
+                  { status: 200, json: { conversation: { id: CONV_A, title: "Launch plan", version: 3 } } });
+    document.querySelectorAll("#spaces-list .spaces-edit-row")[0].querySelector("button").click();
+    var field = await until(function () { return document.getElementById("spaces-rename-conversation"); }, "rename");
+    field.value = "Launch plan";
+    field.form.requestSubmit();
+    await until(function () { return text($("spaces-status")) === "Renamed."; }, "renamed");
+    steps.push({ label: "renamed", bar: text($("space-bar-title")), rows: Array.prototype.map.call(
+      document.querySelectorAll("#spaces-list .spaces-edit-row .spaces-item-name"), function (r) { return text(r); }) });
+    a.respondWith({ status: 204, body: "" });
+    document.querySelectorAll("#spaces-list .spaces-edit-row")[0].querySelectorAll("button")[1].click();
+    var confirmDelete = await until(function () {
+      return Array.prototype.filter.call(document.querySelectorAll("#spaces-list button"),
+                                         function (b) { return text(b) === "Delete conversation"; })[0];
+    }, "confirm delete");
+    confirmDelete.click();
+    await until(function () { return text($("spaces-status")) === "Conversation deleted."; }, "deleted");
+    steps.push({ label: "deleted", barShown: !$("space-bar").hidden, rows: Array.prototype.map.call(
+      document.querySelectorAll("#spaces-list .spaces-edit-row .spaces-item-name"), function (r) { return text(r); }) });
+    a.snap("deleted-page");
+  };
+
   // A long saved conversation: earlier messages load above, each turn keeps Copy, the cursor moves on.
   SCENARIOS.spaces_earlier_messages = async function (a) {
     await a.wait(60);

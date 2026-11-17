@@ -314,6 +314,20 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
 .spaces-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .spaces-confirm { flex: 1 1 100%; margin: 0 0 4px; font-size: 14px; line-height: 1.45; color: var(--ink); }
 .spaces-earlier-row { display: flex; justify-content: center; margin: 4px 0 12px; }
+.spaces-edit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-height: 44px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  font: 600 13px/1.3 var(--font-ui);
+}
+.spaces-edit-row .spaces-item-name { flex: 1 1 0; min-width: 0; }
+.spaces-edit-row .spaces-confirm { flex: 1 1 100%; margin: 0; font-weight: 500; }
+.spaces-edit-inline { flex: 1 1 100%; }
 
 /* Plain status text, not a control: what is true of this conversation now. */
 .session-status {

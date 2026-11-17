@@ -35,8 +35,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-spaces4"
-CSS_CACHE_KEY = "20261117-spaces3"
+CACHE_KEY = "20261117-spaces5"
+CSS_CACHE_KEY = "20261117-spaces5"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -214,7 +214,8 @@ SCENARIOS = (
     + list(FILE_SCENARIOS)
     + list(REASONING_SCENARIOS)
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
-       "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes"]
+       "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes",
+       "spaces_conversations_edit"]
 )
 
 
@@ -1239,9 +1240,22 @@ def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_re
         ("POST", f"/api/spaces/{SPACE_B}/conversations", {})]
 
 
+def test_a_conversation_is_renamed_with_its_version_and_deleting_the_open_one_leaves_it(browser_results):
+    result = scenario(browser_results, "spaces_conversations_edit")
+    assert step(result, "editing")["rows"] == ["Plan", "Notes"]
+    renamed = step(result, "renamed")
+    assert renamed["rows"] == ["Launch plan", "Notes"] and renamed["bar"] == " · Launch plan"
+    deleted = step(result, "deleted")
+    assert deleted["rows"] == ["Notes"] and not deleted["barShown"]
+    writes = [(m, u, b) for m, u, b in spaces_requests(result) if m in ("PATCH", "DELETE")]
+    assert writes == [
+        ("PATCH", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}", {"title": "Launch plan", "expected_version": 2}),
+        ("DELETE", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}", None)]
+
+
 def test_a_space_is_renamed_given_instructions_and_deleted_with_its_version(browser_results):
     result = scenario(browser_results, "spaces_manage")
-    assert step(result, "space-view")["buttons"] == ["Rename", "Instructions", "Delete"]
+    assert step(result, "space-view")["buttons"] == ["Rename", "Instructions", "Delete", "Edit conversations"]
     renaming = step(result, "renaming")
     assert renaming["field"] == "Research" and renaming["buttons"] == ["Save", "Cancel"]
     renamed = step(result, "renamed")
