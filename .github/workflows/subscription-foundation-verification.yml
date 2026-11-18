@@ -530,6 +530,7 @@ jobs:
           tests/test_staging_files.py
           tests/test_staging_preflight.py
           tests/test_local_staging.py
+          tests/test_local_reset.py
           tests/test_spaces_v1_postgres.py
           tests/test_v1_billing_usage_quota_postgres.py
           tests/test_owner_report_postgres.py
@@ -547,7 +548,7 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 668, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 697, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       # The staging runbook's own commands (deploy/staging/README.md, steps 4, 7 and 8), as root on the

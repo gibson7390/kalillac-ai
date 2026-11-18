@@ -10,6 +10,12 @@ Run as root (in WSL: `wsl -u root`), with the repository's Python environment, f
     python3 -B tools/local_staging.py refresh-web  after `npm run build` in site/: rebuild the web root (front server only)
     python3 -B tools/local_staging.py reset --yes  delete local staging entirely (its database and files only)
 
+The root (default /var/lib/kalillac-local-staging, or KALILLAC_LOCAL_ROOT) is checked before anything else:
+an absolute path with no symlink in it, named kalillac-local-staging (optionally -suffix), in a parent only
+root can write. Setup creates it with an ownership marker (.kalillac-local-staging: this deployment, this
+path and this directory's device and inode); every other command, and above all `reset`, refuses a root
+without that exact marker, so it can never stop processes in, or delete, any other directory.
+
 Then open http://localhost:8010 (the local panel: http://localhost:8010/__local__/).
 
 What it is: the real application on a real PostgreSQL 16 cluster of its own (port 55433, data under
@@ -27,6 +33,7 @@ It never touches production, any other worktree's data, or the test suites' disp
 from __future__ import annotations
 
 import argparse
+import errno
 import grp
 import json
 import os
@@ -36,6 +43,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -46,7 +54,11 @@ CANDIDATE = Path(__file__).resolve().parents[1]
 REPO = CANDIDATE.parent
 sys.path[:0] = [str(CANDIDATE), str(Path(__file__).resolve().parent)]
 
-ROOT = Path(os.environ.get("KALILLAC_LOCAL_ROOT", "/var/lib/kalillac-local-staging"))
+DEFAULT_ROOT = Path("/var/lib/kalillac-local-staging")
+ROOT = DEFAULT_ROOT                       # Replaced in main() by the checked root (owned_root).
+ROOT_OWNER = 0                            # The uid that owns the root and its marker (tests use their own).
+MARKER = ".kalillac-local-staging"
+ROOT_NAME = re.compile(r"kalillac-local-staging(-[a-z0-9]{1,24})?")
 WEB_PORT, APP_PORT, PG_PORT = 8010, 8011, 55433
 ORIGIN = f"http://localhost:{WEB_PORT}"
 DEPLOYMENT = "kalillac-local-staging"
@@ -68,6 +80,126 @@ def say(text):
 def fail(text):
     print("local staging: " + text, file=sys.stderr, flush=True)
     sys.exit(2)
+
+
+# --- the root: checked before any command touches anything --------------------------------------------
+
+class UnsafeRoot(Exception):
+    """The configured root is not local staging's own directory."""
+
+
+def checked_path(raw) -> Path:
+    """The root's path alone: absolute, already normal, named for local staging, no symlink anywhere in it,
+    and in a parent only its owner can write (so nothing can be swapped in beneath it)."""
+    raw = str(raw or "")
+    if not raw.startswith("/") or os.path.normpath(raw) != raw or "\0" in raw:
+        raise UnsafeRoot(f"the root must be an absolute, normal path: {raw!r}")
+    path = Path(raw)
+    if not ROOT_NAME.fullmatch(path.name):
+        raise UnsafeRoot(f"the root must be a directory named kalillac-local-staging, not {path}")
+    if os.path.realpath(path) != raw:
+        raise UnsafeRoot(f"the root must not be, or be inside, a symlink: {path}")
+    parent = os.stat(path.parent) if os.path.isdir(path.parent) else None
+    if parent is None or parent.st_uid != ROOT_OWNER or parent.st_mode & 0o022:
+        raise UnsafeRoot(f"the root's parent must exist, belong to uid {ROOT_OWNER} and not be writable by others: "
+                         f"{path.parent}")
+    return path
+
+
+def _expected_marker(path: Path, st):
+    return {"deployment": DEPLOYMENT, "root": str(path), "device": st.st_dev, "inode": st.st_ino}
+
+
+def _directory(path: Path):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        raise UnsafeRoot(f"the root is not a directory: {path}")
+    if st.st_uid != ROOT_OWNER or st.st_mode & 0o022:
+        raise UnsafeRoot(f"the root must belong to uid {ROOT_OWNER} and not be writable by others: {path}")
+    return st
+
+
+def read_marker(path: Path):
+    """The marker's contents, read without following a symlink, or None if there is none."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            marker = os.open(MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise UnsafeRoot(f"the ownership marker is a symlink: {path / MARKER}") from None
+            raise
+        try:
+            st = os.fstat(marker)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != ROOT_OWNER or st.st_mode & 0o022 or st.st_size > 4096:
+                raise UnsafeRoot(f"the ownership marker is not a file of uid {ROOT_OWNER}: {path / MARKER}")
+            data = os.read(marker, 4097)
+        finally:
+            os.close(marker)
+    finally:
+        os.close(fd)
+    try:
+        return json.loads(data)
+    except ValueError:
+        raise UnsafeRoot(f"the ownership marker is unreadable: {path / MARKER}") from None
+
+
+def write_marker(path: Path):
+    st = _directory(path)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        marker = os.open(MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        try:
+            os.write(marker, json.dumps(_expected_marker(path, st)).encode())
+        finally:
+            os.close(marker)
+    finally:
+        os.close(fd)
+
+
+def _legacy(path: Path):
+    """A root set up before the marker existed: only the default path, holding this deployment's record."""
+    if path != DEFAULT_ROOT:
+        return False
+    try:
+        fd = os.open(path / "local.json", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as record:
+            return json.load(record).get("deployment") == DEPLOYMENT
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def owned_root(raw, *, create=False, adopt=False):
+    """The checked root, proven to be local staging's own directory by its marker.
+
+    create: setup may make the directory, or take an empty one, and mark it.
+    adopt: a non-destructive command may mark a root set up before markers existed (the default path only).
+    Returns the path, or None when it does not exist (and create is False)."""
+    path = checked_path(raw)
+    st = _directory(path)
+    if st is None:
+        if not create:
+            return None
+        os.mkdir(path, 0o755)
+        if os.geteuid() == 0:
+            os.chown(path, ROOT_OWNER, 0)
+        os.chmod(path, 0o755)
+        write_marker(path)
+        return owned_root(raw)
+    marker = read_marker(path)
+    if marker is None:
+        if (create and not os.listdir(path)) or (adopt and _legacy(path)):
+            write_marker(path)
+            return owned_root(raw)
+        raise UnsafeRoot(f"{path} has no local staging ownership marker ({MARKER}); refusing to use it")
+    if marker != _expected_marker(path, st):
+        raise UnsafeRoot(f"{path}'s ownership marker belongs to another directory or deployment; refusing to use it")
+    return path
 
 
 # --- the service identity and paths -------------------------------------------------------------------
@@ -144,8 +276,6 @@ def setup(args):
     if (ROOT / "local.json").exists():
         fail(f"already set up ({ROOT}); `reset --yes` first to start again")
     bindir = pg_bin(home)
-    ROOT.mkdir(mode=0o755, exist_ok=True)
-    os.chown(ROOT, 0, 0)
     for name, owner, mode in (("pg", uid, 0o700), ("pgsock", uid, 0o700), ("admin", 0, 0o700), ("credentials", uid, 0o500),
                               ("state", uid, 0o700), ("secrets", 0, 0o700), ("run", 0, 0o755)):
         p[name].mkdir(mode=mode, exist_ok=True)
@@ -270,6 +400,11 @@ def build_webroot(p):
     sys.path.insert(0, str(REPO / "deploy" / "staging"))
     import build_webroot as builder
     builder.build(site, REPO / "frontend", p["webroot"], ["accounts", "files", "images", "reasoning", "spaces"])
+    # Copied from a Windows drive every mode is 0777: the web root is readable, and writable only by its owner.
+    for folder, _dirs, files in os.walk(p["webroot"]):
+        os.chmod(folder, 0o755)
+        for name in files:
+            os.chmod(os.path.join(folder, name), 0o644, follow_symlinks=False)
 
 
 def write_settings(p, sha, stripe):
@@ -333,6 +468,18 @@ def _alive(pidfile: Path):
         return None
 
 
+SCRIPTS = {"app": "tools/local_staging_app.py", "web": "tools/local_staging_web.py"}
+
+
+def _ours(pid, name):
+    """True only if pid is local staging's own process of that name, leading its own process group."""
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        return SCRIPTS[name].encode() in argv and os.getpgid(pid) == pid
+    except (OSError, KeyError):
+        return False
+
+
 def _spawn(name, argv, p, uid, gid, env):
     log = open(p["state"] / f"{name}.log", "ab")
     os.chown(p["state"] / f"{name}.log", uid, gid)
@@ -385,7 +532,7 @@ def stop(args):
     p = paths()
     for name in ("web", "app"):
         pid = _alive(p["run"] / f"{name}.pid")
-        if pid:
+        if pid and _ours(pid, name):
             os.killpg(pid, signal.SIGTERM)
             for _ in range(60):
                 if not _alive(p["run"] / f"{name}.pid"):
@@ -537,7 +684,7 @@ def refresh_web(args):
     uid, gid, group, home = identity()
     p = paths()
     pid = _alive(p["run"] / "web.pid")
-    if pid:
+    if pid and _ours(pid, "web"):
         os.killpg(pid, signal.SIGTERM)
         for _ in range(40):
             if not _alive(p["run"] / "web.pid"):
@@ -552,14 +699,26 @@ def refresh_web(args):
 def reset(args):
     if not args.yes:
         fail("this deletes local staging's database and files; repeat with --yes")
-    if ROOT.exists():
-        stop(None)
-        shutil.rmtree(ROOT)
+    if not os.path.lexists(ROOT):
+        say(f"nothing to remove: {ROOT} does not exist")
+        return
+    stop(None)
+    try:
+        owned_root(str(ROOT))             # Still the marked directory after stopping, immediately before deleting.
+    except UnsafeRoot as error:
+        fail(f"{error}. Local staging was stopped; nothing was deleted.")
+    if not shutil.rmtree.avoids_symlink_attacks:
+        fail("this platform's recursive delete can follow symlinks; remove the directory by hand")
+    shutil.rmtree(ROOT)
     say(f"removed {ROOT}")
 
 
+def _running_as_root():
+    return sys.platform == "linux" and os.geteuid() == 0
+
+
 def main(argv=None):
-    if sys.platform != "linux" or os.geteuid() != 0:
+    if not _running_as_root():
         fail("run as root on Linux or WSL (wsl -u root ...)")
     parser = argparse.ArgumentParser(prog="local_staging.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -573,6 +732,14 @@ def main(argv=None):
     remove.add_argument("--yes", action="store_true")
     remove.set_defaults(handler=reset)
     args = parser.parse_args(argv)
+    global ROOT
+    raw = os.environ.get("KALILLAC_LOCAL_ROOT", str(DEFAULT_ROOT))
+    try:
+        # Setup may create or mark an empty directory; reset never adopts an unmarked one.
+        root = owned_root(raw, create=args.command == "setup", adopt=args.command not in ("setup", "reset"))
+    except UnsafeRoot as error:
+        fail(f"{error}. Nothing was stopped or deleted.")
+    ROOT = root or Path(raw)
     args.handler(args)
     return 0
 

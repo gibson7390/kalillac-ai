@@ -92,5 +92,11 @@ Resend. Those need the real keys above (or the server staging run).
 ## Reset
 
 `Kalillac-Local.cmd reset --yes` deletes local staging's database and files (only
-`/var/lib/kalillac-local-staging`); `setup` builds it again. Chinese, Japanese and Korean PDFs need the large
+`/var/lib/kalillac-local-staging`); `setup` builds it again. Every command first checks that the root is
+local staging's own: an absolute path named `kalillac-local-staging` with no symlink in it, in a parent only
+root can write, holding the ownership marker `.kalillac-local-staging` that setup writes (this deployment, the
+path, the directory's device and inode). Anything else, including another directory given in
+`KALILLAC_LOCAL_ROOT`, is refused before any process is stopped or anything is deleted. `stop` signals only
+local staging's own application and front server. A root set up before the marker existed is marked by the next
+`status` or `start` (the default path only); `reset` never marks one. Chinese, Japanese and Korean PDFs need the large
 CJK fonts once: in WSL, `cd candidate && ~/kf15/bin/python tools/fetch_document_fonts.py`.
