@@ -257,6 +257,48 @@ CI: file generation 44368926553 (1,054 passed), subscription 44368936581 (every 
 **Nothing is resolved by this integration.** Codex verified `78b7a05`; the merge is new code. Every pending
 audit (D3 through the allowance correction, sections 1–13) stays open and now applies to this combination too.
 
+## 15. Data lifecycle: expired files and usage records (`feat/data-lifecycle` at `c0beeb9`, docs `1057222`)
+
+From `release/staging-v1` `fed4a6c`. Not merged into the release. Nothing is scheduled and no environment ran it.
+
+* `kalillac_files/retention.py` and `tools/data_lifecycle.py files`: delete a file once it has been
+  expired for an explicit period plus a one-hour margin, plus abandoned upload temporaries and orphaned data.
+  It enters only `[0-9a-f]{32}` owner folders and FileStore's own names. Each file is decided from its own
+  record in its own folder. On POSIX, every stat and unlink is relative to a folder opened `O_NOFOLLOW`. Data
+  is deleted before its record, unreadable records are never deleted, and a run lock (`.retention.lock`, flock)
+  keeps runs apart. Nothing is deleted without `--apply --confirm-deployment <KALILLAC_DEPLOYMENT_ID>`, there
+  is no default period, and the output is counts only.
+* `FileStore.purge` now uses these rules. **Behaviour change worth checking:** it used to delete every
+  `*.tmp`, uploads in progress included.
+* **A race found and fixed while testing**: a cleanup whose expiry clock ran ahead judged a fresh upload
+  (data written, record not yet) as orphaned. Ages on disk now use the real clock; regression test
+  `test_an_upload_caught_between_its_data_and_its_record_survives_any_expiry_clock`.
+* `kalillac_accounts/usage_retention.py` and `tools/data_lifecycle.py usage`: delete
+  `account_usage_daily` and `account_usage_slots` rows older than an explicit number of days (at least 8),
+  as the runtime login, by the database's UTC date, with `lock_timeout` 5 s and `statement_timeout` 60 s.
+* `docs/DATA-LIFECYCLE.md`: the data map, the erasure plan (not built; V1's security tables reference
+  `users` with no `ON DELETE`, so a tombstone is proposed), what is buildable now and what needs the owner.
+  It also records a **gap: no customer page lists or deletes stored files** (the API does both).
+
+Questions for Codex:
+1. Can any interleaving of `FileStore.save`/`read`/`delete` with a cleanup run delete live data, or leave a
+   record pointing at deleted data? (On Windows an open file cannot be unlinked; that run leaves it for the
+   next. The exactly-once deletion count is asserted on POSIX only.)
+2. Is a one-hour stale-temporary age safe against the slowest legitimate upload (10 MiB)?
+3. Should the usage cleanup run as R (today), or as a narrower function owned by S/P?
+
+Tests: `test_file_retention.py` 24 on a real filesystem (threshold, dry run, isolation across accounts
+and foreign names, symlinks, interrupted runs, temporaries, orphans, unreadable records, repeated runs,
+threads and separate processes with uploads and reads, the command); `test_data_lifecycle_postgres.py`
+9 on real PostgreSQL under the final grants (exactly the old rows of two accounts deleted as the runtime
+login with no account table written, dry run, repeated runs, the owner report still reading its week, the
+8-day floor and malformed periods refused, four concurrent cleanups racing today's quota writes with each
+old row deleted once, the command's confirmation and counts-only output). CI on `c0beeb9`: file generation 44406198275
+(1,078 passed), subscription 44406206211 (both jobs green; the PostgreSQL job ran its pinned 653).
+
+**Nothing here resolves an audit finding.** The legal review's gaps 1 and 2 are mechanisms only until the
+owner sets D-9 and D-11 and approves a schedule per environment.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
