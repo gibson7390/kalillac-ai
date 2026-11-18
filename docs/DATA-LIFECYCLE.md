@@ -110,13 +110,17 @@ command's confirmation).
 | Expired sessions and used reset links (rows) | Could be built now as a P authority function (rows are V1's); needs D-11 for how long expired rows are kept for security review |
 | Security events retention | Needs D-11 and the tombstone decision (section 3.5); V1 authority change, Codex |
 | Account erasure | Plan above; needs D-4, D-8, D-11 and the tombstone decision before any irreversible code |
+| Customer files page (list, download, delete) | **Gap found 2026-11-18.** The API lists and deletes files, but no customer page does, so files from a closed temporary chat are out of reach until they expire. Buildable now on the existing API and per-account isolation; whether it is required for launch is the owner's call |
 | Backups | Needs the owner: whether and where backups exist, and their retention [D-11] |
 | Scheduling | A systemd timer per environment, only after the periods are decided; never on production without the owner's approval |
 
 ## 5. Customer-facing disclosure: files from temporary conversations
 
 The fact: a file attached to, or created in, a **temporary** conversation by a signed-in Premium customer
-is stored in the account's files and kept for 30 days, although the conversation is not saved. The exact
-changes proposed for review are on `fix/files-storage-disclosure` (not merged): the chat's status
-tooltip and the attach control's note, the account pages' notes, and the corresponding text in the
-legal drafts. Production's Privacy Policy and Terms are unchanged.
+is stored in the account's files and stays available for 30 days, although the conversation is not saved.
+The exact changes proposed for review are on `fix/files-storage-disclosure` (not merged), with their
+before and after text in `docs/FILES-STORAGE-DISCLOSURE.md` there: the chat's session description,
+an attachment note, and the account pages' notes. The copy says files are stored and *stay available*
+for 30 days, never that they are deleted then, because the deletion period is D-9. The legal drafts on
+`docs/legal-review-v1` (1ee7cf0) mark their "you can delete a file" sentences `[FILES-PAGE]` until a
+customer files page exists. Production's Privacy Policy and Terms are unchanged.
