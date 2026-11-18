@@ -15170,6 +15170,38 @@ def _file_failure(error):
     return None
 
 
+def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_confirmations):
+    """The /api/chat file handoff for a FileService and the file package's request checks (passed in,
+    so the application names nothing of that package outside its block)."""
+    async def _file_chat_handoff(request, req, history):
+        """/api/chat: a message that asks for a file, or carries attachments, from an account with file
+        access goes to the file assistant. Anything else returns None and the ordinary chat answers."""
+        attached = req.file_ids if req.file_ids is not None else []
+        if type(attached) is not list:
+            return JSONResponse(status_code=422, content={"error": "invalid_request"})
+        if not wants_file(req.message, attached):
+            return None
+        account, refusal = await service.account(request)
+        if refusal is not None:
+            # Without access, attachments cannot be honoured; a plain request goes to the ordinary chat.
+            return refusal if attached else None
+        # The chat's own limits allow longer turns than the assistant reads; it sees the recent ones, clipped.
+        turns = [{"role": turn["role"], "content": str(turn["content"])[:20_000]} for turn in history[-20:]
+                 if turn.get("role") in ("user", "assistant")]
+        confirmations = req.file_confirmations if req.file_confirmations is not None else []
+        if not valid_assist_request(req.message, turns, attached) or not valid_confirmations(confirmations):
+            return JSONResponse(status_code=422, content={"error": "invalid_request"})
+        session_id = resolve_session_id(req.session_id)   # May raise SessionEnded, handled by the caller.
+        content, refusal = await service.assist(account, req.message, turns, attached, confirmations)
+        if refusal is not None:
+            return refusal
+        reply = {"reply": content["reply"], "session_id": session_id, "files": content["files"]}
+        if content.get("confirmations"):
+            reply["confirmations"] = content["confirmations"]
+        return JSONResponse(content=reply)
+    return _file_chat_handoff
+
+
 _file_chat_handoff = None   # Set below only when files are enabled; /api/chat is unchanged while it is None.
 if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
     if os.getenv("KALILLAC_ACCOUNTS_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
@@ -15247,32 +15279,8 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
     )
     api.include_router(build_files_router(service=_file_service))
 
-    async def _file_chat_handoff(request, req, history):
-        """/api/chat: a message that asks for a file, or carries attachments, from an account with file
-        access goes to the file assistant. Anything else returns None and the ordinary chat answers."""
-        attached = req.file_ids if req.file_ids is not None else []
-        if type(attached) is not list:
-            return JSONResponse(status_code=422, content={"error": "invalid_request"})
-        if not _wants_file(req.message, attached):
-            return None
-        account, refusal = await _file_service.account(request)
-        if refusal is not None:
-            # Without access, attachments cannot be honoured; a plain request goes to the ordinary chat.
-            return refusal if attached else None
-        # The chat's own limits allow longer turns than the assistant reads; it sees the recent ones, clipped.
-        turns = [{"role": turn["role"], "content": str(turn["content"])[:20_000]} for turn in history[-20:]
-                 if turn.get("role") in ("user", "assistant")]
-        confirmations = req.file_confirmations if req.file_confirmations is not None else []
-        if not _valid_assist_request(req.message, turns, attached) or not _valid_confirmations(confirmations):
-            return JSONResponse(status_code=422, content={"error": "invalid_request"})
-        session_id = resolve_session_id(req.session_id)   # May raise SessionEnded, handled by the caller.
-        content, refusal = await _file_service.assist(account, req.message, turns, attached, confirmations)
-        if refusal is not None:
-            return refusal
-        reply = {"reply": content["reply"], "session_id": session_id, "files": content["files"]}
-        if content.get("confirmations"):
-            reply["confirmations"] = content["confirmations"]
-        return JSONResponse(content=reply)
+    _file_chat_handoff = _build_file_chat_handoff(_file_service, _wants_file, _valid_assist_request,
+                                                  _valid_confirmations)
 
     async def _purge_expired_files():
         from starlette.concurrency import run_in_threadpool
