@@ -28,6 +28,7 @@ is applied at the single OpenAI seam, before the financial reservation is
 priced, so a mode's worst-case cost is reserved like any other attempt and
 counts toward the request's dollar ceiling.
 """
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -197,6 +198,31 @@ def begin(requested, paid=False):
 
 def end(token):
     if token is not None:
+        _SELECTED.reset(token)
+
+
+def resolve(requested, paid=False):
+    """The Selection for a request that binds it elsewhere (bound()), or None for the default mode or
+    while modes are off. Raises ReasoningModeRefused exactly as begin() does."""
+    config = CONFIG
+    return None if config is None else config.resolve(requested, paid)
+
+
+def selected():
+    """This context's bound Selection (None: the default mode, or modes off)."""
+    return _SELECTED.get()
+
+
+@contextmanager
+def bound(selection):
+    """Bind a Selection already resolved for this request, in another context: the worker thread
+    that makes the request's model calls."""
+    if selection is not None and type(selection) is not Selection:
+        raise TypeError("selection must be a Selection or None")
+    token = _SELECTED.set(selection)
+    try:
+        yield
+    finally:
         _SELECTED.reset(token)
 
 

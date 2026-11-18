@@ -15205,9 +15205,16 @@ async def _counted_file_response(request, account, request_chars, produce):
 def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_confirmations):
     """The /api/chat file handoff for a FileService and the file package's request checks (passed in,
     so the application names nothing of that package outside its block)."""
-    async def _file_chat_handoff(request, req, history):
+    async def _file_chat_handoff(request, req, history, session):
         """/api/chat: a message that asks for a file, or carries attachments, from an account with file
-        access goes to the file assistant. Anything else returns None and the ordinary chat answers."""
+        access goes to the file assistant. Anything else returns None and the ordinary chat answers.
+
+        Called after the chat has resolved the request's reasoning mode, which it carries into the worker
+        thread. A request that is handled here is registered as work of its chat session (session.work,
+        released and checked by the chat route as for any chat): End & erase marks it ended, cancels its
+        request budget, the assistant stops before its next model call or tool, and the late result is
+        replaced by session_ended. Files already stored stay in the account (they are the account's, not
+        the conversation's)."""
         attached = req.file_ids if req.file_ids is not None else []
         if type(attached) is not list:
             return JSONResponse(status_code=422, content={"error": "invalid_request"})
@@ -15223,14 +15230,33 @@ def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_co
         confirmations = req.file_confirmations if req.file_confirmations is not None else []
         if not valid_assist_request(req.message, turns, attached) or not valid_confirmations(confirmations):
             return JSONResponse(status_code=422, content={"error": "invalid_request"})
-        session_id = resolve_session_id(req.session_id)   # May raise SessionEnded, handled by the caller.
+        # Registered under the effective session id; may raise SessionEnded, handled by the caller.
+        session_id, session.work = _begin_session_work(req.session_id, None)
+        work, selection = session.work, reasoning_modes.selected()
+
+        @_contextlib.contextmanager
+        def scope():
+            """In the worker thread, inside the file request's controls: this request's reasoning mode,
+            and its request budget linked to the session so End & erase cancels it."""
+            with reasoning_modes.bound(selection):
+                budget = current_budget()
+                if budget is not None:
+                    with SESSION_LOCK:
+                        work.budget = budget
+                        ended = work.ended
+                    if ended:
+                        budget.cancel()
+                yield
         # One response against the daily allowance, admitted before the assistant runs; /api/chat's own
         # request wrapper completes and settles it on success and releases it otherwise.
         refusal = await _admit_file_response(
             request, account, len(req.message) + sum(len(turn["content"]) for turn in turns))
         if refusal is not None:
             return refusal
-        content, refusal = await service.assist(account, req.message, turns, attached, confirmations)
+        if work.ended:
+            return _session_ended_response()
+        content, refusal = await service.assist(account, req.message, turns, attached, confirmations,
+                                                scope=scope, stopped=lambda: work.ended)
         if refusal is not None:
             return refusal
         reply = {"reply": content["reply"], "session_id": session_id, "files": content["files"]}
@@ -15292,8 +15318,19 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
 
     from kalillac_files.assistant import MAX_TOOL_ROUNDS as _FILE_MAX_TOOL_ROUNDS
     from kalillac_files.intent import wants_file as _wants_file
-    from kalillac_files.router import (FileService, valid_assist_request as _valid_assist_request,
+    from kalillac_files.router import (FileService, RequestRefused as _FileRequestRefused,
+                                       valid_assist_request as _valid_assist_request,
                                        valid_confirmations as _valid_confirmations)
+
+    def _file_reasoning(account, requested):
+        """/api/files/assist's reasoning_mode, with the chat's rule: paid modes only with the V1-verified
+        paid entitlement of this request's account. Returns the binding for the worker thread."""
+        verified = getattr(account, "verified", None)
+        try:
+            selection = reasoning_modes.resolve(requested, paid=verified is not None and verified.paid)
+        except reasoning_modes.ReasoningModeRefused as refused:
+            raise _FileRequestRefused(refused.status, refused.code) from None
+        return lambda: reasoning_modes.bound(selection)
     if FILE_REQUEST_MODEL_ATTEMPTS != _FILE_MAX_TOOL_ROUNDS + 1:
         raise RuntimeError("FILE_REQUEST_MODEL_ATTEMPTS must be the file assistant's MAX_TOOL_ROUNDS + 1.")
 
@@ -15315,6 +15352,7 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
         failure_status=_file_failure,
         images=_files_images,
         count_response=_counted_file_response,
+        reasoning=_file_reasoning if reasoning_modes.CONFIG is not None else None,
     )
     api.include_router(build_files_router(service=_file_service))
 
@@ -16151,15 +16189,6 @@ async def _api_chat_response(request):
         # corrupt Kalillac's own prior answers, so it is deliberately not done.
         return JSONResponse(status_code=422, content={"error": "history_too_long"})
 
-    # Files (default off): a file request from an account with file access goes to the file assistant.
-    if _file_chat_handoff is not None:
-        try:
-            handed = await _file_chat_handoff(request, req, history)
-        except SessionEnded:
-            return _session_ended_response()
-        if handed is not None:
-            return handed
-
     # session.work is this request's registration under its effective session
     # id, set by the dispatch the moment the id is resolved. The handler's own
     # claim on it is released here, exactly once; a worker that outlives the
@@ -16184,7 +16213,12 @@ async def _api_chat_response(request):
 
     session = SimpleNamespace(work=None)
     try:
-        response = await _api_chat_dispatch(request, req, history, session)
+        # Files (default off): a file request from an account with file access goes to the file
+        # assistant, after the mode check above and in the same session lifecycle as any chat.
+        handed = None
+        if _file_chat_handoff is not None:
+            handed = await _file_chat_handoff(request, req, history, session)
+        response = handed if handed is not None else await _api_chat_dispatch(request, req, history, session)
     except SessionEnded:
         response = _session_ended_response()
     finally:

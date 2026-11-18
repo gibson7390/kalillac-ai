@@ -12,8 +12,8 @@ gets here.
     GET    /api/files              the account's files
     GET    /api/files/{file_id}    download (attachment, never rendered by the browser)
     DELETE /api/files/{file_id}
-    POST   /api/files/assist       {"message", "history"?, "file_ids"?}: the file assistant makes or
-                                   edits files; the reply lists them
+    POST   /api/files/assist       {"message", "history"?, "file_ids"?, "confirmations"?, "reasoning_mode"?}:
+                                   the file assistant makes or edits files; the reply lists them
 
 Responses never contain a path, an owner id or document text beyond what the customer asked for;
 errors are stable codes.
@@ -49,6 +49,14 @@ MAX_MESSAGE = 20_000
 MAX_HISTORY = 20
 MAX_ATTACHED = 5
 _NO_STORE = {"Cache-Control": "no-store", "Vary": "Cookie"}
+
+
+class RequestRefused(Exception):
+    """A check the application supplies (the reasoning mode) refused the request before any work."""
+
+    def __init__(self, status, code):
+        super().__init__(code)
+        self.status, self.code = status, code
 
 
 @dataclass(frozen=True)
@@ -109,20 +117,25 @@ class FileService:
                  worker_module=None, request_scope: Callable[[FileAccount], Any] | None = None,
                  failure_status: Callable[[BaseException], tuple[int, str] | None] | None = None,
                  images: bool = False,
-                 count_response: Callable[..., Awaitable[Any]] | None = None):
+                 count_response: Callable[..., Awaitable[Any]] | None = None,
+                 reasoning: Callable[[FileAccount, object], Callable[[], Any]] | None = None):
         """request_scope(account) is a context manager entered in the worker thread around one assistant
         run (the application's request budget and provider controls); failure_status maps an exception
         those controls raise to (status, stable code). images=True accepts image uploads (I1): each is
         re-encoded clean by the worker (kalillac_files.images) and only that copy is stored.
         count_response(request, account, request_chars, produce), when given, runs one assistant
         response (produce()) under the customer's daily response allowance: admitted before any model
-        work, counted once when it succeeds, released when it fails."""
+        work, counted once when it succeeds, released when it fails.
+        reasoning(account, requested mode) checks /api/files/assist's reasoning_mode before any work and
+        returns a context-manager factory that binds it in the worker thread, or raises RequestRefused;
+        None while reasoning modes are off (the value is then ignored, as in the chat)."""
         if required_tier not in ("paid", "any"):
             raise ValueError("required_tier must be 'paid' or 'any'")
         if type(images) is not bool:
             raise ValueError("images must be a bool")
         self.images = images
         self.count_response = count_response
+        self.reasoning = reasoning
         from . import worker as default_worker
         self.store, self.authenticate, self.call_model = store, authenticate, call_model
         self.request_scope = request_scope or (lambda account: nullcontext())
@@ -176,10 +189,13 @@ class FileService:
             return None, _error(403, "files_require_premium")
         return found, None
 
-    async def assist(self, account, message, history, file_ids, confirmations=()):
+    async def assist(self, account, message, history, file_ids, confirmations=(), *, scope=None, stopped=None):
         """Run the file assistant: ({"reply", "files"[, "confirmations"]}, None) or (None, the refusal
-        response). confirmations: exact-edit confirmation ids the customer confirmed in the product."""
-        from .assistant import AssistantError, FileRequest, run_file_assistant
+        response). confirmations: exact-edit confirmation ids the customer confirmed in the product.
+        scope(): a context manager entered in the worker thread inside request_scope (the request's
+        reasoning mode and its chat session's cancellation). stopped(): True once the request's chat
+        session has ended; the assistant then does nothing more."""
+        from .assistant import AssistantError, AssistantStopped, FileRequest, run_file_assistant
         for file_id in file_ids:
             try:
                 await run_in_threadpool(self.store.record, account.owner, file_id)
@@ -192,11 +208,13 @@ class FileService:
                                        run_generate=self.worker.run_generate, run_outline=self.worker.run_outline,
                                        run_edit=self.worker.run_edit,
                                        claim=self._claimer(account.owner, confirmations),
-                                       offer=self._offer(account.owner))
+                                       offer=self._offer(account.owner), stopped=stopped)
             def run():
-                with self.request_scope(account):
+                with self.request_scope(account), (scope or nullcontext)():
                     return run_file_assistant(message, history, file_request, self.call_model)
             result = await run_in_threadpool(run)
+        except AssistantStopped:
+            return None, _error(499, "request_cancelled")
         except AssistantError as failed:
             return None, _error(502, failed.code)
         except Exception as failed:  # The model provider, a limit or a defect: a class name only, never content.
@@ -322,15 +340,23 @@ def build_files_router(*, service: FileService | None = None, **options) -> APIR
             payload = json.loads(body) if body else None
         except ValueError:
             payload = None
-        if not isinstance(payload, dict) or not set(payload) <= {"message", "history", "file_ids", "confirmations"}:
+        if not isinstance(payload, dict) or not set(payload) <= {"message", "history", "file_ids", "confirmations",
+                                                                 "reasoning_mode"}:
             return _error(422, "invalid_request")
         message, history, file_ids = payload.get("message"), payload.get("history", []), payload.get("file_ids", [])
         confirmations = payload.get("confirmations", [])
         if not valid_assist_request(message, history, file_ids) or not valid_confirmations(confirmations):
             return _error(422, "invalid_request")
+        # The reasoning mode, refused here before the allowance or any model work, as in the chat.
+        scope = None
+        if service.reasoning is not None:
+            try:
+                scope = service.reasoning(found, payload.get("reasoning_mode"))
+            except RequestRefused as refused:
+                return _error(refused.status, refused.code)
 
         async def produce():
-            content, refusal = await service.assist(found, message, history, file_ids, confirmations)
+            content, refusal = await service.assist(found, message, history, file_ids, confirmations, scope=scope)
             if refusal:
                 return refusal
             return JSONResponse(content=content, headers=_NO_STORE)
