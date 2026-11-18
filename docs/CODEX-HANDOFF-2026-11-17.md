@@ -192,6 +192,14 @@ Questions worth an independent answer: can any model-backed response path still 
 reservation (the handoff returns None only before admission)? Is the account match
 (`str(quota user) == file account owner`) sufficient in legacy mode as well as V1?
 
+## 12. E1b design, for the billing audit before anything is built
+
+`docs/E1B-BILLING-AUTHORITY-DESIGN.md` (branch `docs/e1b-billing-authority-design`, documentation only):
+every runtime write to `account_entitlements`, `account_billing`, `stripe_webhook_events` and
+`billing_cases` (W1 to W9), why the account lock the webhook holds across Stripe's retrieve cannot simply
+move to S, and a proposal (optimistic versioned single-call functions on S, operator paths through P). Its
+section 8 asks five questions whose answers decide the implementation; nothing is implemented until then.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image

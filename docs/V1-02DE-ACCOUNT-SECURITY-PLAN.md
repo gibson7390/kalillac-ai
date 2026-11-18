@@ -241,6 +241,8 @@ was tried first and rejected: legacy code and tests read the hash from detached 
 **E1b, entitlements and billing:** R's DML on `account_entitlements`, `account_billing`, billing cases
 and webhook records moves behind a reviewed billing path first (Milestone 3, blueprint B2), then the
 same pattern. Until then E1a leaves those grants exactly as they are, and the blueprint shows E1b open.
+The design, with the inventory of every runtime write and the questions for the billing audit, is
+`docs/E1B-BILLING-AUTHORITY-DESIGN.md` (2026-11-17; not implemented).
 
 **Rollback.** E1a is reversible only by the operator, inside the transition tool's own rollback
 command, while ingress is closed: the inverse grants are generated from the same table, applied in
