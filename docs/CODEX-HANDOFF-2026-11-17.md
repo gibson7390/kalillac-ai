@@ -225,6 +225,38 @@ CI: frontend 44261585705 on `32a0e77` (1,896 passed, 19 skipped) and 44261589782
 
 Not changed: any backend behaviour, any grant, any price, allowance or provider setting.
 
+## 14. The integrated staging release: `release/staging-v1` at `7d857c5aaa35b8877db1deb33286daceb3af5d9e`
+
+One branch for staging, authorized by the owner for this purpose only (no production branch, no deploy).
+Built from `feat/staging-preflight` at `e6aa7a5`:
+
+* `c832fcb`, merge of `docs/codex-reverification-6-closeout` (`c5291b4`, `856d9a5`, `0ea08a8`, `78b7a05`,
+  `67c1e25`): Codex's verified prose-total and atomic-confirmation corrections had forked at `53869d7` and were
+  never on the release line. One textual conflict (the file workflow's pinned counts), resolved from collection
+  on the merged tree. The merge applies exactly the correction's lines (router 30, assistant 20, editing 92)
+  and drops nothing; no code uses the removed `confirmed=`/`_presented`/`used` API.
+* **An interaction worth an independent look, now tested** (`test_files_router.py`,
+  `test_confirmed_edits_are_counted_once_and_a_failed_confirmed_attempt_is_not_charged`): the release line's
+  chat retry resends the same confirmation id. On `e6aa7a5`, after a provider failure that followed a stored
+  confirmed edit, that retry applied the exact edit a second time (the test fails there). Merged, the retry is
+  refused with a fresh offer, the failed attempt returns 502 through the allowance hook (uncharged) and each
+  request passes the hook once. Question: is any other path able to present a consumed id and get an effect?
+* `bdc153a`, `5b0a864`: the host assessment, the read-only host script and the edge configuration
+  (`deploy/staging/CLOUDFLARE-ACCESS.md`). Question: is the webhook exception (Access bypass for Stripe's
+  webhook addresses on the exact path, POST only at Nginx, Authenticated Origin Pulls with the zone's own
+  certificate) as narrow as claimed?
+* `7d857c5`: two checks this session's earlier work had missed, found by the release's CI: the finance
+  package guard now names the staging preflight (an operator command, like `finance_ledger_admin.py`), and
+  the anonymous-allowance workflow counts the Spaces phone test (645). Cherry-picked to `feat/staging-preflight`
+  as `fe7a43f`.
+
+CI: file generation 44368926553 (1,054 passed), subscription 44368936581 (every pinned set; PostgreSQL job 644; root verifiers: provisioned boot 16/16 starting the application from the staging template, registration bootstrap 27/27, protected files 26/26), frontend 44368944911 (1,897 passed, 19 skipped), provider ceilings 44368884844, anonymous allowance 44368891907 (645), safety 44368955624 (820), Spaces 44368966234 (1,249): all green on `7d857c5aaa35b8877db1deb33286daceb3af5d9e`. Local real PostgreSQL on the merge `c832fcb`: 25 of 25 (file allowance 7, Premium files, journey and Spaces 1 each, billing/usage/quota 10, Spaces under V1 4, lifecycle 1).
+
+`deploy-tooling-verification` fails on the release (44361179716) exactly as on `21258e5`, before this work (control run 44368695381): its `test_production_shape_passes` pins production's schema head `0015_finance_ledger`, and the release line has been past it since 0016 (2026-11-15). That is the production release tool correctly refusing a schema production does not have; the staging runbook does not use it. Not changed.
+
+**Nothing is resolved by this integration.** Codex verified `78b7a05`; the merge is new code. Every pending
+audit (D3 through the allowance correction, sections 1–13) stays open and now applies to this combination too.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image

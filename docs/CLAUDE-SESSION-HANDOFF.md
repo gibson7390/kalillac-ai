@@ -122,3 +122,11 @@ finding arrived in that session; the allowance correction still awaits Codex. Ne
 come; E1b only after the billing audit answers the design's section 8; the staging run when the owner
 supplies decision 17. Lesson recorded: run `test_homepage_handoff.py`'s source guards (the tests without a
 browser fixture, about 10 s) before pushing any change under `site/src`.
+
+## Update: the staging release (2026-11-18)
+
+`release/staging-v1` at `7d857c5aaa35b8877db1deb33286daceb3af5d9e` is the one staging release: every completed V1 feature plus Codex's verified file
+corrections. Evidence and open questions: Codex handoff section 14. Edge configuration:
+`deploy/staging/CLOUDFLARE-ACCESS.md`. Host: a separate temporary server is the owner's leaning; no server has been
+contacted. Before pushing to a branch, run every workflow that lists a touched test file (two counts were missed
+once: each workflow pins its own).

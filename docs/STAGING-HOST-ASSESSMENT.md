@@ -118,7 +118,7 @@ Checked 2026-11-18 against `origin`, by ancestry and by patch identity (`git che
   parallel approach to the `site/` application the release uses; never part of a release. Excluded unless
   the owner wants it.
 
-**Integration steps** (not performed; this is the plan):
+**Done 2026-11-18** on the owner's authorization: `release/staging-v1`, merge `c832fcb`, release head `7d857c5aaa35b8877db1deb33286daceb3af5d9e`, every applicable workflow green (Codex handoff section 14). The steps as planned:
 
 1. Branch `release/staging-v1` from `e6aa7a5`; merge `origin/docs/codex-reverification-6-closeout` (a merge
    commit, so both histories and Codex's audited commit `78b7a05` stay intact).
