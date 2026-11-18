@@ -1019,3 +1019,423 @@ def test_a_restated_total_must_be_restated_wherever_the_document_states_it(propo
     text = accepted(document_xml(edit(proposal, "p.docx", everywhere, track_changes=True).data))
     assert "$186,500" not in text and text.count("$187,500") >= 2
     edit(proposal, "p.docx", table_only, exact=True)                       # The customer's confirmed choice.
+
+
+# --- a stated total is matched as a whole figure (Codex reverification 3, finding 2) ----------------
+
+def _insurance(prose, extra=()):
+    """Codex's reproduction: a sentence with an unrelated figure, and a fee table A $100, B $200, Total $300."""
+    return generate({"title": "Cover", "blocks": [
+        {"type": "paragraph", "text": prose},
+        {"type": "table", "caption": "Fees", "total_row": True, "header": ["Item", "Fee"],
+         "rows": [["A", "$100"], ["B", "$200"], ["Total", "$300"]]}, *extra]}, "docx").data
+
+
+def _restate(data):
+    """Edit A to $200 and the total to $400, leaving the prose alone."""
+    found = outline(data, "c.docx")
+    return [{"op": "set_text", "at": _fee_cell(found, "$100"), "text": "$200"},
+            {"op": "set_text", "at": _fee_cell(found, "$300"), "text": "$400"}]
+
+
+@pytest.mark.parametrize("prose", [
+    "Separate insurance coverage is $3000.",                 # Codex's case: "$300" is inside "$3000".
+    "Separate insurance coverage is $3,000.",
+    "Separate insurance coverage is $1,300.",
+    "Separate insurance coverage is $300.5 a month.",
+    "Separate insurance coverage is $3005.",
+    "Separate insurance coverage is $300K.",
+    "Separate insurance coverage is A$300.",                 # Another currency.
+    "Separate insurance coverage is €300.",
+    "The venue holds 300 seats.",                            # A count, not money.
+    "Reference 300-B applies.",
+])
+def test_an_unrelated_figure_that_contains_the_old_total_does_not_block_the_restatement(prose):
+    data = _insurance(prose)
+    text = document_xml(edit(data, "c.docx", _restate(data)).data)
+    assert "$400" in text and prose.replace("€", "€") in text      # Nothing else changed automatically.
+
+
+@pytest.mark.parametrize("prose", [
+    "The total fee is $300.",
+    "The total fee is $300, payable on signing.",
+    "The total fee is $300.00.",                             # The same figure, formatted differently.
+    "The total fee is $ 300.",
+    "The total fee ($300) is fixed.",
+    "Fees: $300; insurance: $3000.",                         # The stale total beside an unrelated figure.
+])
+def test_the_old_total_left_in_prose_is_still_refused(prose):
+    data = _insurance(prose)
+    assert refused(data, "c.docx", _restate(data)) == "dependent_figure_unchanged"
+    assert refused(data, "c.docx", _restate(data), track_changes=True) == "dependent_figure_unchanged"
+    edit(data, "c.docx", _restate(data), exact=True)                       # The customer's confirmed choice.
+
+
+def test_the_old_total_left_in_another_table_is_still_refused():
+    data = _insurance("Separate insurance coverage is $3000.", extra=[
+        {"type": "table", "caption": "Summary", "header": ["Measure", "Value"],
+         "rows": [["Fees", "$300"], ["Insurance", "$3000"]]}])
+    assert refused(data, "c.docx", _restate(data)) == "dependent_figure_unchanged"
+    found = outline(data, "c.docx")
+    summary = next(u.address for u in found.units if u.kind == "cell" and u.text == "$300"
+                   and u.address != _fee_cell(found, "$300"))
+    edit(data, "c.docx", _restate(data) + [{"op": "set_text", "at": summary, "text": "$400"}])
+
+
+# --- signed, accounting and ISO-currency totals (Codex reverification of c5291b4, R1) ---------------
+
+STYLES = {"signed": lambda n: f"-${n}", "minus": lambda n: f"\u2212${n}", "accounting": lambda n: f"(${n})",
+          "iso": lambda n: f"USD {n}", "iso_no_break": lambda n: f"USD\u00a0{n}", "positive": lambda n: f"${n}"}
+
+
+def _styled(kind, cell, prose):
+    """A document (docx) or deck (pptx) stating `prose`, with a total-row table A 100, B 200, Total 300
+    written in the cell style."""
+    rows = [["A", cell(100)], ["B", cell(200)], ["Total", cell(300)]]
+    if kind == "docx":
+        raw = {"title": "Total test", "blocks": [{"type": "paragraph", "text": prose},
+               {"type": "table", "header": ["Item", "Amount"], "total_row": True, "rows": rows}]}
+    else:
+        raw = {"title": "Total test", "slides": [{"layout": "points", "title": "Summary", "points": [prose]},
+               {"layout": "table", "title": "Breakdown", "total_row": True, "header": ["Item", "Amount"],
+                "rows": rows}]}
+    return generate(raw, kind).data
+
+
+def _restated(data, name, cell):
+    """Set A to 200 and the total to 400: the table still adds up."""
+    found = outline(data, name)
+    return [{"op": "set_text", "at": next(u.address for u in found.units if u.kind == "cell" and u.text == old),
+             "text": new} for old, new in [(cell(100), cell(200)), (cell(300), cell(400))]]
+
+
+def _text(data, kind):
+    if kind == "docx":
+        return accepted(document_xml(data))
+    from pptx import Presentation
+    deck = Presentation(io.BytesIO(data))
+    return "\n".join(shape.text_frame.text for slide in deck.slides for shape in slide.shapes
+                     if shape.has_text_frame)
+
+
+FORMATS = [("docx", False), ("docx", True), ("pptx", False)]
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("style", ["signed", "minus", "accounting", "iso", "iso_no_break"])
+def test_a_stale_signed_accounting_or_iso_total_is_refused_and_a_full_restatement_accepted(kind, tracked, style):
+    cell = STYLES[style]
+    name = f"t.{kind}"
+    options = {"track_changes": True} if tracked else {}
+    data = _styled(kind, cell, f"The total is {cell(300)}.")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    # Restated everywhere, the same edit is accepted and the summary states the new total only.
+    everywhere = table_only + [{"op": "replace_text", "find": f"The total is {cell(300)}.",
+                                "replace": f"The total is {cell(400)}.", "expect": 1}]
+    text = _text(edit(data, name, everywhere, **options).data, kind)
+    assert f"The total is {cell(400)}." in text and f"The total is {cell(300)}." not in text
+    edit(data, name, table_only, exact=True, **options)                    # The customer's confirmed choice.
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("cell_style,prose", [
+    ("accounting", "The net result was -$300."),      # The same negative amount, written another way.
+    ("accounting", "The net result was \u2212$300."),
+    ("signed", "The net result was ($300)."),         # Parentheses in prose may be accounting notation.
+    ("signed", "The net result \u2013$300 is final."),  # An en dash may be a minus sign.
+    ("positive", "The total fee ($300) is fixed."),   # ... or punctuation around a positive amount.
+    ("positive", "Fees \u2013 $300 in all."),         # A dash before a positive amount.
+    ("positive", "Quotes ranged $100-$300."),         # A range, not a negative "-$300".
+    ("iso", "The total is USD 300.00."),
+])
+def test_an_amount_that_may_be_the_old_total_is_refused(kind, tracked, cell_style, prose):
+    cell = STYLES[cell_style]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, prose)
+    options = {"track_changes": True} if tracked else {}
+    assert refused(data, name, _restated(data, name, cell), **options) == "dependent_figure_unchanged"
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("cell_style,prose", [
+    ("signed", "A separate deposit of $300 is refundable."),   # Positive, not the negative total.
+    ("signed", "The prior year was -$3000."),
+    ("accounting", "Insurance is ($3,000) a year."),
+    ("iso", "The fee is EUR 300."),                           # Another currency.
+    ("iso", "The fee is USD 3000."),
+    ("iso", "The fee is USD 300K."),                          # Another scale.
+    ("iso", "The venue holds 300 seats."),                    # A count.
+    ("minus", "The loss was \u2212$300.5 per unit."),
+])
+def test_an_unrelated_signed_or_iso_amount_does_not_block_the_restatement(kind, tracked, cell_style, prose):
+    cell = STYLES[cell_style]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, prose)
+    options = {"track_changes": True} if tracked else {}
+    text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert prose in text                                               # Nothing else changed automatically.
+
+
+# --- repeated and mixed horizontal spaces (Codex reverification of 856d9a5) -------------------------
+
+NB, THIN = "\u00a0", "\u202f"
+SPACED = {
+    "iso_two_spaces": lambda n: f"USD  {n}",                 # Codex's five reproductions.
+    "iso_two_no_break": lambda n: f"USD{NB}{NB}{n}",
+    "signed_two_spaces": lambda n: f"-  ${n}",
+    "currency_two_spaces": lambda n: f"$  {n}",
+    "scale_two_spaces": lambda n: f"${n}  K",
+    "iso_mixed_run": lambda n: f"USD {NB}{THIN} {n}",         # Mixed runs.
+    "accounting_mixed_run": lambda n: f"( {NB}${n}{NB} )",
+    "minus_mixed_run": lambda n: f"\u2212{NB} $ {NB}{n}",
+}
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("style", list(SPACED))
+def test_a_stale_total_with_repeated_spaces_is_refused_and_a_full_restatement_accepted(kind, tracked, style):
+    cell = SPACED[style]
+    name = f"t.{kind}"
+    options = {"track_changes": True} if tracked else {}
+    data = _styled(kind, cell, f"The total is {cell(300)}.")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    everywhere = table_only + [{"op": "replace_text", "find": f"The total is {cell(300)}.",
+                                "replace": f"The total is {cell(400)}.", "expect": 1}]
+    text = _text(edit(data, name, everywhere, **options).data, kind)
+    assert f"The total is {cell(400)}." in text and f"The total is {cell(300)}." not in text
+    edit(data, name, table_only, exact=True, **options)                    # The customer's confirmed choice.
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,summary", [
+    ("iso_two_spaces", f"The total is USD{NB}300."),               # The same amount spaced differently.
+    ("iso_two_no_break", "The total is USD 300.00."),
+    ("scale_two_spaces", "The total is $300K."),
+    ("currency_two_spaces", "The total is $300."),
+    ("signed_two_spaces", "The total is -$300."),
+    ("signed", f"The total is -{NB} {NB}$300."),
+    ("iso", f"The total is USD {NB} 300."),
+    ("accounting", "The total is (  $300  )."),
+])
+def test_the_old_total_spaced_differently_in_the_summary_is_refused(kind, tracked, table, summary):
+    cell = {**STYLES, **SPACED}[table]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, summary)
+    options = {"track_changes": True} if tracked else {}
+    assert refused(data, name, _restated(data, name, cell), **options) == "dependent_figure_unchanged"
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,old_summary,new_summary", [
+    ("iso_two_spaces", "The total is USD 300.", f"The total is USD{NB}400."),   # Restated in another spacing.
+    ("scale_two_spaces", "The total is $300K.", "The total is $400 K."),
+    ("signed_two_spaces", "The total is -$300.", "The total is -  $400."),
+])
+def test_a_restatement_in_another_spacing_is_accepted(kind, tracked, table, old_summary, new_summary):
+    cell = SPACED[table]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, old_summary)
+    options = {"track_changes": True} if tracked else {}
+    everywhere = _restated(data, name, cell) + [{"op": "replace_text", "find": old_summary,
+                                                 "replace": new_summary, "expect": 1}]
+    text = _text(edit(data, name, everywhere, **options).data, kind)
+    assert new_summary in text and old_summary not in text
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,respaced", [
+    ("iso_two_spaces", "USD 300"), ("iso_two_no_break", f"USD{NB}300.00"), ("scale_two_spaces", "$300K"),
+    ("signed_two_spaces", "-$300"), ("accounting_mixed_run", "($300)"),
+])
+def test_respacing_the_total_alone_is_not_a_change_of_total(kind, tracked, table, respaced):
+    """Formatting only: the summary still states the same amount, so nothing is stale."""
+    cell = SPACED[table]
+    name = f"t.{kind}"
+    summary = f"The total is {cell(300)}."
+    data = _styled(kind, cell, summary)
+    options = {"track_changes": True} if tracked else {}
+    found = outline(data, name)
+    total = next(u.address for u in found.units if u.kind == "cell" and u.text == cell(300))
+    text = _text(edit(data, name, [{"op": "set_text", "at": total, "text": respaced}], **options).data, kind)
+    assert summary in text
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+@pytest.mark.parametrize("table,prose", [
+    ("iso_two_spaces", "The fee is EUR  300."),                    # Another currency.
+    ("iso_two_spaces", "The fee is USD  3000."),
+    ("scale_two_spaces", "The fee is $300  M."),                   # Another scale.
+    ("scale_two_spaces", "The fee is $  300."),                    # No scale: another amount.
+    ("signed_two_spaces", f"A deposit of ${NB} 300 is refundable."),  # Positive, not the negative total.
+    ("currency_two_spaces", "The venue holds  300  seats."),       # A count.
+    ("currency_two_spaces", "Insurance is $  3,000  a year."),
+])
+def test_an_unrelated_spaced_amount_does_not_block_the_restatement(kind, tracked, table, prose):
+    cell = SPACED[table]
+    name = f"t.{kind}"
+    data = _styled(kind, cell, prose)
+    options = {"track_changes": True} if tracked else {}
+    text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert prose in text                                               # Nothing else changed automatically.
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+def test_an_amount_is_never_joined_across_paragraphs_points_or_cells(kind, tracked):
+    """A currency code ending one paragraph (or point) and a number starting the next are not "USD 300"."""
+    cell = SPACED["iso_two_spaces"]
+    name = f"t.{kind}"
+    rows = [["A", cell(100)], ["B", cell(200)], ["Total", cell(300)]]
+    first, second = "All prices are in USD", "300 seats remain."
+    if kind == "docx":
+        raw = {"title": "Total test", "blocks": [{"type": "paragraph", "text": first},
+               {"type": "paragraph", "text": second},
+               {"type": "table", "header": ["Item", "Amount"], "total_row": True, "rows": rows}]}
+    else:
+        raw = {"title": "Total test", "slides": [
+            {"layout": "points", "title": "Summary", "points": [first, second]},
+            {"layout": "table", "title": "Breakdown", "total_row": True, "header": ["Item", "Amount"],
+             "rows": rows}]}
+    data = generate(raw, kind).data
+    options = {"track_changes": True} if tracked else {}
+    text = _text(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert first in text and second in text
+
+
+def test_horizontal_space_runs_never_cross_a_line():
+    from kalillac_files.editing import _figures
+    assert _figures("USD  300\u00a0\u00a0and\t$ \u00a0300  K") == {(300.0, "USD", ""): 1, (300.0, "$", "K"): 1}
+    # Broken by a line or paragraph break, the parts are separate: a bare number, or a figure without
+    # the currency or scale on the other line.
+    for broken, read in [("USD\n300", (300.0, "", "")), ("USD \n 300", (300.0, "", "")),
+                         ("USD\u2028300", (300.0, "", "")), ("USD\r\n300", (300.0, "", "")),
+                         ("$\n300", (300.0, "", "")), ("$300\nK", (300.0, "$", "")),
+                         ("-\n$300", (300.0, "$", ""))]:
+        assert _figures(broken) == {read: 1}, broken
+
+
+# --- tabs and line breaks inside a paragraph (Codex reverification of 0ea08a8) ----------------------
+
+MARK = "QQMARKQQ"
+WORD_TAB = '</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t xml:space="preserve">'
+WORD_BREAK = '</w:t></w:r><w:r><w:br/></w:r><w:r><w:t xml:space="preserve">'
+REVISION = 'w:id="{}" w:author="Reviewer" w:date="2026-11-01T00:00:00Z"'
+WORD_INSERTED_BREAK = (f'</w:t></w:r><w:ins {REVISION.format(9001)}><w:r><w:br/></w:r></w:ins>'
+                       '<w:r><w:t xml:space="preserve">')
+WORD_DELETED_BREAK = (f'</w:t></w:r><w:del {REVISION.format(9002)}><w:r><w:br/></w:r></w:del>'
+                      '<w:r><w:t xml:space="preserve">')
+DECK_BREAK = "</a:t></a:r><a:br/><a:r><a:t>"
+
+
+def _marked(kind, cell, prose, replacement):
+    """A real file from _styled whose summary has MARK replaced, in the file's XML, by a tab or break
+    run (or a tab character), so the regression exercises the editor's text extraction too."""
+    data = _styled(kind, cell, prose)
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        parts = [name for name in source.namelist()
+                 if name.endswith(".xml") and MARK.encode() in source.read(name)]
+    assert len(parts) == 1
+
+    def change(xml):
+        return xml.decode("utf-8").replace(MARK, replacement).encode("utf-8")
+    return rezip(data, change={parts[0]: change})
+
+
+def _read_back(data, kind):
+    """The file's text read by python-docx or python-pptx, not by the editor: Word shows a tab as "\\t"
+    and a line break as "\\n"; PowerPoint a line break as "\\v"."""
+    if kind == "docx":
+        return "\n".join(paragraph.text for paragraph in docx.Document(io.BytesIO(data)).paragraphs)
+    from pptx import Presentation
+    deck = Presentation(io.BytesIO(data))
+    return "\n".join(shape.text_frame.text for slide in deck.slides for shape in slide.shapes
+                     if shape.has_text_frame)
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_a_word_tab_inside_a_stale_total_keeps_the_total_recognized(tracked):
+    """"USD", a Word tab, "300": Word shows USD 300, so a table-only restatement to USD 400 is refused,
+    and restating the summary too is accepted."""
+    cell, name = STYLES["iso"], "t.docx"
+    options = {"track_changes": True} if tracked else {}
+    data = _marked("docx", cell, f"The total is USD{MARK}300.", WORD_TAB)
+    assert "The total is USD\t300." in _read_back(data, "docx")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    everywhere = table_only + [{"op": "replace_text", "find": "300.", "replace": "400.", "expect": 1}]
+    result = edit(data, name, everywhere, **options).data
+    if tracked:          # python-docx shows inserted and deleted text alike: read the accepted view.
+        text = accepted(document_xml(result))                              # Text runs only, no tab glyph.
+        assert "The total is USD400." in text and "USD300." not in text and "<w:tab/>" in document_xml(result)
+    else:
+        text = _read_back(result, "docx")
+        assert "The total is USD\t400." in text and "USD\t300." not in text
+    edit(data, name, table_only, exact=True, **options)                    # The customer's confirmed choice.
+
+
+def test_a_powerpoint_tab_inside_a_stale_total_keeps_the_total_recognized():
+    """Unchanged behaviour: a tab is a character inside a:t."""
+    cell, name = STYLES["iso"], "t.pptx"
+    data = _marked("pptx", cell, f"The total is USD{MARK}300.", "\t")
+    assert "The total is USD\t300." in _read_back(data, "pptx")
+    table_only = _restated(data, name, cell)
+    assert refused(data, name, table_only) == "dependent_figure_unchanged"
+    everywhere = table_only + [{"op": "replace_text", "find": "300.", "replace": "400.", "expect": 1}]
+    text = _read_back(edit(data, name, everywhere).data, "pptx")
+    assert "The total is USD\t400." in text and "USD\t300." not in text
+
+
+@pytest.mark.parametrize("kind,tracked", FORMATS)
+def test_a_line_break_inside_a_paragraph_separates_the_lines(kind, tracked):
+    """One line ends with "$", the next begins "300 licenses were issued.": not "$300", so restating a $300
+    total is accepted and the unrelated text is left exactly as it was."""
+    cell, name = STYLES["positive"], f"t.{kind}"
+    options = {"track_changes": True} if tracked else {}
+    data = _marked(kind, cell, f"Every fee below is quoted in ${MARK}300 licenses were issued.",
+                   WORD_BREAK if kind == "docx" else DECK_BREAK)
+    line = "\n" if kind == "docx" else "\v"
+    expected = f"Every fee below is quoted in ${line}300 licenses were issued."
+    assert expected in _read_back(data, kind)
+    text = _read_back(edit(data, name, _restated(data, name, cell), **options).data, kind)
+    assert expected in text
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.parametrize("revision,stale", [pytest.param(WORD_INSERTED_BREAK, False, id="inserted_break"),
+                                            pytest.param(WORD_DELETED_BREAK, True, id="deleted_break")])
+def test_a_tracked_line_break_counts_as_word_shows_it_once_accepted(tracked, revision, stale):
+    """A break inserted by an earlier tracked revision separates "$" from "300"; a break that revision
+    deleted does not, so the accepted text reads "$300", the old total, and the restatement is refused."""
+    cell, name = STYLES["positive"], "t.docx"
+    options = {"track_changes": True} if tracked else {}
+    data = _marked("docx", cell, f"Every fee below is quoted in ${MARK}300 licenses were issued.", revision)
+    table_only = _restated(data, name, cell)
+    if stale:
+        assert refused(data, name, table_only, **options) == "dependent_figure_unchanged"
+    else:
+        edit(data, name, table_only, **options)
+
+
+def test_word_tabs_and_breaks_read_as_word_shows_them_and_tab_stops_do_not():
+    from lxml import etree
+
+    from kalillac_files.editing import _accepted_text
+    namespace = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    paragraph = etree.fromstring(
+        f'<w:p {namespace}><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>'
+        '<w:r><w:t>USD</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>300</w:t></w:r>'
+        '<w:r><w:br/></w:r><w:r><w:t>end</w:t></w:r><w:r><w:cr/></w:r><w:r><w:t>x</w:t></w:r>'
+        '<w:del w:id="1" w:author="R" w:date="2026-11-01T00:00:00Z"><w:r><w:tab/></w:r></w:del></w:p>')
+    assert _accepted_text(paragraph) == "USD\t300\nend\nx"
+
+
+def test_a_powerpoint_line_break_reads_as_a_line_break():
+    from lxml import etree
+
+    from kalillac_files.editing import _body_text
+    namespace = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    body = etree.fromstring(f'<a:txBody {namespace}><a:p><a:r><a:t>quoted in $</a:t></a:r><a:br/>'
+                            '<a:r><a:t>300 licenses</a:t></a:r></a:p><a:p><a:r><a:t>USD\t300</a:t></a:r></a:p>'
+                            '</a:txBody>')
+    assert _body_text(body) == "quoted in $\n300 licenses\nUSD\t300"
