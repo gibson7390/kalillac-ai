@@ -172,6 +172,25 @@ context, with the administrative file back in place), never by starting an older
 
 ## 8. Start, and check
 
+First the preflight, as root from the release (read-only; it prints check names and setting names,
+never a value):
+
+```
+cd REL/candidate && sudo VENV/bin/python3 -B tools/staging_preflight.py --dir DIR \
+    --unit /etc/systemd/system/UNIT.service --template REL/deploy/staging/settings.env.template
+```
+
+Its last line must be `PASSED`. It checks that every template setting is present and filled, the
+product's fixed identity is unchanged (GPT-6 Luna, Brave then Tavily, 10 anonymous responses, V1 security,
+Financial Safeguards, enforcement, Stripe test mode), nothing points at production (hostname, port 8001,
+production's unit name), every address is the staging host's and Stripe returns customers to `/account`,
+Stripe holds test-mode secrets only, `deployment.env` is exactly what provisioning wrote and
+`settings.env` overrides none of it, the owner's numbers do not contradict each other, the secret files
+are root-only, and the application's own settings loaders accept the result. It does not judge whether
+an allowance, budget or price is right: those are the owner's values. Fix what it names and run it again.
+
+Then start:
+
 ```
 sudo systemctl start UNIT
 systemctl status UNIT --no-pager                 # active; the journal shows SINGLETON_LOCK_ACQUIRED and REGISTRATION_V2_READY
