@@ -186,6 +186,8 @@ daily response allowance. Confirmed and corrected:
   cancellation during model work; Premium cancellation; quarantine) failed 5 of 7 on `01bf2ec` and passes
   on the correction; `tests/test_file_allowance.py` (4 unit tests of the route's hook).
 
+CI green on `c3a7a2083d3f527da4a9a67b02f78b61db37c9d3`: subscription 44218217622, files 44218222254, frontend 44218226795, provider 44218230840, anonymous allowance 44218235431.
+
 Questions worth an independent answer: can any model-backed response path still return without a
 reservation (the handoff returns None only before admission)? Is the account match
 (`str(quota user) == file account owner`) sufficient in legacy mode as well as V1?

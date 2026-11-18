@@ -310,7 +310,7 @@ from the code. See "Owner decisions required".
 * **Allowance correction** (`fix/file-allowance-accounting`, on `8d5a2d4`): Codex found that file- and
   image-assisted responses were not counted against the daily allowance. Reproduced (5 of 7 new
   PostgreSQL tests failed on the unfixed code), corrected, and verified (7 of 7, three runs; regression
-  suites green). Details in the blueprint and the handoff, section 11. Awaiting CI and Codex.
+  suites green). Details in the blueprint and the handoff, section 11. CI green on `c3a7a2083d3f527da4a9a67b02f78b61db37c9d3`: subscription 44218217622, files 44218222254, frontend 44218226795, provider 44218230840, anonymous allowance 44218235431. Awaiting Codex.
 * Fixed flaky test: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
   `pending` once in CI (run 43982872312, D3). Cause: the lease release is a background task on the test

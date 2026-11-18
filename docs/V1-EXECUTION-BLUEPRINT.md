@@ -73,6 +73,7 @@ recovery) → subscription cancellation → account deletion request. Owned by M
   response (decision 16's recorded recommendation; no value changed). Reproduced before the fix: 5 of 7
   real-PostgreSQL tests failed (an image-assisted chat answered with a count of 0; concurrent requests
   past the limit); after it, 7 of 7 three times, plus 4 unit tests of the route's allowance hook.
+  CI green on `c3a7a2083d3f527da4a9a67b02f78b61db37c9d3`: subscription 44218217622, files 44218222254, frontend 44218226795, provider 44218230840, anonymous allowance 44218235431.
 * D3 routes at `35f61c8` and D5 at `9feb42b`: awaiting Codex.
 * Document quality: Arabic PDF ligature order (open), Word field caches (owner decision 12 pending
   acceptance of the finalization service), semantic-consistency contract (partly built). Details:
