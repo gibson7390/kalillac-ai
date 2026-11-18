@@ -827,9 +827,12 @@ type Loadable<T> = { state: 'loading' } | { state: 'ready'; value: T } | { state
    access always follows the plan the server reports. */
 type CheckoutReturn = 'success' | 'cancelled' | null;
 
+// Exactly the two configured queries and nothing else: the site parses no query (a source guard keeps
+// it that way), so anything added to the address simply shows no notice.
 function checkoutReturnFrom(search: string): CheckoutReturn {
-  const value = new URLSearchParams(search).get('checkout');
-  return value === 'success' || value === 'cancelled' ? value : null;
+  if (search === '?checkout=success') return 'success';
+  if (search === '?checkout=cancelled') return 'cancelled';
+  return null;
 }
 
 function checkoutReturnNotice(returned: CheckoutReturn, tier: api.Entitlements['tier']): NoticeData | null {
