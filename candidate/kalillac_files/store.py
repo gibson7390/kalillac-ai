@@ -13,7 +13,9 @@ Rules:
   * Identifiers are 128-bit random values; nothing a customer supplies ever becomes a path. Owner
     directories are named by an unkeyed SHA-256 of the owner id, never the id itself.
   * Quotas per owner (bytes and count) are checked before anything is written; a file past its
-    retention is deleted by purge() and is already invisible to get() and list().
+    availability period is invisible to get() and list() at once, and is deleted from disk by the
+    retention cleanup (kalillac_files/retention.py, run by tools/data_lifecycle.py) once it has been
+    expired for the explicitly configured period.
   * Writes are atomic (temporary file, then rename), metadata included.
 """
 from __future__ import annotations
@@ -165,22 +167,9 @@ class FileStore:
                 except FileNotFoundError:
                     pass
 
-    def purge(self):
-        """Delete every file past its retention; returns how many were removed."""
-        removed, now = 0, self.clock()
-        for folder in [path for path in self.root.iterdir() if path.is_dir()]:
-            for meta in folder.glob("*.json"):
-                try:
-                    expires = datetime.fromisoformat(json.loads(meta.read_text(encoding="utf-8"))["expires_at"])
-                except (OSError, ValueError, KeyError, TypeError):
-                    continue
-                if expires <= now:
-                    for path in (meta, meta.with_suffix(".bin")):
-                        try:
-                            path.unlink()
-                        except FileNotFoundError:
-                            pass
-                    removed += 1
-            for stale in folder.glob("*.tmp"):
-                stale.unlink(missing_ok=True)
-        return removed
+    def purge(self, delete_after=timedelta(0)):
+        """Delete files expired for longer than delete_after (plus retention.SAFETY_MARGIN), abandoned
+        upload temporaries and orphaned data, through kalillac_files.retention's rules; returns how many
+        files were deleted. The operator command (tools/data_lifecycle.py files) is the scheduled way."""
+        from .retention import clean
+        return clean(self.root, delete_after=delete_after, now=self.clock(), apply=True).deleted_files

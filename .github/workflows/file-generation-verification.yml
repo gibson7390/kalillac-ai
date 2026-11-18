@@ -28,6 +28,8 @@ on:
       - "candidate/tests/test_files_chat_handoff.py"
       - "candidate/tests/test_file_images.py"
       - "candidate/tests/test_file_allowance.py"
+      - "candidate/tests/test_file_retention.py"
+      - "candidate/tools/data_lifecycle.py"
       - "candidate/kalillac_finance/**"
       - "candidate/app_fastapi_candidate.py"
       - "candidate/kalillac_accounts/request_guard.py"
@@ -56,6 +58,8 @@ on:
       - "candidate/tests/test_files_chat_handoff.py"
       - "candidate/tests/test_file_images.py"
       - "candidate/tests/test_file_allowance.py"
+      - "candidate/tests/test_file_retention.py"
+      - "candidate/tools/data_lifecycle.py"
       - "candidate/kalillac_finance/**"
       - "candidate/app_fastapi_candidate.py"
       - "candidate/kalillac_accounts/request_guard.py"
@@ -113,7 +117,7 @@ jobs:
           python -m pytest tests/test_file_generation.py tests/test_file_intake.py tests/test_file_worker.py
           tests/test_document_design.py tests/test_workbook_design.py tests/test_deck_design.py
           tests/test_file_editing.py tests/test_file_store.py tests/test_file_assistant.py tests/test_files_router.py
-          tests/test_file_intent.py tests/test_files_chat_handoff.py tests/test_file_images.py tests/test_file_allowance.py -v -rA -p no:cacheprovider
+          tests/test_file_intent.py tests/test_files_chat_handoff.py tests/test_file_images.py tests/test_file_allowance.py tests/test_file_retention.py -v -rA -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/file-generation.xml"
 
       # The test modules skip themselves when a document library is missing,
@@ -121,7 +125,7 @@ jobs:
       # ran (collected on the merged release, 2026-11-18): 166 generation, 65 intake, 37 worker,
       # 123 document-design, 241 workbook, 63 deck and 263 editing tests, and 12 store, 9 assistant,
       # 22 router (one added at the merge: confirmations under the allowance hook), 28 intent,
-      # 2 chat-handoff, 19 image (I1) and 4 allowance-hook tests. The
+      # 2 chat-handoff, 19 image (I1), 4 allowance-hook and 24 file-retention tests. The
       # worker's memory-limit test runs only on POSIX, so it must run here.
       - name: Require every file test to have run
         run: |
@@ -132,6 +136,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 1054, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 1078, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the file verification did not run completely")
           PY
