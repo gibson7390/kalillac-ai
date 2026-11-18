@@ -1500,9 +1500,13 @@
       if (attachInput.files && attachInput.files[0]) uploadFile(attachInput.files[0]);
       attachInput.value = "";
     });
-    // Files are offered only to an account the server says may use them.
+    // Files are offered only to an account the server says may add them: any signed-in account may
+    // list its own files, so a 200 alone is not enough; can_add must be exactly true.
     fetch("/api/files", { method: "GET" }).then(function (res) {
-      if (res.status === 200) attachBtn.hidden = false;
+      if (res.status !== 200) return null;
+      return res.json();
+    }).then(function (body) {
+      if (body && body.can_add === true) attachBtn.hidden = false;
     }, function () {});
   }
 

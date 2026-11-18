@@ -1,15 +1,20 @@
 """/api/files: upload, list, download and delete a customer's files, and ask the file assistant.
 
-Installed only when KALILLAC_FILES_ENABLED is set (with accounts and the database). Every route needs
-a signed-in account with the tier the configuration requires (KALILLAC_FILES_TIER, "paid" unless set
-otherwise; the Free/Premium split is an owner decision and stays fail-closed until made). Unsafe
-routes are in the unsafe-request guard's inventory, so a cross-site request is refused before it
-gets here.
+Installed only when KALILLAC_FILES_ENABLED is set (with accounts and the database). Two permissions:
+  * adding files (upload) and the file assistant need a signed-in account with the tier the
+    configuration requires (KALILLAC_FILES_TIER, "paid" unless set otherwise; the Free/Premium split
+    is an owner decision and stays fail-closed until made);
+  * managing the files an account already has (list, download, delete) needs only the signed-in
+    account itself (Codex F6): a customer who leaves Premium keeps access to their own files for as
+    long as they are kept, and can delete them; nothing new can be made or analysed.
+Unsafe routes are in the unsafe-request guard's inventory, so a cross-site request is refused before
+it gets here.
 
     POST   /api/files              upload: the raw file as the body (application/octet-stream), its
                                    name percent-encoded in X-Kalillac-Filename; checked by intake in
                                    the isolated worker before anything is stored
-    GET    /api/files              the account's files
+    GET    /api/files              the account's files, expired ones marked "available": false (they can
+                                   only be deleted), and "can_add": whether this account may upload
     GET    /api/files/{file_id}    download (attachment, never rendered by the browser)
     DELETE /api/files/{file_id}
     POST   /api/files/assist       {"message", "history"?, "file_ids"?, "confirmations"?, "reasoning_mode"?}:
@@ -180,13 +185,24 @@ class FileService:
                 return False
         return claim
 
+    def may_add(self, found):
+        """Whether this signed-in account may upload and use the file assistant."""
+        return self.required_tier == "any" or found.paid is True
+
     async def account(self, request):
-        """(account, None) when the caller may use files, else (None, the refusal response)."""
+        """(account, None) when the caller may add files and use the assistant, else (None, the refusal)."""
+        found, refusal = await self.owner(request)
+        if refusal is not None:
+            return None, refusal
+        if not self.may_add(found):
+            return None, _error(403, "files_require_premium")
+        return found, None
+
+    async def owner(self, request):
+        """(account, None) for any signed-in account, which may manage its own files, else (None, 401)."""
         found = await self.authenticate(request)
         if found is None:
             return None, _error(401, "not_authenticated")
-        if self.required_tier == "paid" and not found.paid:
-            return None, _error(403, "files_require_premium")
         return found, None
 
     async def assist(self, account, message, history, file_ids, confirmations=(), *, scope=None, stopped=None):
@@ -233,7 +249,7 @@ class FileService:
 
 def build_files_router(*, service: FileService | None = None, **options) -> APIRouter:
     service = service or FileService(**options)
-    store, worker, account = service.store, service.worker, service.account
+    store, worker, account, owner = service.store, service.worker, service.account, service.owner
     router = APIRouter(prefix="/api/files")
 
     def no_query(request):
@@ -284,18 +300,20 @@ def build_files_router(*, service: FileService | None = None, **options) -> APIR
         refusal = no_query(request)
         if refusal:
             return refusal
-        found, refusal = await account(request)
+        found, refusal = await owner(request)
         if refusal:
             return refusal
-        records = await run_in_threadpool(store.list, found.owner)
-        return JSONResponse(content={"files": [record.public() for record in records]}, headers=_NO_STORE)
+        records = await run_in_threadpool(store.list, found.owner, True)
+        return JSONResponse(content={"files": [{**record.public(), "available": store.available(record)}
+                                               for record in records],
+                                     "can_add": service.may_add(found)}, headers=_NO_STORE)
 
     @router.get("/{file_id}")
     async def download(file_id: str, request: Request):
         refusal = no_query(request)
         if refusal:
             return refusal
-        found, refusal = await account(request)
+        found, refusal = await owner(request)
         if refusal:
             return refusal
         try:
@@ -316,7 +334,7 @@ def build_files_router(*, service: FileService | None = None, **options) -> APIR
         refusal = no_query(request)
         if refusal:
             return refusal
-        found, refusal = await account(request)
+        found, refusal = await owner(request)
         if refusal:
             return refusal
         try:

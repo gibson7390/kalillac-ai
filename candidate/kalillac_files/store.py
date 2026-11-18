@@ -12,10 +12,12 @@ Rules:
     FileNotFound, so an identifier reveals nothing about anyone else.
   * Identifiers are 128-bit random values; nothing a customer supplies ever becomes a path. Owner
     directories are named by an unkeyed SHA-256 of the owner id, never the id itself.
-  * Quotas per owner (bytes and count) are checked before anything is written; a file past its
-    availability period is invisible to get() and list() at once, and is deleted from disk by the
-    retention cleanup (kalillac_files/retention.py, run by tools/data_lifecycle.py) once it has been
-    expired for the explicitly configured period.
+  * Quotas per owner (bytes and count) are checked before anything is written, over every file the
+    owner has on disk, expired ones included: an account's storage is bounded by its quota whether or
+    not the retention cleanup has run yet. A file past its availability period cannot be read (get(),
+    record()) and is listed only on request (list(include_expired=True)); its owner can still delete it
+    at once. The retention cleanup (kalillac_files/retention.py: the application's scheduled run and
+    tools/data_lifecycle.py) deletes it from disk once it has been expired for the configured period.
   * Writes are atomic (temporary file, then rename), metadata included.
 """
 from __future__ import annotations
@@ -93,7 +95,7 @@ class FileStore:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
 
-    def _records(self, folder):
+    def _records(self, folder, include_expired=False):
         now = self.clock()
         found = []
         if not folder.is_dir():
@@ -103,9 +105,13 @@ class FileStore:
                 record = StoredFile(**json.loads(meta.read_text(encoding="utf-8")))
             except (OSError, ValueError, TypeError):
                 continue
-            if datetime.fromisoformat(record.expires_at) > now:
+            if include_expired or datetime.fromisoformat(record.expires_at) > now:
                 found.append(record)
         return found
+
+    def available(self, record):
+        """Whether a record is still within its availability period (readable and downloadable)."""
+        return datetime.fromisoformat(record.expires_at) > self.clock()
 
     # --- operations -------------------------------------------------------------------------
 
@@ -119,7 +125,7 @@ class FileStore:
             raise ValueError("invalid parent")
         folder = self._folder(owner)
         with self._lock(owner):
-            existing = self._records(folder)
+            existing = self._records(folder, include_expired=True)   # Everything on disk counts.
             if len(existing) + 1 > self.max_owner_files:
                 raise QuotaExceeded("file_count_quota_exceeded")
             if sum(record.size for record in existing) + len(data) > self.max_owner_bytes:
@@ -132,15 +138,19 @@ class FileStore:
             self._write(folder / (record.file_id + ".json"), json.dumps(asdict(record)).encode("utf-8"))
             return record
 
-    def record(self, owner, file_id):
+    def _own(self, owner, file_id):
+        """The owner's record, expired or not."""
         if type(file_id) is not str or _ID.fullmatch(file_id) is None:
             raise FileNotFound(file_id)
         meta = self._folder(owner) / (file_id + ".json")
         try:
-            record = StoredFile(**json.loads(meta.read_text(encoding="utf-8")))
+            return StoredFile(**json.loads(meta.read_text(encoding="utf-8")))
         except (OSError, ValueError, TypeError):
             raise FileNotFound(file_id) from None
-        if datetime.fromisoformat(record.expires_at) <= self.clock():
+
+    def record(self, owner, file_id):
+        record = self._own(owner, file_id)
+        if not self.available(record):
             raise FileNotFound(file_id)
         return record
 
@@ -154,14 +164,16 @@ class FileStore:
             raise FileNotFound(file_id)
         return record, data
 
-    def list(self, owner):
-        return sorted(self._records(self._folder(owner)), key=lambda record: record.created_at, reverse=True)
+    def list(self, owner, include_expired=False):
+        return sorted(self._records(self._folder(owner), include_expired), key=lambda record: record.created_at,
+                      reverse=True)
 
     def delete(self, owner, file_id):
-        self.record(owner, file_id)
+        """Delete one of the owner's files, expired or not: its data, then its record."""
+        self._own(owner, file_id)
         folder = self._folder(owner)
         with self._lock(owner):
-            for suffix in (".json", ".bin"):
+            for suffix in (".bin", ".json"):
                 try:
                     (folder / (file_id + suffix)).unlink()
                 except FileNotFoundError:
@@ -170,6 +182,8 @@ class FileStore:
     def purge(self, delete_after=timedelta(0)):
         """Delete files expired for longer than delete_after (plus retention.SAFETY_MARGIN), abandoned
         upload temporaries and orphaned data, through kalillac_files.retention's rules; returns how many
-        files were deleted. The operator command (tools/data_lifecycle.py files) is the scheduled way."""
-        from .retention import clean
-        return clean(self.root, delete_after=delete_after, now=self.clock(), apply=True).deleted_files
+        files were deleted, or None when another run holds the retention lock. The application's scheduled
+        run and the operator command (tools/data_lifecycle.py files) share that lock."""
+        from .retention import run_exclusive
+        report = run_exclusive(self.root, delete_after=delete_after, now=self.clock(), apply=True)
+        return None if report is None else report.deleted_files

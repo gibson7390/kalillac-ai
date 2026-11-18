@@ -94,7 +94,7 @@ class FakeAccountApi:
         self.reset()
 
     def reset(self, *, enabled=True, non_json_404=False, signed_in=False, tier="free",
-              verification=None, billing=None, security=False):
+              verification=None, billing=None, security=False, files=None):
         with self.lock:
             self.enabled, self.non_json_404 = enabled, non_json_404
             self.password = PASSWORD
@@ -110,6 +110,8 @@ class FakeAccountApi:
             self.billing = billing
             # False: the server's account-security mode is off (the routes are not mounted).
             self.security = security
+            # None: not a files deployment (/api/files is not mounted); else the account's stored files.
+            self.files = None if files is None else [dict(f) for f in files]
             self.deletion_requested = False
             self.recovery_tokens = {TOKEN}
             self.verification_tokens = {TOKEN}
@@ -249,6 +251,21 @@ class FakeAccountApi:
                 self.deletion_requested = True
                 self.sessions.clear()
                 return 200, {"ok": True}, {"Set-Cookie": "kalillac_account=; Max-Age=0; Path=/; HttpOnly"}
+        if path == "/api/files" or path.startswith("/api/files/"):
+            if self.files is None:
+                return 404, {"detail": "Not Found"}, {}
+            if not authed:
+                return unauth
+            if (method, path) == ("GET", "/api/files"):
+                return 200, {"files": self.files, "can_add": self.tier == "paid"}, {}
+            file_id = path[len("/api/files/"):]
+            found = [f for f in self.files if f["id"] == file_id]
+            if method == "DELETE" and found:
+                self.files.remove(found[0])
+                return 200, {"deleted": True}, {}
+            if method == "GET" and found and found[0]["available"]:
+                return 200, Raw("text/plain", b"file bytes"), {"Content-Disposition": "attachment"}
+            return 404, {"error": "file_not_found"}, {}
         if path.startswith("/api/account/billing"):
             if self.billing is None:
                 return 404, {"detail": "Not Found"}, {}
@@ -310,6 +327,12 @@ class AccountSite(Site):
                     return self._api("POST")
                 self._reply(404, "text/plain", b"")
 
+            def do_DELETE(self):
+                site.http_paths.append("DELETE " + self.path)
+                if self.path.startswith("/api/"):
+                    return self._api("DELETE")
+                self._reply(404, "text/plain", b"")
+
             def log_message(self, *args):
                 pass
 
@@ -324,6 +347,7 @@ class AccountSite(Site):
     # A deployment that offers accounts marks each of the site's pages exactly as
     # deploy/staging/build_webroot.py does; off by default, as in production today.
     accounts_mark = False
+    files_mark = False         # A files deployment marks the site's pages too (data-kalillac-files).
 
     def route(self, raw_path):
         path = raw_path.split("?", 1)[0]
@@ -333,6 +357,8 @@ class AccountSite(Site):
             status, ctype, body = super().route(raw_path)
         if self.accounts_mark and ctype.startswith("text/html") and not path.startswith("/app/"):
             body = body.replace(b'<html lang="en">', b'<html lang="en" data-kalillac-accounts="on">', 1)
+        if self.files_mark and ctype.startswith("text/html") and not path.startswith("/app/"):
+            body = body.replace(b'<html lang="en"', b'<html lang="en" data-kalillac-files="on"', 1)
         return status, ctype, body
 
     def __enter__(self):
@@ -448,6 +474,7 @@ def browser_site(tmp_path_factory):
 def page(browser_site):
     browser_site.site.api.reset()
     browser_site.site.accounts_mark = False
+    browser_site.site.files_mark = False
     browser_site.resize(DESKTOP, False)
     browser_site.dt.call("Emulation.setEmulatedMedia", {"features": [
         {"name": "prefers-reduced-motion", "value": "no-preference"}]}, browser_site.session)
@@ -488,6 +515,8 @@ def test_account_module_uses_only_fixed_same_origin_paths_and_safe_fetch_options
         # Account security (V1 mode): offered only when the server's /security route answers.
         "/api/account/security", "/api/account/sessions/revoke-others", "/api/account/sessions/revoke-all",
         "/api/account/password", "/api/account/deletion-request",
+        # The account's stored files (a files deployment): listed here, each deleted at /api/files/<id>.
+        "/api/files",
     }
     assert "'checkout.stripe.com'" in api and "'billing.stripe.com'" in api
     for name, source in account_sources().items():
@@ -1643,3 +1672,94 @@ def test_reduced_motion_removes_transitions(page):
     durations = page.eval("""return ['#email', 'button[type=submit]'].map(s =>
       getComputedStyle(document.querySelector(s)).transitionDuration.split(',').map(parseFloat));""")
     assert all(value < 0.001 for group in durations for value in group)
+
+
+# --- Your files (a files deployment): every stored file, managed whatever the plan (Codex F2, F6) ------------
+
+FILES = [
+    {"id": "AaAaAaAaAaAaAaAaAaAaAa", "filename": "launch-plan.pptx", "media_type": "x", "size": 186_257,
+     "origin": "generated", "created_at": "2026-11-10T09:00:00+00:00", "expires_at": "2026-12-10T09:00:00+00:00",
+     "parent_id": None, "available": True},
+    {"id": "BbBbBbBbBbBbBbBbBbBbBb", "filename": "notes.txt", "media_type": "text/plain", "size": 912,
+     "origin": "uploaded", "created_at": "2026-10-01T09:00:00+00:00", "expires_at": "2026-10-31T09:00:00+00:00",
+     "parent_id": None, "available": False},
+]
+FILES_READY = "document.querySelector('[data-testid=\"files-list\"], [data-testid=\"files-empty\"]')"
+
+
+def open_files(page, files=FILES, **reset):
+    page.site.files_mark = True
+    page.site.api.reset(signed_in=True, files=files, **reset)
+    page.open("/account")
+    page.wait_for(FILES_READY)
+
+
+def file_rows(page):
+    return page.eval(r"""return [...document.querySelectorAll('[data-testid="file-row"]')].map(row => ({
+        text: row.innerText.replace(/\s+/g, ' ').trim(), available: row.dataset.available,
+        download: row.querySelector('[data-testid="link-download-file"]')?.getAttribute('href') ?? null}));""")
+
+
+def test_the_files_section_appears_only_on_a_files_deployment(page):
+    page.site.api.reset(signed_in=True, files=FILES)          # The API has files, but the page is not marked.
+    page.open("/account")
+    page.wait_for("document.querySelector('[data-testid=\"button-sign-out\"]')")
+    page.after_json_reads(2)
+    assert page.eval("return document.querySelector('[data-testid=\"files-section\"]');") is None
+    assert api_calls(page, "/api/files") == []
+    open_files(page)
+    assert page.text("#acct-files-heading") == "Your files"
+    assert_only_current_functionality(page)
+
+
+def test_a_customer_who_left_premium_downloads_and_deletes_files_and_an_expired_one_can_only_be_deleted(page):
+    open_files(page, tier="free")                              # No longer Premium: the files are still theirs.
+    rows = file_rows(page)
+    assert rows[0]["available"] == "true" and rows[0]["download"] == "/api/files/AaAaAaAaAaAaAaAaAaAaAa"
+    assert "launch-plan.pptx" in rows[0]["text"] and "182 KB · Available until" in rows[0]["text"]
+    assert rows[1]["available"] == "false" and rows[1]["download"] is None
+    assert "notes.txt" in rows[1]["text"] and "912 bytes · Expired, no longer downloadable" in rows[1]["text"]
+    # Deleting asks once, then removes it from the account.
+    page.click_selector("[data-testid='file-row'][data-available='false'] [data-testid='button-delete-file']")
+    page.wait_for("document.querySelector('[data-testid=\"button-confirm-delete-file\"]')")
+    assert api_calls(page, "/api/files/BbBbBbBbBbBbBbBbBbBbBb") == []
+    page.click_selector("[data-testid='button-confirm-delete-file']")
+    page.wait_for("document.querySelector('[data-testid=\"account-notice\"]')")
+    assert page.text("[data-testid='account-notice']") == "File deleted\nnotes.txt was removed from your account."
+    (call,) = api_calls(page, "/api/files/BbBbBbBbBbBbBbBbBbBbBb")
+    assert call["method"] == "DELETE" and call["cookie"] is True and call["body"] is None
+    assert [r["text"].split(" ")[0] for r in file_rows(page)] == ["launch-plan.pptx"]
+    assert [f["id"] for f in page.site.api.files] == ["AaAaAaAaAaAaAaAaAaAaAa"]
+    # Cancel leaves the file alone.
+    page.click_selector("[data-testid='button-delete-file']")
+    page.click_selector("[data-testid='button-cancel-delete-file']")
+    page.wait_for("!document.querySelector('[data-testid=\"button-confirm-delete-file\"]')")
+    assert len(page.site.api.files) == 1 and api_calls(page, "/api/files/AaAaAaAaAaAaAaAaAaAaAa") == []
+
+
+def test_no_files_a_failed_load_and_an_ended_session(page):
+    open_files(page, files=[])
+    assert page.text("[data-testid='files-empty']") == "No files are stored in your account."
+    page.site.files_mark = True
+    page.site.api.reset(signed_in=True, files=FILES)
+    page.site.api.override("GET", "/api/files", 503, {"error": "service_unavailable"})
+    page.open("/account")
+    page.wait_for("document.querySelector('[data-testid=\"files-section\"] .acct-inline-problem')")
+    page.click_selector("[data-testid='files-section'] .acct-text-button")
+    page.wait_for("document.querySelector('[data-testid=\"files-list\"]')")
+    open_files(page)
+    page.site.api.sessions.clear()                             # Signed out elsewhere.
+    page.click_selector("[data-testid='button-delete-file']")
+    page.click_selector("[data-testid='button-confirm-delete-file']")
+    page.wait_for("location.pathname === '/account/sign-in'")
+    assert len(page.site.api.files) == 2
+
+
+@pytest.mark.parametrize("size", [NARROW, PHONE])
+def test_the_files_list_fits_a_phone(page, size):
+    page.resize(size, True)
+    open_files(page, files=[{**FILES[0], "filename": "a-very-long-file-name-without-spaces-" * 3 + ".pptx"},
+                            FILES[1]])
+    assert page.eval("return document.documentElement.scrollWidth <= window.innerWidth;")
+    assert page.eval("""return [...document.querySelectorAll('[data-testid="file-row"] button, [data-testid="file-row"] a')]
+        .every(e => { const r = e.getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; });""")

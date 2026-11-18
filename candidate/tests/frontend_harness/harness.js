@@ -112,13 +112,16 @@
   if (scenarioName.indexOf("images_") === 0) {
     document.documentElement.setAttribute("data-kalillac-files", "on");
     document.documentElement.setAttribute("data-kalillac-images", "on");
-    queue.push({ status: 200, json: { files: [] } });
+    queue.push({ status: 200, json: { files: [], can_add: true } });
   }
   if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access"
       || scenarioName === "files_edit_confirm") {
     document.documentElement.setAttribute("data-kalillac-files", "on");
-    queue.push(scenarioName !== "files_offered_no_access" ? { status: 200, json: { files: [] } }
-                                                : { status: 403, json: { error: "files_require_premium" } });
+    // Any signed-in account may list its own files (F6): an account that may not add any (Free, or
+    // after Premium ends) is answered 200 with can_add false, and its own files listed.
+    queue.push(scenarioName !== "files_offered_no_access" ? { status: 200, json: { files: [], can_add: true } }
+      : { status: 200, json: { can_add: false, files: [{ id: "EeEeEeEeEeEeEeEeEeEeEe", filename: "kept.pdf",
+                                                          available: true }] } });
   }
 
   // ---- scenario page: the End & erase timeout, under the scenario's control --

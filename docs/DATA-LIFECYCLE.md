@@ -5,6 +5,22 @@ built (and tested on real storage and PostgreSQL), and the plan for account eras
 built: it waits on the owner's retention decisions. Nothing here is scheduled or run against production.
 Decision numbers `D-n` are those of `docs/legal/LEGAL-REVIEW-V1.md` section 4.
 
+**Update after Codex's audit (F2, F6; branch `fix/premium-audit-corrections`).** Three statements below were
+wrong or are now out of date:
+- Expired files *were* deleted, but only at application startup: since the file feature (`36e1053`) a files
+  deployment ran `FileStore.purge` once when it started, with no further period. A long-running process never
+  deleted anything. Now the application runs the retention cleanup itself at startup and **every hour**
+  (`retention.CLEANUP_INTERVAL`), deleting a file once it has been expired for
+  `KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS` days plus the one-hour margin. Unset, that is 0, the behaviour the
+  release already had, so nothing new is decided; the staging template asks the owner for it (D-9). The
+  application and the operator command share one lock (`retention.run_exclusive`). Production has no files
+  feature, so none of this runs there.
+- An account's storage is bounded whether or not cleanup has run: quotas now count every file on disk,
+  expired ones included (250 MB / 300 files per account, unchanged).
+- A customer can delete an expired file (the API refused before), and every signed-in account, whatever its
+  plan, can list, download and delete its own files; a files deployment shows them on the account page
+  ("Your files"). Uploading and the file assistant still need Premium.
+
 ## 1. The data map
 
 How each piece of customer data is created, where it lives, how it ends today, and what deleting the
@@ -27,7 +43,7 @@ account row would do to it (the foreign keys as defined).
 | Security events (account id, type, time) | `account_security_events` | Never | **Blocks the deletion** (no `ON DELETE`) |
 | Security admission records (rate limiting of account actions) | `account_security_admission` | Managed by V1 admission control | **Blocks the deletion** |
 | Account operation outbox | `account_outbox` | — | **Blocks the deletion** |
-| Files and images | Server disk, per-account folder | Unavailable after 30 days; **not deleted until this checkpoint** (cleanup built, section 2); deleted at once when the customer deletes one | Not linked: the folder stays |
+| Files and images | Server disk, per-account folder | Unavailable after 30 days; deleted by the application's hourly cleanup once expired for the configured period (0 unless set, D-9); deleted at once when the customer deletes one, expired or not | Not linked: the folder stays |
 | Financial safeguards ledger | `finance_*` | Its own records, **no account identity** | Not linked |
 | Anonymous allowance | `anonymous_usage_*` | Current and previous UTC day, pruned lazily | Not linked |
 | Temporary conversations | Server memory | Eviction, End & erase, restart | Not stored |
@@ -100,19 +116,37 @@ command's confirmation).
    before reopening (V1-02D/E plan §5); the retention statement must say how long backups keep erased data
    [D-11].
 
+### 3.1 The decisions that complete erasure (nothing irreversible is built before them)
+
+| # | Decision (owner, with counsel where marked) | Options | What it unblocks |
+|---|---|---|---|
+| E-1 | The erasure window after a request [D-8] | e.g. none, 7, 14 or 30 days | When erasure may run |
+| E-2 | Whether the customer can withdraw a request in the window, and how [D-8] | no / by signing in / by contacting support | The withdrawal path and its copy |
+| E-3 | What is retained after erasure, and for how long (counsel) [D-8, D-11] | billing references and refund/dispute cases (tax period); security events (pseudonymous; the plan proposes 12 months); none | Which tables erasure empties, and the retention cleanup for what stays |
+| E-4 | The account row: tombstone (recommended) or delete the V1 security records first | tombstone / delete | The V1 authority change (Codex review) |
+| E-5 | Subscriptions at erasure: operator cancels first; refunds [D-4] | cancel at once, or at period end; refund policy | The prerequisite check |
+| E-6 | The Stripe customer: delete it where Stripe allows, or keep for accounting (counsel) [D-8] | delete / keep | The provider step |
+| E-7 | A confirmation email when erasure completes [D-8] | yes / no | One outbox message |
+| E-8 | Backups: whether they exist, and how long they keep erased data [D-11] | none / schedule and retention | The restore rule and the policy statement |
+
+The erasure itself waits on these: its database shape depends on E-3 and E-4, and when it may run on E-1.
+Once E-1, E-3 and E-4 are recorded, the erasure function, the per-account file removal (one owner's folder with the
+retention rules' protections) and the operator command can be built and tested on real PostgreSQL and storage
+without touching production.
+
 ## 4. What can be built now, and what needs the owner
 
 | Item | Status |
 |---|---|
-| Expired-file deletion mechanism | **Built and tested**; needs D-9 (the period) and approval to schedule it per environment |
+| Expired-file deletion | **Built, tested and scheduled by the application itself** (startup and hourly) in a files deployment; the period is D-9 (0 days unless set, as before) |
 | Usage-record cleanup mechanism | **Built and tested**; needs D-11 (the period, at least 8 days) and approval to schedule |
 | Registration intents | **Already purged** after 24 hours; nothing to build |
 | Expired sessions and used reset links (rows) | Could be built now as a P authority function (rows are V1's); needs D-11 for how long expired rows are kept for security review |
 | Security events retention | Needs D-11 and the tombstone decision (section 3.5); V1 authority change, Codex |
 | Account erasure | Plan above; needs D-4, D-8, D-11 and the tombstone decision before any irreversible code |
-| Customer files page (list, download, delete) | **Gap found 2026-11-18.** The API lists and deletes files, but no customer page does, so files from a closed temporary chat are out of reach until they expire. Buildable now on the existing API and per-account isolation; whether it is required for launch is the owner's call |
+| Customer files page (list, download, delete) | **Built** (`fix/premium-audit-corrections`): "Your files" on the account page of a files deployment, for every plan; expired files are listed for deletion only |
 | Backups | Needs the owner: whether and where backups exist, and their retention [D-11] |
-| Scheduling | A systemd timer per environment, only after the periods are decided; never on production without the owner's approval |
+| Scheduling | Files: the application (above). Usage records: an operator command; a timer per environment only after D-11, never on production without the owner's approval |
 
 ## 5. Customer-facing disclosure: files from temporary conversations
 

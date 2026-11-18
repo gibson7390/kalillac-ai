@@ -2,9 +2,10 @@
 
 A file stops being available at its recorded expires_at (FileStore's availability period, 30 days today).
 This module deletes it from disk once it has been expired for an explicitly configured further period
-(`delete_after`, required, no default; the owner's decision D-9) plus a fixed safety margin. It is run by
-an operator command (tools/data_lifecycle.py files), as the service identity that owns the files; the
-application never calls it.
+(`delete_after`, required here; the owner's decision D-9) plus a fixed safety margin. A files deployment
+runs it itself at startup and every CLEANUP_INTERVAL (KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS), and an
+operator can run it (tools/data_lifecycle.py files), both as the service identity that owns the files and
+never at the same time (run_exclusive).
 
 Safety rules, each tested in tests/test_file_retention.py:
 
@@ -42,6 +43,8 @@ SAFETY_MARGIN = timedelta(hours=1)
 STALE_TEMPORARY = timedelta(hours=1)
 MAX_RECORD_BYTES = 64 * 1024
 LOCK_NAME = ".retention.lock"
+CLEANUP_INTERVAL = timedelta(hours=1)   # How often a files deployment runs the cleanup itself.
+_PROCESS_LOCK = __import__("threading").Lock()
 
 _FOLDER = re.compile(r"[0-9a-f]{32}")
 _ID = r"[A-Za-z0-9_-]{22}"
@@ -205,3 +208,30 @@ def _clean_folder(folder, report, deadline, stale_before, apply):
                     folder.unlink(name)
         else:
             report.skipped_entries += 1
+
+
+def run_exclusive(root, **options):
+    """clean(root, **options) unless another run holds the retention lock: then None, and nothing is done.
+
+    The lock is root/.retention.lock (flock, POSIX), shared by every process using that root (the
+    application's workers and the operator command), plus a lock for threads of this process."""
+    root = Path(root)
+    if not _PROCESS_LOCK.acquire(blocking=False):
+        return None
+    try:
+        handle = None
+        if os.name == "posix":
+            import fcntl
+            handle = os.open(root / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(handle)
+                return None
+        try:
+            return clean(root, **options)
+        finally:
+            if handle is not None:
+                os.close(handle)
+    finally:
+        _PROCESS_LOCK.release()

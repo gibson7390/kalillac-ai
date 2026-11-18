@@ -15359,10 +15359,39 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
     _file_chat_handoff = _build_file_chat_handoff(_file_service, _wants_file, _valid_assist_request,
                                                   _valid_confirmations)
 
-    async def _purge_expired_files():
-        from starlette.concurrency import run_in_threadpool
-        await run_in_threadpool(_file_store.purge)
-    api.add_event_handler("startup", _purge_expired_files)
+    # Expired files leave storage on a schedule, not only at a restart (Codex F2): at startup and every
+    # retention.CLEANUP_INTERVAL, once expired for KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS (D-9, the
+    # owner's; unset keeps this release's behaviour since 36e1053: deleted once expired, plus the
+    # cleanup's safety margin). The application's workers and the operator command share one lock.
+    _files_delete_after_raw = os.getenv("KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS", "0").strip()
+    if not re.fullmatch(r"[0-9]{1,4}", _files_delete_after_raw) or int(_files_delete_after_raw) > 3650:
+        raise RuntimeError("KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS must be a whole number of days, at most 3650.")
+    from datetime import timedelta as _timedelta
+    _files_delete_after = _timedelta(days=int(_files_delete_after_raw))
+    _files_cleanup_stop = _threading.Event()
+
+    def _file_cleanup_once():
+        try:
+            removed = _file_store.purge(_files_delete_after)
+        except Exception as error:   # A class name only; the next run tries again.
+            print("WARN: FILE_RETENTION_FAILED", type(error).__name__)
+            return
+        if removed:
+            print("INFO: FILE_RETENTION_DELETED", removed)
+
+    def _file_cleanup_loop():
+        from kalillac_files.retention import CLEANUP_INTERVAL
+        while not _files_cleanup_stop.is_set():
+            _file_cleanup_once()
+            _files_cleanup_stop.wait(CLEANUP_INTERVAL.total_seconds())
+
+    async def _start_file_cleanup():
+        _threading.Thread(target=_file_cleanup_loop, name="kalillac-file-retention", daemon=True).start()
+
+    async def _stop_file_cleanup():
+        _files_cleanup_stop.set()
+    api.add_event_handler("startup", _start_file_cleanup)
+    api.add_event_handler("shutdown", _stop_file_cleanup)
 
 
 @api.get("/api/health")

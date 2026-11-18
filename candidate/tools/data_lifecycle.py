@@ -55,7 +55,7 @@ def _days(value, name):
 
 def run_files(args, environ, out):
     from datetime import timedelta
-    from kalillac_files.retention import LOCK_NAME, clean
+    from kalillac_files.retention import run_exclusive
     apply = _confirmed(args, environ)
     days = _days(args.delete_after_expiry_days, "--delete-after-expiry-days")
     root = Path(args.root or environ.get("KALILLAC_FILES_ROOT", ""))
@@ -63,21 +63,10 @@ def run_files(args, environ, out):
         raise Refused("--root or KALILLAC_FILES_ROOT is required")
     if not root.is_dir() or root.is_symlink():
         raise Refused("the files root must be an existing directory")
-    lock = None
-    if os.name == "posix":
-        import fcntl
-        lock = os.open(root / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(lock)
-            out.write(json.dumps({"command": "files", "result": "busy"}) + "\n")
-            return 3
-    try:
-        report = clean(root, delete_after=timedelta(days=days), apply=apply)
-    finally:
-        if lock is not None:
-            os.close(lock)
+    report = run_exclusive(root, delete_after=timedelta(days=days), apply=apply)
+    if report is None:      # The application's scheduled run, or another operator run, holds the lock.
+        out.write(json.dumps({"command": "files", "result": "busy"}) + "\n")
+        return 3
     out.write(json.dumps({"command": "files", "delete_after_expiry_days": days, **report.as_dict()}) + "\n")
     return 0
 
