@@ -1181,7 +1181,8 @@ def test_the_earlier_billing_address_and_unknown_values_land_on_the_overview(pag
     assert page.eval("return location.search;") == ""
     assert page.eval("return document.title;") == "Your account — Kalillac AI"
     # The portal's return address, and anything else, shows the overview with no notice.
-    for address in ("/account/billing", "/account?checkout=evil", "/account?checkout=SUCCESS"):
+    for address in ("/account/billing", "/account?checkout=evil", "/account?checkout=SUCCESS",
+                    "/account?checkout=success&utm_source=x"):
         page.open(address)
         page.wait_for("location.pathname === '/account' && document.querySelector('[data-testid=\"button-upgrade\"]')")
         assert page.eval("return location.search;") == ""
