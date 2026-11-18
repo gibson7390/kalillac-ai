@@ -220,9 +220,11 @@ staging hostname), `root` (`/var/www/UNIT`), the upstream port (`PORT`), and add
 `add_header X-Robots-Tag "noindex, nofollow" always;`. Two limits must allow what staging turns on:
 `client_max_body_size` of at least 11m (file uploads are bounded at 10 MiB by the application) and a
 `proxy_read_timeout` of at least 620s on `/api/` (a file request may take up to 600 seconds).
-Publish the hostname only behind **Cloudflare Access** limited to the owner; never link it from the
-public site. Then add the Stripe test-mode webhook endpoint for the hostname
-(`docs/STRIPE_TEST_MODE_SETUP.md`).
+Publish the hostname (`staging.kalillac.ai`) only behind **Cloudflare Access** limited to the owner,
+with the one Stripe webhook exception restricted to Stripe's addresses, the exact path and POST, and
+the origin reachable only through this zone: every rule and the outside-in proof are in
+`CLOUDFLARE-ACCESS.md` (this directory). Never link the hostname from the public site. Then add the Stripe
+test-mode webhook endpoint for the hostname (`docs/STRIPE_TEST_MODE_SETUP.md`).
 
 ## 10. The journey to accept staging
 
