@@ -1879,7 +1879,14 @@
     return "/api/spaces/" + spaceId + (rest || "");
   }
 
-  function setSpacesStatus(text) { spacesStatus.textContent = text || ""; }
+  // A failure (one of the fixed failure messages) is marked so it reads as a problem.
+  function setSpacesStatus(text) {
+    spacesStatus.textContent = text || "";
+    var problem = text === COPY_SPACES_FAILED || text === COPY_SPACES_CREATE_FAILED
+      || text === COPY_SPACE_SAVE_FAILED || text === COPY_SPACE_CHANGED;
+    if (problem) spacesStatus.setAttribute("data-tone", "problem");
+    else spacesStatus.removeAttribute("data-tone");
+  }
 
   function clearSpacesList() {
     while (spacesList.firstChild) spacesList.removeChild(spacesList.firstChild);
@@ -1944,7 +1951,7 @@
     spacesTitle.textContent = space.name;
     spacesBack.hidden = false;
     spacesNewLabel.textContent = "New conversation title (optional)";
-    spacesNewName.placeholder = "New conversation (title optional)";
+    spacesNewName.placeholder = "Conversation title (optional)";   // Fits a 360 px phone in full.
     spacesNewName.maxLength = SPACE_TITLE_MAX;
     spacesNewName.value = "";
     clearSpacesList();

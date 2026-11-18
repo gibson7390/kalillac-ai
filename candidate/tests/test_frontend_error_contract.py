@@ -215,7 +215,7 @@ SCENARIOS = (
     + list(REASONING_SCENARIOS)
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
        "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes",
-       "spaces_conversations_edit"]
+       "spaces_conversations_edit", "spaces_manage_360x640"]
 )
 
 
@@ -1265,6 +1265,9 @@ def test_a_space_is_renamed_given_instructions_and_deleted_with_its_version(brow
     conflict = step(result, "conflict")
     assert conflict["status"] == "This Space was changed somewhere else. Open it again to see the latest."
     assert conflict["field"] == "Cite sources."                    # Kept for the customer, not overwritten.
+    # A failure reads as one; ordinary progress and outcomes do not.
+    assert conflict["tone"] == "problem"
+    assert [step(result, label)["tone"] for label in ("renamed", "instructions-saved", "deleted")] == [None] * 3
     assert step(result, "instructions-saved")["status"] == "Instructions saved."
     assert step(result, "confirm-delete")["buttons"] == ["Delete Space", "Cancel"]
     deleted = step(result, "deleted")
@@ -1276,6 +1279,18 @@ def test_a_space_is_renamed_given_instructions_and_deleted_with_its_version(brow
         ("PUT", f"/api/spaces/{SPACE_A}/instructions", {"instructions": "Cite sources.", "expected_version": 5}),
         ("DELETE", f"/api/spaces/{SPACE_A}", None)]
     assert "RAW-SECRET" not in step(result, "deleted-page")["threadText"]
+
+
+def test_managing_a_space_on_a_phone_keeps_touch_targets_and_fits(browser_results):
+    result = scenario(browser_results, "spaces_manage_360x640")
+    labels = ["space-view", "renaming", "renamed", "instructions", "conflict", "instructions-saved",
+              "confirm-delete", "deleted"]
+    for label in labels:
+        snap = step(result, label)
+        assert snap["viewport"] == 360 and snap["overflow"] <= 0, label
+        assert snap["small"] == [], (label, snap["small"])      # every control a 44 px target
+        assert snap["placeholderFits"], label                 # "Conversation title (optional)" in full
+    assert step(result, "conflict")["tone"] == "problem"
 
 
 def test_a_space_send_carries_the_chosen_mode_and_a_retry_keeps_it(browser_results):

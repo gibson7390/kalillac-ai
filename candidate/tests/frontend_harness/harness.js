@@ -1594,9 +1594,23 @@
   function manage(label) {
     var buttons = Array.prototype.map.call(document.querySelectorAll("#spaces-manage button"), text);
     var field = document.getElementById("spaces-edit-field");
+    // Layout, for the phone-sized run: controls in the open dialog under a 44 px target, the page's
+    // horizontal overflow, and whether the name field's placeholder fits inside it.
+    var small = Array.prototype.filter.call(
+      document.querySelectorAll("dialog[open] button, dialog[open] input, dialog[open] textarea"),
+      function (e) { return e.offsetParent !== null && e.getBoundingClientRect().height < 44; }
+    ).map(function (e) { return text(e) || e.id; });
+    var input = $("spaces-new-name");
+    var style = getComputedStyle(input);
+    var ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = style.font;
+    var room = input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
     steps.push({ label: label, buttons: buttons, field: field ? field.value : null,
                  title: text($("spaces-dialog-title")), status: text($("spaces-status")),
-                 barName: text($("space-bar-name")), barShown: !$("space-bar").hidden, requestCount: requests.length });
+                 tone: $("spaces-status").getAttribute("data-tone"),
+                 barName: text($("space-bar-name")), barShown: !$("space-bar").hidden, requestCount: requests.length,
+                 viewport: window.innerWidth, overflow: document.documentElement.scrollWidth - window.innerWidth,
+                 small: small, placeholderFits: ctx.measureText(input.placeholder).width <= room + 0.5 });
   }
   // Waits (up to 3 s) for what the page draws after a scripted response, instead of a fixed pause.
   async function until(find, label) {
@@ -1662,6 +1676,9 @@
     manage("deleted");
     a.snap("deleted-page");
   };
+
+  // The same management, on a 360 px phone (layout recorded at every step).
+  SCENARIOS.spaces_manage_360x640 = SCENARIOS.spaces_manage;
 
   // Reasoning modes on a Spaces deployment: the picker stays in a Space and the chosen mode goes with the
   // message; a retry keeps the mode it was sent with, even after the picker changed.

@@ -328,6 +328,29 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
 .spaces-edit-row .spaces-item-name { flex: 1 1 0; min-width: 0; }
 .spaces-edit-row .spaces-confirm { flex: 1 1 100%; margin: 0; font-weight: 500; }
 .spaces-edit-inline { flex: 1 1 100%; }
+/* A failure in the dialog reads as one, not as another line of description. */
+.spaces-status[data-tone="problem"] {
+  padding: 8px 12px;
+  border-left: 3px solid var(--danger);
+  border-radius: 0 8px 8px 0;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-weight: 600;
+}
+/* Phones and other touch screens: every control in the Spaces bar and dialog is a 44px target, and
+   fields use 16px text so mobile Safari does not zoom the page when one is focused. */
+@media (max-width: 560px), (pointer: coarse) {
+  .space-leave, .spaces-secondary, .spaces-new-submit, .spaces-item, .spaces-manage-btn, .spaces-earlier,
+  .spaces-new input, .spaces-edit-field { min-height: 44px; }
+  .spaces-new input, .spaces-edit-field { font-size: 16px; }
+}
+/* A narrow phone: the name field takes the whole row (its placeholder is no longer cut off) and its
+   button follows on the right. */
+@media (max-width: 400px) {
+  .spaces-new { flex-wrap: wrap; }
+  .spaces-new input { flex: 1 1 100%; }
+  .spaces-new-submit { margin-left: auto; }
+}
 
 /* Plain status text, not a control: what is true of this conversation now. */
 .session-status {
