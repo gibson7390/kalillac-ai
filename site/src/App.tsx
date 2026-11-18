@@ -5,13 +5,20 @@ import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, use
 import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
 import { updatePublicMetadata } from '@/public-identity';
-import { isAccountPath, updateAccountMetadata } from '@/account/account-routes';
+import { ACCOUNT_PATHS, isAccountPath, updateAccountMetadata } from '@/account/account-routes';
 
 // Account pages load only on /account routes: the homepage, Privacy and Terms
 // never request their code or styles.
 const AccountPages = lazy(() => import('@/account/account-pages'));
 
 const brandLogoUrl = '/assets/kalillac-ai-logo.png';
+
+// A deployment that offers accounts says so with an attribute on each page's <html> element
+// (data-kalillac-accounts="on", written by deploy/staging/build_webroot.py), exactly as it flags the chat
+// page. Only then do the header, the mobile menu and the hero offer account entry points; a
+// deployment without accounts shows none, so no visitor is sent to a page that cannot serve them. The
+// homepage still makes no account request and loads no account code until a visitor follows a link.
+const ACCOUNTS_OFFERED = document.documentElement.getAttribute('data-kalillac-accounts') === 'on';
 
 // The canonical chat workspace (../frontend), served at /app/. The homepage
 // never loads or frames it: only Send opens it, with the draft.
@@ -51,6 +58,10 @@ function SiteHeader() {
           <a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>
           <Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>
           <a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>
+          {ACCOUNTS_OFFERED && <>
+            <Link href={ACCOUNT_PATHS.signIn} className="nav-link nav-sign-in" data-testid="link-sign-in-nav">Sign in</Link>
+            <Link href={ACCOUNT_PATHS.create} className="nav-account" data-testid="link-create-account-nav">Create account</Link>
+          </>}
           <button ref={toggle} type="button" className="mobile-nav-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-site-menu" aria-label={open ? 'Close navigation menu' : 'Open navigation menu'} data-testid="button-mobile-menu">
             {open ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
           </button>
@@ -61,6 +72,10 @@ function SiteHeader() {
           <a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>
           <Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>
           <a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>
+          {ACCOUNTS_OFFERED && <>
+            <Link href={ACCOUNT_PATHS.signIn} onClick={close} className="mobile-menu-account" data-testid="link-mobile-sign-in">Sign in</Link>
+            <Link href={ACCOUNT_PATHS.create} onClick={close} data-testid="link-mobile-create-account">Create account</Link>
+          </>}
         </nav>
       )}
     </header>
@@ -741,6 +756,7 @@ function HomePage() {
     <section className="hero" aria-labelledby="hero-title" data-testid="section-hero"><div className="hero-signal-line" aria-hidden="true"/><div className="container-wide hero-stage">
       <div className="hero-copy"><span className="eyebrow">PRIVATE BY DESIGN</span><h1 id="hero-title"><span className="h1-phrase">Think clearly.</span>{' '}<span className="h1-phrase">Write well.</span>{' '}<span className="h1-phrase">Build and debug.</span>{' '}<span className="h1-phrase h1-accent"><span>Search the</span>{' '}<span>current web.</span></span></h1><p className="hero-description">Work through difficult questions, draft and revise writing, explain and repair code, or research current information with sources—without creating an account or building a permanent chat history.</p>
         <button type="button" className="primary-link hero-action" onClick={startSession} data-testid="button-start-session">Start a private session <ArrowRight size={18} aria-hidden="true"/></button>
+        {ACCOUNTS_OFFERED && <p className="hero-account" data-testid="hero-account">Have an account?{' '}<Link href={ACCOUNT_PATHS.signIn} data-testid="link-sign-in-hero">Sign in</Link><span aria-hidden="true">·</span><Link href={ACCOUNT_PATHS.create} data-testid="link-create-account-hero">Create one</Link></p>}
         <p className="hero-under-note"><span className="trust-item"><Clock size={16} aria-hidden="true"/> Temporary sessions</span><span className="trust-item"><CircleSlash size={16} aria-hidden="true"/> No account required</span><Link href="/privacy" className="note-link trust-item"><ShieldCheck size={16} aria-hidden="true"/> Clear provider disclosure</Link></p>
       </div><div className="hero-workspace"><OrbitalAssistant/><HomeComposer slotRef={slotRef} inputRef={inputRef}/></div>
     </div></section>

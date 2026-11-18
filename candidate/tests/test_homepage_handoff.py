@@ -647,8 +647,13 @@ def test_homepage_copy_and_navigation():
     assert header.count('href="/#product"') == 2 and 'href="/#privacy"' not in header
     assert "Try Kalillac" not in app and "nav-cta" not in app
     assert app.count('className="primary-link') == 1
-    for unfinished in ("Pricing", "Sign in", "Sign up", "Create account", "Log in"):
+    for unfinished in ("Pricing", "Sign up", "Log in"):
         assert unfinished not in app, unfinished
+    # Sign in and Create account exist only where the deployment offers accounts: every occurrence sits
+    # inside an ACCOUNTS_OFFERED block (test_account_ui checks the links and their behaviour).
+    ungated = re.sub(r"\{ACCOUNTS_OFFERED && (<>.*?</>|<p .*?</p>)\}", "", app, flags=re.S)
+    for entry in ("Sign in", "Create account", "Create one"):
+        assert entry not in ungated, entry
 
 
 def test_privacy_wording_boundaries():

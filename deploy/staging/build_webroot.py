@@ -6,9 +6,11 @@
 The site (built with `npm ci && npm run build` in site/) is served at / and the chat at /app/, as in
 production. The chat page offers accounts, files and reasoning modes only where the deployment marks
 its <html> element; a release does that by hand, and this does it for staging: each name in --marks
-adds data-kalillac-<name>="on". Nothing else in either tree is changed, and nothing is fetched.
-It refuses an output directory that already exists, a mark it does not know, and a chat page whose
-<html> element is not the one it expects (so a changed page is never marked wrongly).
+adds data-kalillac-<name>="on". The site reads one mark, accounts (its header, mobile menu and hero then
+offer Sign in and Create account), so with accounts in --marks each of the site's own pages (its top-level
+.html files) is marked the same way. Nothing else in either tree is changed, and nothing is fetched.
+It refuses an output directory that already exists, a mark it does not know, and a page whose <html>
+element is not the one it expects (so a changed page is never marked wrongly).
 """
 from __future__ import annotations
 
@@ -18,12 +20,13 @@ import shutil
 import sys
 
 MARKS = ("accounts", "files", "images", "reasoning", "spaces")
+SITE_MARKS = ("accounts",)        # the only mark the site reads (site/src/App.tsx)
 HTML = '<html lang="en">'
 
 
 def marked(page, marks):
     if page.count(HTML) != 1:
-        raise ValueError("the chat page's <html> element is not the expected one")
+        raise ValueError("a page's <html> element is not the expected one")
     return page.replace(HTML, '<html lang="en"' + "".join(f' data-kalillac-{m}="on"' for m in marks) + ">")
 
 
@@ -37,7 +40,12 @@ def build(site, frontend, out, marks):
     if out.exists():
         raise ValueError("--out already exists")
     page = marked((frontend / "index.html").read_text(encoding="utf-8"), [m for m in MARKS if m in marks])
+    site_marks = [m for m in SITE_MARKS if m in marks]
+    pages = {path.name: marked(path.read_text(encoding="utf-8"), site_marks)
+             for path in sorted(site.glob("*.html"))} if site_marks else {}
     shutil.copytree(site, out)
+    for name, text in pages.items():
+        (out / name).write_text(text, encoding="utf-8", newline="\n")
     if (out / "app").exists():
         raise ValueError("the built site already has an /app/ directory")
     shutil.copytree(frontend, out / "app")
