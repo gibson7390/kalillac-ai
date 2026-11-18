@@ -118,6 +118,24 @@ PDFium (the Noto PDF had 43 and still extracted wrongly). For comparison, Micros
 export of the same document extracts worse in PDFium (no probe word found). Clipboard and
 screen-reader behaviour are not yet verified. This item is not resolved.
 
+**Measured again 2026-11-17 (narrows the finding; resolves nothing).** The generated Arabic benchmark PDF
+(Linux, typst 0.15.2, pypdfium2, pypdf 7.1.0; the same 27 source words as the test) carries seven
+multi-letter glyphs in its ToUnicode maps: لا لأ لإ (regular and bold) and سي شر (regular). Words found
+exactly in the extracted text:
+
+| | PDFium text | PDFium search | pypdf text |
+|---|---|---|---|
+| As generated | 20 of 27 | 19 | **27 of 27** |
+| Those seven entries' letters reversed in ToUnicode | 27 | 26 | 20 |
+
+So pypdf already extracts every word exactly; the reversal is PDFium's (Chrome's viewer) alone, and the
+statement above that pypdf reverses them no longer holds for this pypdf. The obvious ToUnicode
+workaround only moves the defect from PDFium to pypdf (and to any extractor that reads ToUnicode in
+logical order), so it is **not adopted**. All seven pairs come from the font's required-ligature
+lookup (`rlig`, 241 pairs; checked in the GSUB table, whose only `liga` entry is the Latin "fi"), so
+turning ligatures off is not a typographic option. A real correction must be honoured by both extractors,
+for example the ligature's letters carried by a mechanism PDFium reads; none is measured yet.
+
 ### Finding 4 and Q3: Word fields
 
 Verified locally in Microsoft Word 16 through automation, on the generated benchmark documents:

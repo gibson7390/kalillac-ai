@@ -311,6 +311,14 @@ from the code. See "Owner decisions required".
   image-assisted responses were not counted against the daily allowance. Reproduced (5 of 7 new
   PostgreSQL tests failed on the unfixed code), corrected, and verified (7 of 7, three runs; regression
   suites green). Details in the blueprint and the handoff, section 11. CI green on `c3a7a2083d3f527da4a9a67b02f78b61db37c9d3`: subscription 44218217622, files 44218222254, frontend 44218226795, provider 44218230840, anonymous allowance 44218235431. Awaiting Codex.
+* **Second session of 2026-11-17** (`feat/responsive-account-u2`, then `feat/staging-preflight`; the
+  handoff's section 13): U2 responsive pass over every account page and state (`3ad5979`) and the chat's
+  Spaces dialog on phones (`e17dd1f`); B4, a customer-journey defect found by reading the staging
+  configuration against the site's routes: Stripe's return addresses pointed at `/account/billing`, which
+  rendered Not found (`13c5bd3`, `32a0e77`); M9, the read-only staging preflight (`351058e`, runbook step
+  8); E1b designed, not built (`docs/E1B-BILLING-AUTHORITY-DESIGN.md`, branch
+  `docs/e1b-billing-authority-design`, `8fd0cb5`); the Arabic PDF finding re-measured (pypdf already exact;
+  PDFium alone reverses ligatures; the ToUnicode workaround rejected). CI: frontend 44261585705 on `32a0e77` (1,896 passed, 19 skipped) and 44261589782 on `55ae0ff` (1,897 passed, 19 skipped), subscription 44231539374 on `13c5bd3` and 44232364958 on `351058e`: green. The first frontend runs (44231534575, 44233204310) failed one source guard, corrected in `32a0e77`.
 * Fixed flaky test: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
   `pending` once in CI (run 43982872312, D3). Cause: the lease release is a background task on the test
@@ -513,11 +521,13 @@ artwork; fixed and tested.
 
 ## Known defects and environment limits
 
-* **Arabic PDF ligature order (open):** PDFium (Chrome's viewer) and pypdf reverse the two letters of
-  a required two-letter ligature glyph inside right-to-left runs, so words containing lam-alef or
-  another `rlig` pair are not found by search. Letters are otherwise exact since `dee4831`. Typst's
-  `/ActualText` is not used by PDFium; a different export approach is needed. Clipboard and
-  screen-reader behaviour not yet verified.
+* **Arabic PDF ligature order (open):** PDFium (Chrome's viewer) reverses the two letters of a
+  required two-letter ligature glyph inside right-to-left runs, so words containing lam-alef or
+  another `rlig` pair are not found by search (20 of the benchmark's 27 words exact). Measured
+  2026-11-17: pypdf 7.1.0 extracts all 27 exactly, and reversing those glyphs' ToUnicode entries fixes
+  PDFium only by breaking pypdf, so it is not adopted (`docs/CODEX-AUDIT-CORRECTIONS.md`, finding 5).
+  Letters are otherwise exact since `dee4831`. Typst's `/ActualText` is not used by PDFium; a different
+  export approach is needed. Clipboard and screen-reader behaviour not yet verified.
 * **Word field caches (open, owner decision 12):** cached `PAGE`/`SECTIONPAGES` results are `1`; Word
   desktop recalculates them, viewers that do not show stale totals. The contents field is marked
   dirty, which is what makes Word ask to update fields on opening (verified in Word 16).

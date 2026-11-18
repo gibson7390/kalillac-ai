@@ -112,3 +112,13 @@ Environment facts and pitfalls are in the memory file `kalillac-roadmap-location
   each way into a request begin with the authority check (`test_homepage_handoff`).
 * Edit with the Edit tool or Python scripts written with Write; backslashes in Bash heredocs get mangled.
 * Long browser suites take an hour locally when the machine is busy; CI's frontend workflow is the gate.
+
+## Update: second session of 2026-11-17
+
+Head: `feat/staging-preflight` (stacked on `feat/responsive-account-u2`, on `fix/file-allowance-accounting`);
+`docs/e1b-billing-authority-design` is a separate documentation branch from `21258e5`. What was done, with
+commits and CI, is section 13 of `docs/CODEX-HANDOFF-2026-11-17.md`; statuses are in the blueprint. No Codex
+finding arrived in that session; the allowance correction still awaits Codex. Next: answer Codex as findings
+come; E1b only after the billing audit answers the design's section 8; the staging run when the owner
+supplies decision 17. Lesson recorded: run `test_homepage_handoff.py`'s source guards (the tests without a
+browser fixture, about 10 s) before pushing any change under `site/src`.

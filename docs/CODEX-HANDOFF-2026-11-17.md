@@ -192,6 +192,39 @@ Questions worth an independent answer: can any model-backed response path still 
 reservation (the handoff returns None only before admission)? Is the account match
 (`str(quota user) == file account owner`) sufficient in legacy mode as well as V1?
 
+## 13. Second session of 2026-11-17: responsive pass, the return from Stripe, the staging preflight
+
+Stacked on section 11's branch: `feat/responsive-account-u2` (`3ad5979`, `13c5bd3`) and on it
+`feat/staging-preflight` (`351058e`, `e17dd1f`, then the record). Development statuses only.
+
+* `3ad5979` U2, account pages: rendered every account page and state at 320–1440 px and on a landscape
+  phone; corrected the form measure on tablets, an empty note column beside the long overview (now
+  sticky; the surface uses `overflow: clip`, since `hidden` made it the sticky element's scroll container),
+  the one phone action that stayed content-width, and short landscape screens.
+* `13c5bd3` B4: **a customer-journey defect no test could see.** The staging template and the Stripe guide
+  sent Checkout's success and cancel URLs and the portal's return URL to `/account/billing`, which the
+  account site does not route (Not found). They are now `/account?checkout=success|cancelled` and
+  `/account`; `/account/billing` redirects there. The overview reads `?checkout=` once without side
+  effects, removes it through the router, and only chooses fixed copy (access always follows the
+  server's plan); no second upgrade is offered while Stripe confirms. Question: can the query make the
+  page claim or do anything the server's plan does not support?
+* `351058e` M9: `tools/staging_preflight.py`, read-only, run at runbook step 8. Questions: can any line
+  it prints carry a value from the files it reads (its own messages name settings; the application's
+  loaders' messages are passed through, truncated)? Does its in-process `os.environ` replacement
+  (restored afterwards; tested) matter for a tool run as root on the host?
+* `e17dd1f` U2, the chat's Spaces dialog on phones: 44 px targets and 16 px fields below 560 px and on
+  coarse pointers, the conflict and failure statuses marked `data-tone="problem"` (derived only from the
+  four fixed failure messages), the title field's placeholder shortened to fit 360 px.
+* `32a0e77` (U2 branch) and its cherry-pick `55ae0ff` (preflight branch): the first frontend runs on
+  `13c5bd3` (44231534575: 1 failed, 1,895 passed, 19 skipped) and `e17dd1f` (44233204310) **failed** one
+  source guard, `test_storage_is_only_the_one_time_sessionstorage_handoff`, which forbids
+  `URLSearchParams` anywhere in the site. The overview now compares `location.search` with the two exact
+  strings (extra parameters show no notice); the guard is unchanged.
+
+CI: frontend 44261585705 on `32a0e77` (1,896 passed, 19 skipped) and 44261589782 on `55ae0ff` (1,897 passed, 19 skipped), subscription 44231539374 on `13c5bd3` and 44232364958 on `351058e`: green. The first frontend runs (44231534575, 44233204310) failed one source guard, corrected in `32a0e77`.
+
+Not changed: any backend behaviour, any grant, any price, allowance or provider setting.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
