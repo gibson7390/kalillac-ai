@@ -1134,7 +1134,9 @@ def test_signing_in_and_creating_an_account_say_files_stay_available_for_30_days
     page.open(path)
     page.wait_for("document.querySelector('main form')")
     note = page.text(".acct-aside").lower()
-    assert "files you attach or kalillac creates are stored in" in note and "stay available for 30 days" in note
+    # Sign in: "...are stored in your account..."; create: "...while signed in are stored in it...".
+    assert "files you attach or kalillac creates" in note and " are stored in " in note
+    assert "stay available for 30 days" in note
 
 
 @pytest.mark.parametrize("tier,label", [("paid", "Paid plan"), ("free", "Free account")])
