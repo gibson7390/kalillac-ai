@@ -1128,6 +1128,66 @@ def test_renewing_plan_and_portal_failures(page):
     assert page.offsite() == []
 
 
+PAID_ACTIVE = {"subscription_status": "active", "cancel_at_period_end": False,
+               "current_period_end": "2026-12-01T17:00:00+00:00", "portal_available": True}
+
+
+def test_return_from_checkout_explains_confirmation_and_rechecks_the_plan(page):
+    # Stripe's success URL: the webhook has not arrived yet, so the account is still free.
+    page.site.api.reset(signed_in=True, verification=True, billing=dict(FREE_BILLING))
+    page.open("/account?checkout=success")
+    page.wait_for("document.querySelector('[data-testid=\"checkout-return\"]')")
+    assert page.text("[data-testid='checkout-return'] [data-testid='account-notice']") == (
+        "Your payment is being confirmed\n"
+        "Paid access appears here once Stripe confirms the payment, usually within a few minutes.")
+    # No second purchase is offered while Stripe confirms the first.
+    assert page.eval("return document.querySelector('[data-testid=\"button-upgrade\"]');") is None
+    assert "Upgrading opens" not in page.text("[data-testid='billing-section']")
+    # The query is removed, so a reload or a copied address does not repeat the notice.
+    assert page.eval("return location.pathname + location.search;") == "/account"
+    # Stripe confirms; the customer checks again on the same page.
+    with page.site.api.lock:
+        page.site.api.tier, page.site.api.billing = "paid", dict(PAID_ACTIVE)
+    page.click_selector("[data-testid='button-check-plan']")
+    page.wait_for("document.querySelector('[data-testid=\"account-plan\"]').textContent === 'Paid plan'"
+                  " && document.querySelector('[data-testid=\"checkout-return\"]')")
+    assert page.text("[data-testid='checkout-return']") == "Your paid plan is active\nStripe has confirmed your payment."
+    assert page.eval("return document.querySelector('[data-testid=\"button-check-plan\"]');") is None
+    assert_only_current_functionality(page)
+    page.dt.call("Page.reload", {}, page.session)
+    page.wait_for("document.querySelector('[data-testid=\"button-manage-billing\"]')")
+    assert page.eval("return document.querySelector('[data-testid=\"checkout-return\"]');") is None
+
+
+@pytest.mark.parametrize("tier,shown", [("free", True), ("paid", False)])
+def test_return_from_a_cancelled_checkout(page, tier, shown):
+    page.site.api.reset(signed_in=True, tier=tier, verification=True,
+                        billing=dict(FREE_BILLING if tier == "free" else PAID_ACTIVE))
+    page.open("/account?checkout=cancelled")
+    page.wait_for("document.querySelector('[data-testid=\"billing-section\"] .acct-actions')")
+    notice = page.eval("return document.querySelector('[data-testid=\"checkout-return\"]')?.innerText ?? null;")
+    if shown:
+        assert notice.replace("\n\n", "\n").strip() == (
+            "Checkout was cancelled\nYou left Stripe’s checkout before paying, so your plan hasn’t changed.")
+    else:
+        assert notice is None                   # a paid account was not affected by a cancelled checkout
+    assert page.eval("return location.search;") == ""
+
+
+def test_the_earlier_billing_address_and_unknown_values_land_on_the_overview(page):
+    page.site.api.reset(signed_in=True, verification=True, billing=dict(FREE_BILLING))
+    page.open("/account/billing?checkout=success")
+    page.wait_for("location.pathname === '/account' && document.querySelector('[data-testid=\"checkout-return\"]')")
+    assert page.eval("return location.search;") == ""
+    assert page.eval("return document.title;") == "Your account — Kalillac AI"
+    # The portal's return address, and anything else, shows the overview with no notice.
+    for address in ("/account/billing", "/account?checkout=evil", "/account?checkout=SUCCESS"):
+        page.open(address)
+        page.wait_for("location.pathname === '/account' && document.querySelector('[data-testid=\"button-upgrade\"]')")
+        assert page.eval("return location.search;") == ""
+        assert page.eval("return document.querySelector('[data-testid=\"checkout-return\"]');") is None, address
+
+
 def test_expired_session_returns_to_sign_in_with_a_note(page):
     # The session expires between the account check and the plan request.
     page.site.api.reset(signed_in=True)

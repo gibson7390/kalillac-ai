@@ -13,7 +13,7 @@
      carried between pages (a notice, the email just registered) lives in
      memory for this page load. */
 import { type FormEvent, type ReactNode, type RefObject, useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Link, useLocation } from 'wouter';
+import { Link, Redirect, useLocation } from 'wouter';
 import NotFound from '@/pages/not-found';
 import * as api from './account-api';
 import * as registrationApi from './registration-api';
@@ -821,9 +821,42 @@ function VerifyEmailPage() {
 
 type Loadable<T> = { state: 'loading' } | { state: 'ready'; value: T } | { state: 'unavailable' } | { state: 'error' };
 
+/* Stripe sends the customer back to the overview: Checkout's success and cancel URLs carry
+   ?checkout=success or ?checkout=cancelled, the portal returns with no query (all three are server
+   configuration). The value only chooses which fixed notice to show; nothing is trusted from it, and
+   access always follows the plan the server reports. */
+type CheckoutReturn = 'success' | 'cancelled' | null;
+
+function checkoutReturnFrom(search: string): CheckoutReturn {
+  const value = new URLSearchParams(search).get('checkout');
+  return value === 'success' || value === 'cancelled' ? value : null;
+}
+
+function checkoutReturnNotice(returned: CheckoutReturn, tier: api.Entitlements['tier']): NoticeData | null {
+  if (returned === 'success') {
+    return tier === 'paid'
+      ? { tone: 'success', title: 'Your paid plan is active', body: 'Stripe has confirmed your payment.' }
+      : { tone: 'info', title: 'Your payment is being confirmed',
+          body: 'Paid access appears here once Stripe confirms the payment, usually within a few minutes.' };
+  }
+  if (returned === 'cancelled' && tier === 'free') {
+    return { tone: 'info', title: 'Checkout was cancelled',
+      body: 'You left Stripe’s checkout before paying, so your plan hasn’t changed.' };
+  }
+  return null;
+}
+
 function AccountOverviewPage() {
   const [, navigate] = useLocation();
   const { session, reload } = useSession();
+  // Read once, without side effects; the query is then removed so a reload or a shared address
+  // does not repeat the notice.
+  const [checkoutReturn] = useState(() => checkoutReturnFrom(window.location.search));
+  useEffect(() => {
+    // Through the router (same path, so the page stays mounted); the only raw history change on these
+    // pages remains the token-fragment scrub.
+    if (window.location.search) navigate(ACCOUNT_PATHS.overview, { replace: true });
+  }, [navigate]);
   const [plan, setPlan] = useState<Loadable<api.Entitlements>>({ state: 'loading' });
   const [billing, setBilling] = useState<Loadable<api.BillingStatus>>({ state: 'loading' });
   const [security, setSecurity] = useState<Loadable<api.AccountSecurity>>({ state: 'loading' });
@@ -873,7 +906,9 @@ function AccountOverviewPage() {
     body = <Overview user={session.user} plan={plan} billing={billing}
                      security={security.state === 'ready' ? security.value : null}
                      onRetryPlan={() => void loadPlan()}
-                     onRetryBilling={() => void loadBilling()} onSessionEnded={sessionEnded} />;
+                     onRetryBilling={() => void loadBilling()} onSessionEnded={sessionEnded}
+                     checkoutReturn={checkoutReturn}
+                     onRefreshPlan={() => { void loadPlan(); void loadBilling(); }} />;
   }
 
   return (
@@ -883,10 +918,12 @@ function AccountOverviewPage() {
   );
 }
 
-function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, onSessionEnded }: {
+function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, onSessionEnded, checkoutReturn,
+                   onRefreshPlan }: {
   user: api.AccountUser; plan: Loadable<api.Entitlements>; billing: Loadable<api.BillingStatus>;
   security: api.AccountSecurity | null;
   onRetryPlan: () => void; onRetryBilling: () => void; onSessionEnded: () => void;
+  checkoutReturn: CheckoutReturn; onRefreshPlan: () => void;
 }) {
   const [, navigate] = useLocation();
   const memberSince = formatDate(user.created_at, false);
@@ -966,7 +1003,7 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
       )}
       {billing.state === 'ready' && plan.state === 'ready' && (
         <BillingSection status={billing.value} tier={plan.value.tier} emailVerified={user.email_verified}
-                        onSessionEnded={onSessionEnded} />
+                        onSessionEnded={onSessionEnded} checkoutReturn={checkoutReturn} onRefreshPlan={onRefreshPlan} />
       )}
 
       <section className="acct-section" aria-labelledby="acct-session-heading">
@@ -1214,10 +1251,13 @@ const CHECKOUT_MESSAGES: Record<string, NoticeData> = {
     body: 'Try again in a few minutes.' },
 };
 
-function BillingSection({ status, tier, emailVerified, onSessionEnded }: {
+function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutReturn = null, onRefreshPlan }: {
   status: api.BillingStatus; tier: api.Entitlements['tier']; emailVerified: boolean | undefined; onSessionEnded: () => void;
+  checkoutReturn?: CheckoutReturn; onRefreshPlan?: () => void;
 }) {
   const [notice, setNotice] = useState<NoticeData | null>(null);
+  const returned = checkoutReturnNotice(checkoutReturn, tier);
+  const awaitingConfirmation = checkoutReturn === 'success' && tier === 'free';
   const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
   const checkout = usePendingGuard();
   const portal = usePendingGuard();
@@ -1238,6 +1278,17 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded }: {
   return (
     <section className="acct-section" aria-labelledby="acct-billing-heading" data-testid="billing-section">
       <h2 id="acct-billing-heading" className="acct-section-title">Plan and billing</h2>
+      {returned && !notice && (
+        <div data-testid="checkout-return">
+          <Notice notice={returned} />
+          {awaitingConfirmation && onRefreshPlan && (
+            <div className="acct-actions acct-actions-return">
+              <button type="button" className="acct-button acct-button-secondary acct-button-compact"
+                      onClick={onRefreshPlan} data-testid="button-check-plan">Check my plan again</button>
+            </div>
+          )}
+        </div>
+      )}
       {tier === 'paid' && periodEnd && (
         <p className="acct-section-text" data-testid="billing-period">
           {status.cancel_at_period_end
@@ -1248,13 +1299,14 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded }: {
       {paymentProblem && status.portal_available && (
         <p className="acct-section-text" data-testid="billing-payment-problem">Stripe couldn’t collect the last payment. Update your payment method in Manage billing.</p>
       )}
-      {tier === 'free' && (needsVerification
+      {tier === 'free' && !awaitingConfirmation && (needsVerification
         ? <p className="acct-section-text" data-testid="billing-needs-verification">Verify your email address before starting a paid plan.</p>
         : <p className="acct-section-text">Upgrading opens Stripe’s secure checkout. Paid access is added after Stripe confirms the payment, which can take a few minutes.</p>)}
       {notice && <Notice notice={notice} focusRef={noticeRef} />}
-      {(status.portal_available || (tier === 'free' && !needsVerification)) && (
+      {/* Just back from a paid Checkout: no second purchase is offered while Stripe confirms the first. */}
+      {(status.portal_available || (tier === 'free' && !needsVerification && !awaitingConfirmation)) && (
         <div className="acct-actions">
-          {tier === 'free' && !needsVerification && (
+          {tier === 'free' && !needsVerification && !awaitingConfirmation && (
             <button type="button" className="acct-button acct-button-primary" aria-disabled={checkout.pending || undefined}
                     onClick={go(checkout, api.startCheckout)} data-testid="button-upgrade">
               {checkout.pending && <Spinner />}{checkout.pending ? 'Opening checkout…' : 'Upgrade to the paid plan'}
@@ -1284,6 +1336,9 @@ export default function AccountPages() {
     case ACCOUNT_PATHS.recovery: return <RecoveryRequestPage />;
     case ACCOUNT_PATHS.recoveryConfirm: return <RecoveryConfirmPage />;
     case ACCOUNT_PATHS.verify: return <VerifyEmailPage />;
+    // Earlier staging documents named /account/billing as Stripe's return address; it is the overview.
+    case ACCOUNT_PATHS.overview + '/billing':
+      return <Redirect to={ACCOUNT_PATHS.overview + window.location.search} replace />;
     default: return <NotFound />;
   }
 }

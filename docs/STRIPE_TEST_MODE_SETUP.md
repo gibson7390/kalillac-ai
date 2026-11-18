@@ -43,9 +43,9 @@ KALILLAC_BILLING_ENABLED=true
 KALILLAC_STRIPE_MODE=test
 KALILLAC_STRIPE_PRICE_ID=price_...                 (the Checkout Price)
 KALILLAC_STRIPE_ALLOWED_PRICE_IDS=price_...        (every Price that grants Premium, comma-separated)
-KALILLAC_BILLING_SUCCESS_URL=https://<staging host>/account/billing?checkout=success
-KALILLAC_BILLING_CANCEL_URL=https://<staging host>/account/billing?checkout=cancelled
-KALILLAC_BILLING_PORTAL_RETURN_URL=https://<staging host>/account/billing
+KALILLAC_BILLING_SUCCESS_URL=https://<staging host>/account?checkout=success
+KALILLAC_BILLING_CANCEL_URL=https://<staging host>/account?checkout=cancelled
+KALILLAC_BILLING_PORTAL_RETURN_URL=https://<staging host>/account
 ```
 
 Billing also requires accounts and the database (`KALILLAC_ACCOUNTS_ENABLED`, `KALILLAC_DB_ENABLED`)

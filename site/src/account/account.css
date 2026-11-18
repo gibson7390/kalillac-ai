@@ -126,6 +126,9 @@
 .acct-notice-success { border-color: #c4e6e3; border-left-color: #008c8d; background: #f2fbfa; }
 .acct-notice-success .acct-notice-title { color: #035f60; }
 .acct-section .acct-notice { margin: 16px 0 0; }
+/* The return from Stripe: its notice, then (while the payment is confirmed) one quiet re-check. */
+[data-testid='checkout-return'] { margin-bottom: 16px; }
+.acct-section .acct-actions.acct-actions-return { margin-top: 12px; }
 
 .acct-state { max-width: 50ch; color: var(--acct-soft); font-size: 15px; line-height: 1.6; }
 .acct [tabindex='-1']:focus { outline: none; }
