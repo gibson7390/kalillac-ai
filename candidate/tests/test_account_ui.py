@@ -321,11 +321,19 @@ class AccountSite(Site):
     def origin(self):
         return f"http://127.0.0.1:{self.server.server_address[1]}"
 
+    # A deployment that offers accounts marks each of the site's pages exactly as
+    # deploy/staging/build_webroot.py does; off by default, as in production today.
+    accounts_mark = False
+
     def route(self, raw_path):
         path = raw_path.split("?", 1)[0]
         if path == "/account" or path.startswith("/account/"):
-            return 200, "text/html; charset=utf-8", (SITE_DIST / "account.html").read_bytes()
-        return super().route(raw_path)
+            status, ctype, body = 200, "text/html; charset=utf-8", (SITE_DIST / "account.html").read_bytes()
+        else:
+            status, ctype, body = super().route(raw_path)
+        if self.accounts_mark and ctype.startswith("text/html") and not path.startswith("/app/"):
+            body = body.replace(b'<html lang="en">', b'<html lang="en" data-kalillac-accounts="on">', 1)
+        return status, ctype, body
 
     def __enter__(self):
         self.thread.start()
@@ -439,6 +447,7 @@ def browser_site(tmp_path_factory):
 @pytest.fixture
 def page(browser_site):
     browser_site.site.api.reset()
+    browser_site.site.accounts_mark = False
     browser_site.resize(DESKTOP, False)
     browser_site.dt.call("Emulation.setEmulatedMedia", {"features": [
         {"name": "prefers-reduced-motion", "value": "no-preference"}]}, browser_site.session)
@@ -494,13 +503,22 @@ def test_account_module_uses_only_fixed_same_origin_paths_and_safe_fetch_options
     assert "value={" not in pages and "defaultValue" not in pages
 
 
-def test_homepage_source_gains_no_account_entry_point():
+def test_the_sites_account_entry_points_exist_only_where_the_deployment_offers_accounts():
     app = APP_TSX.read_text(encoding="utf-8")
     home = app[app.index("function HomePage()"):app.index("type DocSectionProps")]
     header = app[app.index("function SiteHeader()"):app.index("function SiteFooter()")]
     footer = app[app.index("function SiteFooter()"):app.index("function OrbitalAssistant()")]
+    # The deployment's mark is the only switch, read once from the page's <html> element (no request).
+    assert app.count("const ACCOUNTS_OFFERED = document.documentElement.getAttribute('data-kalillac-accounts') === 'on';") == 1
     for part in (home, header, footer):
-        assert "/account" not in part
+        assert "/account" not in part                               # Paths come from ACCOUNT_PATHS only.
+    assert "ACCOUNT_PATHS" not in footer and "ACCOUNTS_OFFERED" not in footer
+    # Every account link in the header and on the homepage sits inside an ACCOUNTS_OFFERED block.
+    for part, expected in ((header, 4), (home, 2)):
+        assert len(re.findall(r"<Link href=\{ACCOUNT_PATHS\.(?:signIn|create)\}", part)) == expected
+        guarded = sum(block.count("<Link href={ACCOUNT_PATHS.") for block in
+                      re.findall(r"\{ACCOUNTS_OFFERED && (<>.*?</>|<p .*?</p>)\}", part, re.S))
+        assert guarded == expected
     assert "lazy(() => import('@/account/account-pages'))" in app
 
 
@@ -514,6 +532,119 @@ def test_built_account_entry_is_noindex_and_outside_the_sitemap():
     assert "account-pages" not in index and '<meta name="robots" content="index, follow" />' in index
     main_css = [p for p in (SITE_DIST / "assets").glob("index-*.css")]
     assert len(main_css) == 1 and ".acct" not in main_css[0].read_text(encoding="utf-8")
+
+
+# --- homepage account navigation (only where the deployment offers accounts) ---------------------------------
+
+HERO = "document.querySelector('[data-testid=\"section-hero\"]')"
+ENTRY_IDS = ("link-sign-in-nav", "link-create-account-nav", "link-sign-in-hero", "link-create-account-hero",
+             "link-mobile-sign-in", "link-mobile-create-account")
+
+
+def shown(page, testid):
+    """The element's box when it is rendered and visible, else None."""
+    return page.eval(f"""const e = document.querySelector('[data-testid="{testid}"]');
+      if (!e || e.offsetParent === null || getComputedStyle(e).visibility === 'hidden') return null;
+      const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom];""")
+
+
+def no_overflow(page):
+    return page.eval("return document.documentElement.scrollWidth <= window.innerWidth;")
+
+
+def follow(page, testid, path, ready):
+    page.click_selector(f"[data-testid='{testid}']")
+    page.wait_for(f"location.pathname === '{path}' && {ready}")
+
+
+SIGN_IN_READY = "document.querySelector('#email') && document.querySelector('#password')"
+CREATE_READY = "document.querySelector('main form #email')"
+
+
+def test_without_the_accounts_mark_no_page_offers_an_account_entry(page):
+    for size, mobile in ((DESKTOP, False), (PHONE, True)):
+        page.resize(size, mobile)
+        for path in ("/", "/privacy", "/terms"):
+            page.open(path, ready="document.querySelector('header')")
+            if mobile:
+                page.click_selector("[data-testid='button-mobile-menu']")
+                page.wait_for("document.querySelector('#mobile-site-menu')")
+            assert [t for t in ENTRY_IDS if page.eval(f"return !!document.querySelector('[data-testid=\"{t}\"]');")] == []
+            assert page.eval("return document.querySelectorAll('a[href^=\"/account\"]').length;") == 0, path
+
+
+def test_with_accounts_offered_the_homepage_still_requests_nothing_about_accounts(page):
+    page.site.accounts_mark = True
+    page.open("/", ready=HERO)
+    page.wait_for("document.readyState === 'complete'")
+    time.sleep(1.5)
+    assert shown(page, "link-sign-in-nav") and shown(page, "link-create-account-nav")
+    assert [c for c in api_calls(page) if c["path"].startswith("/api/account")] == []
+    assert not any("account" in url for url in page.requests())            # No account code or styles yet.
+    assert page.eval("return document.querySelector('meta[name=robots]').content;") == "index, follow"
+
+
+@pytest.mark.parametrize("size,mobile", [(DESKTOP, False), ((1024, 768), False), (TABLET, True)])
+def test_the_header_offers_sign_in_and_create_account_on_desktop_and_tablet(page, size, mobile):
+    page.site.accounts_mark = True
+    page.resize(size, mobile)
+    page.open("/", ready=HERO)
+    sign_in, create = shown(page, "link-sign-in-nav"), shown(page, "link-create-account-nav")
+    logo, how = shown(page, "link-home-brand"), shown(page, "link-how-nav")
+    assert sign_in and create and no_overflow(page), size
+    # In reading order after the other links, side by side on the header's line, inside the viewport.
+    assert logo[2] < how[0] < how[2] <= sign_in[0] < sign_in[2] <= create[0] and create[2] <= size[0]
+    assert abs((sign_in[1] + sign_in[3]) / 2 - (create[1] + create[3]) / 2) < 2
+    assert sign_in[3] - sign_in[1] >= 44 and create[3] - create[1] >= 40
+    assert page.eval("return document.querySelector('[data-testid=\"button-mobile-menu\"]').offsetParent;") is None
+    follow(page, "link-sign-in-nav", "/account/sign-in", SIGN_IN_READY)
+    assert page.eval("return document.title;") == "Sign in — Kalillac AI"
+    page.eval("history.back();")
+    page.wait_for(HERO + " && location.pathname === '/'")
+    follow(page, "link-create-account-nav", "/account/create", CREATE_READY)
+    # The account pages keep the same header, so the way back and the other entry stay at hand.
+    assert shown(page, "link-sign-in-nav") and shown(page, "link-create-account-nav")
+
+
+@pytest.mark.parametrize("size", [PHONE, NARROW])
+def test_the_phone_menu_offers_sign_in_and_create_account(page, size):
+    page.site.accounts_mark = True
+    page.resize(size, True)
+    page.open("/", ready=HERO)
+    assert shown(page, "link-sign-in-nav") is None and shown(page, "link-create-account-nav") is None
+    assert no_overflow(page)
+    for testid, path, ready in (("link-mobile-sign-in", "/account/sign-in", SIGN_IN_READY),
+                                ("link-mobile-create-account", "/account/create", CREATE_READY)):
+        page.open("/", ready=HERO)
+        page.click_selector("[data-testid='button-mobile-menu']")
+        page.wait_for("document.querySelector('#mobile-site-menu')")
+        # Measured after the menu's opening animation (it starts slightly scaled down).
+        page.eval("await Promise.all(document.querySelector('#mobile-site-menu').getAnimations().map(a => a.finished));")
+        items = page.eval("return [...document.querySelectorAll('#mobile-site-menu a')].map(a => [a.textContent.trim(),"
+                          " Math.round(a.getBoundingClientRect().height), a.getBoundingClientRect().right]);")
+        assert [label for label, _, _ in items] == ["Product", "Privacy", "How it works", "Sign in", "Create account"]
+        assert all(height >= 44 and right <= size[0] for _, height, right in items), items
+        follow(page, testid, path, ready)
+        assert page.eval("return document.querySelector('#mobile-site-menu');") is None    # The menu closed.
+
+
+@pytest.mark.parametrize("size,mobile", [(DESKTOP, False), (TABLET, True), (PHONE, True), (NARROW, True)])
+def test_the_hero_offers_account_access_beside_the_private_session(page, size, mobile):
+    page.site.accounts_mark = True
+    page.resize(size, mobile)
+    page.open("/", ready=HERO)
+    start = shown(page, "button-start-session")
+    line, sign_in, create = shown(page, "hero-account"), shown(page, "link-sign-in-hero"), shown(page, "link-create-account-hero")
+    assert start and line and sign_in and create and no_overflow(page), size
+    assert page.text("[data-testid='hero-account']").replace("\n", " ") == "Have an account? Sign in · Create one"
+    # Directly under the private session, which stays the primary action.
+    assert 0 <= line[1] - start[3] <= 24 and line[2] <= size[0]
+    assert sign_in[3] - sign_in[1] >= 44 and create[3] - create[1] >= 44
+    assert page.text("[data-testid='button-start-session']") == "Start a private session"
+    follow(page, "link-create-account-hero", "/account/create", CREATE_READY)
+    page.eval("history.back();")
+    page.wait_for(HERO + " && location.pathname === '/'")
+    follow(page, "link-sign-in-hero", "/account/sign-in", SIGN_IN_READY)
 
 
 # --- homepage and availability ------------------------------------------------------------------------------

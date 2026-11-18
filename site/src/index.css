@@ -152,6 +152,21 @@ h1,h2,h3,p { overflow-wrap: break-word; }
 .mobile-site-menu a:hover { background: #eef5ff; color: var(--k-ink); }
 .mobile-site-menu a:active { background: #e2eeff; }
 .site-header[data-route="privacy"] [data-testid="link-mobile-privacy"] { color: var(--k-ink); box-shadow: inset 2px 0 0 var(--k-blue); }
+/* Account entry (only where the deployment offers accounts): Sign in reads as the other links; Create
+   account is the quiet outlined control of the account pages, never a second blue call to action. */
+.site-nav .nav-sign-in { margin-left: 4px; }
+.site-nav a.nav-account { min-height: 40px; padding: 0 16px; margin-left: -12px; border: 1px solid var(--k-line-strong); border-radius: var(--k-radius-sm); background: white; color: #123063; box-shadow: var(--k-shadow-1); transition: border-color var(--k-dur) var(--k-ease), background-color var(--k-dur) var(--k-ease), color var(--k-dur) var(--k-ease); }
+.site-nav a.nav-account::after { display: none; }
+.site-nav a.nav-account:hover { border-color: #8faad6; background: #f7faff; color: var(--k-focus); }
+.site-nav a.nav-account:active { background: #edf3ff; box-shadow: none; }
+.mobile-site-menu .mobile-menu-account { position: relative; margin-top: 9px; }
+.mobile-site-menu .mobile-menu-account::before { content: ''; position: absolute; left: 10px; right: 10px; top: -6px; height: 1px; background: var(--k-line-soft); }
+.hero-account { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; margin: 10px 0 0; color: #53627c; font-size: 14px; }
+.hero-account a { display: inline-flex; align-items: center; min-height: 44px; color: var(--k-blue-ink); font-weight: 650; text-decoration: underline; text-decoration-color: #0057d545; text-underline-offset: 4px; transition: text-decoration-color var(--k-dur) var(--k-ease); }
+.hero-account a:hover { text-decoration-color: currentColor; }
+.hero-account span { color: #9aa7bd; }
+/* Phones: the header keeps the logo and the menu; Sign in and Create account are in the menu and the hero. */
+@media (max-width: 720px) { .site-nav a.nav-account { display: none; } }
 @media (prefers-reduced-motion: no-preference) { .mobile-site-menu { animation: k-menu-in var(--k-dur-slow) var(--k-ease) both; } @keyframes k-menu-in { from { opacity: 0; transform: translateY(-4px) scale(.985); } } }
 .site-shell :focus-visible { outline: 3px solid #004dcc; outline-offset: 4px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 12px; color: #0058db; font-size: 11px; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
