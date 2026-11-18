@@ -1659,6 +1659,11 @@ def test_files_in_a_reply_are_download_links_and_malformed_entries_are_dropped(b
     assert [r["url"] for r in result["requests"]] == ["/api/chat"]
 
 
+SESSION_TITLE = ("This conversation uses temporary session memory. It is not saved to an account or a chat history, "
+                 "and reloading starts a new session.")
+FILES_KEPT = "Files you attach or Kalillac creates are stored separately in your account and stay available for 30 days."
+
+
 def test_a_files_deployment_offers_attachments_to_an_account_with_access(browser_results):
     result = scenario(browser_results, "files_offered")
     assert step(result, "offered")["attachShown"] is True
@@ -1671,6 +1676,12 @@ def test_a_files_deployment_offers_attachments_to_an_account_with_access(browser
     sent = step(result, "sent")
     assert sent["attachments"] == [] and sent["attachmentsShown"] is False   # Cleared once the reply is shown.
     assert [chip["name"] for chip in sent["chips"]] == ["launch-plan.pptx"]
+    # The conversation is temporary, the file is not: the session's description says so once the account
+    # can use files, and the attachment row says so while a file is attached.
+    assert step(result, "offered")["sessionTitle"] == SESSION_TITLE + " " + FILES_KEPT
+    assert step(result, "offered")["keptNote"] is None and sent["keptNote"] is None
+    assert attached["keptNote"] == ("Attached files are stored in your account and stay available for 30 days, even though this "
+                                    "conversation isn't saved. Removing one here doesn't delete it.")
 
 
 def test_an_attached_image_is_previewed_from_the_stored_copy_and_sent(browser_results):
@@ -1721,6 +1732,7 @@ def test_without_the_images_mark_the_chooser_offers_no_image_type(browser_result
 def test_a_files_deployment_offers_nothing_to_an_account_without_access(browser_results):
     result = scenario(browser_results, "files_offered_no_access")
     assert step(result, "not-offered")["attachShown"] is False
+    assert step(result, "not-offered")["sessionTitle"] == SESSION_TITLE     # No file note without access.
     assert [(r["url"], r["method"]) for r in result["requests"]] == [("/api/files", "GET")]
 
 

@@ -601,7 +601,10 @@
           return { blob: img.src.indexOf("blob:") === 0, alt: img.getAttribute("alt") };
         }) : null,
         accept: $("attach-input") ? $("attach-input").accept : null,
-        status: $("attach-status") && !$("attach-status").hidden ? text($("attach-status")) : null
+        status: $("attach-status") && !$("attach-status").hidden ? text($("attach-status")) : null,
+        // Where the file itself is kept: the note under attachments, and the temporary session's description.
+        keptNote: $("attach-note") && !$("attach-note").hidden ? text($("attach-note")) : null,
+        sessionTitle: $("session-status") ? $("session-status").getAttribute("title") : null
       });
     },
     // The header's account link (present only on an accounts deployment).

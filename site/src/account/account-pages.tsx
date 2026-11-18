@@ -172,11 +172,11 @@ type Note = { title: string; body: string };
 
 const NOTE_SIGN_IN: Note = {
   title: 'Private by default',
-  body: 'Temporary chat remains available without an account. Signing in doesn’t attach the conversation you already have open.',
+  body: 'Temporary chat remains available without an account. Signing in doesn’t attach the conversation you already have open. While you’re signed in, files you attach or Kalillac creates are stored in your account and stay available for 30 days.',
 };
 const NOTE_CREATE: Note = {
   title: 'Before you create one',
-  body: 'Creating an account doesn’t attach the conversation you already have open, and temporary chat remains available. You decide what becomes part of your account.',
+  body: 'Creating an account doesn’t attach the conversation you already have open, and temporary chat remains available. You decide what becomes part of your account; files you attach or Kalillac creates while signed in are stored in it and stay available for 30 days.',
 };
 const NOTE_RECOVERY: Note = {
   title: 'About reset links',
@@ -192,7 +192,7 @@ const NOTE_VERIFY: Note = {
 };
 const NOTE_OVERVIEW: Note = {
   title: 'Your account and temporary chat',
-  body: 'Your account currently holds your sign-in email, verification status, plan and billing settings. Temporary chat remains available, and you decide what becomes part of your account.',
+  body: 'Your account holds your sign-in email, verification status, plan and billing settings and, where they are offered, your saved Spaces and your files. Files you attach or Kalillac creates are stored in your account and stay available for 30 days, even when the conversation itself is temporary. Temporary chat remains available.',
 };
 
 function AccountLayout({ title, lede, children, note }:

@@ -1108,7 +1108,8 @@ def test_verification_state_appears_only_when_the_server_reports_it(page):
 
 # Words that would claim a feature, benefit or price this branch does not have.
 UNIMPLEMENTED_CLAIMS = (
-    "persistent memory", "memory", "spaces", "space for", "saved conversation", "save your conversation",
+    # Spaces exist now (saved per account where offered), so the account may name them.
+    "persistent memory", "memory", "saved conversation", "save your conversation",
     "conversation history", "chat history", "model", "research", "artifact", "export", "pdf", "docx",
     "spreadsheet", "unlimited", "priority", "higher usage", "saved mode", "quota", "usage",
     "per month", "/month", "/mo", "price", "pricing", "$", "€", "£", "plus",
@@ -1122,8 +1123,18 @@ def assert_only_current_functionality(page):
     text = page.text("body").lower()
     for claim in UNIMPLEMENTED_CLAIMS + RETIRED_CLAIMS:
         assert claim not in text, claim
-    # The account describes only what the backend holds today.
-    assert "your account currently holds your sign-in email, verification status, plan and billing settings." in text
+    # The account describes what the backend holds today, and that files outlive a temporary conversation.
+    assert ("your account holds your sign-in email, verification status, plan and billing settings and, where "
+            "they are offered, your saved spaces and your files. files you attach or kalillac creates are stored in "
+            "your account and stay available for 30 days, even when the conversation itself is temporary.") in text
+
+
+@pytest.mark.parametrize("path", ["/account/sign-in", "/account/create"])
+def test_signing_in_and_creating_an_account_say_files_stay_available_for_30_days(page, path):
+    page.open(path)
+    page.wait_for("document.querySelector('main form')")
+    note = page.text(".acct-aside").lower()
+    assert "files you attach or kalillac creates are stored in" in note and "stay available for 30 days" in note
 
 
 @pytest.mark.parametrize("tier,label", [("paid", "Paid plan"), ("free", "Free account")])

@@ -102,6 +102,8 @@
       <form class="composer" id="composer" autocomplete="off">
         <!-- Files attached to the next message. Shown only when the server offers files to this account. -->
         <ul class="attachments" id="attachments" aria-label="Attached files" hidden></ul>
+        <!-- With an attachment: the file itself is kept in the account, though the conversation is temporary. -->
+        <p class="attach-note" id="attach-note" hidden>Attached files are stored in your account and stay available for 30 days, even though this conversation isn't saved. Removing one here doesn't delete it.</p>
         <!-- Why the last file could not be attached (fixed copy). -->
         <p class="attach-status" id="attach-status" role="status" hidden></p>
         <!-- How much reasoning the next message gets. Shown only on a deployment with reasoning modes on. -->

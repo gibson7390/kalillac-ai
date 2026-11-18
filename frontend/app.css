@@ -1728,6 +1728,14 @@ button.spaces-button { cursor: pointer; font-family: inherit; }
   color: var(--muted);
 }
 .attach-status[hidden] { display: none; }
+/* With an attachment in a temporary conversation: where the file itself is kept. */
+.attach-note {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.attach-note[hidden] { display: none; }
 .edit-confirm {
   display: flex;
   flex-wrap: wrap;

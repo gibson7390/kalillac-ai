@@ -1388,6 +1388,10 @@
       attachmentList.appendChild(item);
     });
     attachmentList.hidden = ATTACHED.length === 0;
+    // Files are not offered inside a Space, so an attachment always belongs to a temporary conversation:
+    // say plainly that the file itself is kept in the account.
+    var note = document.getElementById("attach-note");
+    if (note) note.hidden = ATTACHED.length === 0;
   }
 
   /* --- Account link ------------------------------------------------------
@@ -1494,6 +1498,7 @@
   // A deployment with files enabled marks the page (<html data-kalillac-files="on">). Without the mark
   // nothing here runs and no request is made, so every other visitor's page behaves exactly as before.
   var FILES_OFFERED = document.documentElement.getAttribute("data-kalillac-files") === "on";
+  var FILES_KEPT_NOTE = "Files you attach or Kalillac creates are stored separately in your account and stay available for 30 days.";
   if (FILES_OFFERED && attachBtn && attachInput && attachmentList) {
     attachBtn.addEventListener("click", function () { attachInput.click(); });
     attachInput.addEventListener("change", function () {
@@ -1502,7 +1507,11 @@
     });
     // Files are offered only to an account the server says may use them.
     fetch("/api/files", { method: "GET" }).then(function (res) {
-      if (res.status === 200) attachBtn.hidden = false;
+      if (res.status !== 200) return;
+      attachBtn.hidden = false;
+      // This account keeps files: the temporary session's description says where they go.
+      var status = document.getElementById("session-status");
+      if (status) status.title += " " + FILES_KEPT_NOTE;
     }, function () {});
   }
 
