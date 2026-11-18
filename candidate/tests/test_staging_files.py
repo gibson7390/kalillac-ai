@@ -117,7 +117,8 @@ def test_the_unit_loads_the_credentials_the_code_reads_and_the_three_environment
 def site(tmp_path):
     built = tmp_path / "site"
     built.mkdir(parents=True)
-    (built / "index.html").write_text("<!DOCTYPE html><html lang=\"en\"><body>site</body></html>", encoding="utf-8")
+    for name in ("index.html", "privacy.html"):
+        (built / name).write_text("<!DOCTYPE html><html lang=\"en\"><body>site</body></html>", encoding="utf-8")
     return built
 
 
@@ -132,11 +133,21 @@ def test_the_web_root_marks_exactly_what_the_chat_reads(tmp_path):
             ' data-kalillac-reasoning="on" data-kalillac-spaces="on">') in page
     original = (frontend / "index.html").read_text(encoding="utf-8")
     assert page == original.replace('<html lang="en">', page[page.index("<html"):page.index(">", page.index("<html")) + 1])
-    assert (out / "index.html").read_text(encoding="utf-8").count("data-kalillac") == 0
+    # The site reads exactly one mark (accounts: Sign in and Create account), and every one of its pages gets it.
+    app_tsx = (CANDIDATE.parent / "site" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert set(re.findall(r"getAttribute\('data-kalillac-([a-z]+)'\)", app_tsx)) == set(webroot.SITE_MARKS)
+    for name in ("index.html", "privacy.html"):
+        assert (out / name).read_text(encoding="utf-8") == (
+            '<!DOCTYPE html><html lang="en" data-kalillac-accounts="on"><body>site</body></html>')
     for name in ("app.js", "app.css"):
         assert (out / "app" / name).read_bytes() == (frontend / name).read_bytes()
     plain = webroot.build(site(tmp_path / "second"), frontend, tmp_path / "plain", [])
     assert (plain / "app" / "index.html").read_text(encoding="utf-8") == original
+    # Without accounts, the site's pages are left exactly as built: no Sign in or Create account is offered.
+    without = webroot.build(site(tmp_path / "third"), frontend, tmp_path / "without", ["files", "reasoning"])
+    for built in (plain, without):
+        for name in ("index.html", "privacy.html"):
+            assert (built / name).read_text(encoding="utf-8").count("data-kalillac") == 0
 
 
 @pytest.mark.parametrize("marks, message", [(["billing"], "--marks"), (["files", "files"], "--marks")])
