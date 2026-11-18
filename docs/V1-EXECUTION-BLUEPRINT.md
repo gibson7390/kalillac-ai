@@ -76,6 +76,7 @@ recovery) → subscription cancellation → account deletion request. Owned by M
   CI green on `c3a7a2083d3f527da4a9a67b02f78b61db37c9d3`: subscription 44218217622, files 44218222254, frontend 44218226795, provider 44218230840, anonymous allowance 44218235431.
 * Codex's question on the correction (can any model-backed path still return without a reservation?) was also checked here, not as verification: the model is reached only through `/api/chat` (ordinary, anonymous and the file handoff), `/api/files/assist` and Space sends; Space sends run through `_run_chat_request` with the quota, and startup refuses Spaces without usage limits. No further path found.
 * **The staging release** `release/staging-v1` (`7d857c5`): integration of the release line with Codex's verified prose-total and confirmation corrections (`78b7a05`); CI green on every applicable workflow; awaits Codex as a combination. No earlier finding is resolved by it.
+* **Local staging** (`feat/local-staging`, `a4d5e71`): the release on this machine for the owner's evaluation, simulated providers labelled; a tool, not a product change; awaits Codex like every checkpoint (handoff section 15).
 * D3 routes at `35f61c8` and D5 at `9feb42b`: awaiting Codex.
 * Document quality: Arabic PDF ligature order (open), Word field caches (owner decision 12 pending
   acceptance of the finalization service), semantic-consistency contract (partly built). Details:

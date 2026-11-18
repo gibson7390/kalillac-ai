@@ -130,3 +130,10 @@ corrections. Evidence and open questions: Codex handoff section 14. Edge configu
 `deploy/staging/CLOUDFLARE-ACCESS.md`. Host: a separate temporary server is the owner's leaning; no server has been
 contacted. Before pushing to a branch, run every workflow that lists a touched test file (two counts were missed
 once: each workflow pins its own).
+
+## Update: local staging (2026-11-18)
+
+No server: the owner evaluates on this machine. `feat/local-staging` (`a4d5e71`, on `release/staging-v1`) adds
+local staging; it runs from the `kalillac-ai-b2` worktree in WSL (`deploy\local\Kalillac-Local.cmd`,
+http://localhost:8010, panel /__local__/). Its data is `/var/lib/kalillac-local-staging` (separate from the
+test cluster on 55432). After changing `site/src`, rebuild the site before `setup`. Handoff section 15.

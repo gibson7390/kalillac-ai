@@ -257,6 +257,30 @@ CI: file generation 44368926553 (1,054 passed), subscription 44368936581 (every 
 **Nothing is resolved by this integration.** Codex verified `78b7a05`; the merge is new code. Every pending
 audit (D3 through the allowance correction, sections 1–13) stays open and now applies to this combination too.
 
+## 15. Local staging (`feat/local-staging`, `a4d5e71`, on `release/staging-v1`)
+
+The owner's staging, on the development machine instead of a server. No application module changes;
+four tools, a test file, a Windows launcher and a guide (`deploy/local/README.md`).
+
+* `tools/local_staging_sim.py` replaces only the outermost network exchange of each simulated provider:
+  `provider_transport.post_json_within_budget` and `search_providers.post_json_unbudgeted` (for the
+  OpenAI, Brave and Tavily hosts only), the application's `_post_openai_responses` (installed after the
+  module executes, so the launcher still imports the application only after its singleton lock), a
+  `StripeGateway` subclass overriding its five network calls (`parse_webhook` stays Stripe's), and
+  `ResendGateway._deliver`. Questions: can it install anywhere but a local deployment (`require_local`:
+  a `kalillac-local-` deployment id, a localhost origin, Stripe test mode)? Can any control be skipped
+  because of where it hooks in (the wrappers around `_post_openai_for_attempt` are untouched; the
+  budgeted transport's own deadline checks are not run for simulated hosts)? Can a simulated provider's
+  host be reached (`guard_network` blocks resolution in the application's process)?
+* `tools/local_staging_web.py` proxies `/api` and adds `/__local__/` (outbox, simulated Checkout and
+  portal), loopback only, same-origin actions. Question: can the panel act for an account other than the
+  browser's own session?
+* `tools/local_staging.py` provisions and activates exactly as the boot verifier does, into
+  `/var/lib/kalillac-local-staging`, with the boot verifier's synthetic commercial values, labelled.
+* Guard: `test_the_application_never_references_local_staging`.
+
+CI: subscription 44385988423 on `a4d5e71` green (PostgreSQL job 668 tests, none skipped, including the 24 simulation tests; root verifiers included). Browser evidence (Edge through the repository's isolated CDP harness, against the running local instance, simulated providers): Premium 6/6 (sign-in with the Secure cookie on localhost, account page, chat, PDF generated and downloaded 101 KB, image checked and re-encoded), Free journey 8/8 (end now, Deep refused, no file on Free, simulated Checkout to Premium with the return notice, a Space with a saved conversation, cancel at period end), editing 2/2 (a Word edit held back by the total check, applied as `proposal-edited.docx` after the customer's confirmation).
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
