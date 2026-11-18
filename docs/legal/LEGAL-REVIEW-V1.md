@@ -19,7 +19,7 @@ section 4) instead of a value.
 |---|---|---|
 | Temporary chat (anonymous or signed in) | Unchanged from today: page memory plus a server-memory session entry (at most 200 sessions, 50 facts each), never written to the database; End & erase | `app_fastapi_candidate.py`, `frontend/app.js` |
 | Anonymous allowance | Unchanged: `__Host-kalillac_visitor`, 10 responses per browser per UTC day, daily SHA-256 digest | `kalillac_accounts/anonymous_quota.py` |
-| Registration | Email-first: the address is stored **encrypted** (AES-GCM) with lookup and token digests while a registration link is pending; the link expires after **24 hours**; the account is created only when the customer opens it and chooses a password | `kalillac_accounts/registration_authority.py`, `kalillac_db/models/account_registration.py` |
+| Registration | Email-first: the address is stored **encrypted** (AES-GCM) with lookup and token digests while a registration link is pending; the link expires after **24 hours**; the account is created only when the customer opens it and chooses a password. The pending record (encrypted address included) is **deleted automatically** once it has expired: the registration worker removes expired intents every 60 seconds, 250 at a time (`cleanup_expired`); an account keeps no link to it afterwards (`ON DELETE SET NULL`) | `kalillac_accounts/registration_authority.py`, `kalillac_db/models/account_registration.py` |
 | Account record | Email, password hash (**Argon2id**; the password itself is never stored), created and updated times, email-verified time, active flag, quarantine and deletion-request markers | `kalillac_db/models/user.py`, `kalillac_accounts/passwords.py` |
 | Sign-in session | Cookie `kalillac_account`: HttpOnly, Secure, SameSite=Lax, Path=/, lifetime **14 days** (configurable). The database stores only a **hash** of the session token, its creation, expiry and revocation times; **no IP address or browser data** | `kalillac_accounts/router.py`, `kalillac_db/models/account_session.py` |
 | Password reset | A single-use link valid for **30 minutes**; every session is signed out on reset; the page never confirms whether an address has an account | `kalillac_accounts/recovery_tokens.py`, account pages |
@@ -95,7 +95,8 @@ Homepage and product copy (outside the two documents):
 1. **Expired files are never deleted from disk** (`purge()` is not scheduled). Until it is, a policy can
    only say files stop being available, not that they are deleted.
 2. **Per-account daily usage records are never pruned**; their retention is undefined.
-3. **Expired or consumed registration intents** (encrypted email) have no purge recorded here.
+3. ~~Expired or consumed registration intents have no purge.~~ **Corrected 2026-11-18:** they are deleted
+   automatically after their 24-hour expiry (`registration_authority.cleanup_expired`, every 60 seconds).
 4. **Account erasure after a deletion request is not built** (waits on D-8).
 5. Spaces are limited to an allowlist: the documents must say whether Spaces are part of Premium at launch.
 6. Backups: no backup or restore schedule is recorded in this repository for staging or production

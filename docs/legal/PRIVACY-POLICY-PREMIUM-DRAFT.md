@@ -193,7 +193,7 @@ Each handles what it receives under its own policies, which Kalillac does not co
 | Files and images | Kalillac's server storage | Available 30 days; deleted when you delete them; [D-9: deletion of expired files] |
 | Account record (email, password hash, dates) | Kalillac's database | Until the account is erased [D-8] |
 | Sign-in sessions | Kalillac's database (token hash) and your browser | At most 14 days, or sign-out |
-| Pending registration link (encrypted email) | Kalillac's database | Link expires after 24 hours; record kept for [D-11] |
+| Pending registration link (encrypted email) | Kalillac's database | Expires after 24 hours and is then deleted automatically |
 | Password-reset links | Kalillac's database (digest) | Expire after 30 minutes; used once |
 | Daily usage counts | Kalillac's database | [D-11] |
 | Account-security events | Kalillac's database | [D-11; plan proposal: 12 months] |
