@@ -108,16 +108,21 @@ class FileService:
                  call_model: Callable[[list], Any], required_tier: str = "paid", max_concurrent_assists: int = 2,
                  worker_module=None, request_scope: Callable[[FileAccount], Any] | None = None,
                  failure_status: Callable[[BaseException], tuple[int, str] | None] | None = None,
-                 images: bool = False):
+                 images: bool = False,
+                 count_response: Callable[..., Awaitable[Any]] | None = None):
         """request_scope(account) is a context manager entered in the worker thread around one assistant
         run (the application's request budget and provider controls); failure_status maps an exception
         those controls raise to (status, stable code). images=True accepts image uploads (I1): each is
-        re-encoded clean by the worker (kalillac_files.images) and only that copy is stored."""
+        re-encoded clean by the worker (kalillac_files.images) and only that copy is stored.
+        count_response(request, account, request_chars, produce), when given, runs one assistant
+        response (produce()) under the customer's daily response allowance: admitted before any model
+        work, counted once when it succeeds, released when it fails."""
         if required_tier not in ("paid", "any"):
             raise ValueError("required_tier must be 'paid' or 'any'")
         if type(images) is not bool:
             raise ValueError("images must be a bool")
         self.images = images
+        self.count_response = count_response
         from . import worker as default_worker
         self.store, self.authenticate, self.call_model = store, authenticate, call_model
         self.request_scope = request_scope or (lambda account: nullcontext())
@@ -316,9 +321,18 @@ def build_files_router(*, service: FileService | None = None, **options) -> APIR
         confirmations = payload.get("confirmations", [])
         if not valid_assist_request(message, history, file_ids) or not valid_confirmations(confirmations):
             return _error(422, "invalid_request")
-        content, refusal = await service.assist(found, message, history, file_ids, confirmations)
-        if refusal:
-            return refusal
-        return JSONResponse(content=content, headers=_NO_STORE)
+
+        async def produce():
+            content, refusal = await service.assist(found, message, history, file_ids, confirmations)
+            if refusal:
+                return refusal
+            return JSONResponse(content=content, headers=_NO_STORE)
+        if service.count_response is None:
+            return await produce()
+        # One response against the customer's daily allowance: admitted before the assistant runs.
+        request_chars = len(message) + sum(len(turn["content"]) for turn in history)
+        response = await service.count_response(request, found, request_chars, produce)
+        response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     return router

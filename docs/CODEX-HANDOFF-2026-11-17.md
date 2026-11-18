@@ -169,6 +169,27 @@ chat's daily quota (`kalillac_accounts/quota.py`) authorize through V1-01 in V1 
   FREE again after cancellation) and files and images (refused on Free, the clean copy and a PAID-scope
   image request on Premium, refused again after cancellation).
 
+## 11. Correction of the allowance finding on `8d5a2d4` (`fix/file-allowance-accounting`)
+
+The finding: file- and image-assisted responses returned without being counted against the customer's
+daily response allowance. Confirmed and corrected:
+
+* `01bf2ec` (no behavior change): the /api/chat file handoff is built by `_build_file_chat_handoff`, so a
+  PostgreSQL test can drive the real one.
+* The correction (`app_fastapi_candidate.py` `_admit_file_response`, `_counted_file_response`;
+  `kalillac_files/router.py` `count_response`): the handoff and `/api/files/assist` reserve one response
+  through the same quota request as an ordinary chat, before the assistant runs, only after the file
+  account was accepted, and only for that same account; `_run_chat_request` completes and settles it once
+  on a 200 and releases it otherwise. Space sends were already counted in their save transaction.
+* Evidence: `tests/test_v1_file_allowance_postgres.py` (7, under V1 and E1a: counting across image chat,
+  direct assist and ordinary chat; exhaustion refused before model work; failure released; concurrency;
+  cancellation during model work; Premium cancellation; quarantine) failed 5 of 7 on `01bf2ec` and passes
+  on the correction; `tests/test_file_allowance.py` (4 unit tests of the route's hook).
+
+Questions worth an independent answer: can any model-backed response path still return without a
+reservation (the handoff returns None only before admission)? Is the account match
+(`str(quota user) == file account owner`) sufficient in legacy mode as well as V1?
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image

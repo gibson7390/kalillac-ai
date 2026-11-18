@@ -307,6 +307,10 @@ from the code. See "Owner decisions required".
   CI; the confirmation now has its own guarded entry. New workflow `spaces-verification`: the 1,249 SQLite
   Spaces and reasoning-mode tests had been in no workflow.
   The authoritative feature status is `docs/V1-EXECUTION-BLUEPRINT.md`.
+* **Allowance correction** (`fix/file-allowance-accounting`, on `8d5a2d4`): Codex found that file- and
+  image-assisted responses were not counted against the daily allowance. Reproduced (5 of 7 new
+  PostgreSQL tests failed on the unfixed code), corrected, and verified (7 of 7, three runs; regression
+  suites green). Details in the blueprint and the handoff, section 11. Awaiting CI and Codex.
 * Fixed flaky test: `test_usage_enforcement.py::
   test_chat_queue_saturation_stays_busy_and_releases_the_lease[unbudgeted]` read the usage slot as
   `pending` once in CI (run 43982872312, D3). Cause: the lease release is a background task on the test

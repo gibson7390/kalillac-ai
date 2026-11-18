@@ -63,6 +63,16 @@ recovery) → subscription cancellation → account deletion request. Owned by M
 
 ## Codex findings outstanding
 
+* **Codex finding on `8d5a2d4`, corrected on `fix/file-allowance-accounting` (development verified,
+  awaiting Codex):** file- and image-assisted responses were not counted against the signed-in customer's
+  daily response allowance. `/api/chat` handed a file request to the file assistant before the quota's
+  reservation, so the request wrapper saw no admission and charged nothing; `/api/files/assist` had no
+  allowance at all. Both now take the chat's own reservation before any model work (V1's identity, the
+  effective plan's limit, the file service's account must be the quota's account), complete and settle it
+  once on success and release it on failure or cancellation. One file or image response counts as one
+  response (decision 16's recorded recommendation; no value changed). Reproduced before the fix: 5 of 7
+  real-PostgreSQL tests failed (an image-assisted chat answered with a count of 0; concurrent requests
+  past the limit); after it, 7 of 7 three times, plus 4 unit tests of the route's allowance hook.
 * D3 routes at `35f61c8` and D5 at `9feb42b`: awaiting Codex.
 * Document quality: Arabic PDF ligature order (open), Word field caches (owner decision 12 pending
   acceptance of the finalization service), semantic-consistency contract (partly built). Details:

@@ -15170,6 +15170,38 @@ def _file_failure(error):
     return None
 
 
+async def _admit_file_response(request, account, request_chars):
+    """Admit one file-assistant response against the signed-in customer's daily response allowance,
+    before any model work: the same reservation an ordinary chat takes (the quota's identity is V1's in
+    V1 mode, and its limit follows the account's effective plan), for exactly the account the file
+    service authorized. Returns None when admitted, or the refusal response. A QuotaError (daily limit,
+    busy, account refused) propagates and _run_chat_request answers it; whatever is not completed is
+    released when the request ends. With no account quota configured, nothing is counted, as for chat."""
+    quota_request = _usage_quota_context.get()
+    if quota_request is None:
+        return None
+    quota_request.request_chars = request_chars
+    lookup = _start_lookup(quota_request, request)
+    if lookup is None:
+        return _budget_error(429, "busy")
+    user_id = await asyncio.shield(lookup)
+    if user_id is None or str(user_id) != str(account.owner):
+        return _budget_error(401, "not_authenticated")
+    # The lease must still be pending right before the work, as for a chat worker.
+    await run_in_threadpool(quota_request.before_work)
+    return None
+
+
+async def _counted_file_response(request, account, request_chars, produce):
+    """/api/files/assist: one response under the daily allowance, through the same per-request quota and
+    provider-control wrapper as /api/chat (completed and settled exactly once on success, released on
+    failure or cancellation). produce() runs the file assistant and returns its response."""
+    async def admitted(_request):
+        refusal = await _admit_file_response(_request, account, request_chars)
+        return refusal if refusal is not None else await produce()
+    return await _run_chat_request(request, admitted, anonymous_allowed=False)
+
+
 def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_confirmations):
     """The /api/chat file handoff for a FileService and the file package's request checks (passed in,
     so the application names nothing of that package outside its block)."""
@@ -15192,6 +15224,12 @@ def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_co
         if not valid_assist_request(req.message, turns, attached) or not valid_confirmations(confirmations):
             return JSONResponse(status_code=422, content={"error": "invalid_request"})
         session_id = resolve_session_id(req.session_id)   # May raise SessionEnded, handled by the caller.
+        # One response against the daily allowance, admitted before the assistant runs; /api/chat's own
+        # request wrapper completes and settles it on success and releases it otherwise.
+        refusal = await _admit_file_response(
+            request, account, len(req.message) + sum(len(turn["content"]) for turn in turns))
+        if refusal is not None:
+            return refusal
         content, refusal = await service.assist(account, req.message, turns, attached, confirmations)
         if refusal is not None:
             return refusal
@@ -15276,6 +15314,7 @@ if os.getenv("KALILLAC_FILES_ENABLED", "").strip().lower() in {"1", "true", "yes
         request_scope=_file_request_scope,
         failure_status=_file_failure,
         images=_files_images,
+        count_response=_counted_file_response,
     )
     api.include_router(build_files_router(service=_file_service))
 
