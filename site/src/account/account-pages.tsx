@@ -214,8 +214,10 @@ function AccountLayout({ title, lede, children, note }:
             <div className="acct-body">{children}</div>
           </div>
           <aside className="acct-aside" aria-labelledby={noteId}>
-            <h2 id={noteId}>{note.title}</h2>
-            <p>{note.body}</p>
+            <div className="acct-aside-note">
+              <h2 id={noteId}>{note.title}</h2>
+              <p>{note.body}</p>
+            </div>
           </aside>
         </div>
       </div>

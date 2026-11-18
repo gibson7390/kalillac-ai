@@ -39,6 +39,7 @@ OTHER_TOKEN = ("bR7-pLw2_N" * 5)[:42] + "A"
 CREATED_AT = "2026-03-14T09:30:00+00:00"
 USER_ID = str(uuid.UUID(int=0x1234567890ABCDEF1234567890ABCDEF))
 DESKTOP, PHONE, NARROW = (1440, 900), (390, 844), (320, 640)
+TABLET, LANDSCAPE = (768, 1024), (844, 390)
 
 # Records every fetch: what it asked for, and whether the address still held a
 # fragment when it was made. Test instrumentation only.
@@ -1351,7 +1352,8 @@ def test_continue_without_an_account_goes_to_the_private_chat(page):
 LAYOUT_ROUTES = ["/account/sign-in", "/account/create", "/account/recovery", "/account"]
 
 
-@pytest.mark.parametrize("size,mobile", [(DESKTOP, False), (PHONE, True), (NARROW, True), ((640, 450), False)])
+@pytest.mark.parametrize("size,mobile", [(DESKTOP, False), (PHONE, True), (NARROW, True), ((640, 450), False),
+                                         (TABLET, True), (LANDSCAPE, True)])
 def test_layout_reflows_without_horizontal_overflow(page, size, mobile):
     page.resize(size, mobile)
     for path in LAYOUT_ROUTES:
@@ -1382,6 +1384,64 @@ def test_layout_reflows_without_horizontal_overflow(page, size, mobile):
             assert abs(geometry["aside"][1] - geometry["primary"][1]) < 2, path
         else:
             assert geometry["aside"][1] > geometry["primary"][1], path          # form first, then the aside
+
+
+def test_forms_keep_their_measure_on_tablets_and_landscape_phones(page):
+    # One column below 900px, but a form stretched across a tablet strands its
+    # Show control far from the text; the 520px measure holds until phone width.
+    for size in (TABLET, LANDSCAPE):
+        page.resize(size, True)
+        for path in ("/account/sign-in", "/account/create", "/account/recovery"):
+            page.site.api.reset()
+            page.open(path)
+            page.wait_for("document.querySelector('main form input')")
+            geometry = page.eval("""
+              const inputs = [...document.querySelectorAll('main form input')].filter(e => e.offsetParent !== null);
+              const first = inputs[0].getBoundingClientRect();
+              return { widths: inputs.map(e => e.getBoundingClientRect().width),
+                       firstBottom: first.bottom, height: window.innerHeight };""")
+            assert max(geometry["widths"]) <= 520, (path, size, geometry["widths"])
+            if size == LANDSCAPE:
+                # A phone on its side shows the first field without scrolling.
+                assert geometry["firstBottom"] <= geometry["height"], (path, geometry)
+
+
+def test_the_note_stays_beside_a_long_overview(page):
+    open_security(page, tier="paid", verification=True, billing={
+        "subscription_status": "active", "cancel_at_period_end": False,
+        "current_period_end": "2026-12-01T17:00:00+00:00", "portal_available": True})
+    # Instant: the site scrolls smoothly by default.
+    page.eval("window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });")
+    page.eval("await new Promise(r => requestAnimationFrame(() => setTimeout(r, 50)));")
+    note = page.eval("""
+      const note = document.querySelector('.acct-aside-note').getBoundingClientRect();
+      const header = document.querySelector('.site-header').getBoundingClientRect();
+      const primary = document.querySelector('.acct-primary').getBoundingClientRect();
+      return { top: note.top, bottom: note.bottom, left: note.left, headerBottom: header.bottom,
+               primaryRight: primary.right, height: window.innerHeight, scrolled: window.scrollY };""")
+    assert note["scrolled"] > 300, note                       # the page really is long
+    assert note["top"] >= note["headerBottom"] and note["bottom"] <= note["height"], note
+    assert note["left"] >= note["primaryRight"], note
+    # On a phone the note is an ordinary block after the task.
+    page.resize(PHONE, True)
+    page.eval("window.scrollTo(0, 0);")
+    assert page.eval("return getComputedStyle(document.querySelector('.acct-aside-note')).position;") == "static"
+
+
+def test_every_overview_action_spans_its_section_on_a_phone(page):
+    page.resize(PHONE, True)
+    open_security(page, verification=False, billing=dict(FREE_BILLING))
+    widths = page.eval("""
+      return [...document.querySelectorAll('main .acct-section')].flatMap(section => {
+        const style = getComputedStyle(section);
+        const inner = section.getBoundingClientRect().width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        return [...section.querySelectorAll('.acct-button')].filter(b => b.offsetParent !== null)
+          .map(b => [b.dataset.testid || b.textContent.trim(), Math.round(b.getBoundingClientRect().width),
+                     Math.round(inner)]);
+      });""")
+    labels = [label for label, _, _ in widths]
+    assert "button-request-verification" in labels and "button-sign-out" in labels, labels
+    assert [w for w in widths if abs(w[1] - w[2]) > 1] == []
 
 
 def test_reduced_motion_removes_transitions(page):

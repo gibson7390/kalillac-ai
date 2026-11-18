@@ -19,7 +19,9 @@
 
 /* The site's raised material: a hairline, a light inner top edge and a long,
    soft shadow, the same family as the homepage's chat workspace. */
-.acct-surface { display: grid; grid-template-columns: minmax(0, 1fr) 300px; overflow: hidden;
+/* clip, not hidden: it rounds the tinted column's corners without making the
+   surface a scroll container, which would stop the note from staying in view. */
+.acct-surface { display: grid; grid-template-columns: minmax(0, 1fr) 300px; overflow: hidden; overflow: clip;
                 background: var(--k-surface-raised); border: 1px solid var(--acct-line); border-radius: var(--k-radius-lg);
                 box-shadow: var(--k-inner-light), 0 0 0 5px rgba(255, 255, 255, .6), var(--k-shadow-3); }
 .acct-primary { min-width: 0; padding: 44px 52px 48px; }
@@ -34,6 +36,11 @@
 .acct-aside h2 { margin: 0; color: #182a4d; font-size: 13px; font-weight: 750; letter-spacing: .01em; }
 .acct-aside h2::before { content: ''; display: block; width: 22px; height: 2px; margin-bottom: 14px; background: #0069ff; }
 .acct-aside p { margin: 8px 0 0; color: var(--acct-muted); font-size: 13.5px; line-height: 1.6; }
+/* Beside a long page (the account overview) the note travels with the reader
+   instead of leaving the column empty below it. Two-column widths only. */
+@media (min-width: 900px) {
+  .acct-aside-note { position: sticky; top: calc(var(--k-header-h, 72px) + 32px); }
+}
 
 /* --- forms --------------------------------------------------------------------- */
 .acct-form { display: grid; gap: 0; }
@@ -180,7 +187,8 @@
 }
 @media (max-width: 899px) {
   .acct-surface { grid-template-columns: minmax(0, 1fr); }
-  .acct-body { max-width: none; }
+  /* The form keeps its reading measure on tablets and landscape phones; it
+     takes the full width only on phone widths (below). */
   .acct-aside { padding: 22px 40px 26px; border-left: 0; border-top: 1px solid var(--acct-line); }
   .acct-aside h2::before { display: none; }
 }
@@ -191,8 +199,11 @@
   .acct-primary { padding: 26px 20px 28px; }
   .acct-aside { padding: 18px 20px 20px; }
   .acct-aside p { font-size: 13px; }
-  .acct-body { margin-top: 24px; }
+  .acct-body { max-width: none; margin-top: 24px; }
   .acct-actions-form .acct-button, .acct-state .acct-button, .acct-section .acct-actions .acct-button { flex: 1 1 auto; }
+  /* The verification request is a section action like the others: full width on a phone. */
+  .acct-section-value:has(.acct-row-detail) { flex: 1 1 100%; }
+  .acct-row-detail .acct-button { flex: 1 1 100%; }
   .acct-identity { padding: 16px; }
   .account-shell .site-footer { padding: 10px 0 14px; }
   .account-shell .footer-brand p { display: none; }
@@ -206,6 +217,12 @@
   .acct-primary { padding: 22px 16px 24px; }
   .acct-aside { padding: 16px; }
   .acct-title { font-size: 27px; }
+}
+/* A phone on its side: little height, so the form starts closer to the top. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .acct { padding: 16px 0 24px; }
+  .acct-primary { padding-top: 26px; padding-bottom: 30px; }
+  .acct-body { margin-top: 20px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .acct-input input, .acct-button, .acct-reveal, .acct-link { transition: none; }
