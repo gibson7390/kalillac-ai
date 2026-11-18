@@ -10,6 +10,7 @@ anything while providers are simulated.
 * **Stop:** `deploy\local\Kalillac-Local.cmd stop` (also when WSL shuts down by itself, just start again).
 * **What runs, demo accounts:** `deploy\local\Kalillac-Local.cmd status`.
 * **Local panel:** **http://localhost:8010/__local__/** (emails Kalillac sent, simulated Stripe).
+* **After a site change** (`npm run build` in `site\`): `deploy\local\Kalillac-Local.cmd refresh-web`.
 
 First time only (about three minutes): build the site once (`npm run build` in `site\`), then
 `deploy\local\Kalillac-Local.cmd setup`. It needs WSL with the repository's Python environment

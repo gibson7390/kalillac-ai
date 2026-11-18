@@ -7,6 +7,7 @@ Run as root (in WSL: `wsl -u root`), with the repository's Python environment, f
     python3 -B tools/local_staging.py stop
     python3 -B tools/local_staging.py status       what runs, the URL, the demo accounts
     python3 -B tools/local_staging.py spaces-allow EMAIL   let a local account use Spaces (restarts the application)
+    python3 -B tools/local_staging.py refresh-web  after `npm run build` in site/: rebuild the web root (front server only)
     python3 -B tools/local_staging.py reset --yes  delete local staging entirely (its database and files only)
 
 Then open http://localhost:8010 (the local panel: http://localhost:8010/__local__/).
@@ -530,6 +531,24 @@ def spaces_allow(args):
     allow_spaces([args.email])
 
 
+def refresh_web(args):
+    """After `npm run build` in site/: the web root again from the current build, the front server restarted.
+    The application and its data are not touched."""
+    uid, gid, group, home = identity()
+    p = paths()
+    pid = _alive(p["run"] / "web.pid")
+    if pid:
+        os.killpg(pid, signal.SIGTERM)
+        for _ in range(40):
+            if not _alive(p["run"] / "web.pid"):
+                break
+            time.sleep(0.25)
+        (p["run"] / "web.pid").unlink(missing_ok=True)
+    build_webroot(p)
+    say("web root rebuilt from the current site build")
+    start(args)
+
+
 def reset(args):
     if not args.yes:
         fail("this deletes local staging's database and files; repeat with --yes")
@@ -545,7 +564,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="local_staging.py")
     sub = parser.add_subparsers(dest="command", required=True)
     for name, handler in (("setup", setup), ("start", start), ("stop", stop), ("status", status),
-                          ("seed", lambda args: seed(paths()))):
+                          ("seed", lambda args: seed(paths())), ("refresh-web", refresh_web)):
         sub.add_parser(name).set_defaults(handler=handler)
     allow = sub.add_parser("spaces-allow")
     allow.add_argument("email")
