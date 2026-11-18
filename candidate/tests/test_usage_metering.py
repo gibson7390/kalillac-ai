@@ -915,6 +915,7 @@ def test_usage_table_columns_are_aggregates_only():
         "successful_chats",
         "request_chars",
         "response_chars",
+        "provider_attempts",      # A count of provider attempts (Codex F3): a number, like the rest.
         "created_at",
         "updated_at",
     }

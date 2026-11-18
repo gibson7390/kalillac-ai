@@ -53,8 +53,9 @@ ACTIVATION = "0021_registration_activation"  # The registration activation guard
 QUARANTINE = "0022_v1_quarantine"     # Quarantine and reinstatement (V1-02D), above 0021.
 DELETION = "0023_v1_deletion_request"  # Deletion requests (V1-02D), above 0022.
 CREDENTIAL = "0024_v1_recovery_credential"  # Reset-token issuance and the credential read path (D5), above 0023.
-ANCHOR = "0025_v1_row_lock_anchor"  # The inert row-lock anchor (E1 prerequisite), the head, above 0024.
-CHAIN = (ANCHOR, CREDENTIAL, DELETION, QUARANTINE, ACTIVATION, CHANGE, RESET, SESSION_END, BILLING_CASES, FINANCE_HEAD, FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
+ANCHOR = "0025_v1_row_lock_anchor"  # The inert row-lock anchor (E1 prerequisite), above 0024.
+ATTEMPTS = "0026_account_provider_attempts"  # Per-account provider attempts (F3), the head, above the anchor.
+CHAIN = (ATTEMPTS, ANCHOR, CREDENTIAL, DELETION, QUARANTINE, ACTIVATION, CHANGE, RESET, SESSION_END, BILLING_CASES, FINANCE_HEAD, FINANCE, ISSUANCE, REVOCATION, HEAD, "0011_registration_intents", "0010_spaces", "0009_account_email_verification",
          "0008_account_recovery_tokens", "0007_anonymous_usage", "0006_provider_usage_pools",
          "0005_account_usage_slots", "0004_account_billing", "0003_account_usage_daily",
          "0002_account_entitlements", "0001_account_tables")
@@ -77,7 +78,8 @@ def forbidden():
 
 def test_0012_follows_the_exact_0011_chain_directly_below_0013():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [ANCHOR]
+    assert script.get_heads() == [ATTEMPTS]
+    assert script.get_revision(ATTEMPTS).down_revision == ANCHOR
     assert script.get_revision(ANCHOR).down_revision == CREDENTIAL
     assert script.get_revision(CREDENTIAL).down_revision == DELETION
     assert script.get_revision(DELETION).down_revision == QUARANTINE

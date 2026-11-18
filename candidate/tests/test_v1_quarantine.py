@@ -27,7 +27,7 @@ def _module():
 
 def test_0022_sits_directly_after_0021_below_0023():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == ["0025_v1_row_lock_anchor"]
+    assert script.get_heads() == ["0026_account_provider_attempts"]
     assert script.get_revision("0023_v1_deletion_request").down_revision == "0022_v1_quarantine"
     assert (_module().revision, _module().down_revision) == ("0022_v1_quarantine", "0021_registration_activation")
 

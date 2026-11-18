@@ -15140,8 +15140,10 @@ def _file_request_scope(account):
         if control is not None:
             verified = getattr(account, "verified", None)
             # Every file request is a signed-in account's; paid only with V1 evidence for this request.
+            # Its attempts count against that account's daily provider-attempt limit.
             provider_controls.account_status(True, _paid_evidence(
-                control, verified, verified.account_id if verified is not None else None))
+                control, verified, verified.account_id if verified is not None else None),
+                account_id=verified.account_id if verified is not None else account.owner)
         if control is None and _request_limits is None:
             yield
             return
@@ -15769,7 +15771,7 @@ async def _api_chat_with_budget(request, req, history, limits, session, binding=
             _verified = _verified_account_context.get()
             _account = resolved_account(meter_user_id, _verified)
             provider_controls.account_status(_account is not None, _paid_evidence(
-                provider_controls.current_request(), _verified, _account))
+                provider_controls.current_request(), _verified, _account), account_id=_account)
             provider_controls.session_admit(
                 get_session_state_by_id(sid) if binding is None else binding.workspace.state,
                 SESSION_LOCK,

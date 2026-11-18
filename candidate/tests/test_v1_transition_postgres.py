@@ -30,7 +30,7 @@ from test_v1_session_end_postgres import head_world
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import v1_security_transition as transition  # noqa: E402
 
-HEAD = "0025_v1_row_lock_anchor"
+HEAD = "0026_account_provider_attempts"
 PREVIOUS = "0024_v1_recovery_credential"
 DEPLOYMENT = "e2-test"
 RELEASE = "a" * 40

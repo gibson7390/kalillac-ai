@@ -971,6 +971,13 @@
              "It resets at 12:00 AM UTC.",
     kind: "notice", action: null
   };
+  /* A signed-in account's daily bound on provider work, successful or not (a 429
+     only). No number, as for the message limit. */
+  var OUTCOME_ACCOUNT_PROCESSING_LIMIT = {
+    message: "You’ve reached today’s processing limit for this account. " +
+             "It resets at 12:00 AM UTC.",
+    kind: "notice", action: null
+  };
   var OUTCOME_SESSION_ENDED = {
     message: "This conversation was ended. Your next message starts a new one.",
     kind: "notice", action: null
@@ -1023,6 +1030,7 @@
     },
     anonymous_daily_limit_reached: OUTCOME_DAILY_LIMIT,
     daily_limit_reached: OUTCOME_ACCOUNT_DAILY_LIMIT,
+    account_processing_limit_reached: OUTCOME_ACCOUNT_PROCESSING_LIMIT,
     session_ended: OUTCOME_SESSION_ENDED,
     // The account itself was refused (V1 account security): no Retry.
     account_unavailable: { message: "This account isn’t available right now.", kind: "error", action: null },
@@ -1057,7 +1065,8 @@
 
     // The daily limit is only ever a 429; the same code on any other status
     // is not a usable outcome.
-    if ((code === "anonymous_daily_limit_reached" || code === "daily_limit_reached") && status !== 429) {
+    if ((code === "anonymous_daily_limit_reached" || code === "daily_limit_reached" ||
+         code === "account_processing_limit_reached") && status !== 429) {
       code = null;
     }
 

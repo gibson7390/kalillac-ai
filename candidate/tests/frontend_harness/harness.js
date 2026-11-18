@@ -700,7 +700,7 @@
     request_timeout: 504, internal_error: 500,
     session_ended: 409, unsupported_media_type: 415,
     reasoning_mode_not_allowed: 403, files_require_premium: 403, not_authenticated: 401,
-    daily_limit_reached: 429, account_unavailable: 403, too_many_images: 502, image_unavailable: 502,
+    daily_limit_reached: 429, account_processing_limit_reached: 429, account_unavailable: 403, too_many_images: 502, image_unavailable: 502,
     file_not_found: 404, file_assistant_unavailable: 502, model_output_unusable: 502,
     model_output_incomplete: 502, model_refused: 502, tool_limit_exceeded: 502
   };
