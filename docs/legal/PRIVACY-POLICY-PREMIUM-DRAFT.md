@@ -133,7 +133,9 @@ Premium lets you attach files and images, and lets Kalillac create and edit file
   as camera details, location or embedded text, is not kept.
 - **How long:** a file is available for 30 days from when it was stored, then it is no longer shown or
   downloadable. [D-9: state when expired files are deleted from storage, once that deletion is
-  scheduled.] You can delete a file sooner; it is removed from storage at once.
+  scheduled.] [FILES-PAGE: "You can delete a file sooner; it is removed from storage at once." Keep
+  this only once customers have a page to see and delete their files. Today the API can delete a
+  file but no customer page offers it; see docs/FILES-STORAGE-DISCLOSURE.md.]
 - **Where files go:** when you ask Kalillac to work with a file, its outline and text, or the image
   itself, is sent to OpenAI with your message (section 9).
 - **Temporary conversations:** files attached to or created in a temporary conversation are still kept
@@ -190,7 +192,7 @@ Each handles what it receives under its own policies, which Kalillac does not co
 |---|---|---|
 | Temporary conversation | Page memory and server memory | As in section 4 |
 | Saved Spaces, conversations and messages | Kalillac's database | When you delete them (at once), or when your account is erased [D-10] |
-| Files and images | Kalillac's server storage | Available 30 days; deleted when you delete them; [D-9: deletion of expired files] |
+| Files and images | Kalillac's server storage | Available 30 days; [FILES-PAGE: deleted when you delete them]; [D-9: deletion of expired files] |
 | Account record (email, password hash, dates) | Kalillac's database | Until the account is erased [D-8] |
 | Sign-in sessions | Kalillac's database (token hash) and your browser | At most 14 days, or sign-out |
 | Pending registration link (encrypted email) | Kalillac's database | Expires after 24 hours and is then deleted automatically |
@@ -216,7 +218,8 @@ and whether you receive a confirmation.]
 - You can use Kalillac without an account, and you can use temporary conversations while signed in.
 - On the account page you can see your plan and billing status, change your password, sign out sessions,
   manage or cancel your subscription through Stripe, and request deletion.
-- You can delete saved Spaces, conversations and files yourself at any time.
+- You can delete saved Spaces and conversations yourself at any time. [FILES-PAGE: add "and files"
+  once customers have a page to see and delete their files.]
 - [D-2, D-12: rights under the laws that apply (for example access, correction, deletion, portability,
   objection), how to make a request, how identity is checked, and response times.]
 

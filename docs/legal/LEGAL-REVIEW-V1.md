@@ -93,14 +93,23 @@ Homepage and product copy (outside the two documents):
 ## 3. Product gaps the documents expose (before any policy can describe them truthfully)
 
 1. **Expired files are never deleted from disk** (`purge()` is not scheduled). Until it is, a policy can
-   only say files stop being available, not that they are deleted.
-2. **Per-account daily usage records are never pruned**; their retention is undefined.
+   only say files stop being available, not that they are deleted. **Update 2026-11-18:** a reviewed,
+   dry-run-by-default cleanup now exists on `feat/data-lifecycle` (`tools/data_lifecycle.py files`); it
+   is not scheduled anywhere and its deletion period is D-9, so this statement still holds.
+2. **Per-account daily usage records are never pruned**; their retention is undefined. **Update
+   2026-11-18:** `tools/data_lifecycle.py usage` on `feat/data-lifecycle` can prune them (it keeps at
+   least 8 days); it is not scheduled and the period is D-11.
 3. ~~Expired or consumed registration intents have no purge.~~ **Corrected 2026-11-18:** they are deleted
    automatically after their 24-hour expiry (`registration_authority.cleanup_expired`, every 60 seconds).
 4. **Account erasure after a deletion request is not built** (waits on D-8).
 5. Spaces are limited to an allowlist: the documents must say whether Spaces are part of Premium at launch.
 6. Backups: no backup or restore schedule is recorded in this repository for staging or production
    databases and files; a retention statement must account for backups.
+7. **Customers cannot see or delete their stored files (found 2026-11-18).** The API can list and
+   delete files, but no customer page does either; once a temporary chat ends, its files are out of
+   reach until they expire. The draft's "you can delete a file sooner" statements are now marked
+   `[FILES-PAGE]` and must wait for a files page (`docs/FILES-STORAGE-DISCLOSURE.md` on
+   `fix/files-storage-disclosure`).
 
 ## 4. Decisions the owner (with counsel) must make before approval
 
