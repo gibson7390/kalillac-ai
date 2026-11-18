@@ -660,9 +660,12 @@ def test_only_the_provider_control_seam_and_startup_use_the_financial_package():
         if "kalillac_finance" in path.read_text(encoding="utf-8", errors="replace"):
             users.append("/".join(relative))
     # B2 adds exactly one more: the paid seam, which issues the request-bound paid evidence
-    # (kalillac_finance.traffic) from a V1-verified entitlement.
+    # (kalillac_finance.traffic) from a V1-verified entitlement. The staging preflight is a second
+    # operator command: read-only, it runs the configuration loader (load_financial_config) against a
+    # filled-in staging settings file before the first start; no route or routing module reaches it.
     assert sorted(users) == ["app_fastapi_candidate.py", "kalillac_accounts/paid_access.py",
-                             "kalillac_routing/provider_controls.py", "tools/finance_ledger_admin.py"]
+                             "kalillac_routing/provider_controls.py", "tools/finance_ledger_admin.py",
+                             "tools/staging_preflight.py"]
 
 
 def test_application_starts_unchanged_when_the_flag_is_unset():
