@@ -21,8 +21,11 @@ directory it checked, wherever its path points by then.
 
 `stop` signals only the processes `start` launched: each launch records its process's start time, the boot,
 a random token in the process's environment, this checkout and the script's absolute path, and the process
-(the service user's, in this checkout) is signalled through a pidfd only after all of them match: a reused PID
-or another checkout's process never does.
+(the service user's, in this checkout) is signalled only after all of them match: a reused PID or another
+checkout's process never does. Every signal goes through a pidfd, never a numeric PID or group id: the group
+with PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9 and later), or, where the kernel refuses that flag, each member
+through its own pidfd while the leader is alive. A stop is confirmed (the process and its group have exited,
+by SIGKILL after a grace period if need be) or it fails: the records are kept and `reset` deletes nothing.
 
 Then open http://localhost:8010 (the local panel: http://localhost:8010/__local__/).
 
@@ -543,8 +546,13 @@ def _boot():
 
 def _started(pid):
     """The process's start time in clock ticks since boot (/proc/PID/stat field 22): a reused PID has another."""
+    return _stat(pid)[3]
+
+
+def _stat(pid):
+    """(state, process group, session, start time) from /proc/PID/stat."""
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-    return int(fields[19])
+    return fields[0], int(fields[2]), int(fields[3]), int(fields[19])
 
 
 def _run_file(p, filename):
@@ -588,28 +596,37 @@ def _ours(record, name, uid):
     """True only if the process the record names is still the one `start` launched, for this deployment and
     this checkout: the service user's, leading its own group, in this checkout running this checkout's script,
     started at the recorded time on this boot (not a reused PID), with the launch's token in its environment."""
+    return _identity(record, name, uid) == "ours"
+
+
+def _identity(record, name, uid):
+    """"ours"; "other" (gone, or its PID now another process's); or "unknown" (it could not be read)."""
     try:
         pid = record["pid"]
         if type(pid) is not int or pid <= 1:
-            return False
+            return "other"
         proc = Path(f"/proc/{pid}")
         if os.stat(proc).st_uid != uid or os.getpgid(pid) != pid or os.readlink(proc / "cwd") != _checkout():
-            return False
+            return "other"
         argv = [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0")]
         if record.get("legacy"):
             # Launched as `python -B tools/NAME.py` from this checkout; started no later than its PID file was
             # written and no earlier than two minutes before (a PID reused since then started after it).
             started_at = (time.time() - float(Path("/proc/uptime").read_text().split()[0])
                           + _started(pid) / os.sysconf("SC_CLK_TCK"))
-            return SCRIPTS[name] in argv[1:3] and record["written"] - 120 <= started_at <= record["written"] + 2
+            matches = SCRIPTS[name] in argv[1:3] and record["written"] - 120 <= started_at <= record["written"] + 2
+            return "ours" if matches else "other"
         token = record.get("token")
         environ = (proc / "environ").read_bytes().split(b"\0")
-        return (record.get("script") == _script(name) and _script(name) in argv[1:3]
-                and record.get("boot") == _boot() and record.get("started") == _started(pid)
-                and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
-                and f"{INSTANCE}={token}".encode() in environ)
-    except (OSError, KeyError, ValueError, TypeError, IndexError):
-        return False
+        matches = (record.get("script") == _script(name) and _script(name) in argv[1:3]
+                   and record.get("boot") == _boot() and record.get("started") == _started(pid)
+                   and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
+                   and f"{INSTANCE}={token}".encode() in environ)
+        return "ours" if matches else "other"
+    except (FileNotFoundError, ProcessLookupError, KeyError, ValueError, TypeError, IndexError):
+        return "other"
+    except OSError:
+        return "unknown"
 
 
 def _running(p, name, uid=None):
@@ -619,29 +636,140 @@ def _running(p, name, uid=None):
     return record["pid"] if record and _ours(record, name, uid) else None
 
 
-def _terminate(p, name, uid, timeout=30.0):
-    """SIGTERM to local staging's own process of that name and its group, through a pidfd taken before its
-    identity is checked (so the check and the signal concern the same process), then wait for it to exit.
-    Returns True if it was ours, False if there was nothing of ours to stop."""
-    record = _record(p, name)
-    if not record:
+PIDFD_SIGNAL_PROCESS_GROUP = 1 << 2      # include/uapi/linux/pidfd.h, Linux 6.9 and later (EINVAL before).
+STOP_GRACE = 30.0                        # Seconds for SIGTERM to end a process and its group...
+KILL_WAIT = 10.0                         # ...then for SIGKILL to, before the stop is declared failed.
+
+
+class StopFailed(Exception):
+    """A process of local staging could not be confirmed stopped: its records are kept, nothing is deleted."""
+
+
+def _members(leader, since):
+    """The other live processes of the group a leader started (process group and session both the leader's
+    PID, started no earlier than it). Only proof of identity while the leader is alive: its PID, the group's
+    and the session's id, cannot be reused until it exits."""
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == leader:
+            continue
+        try:
+            state, group, session, started = _stat(int(entry))
+        except (OSError, ValueError, IndexError):
+            continue
+        if state != "Z" and group == leader and session == leader and started >= since:
+            found.append(int(entry))
+    return found
+
+
+def _signal_member(pid, leader_fd, leader, since, sig):
+    """Signal one member of the leader's group through its own pidfd, only if, read while that pidfd and the
+    leader's both show their processes alive, it is in the leader's group. True if it was signalled."""
+    try:
+        fd = os.pidfd_open(pid)
+    except ProcessLookupError:
         return False
     try:
-        pidfd = os.pidfd_open(record["pid"])
-    except (OSError, TypeError, ValueError, AttributeError):
-        return False                                   # Gone already, or no pidfd here: never signal blindly.
-    try:
-        if not _ours(record, name, uid):
+        _state, group, session, started = _stat(pid)
+        signal.pidfd_send_signal(fd, 0)            # Alive after the read: the read was this process's...
+        signal.pidfd_send_signal(leader_fd, 0)     # ...and the leader alive: the group's id was still its own.
+        if group != leader or session != leader or started < since:
             return False
-        # Still alive after the check, through the pidfd: its PID, its group's id, cannot have been reused.
-        signal.pidfd_send_signal(pidfd, 0)
-        os.killpg(record["pid"], signal.SIGTERM)
-        select.select([pidfd], [], [], timeout)        # Readable once it has exited.
+        signal.pidfd_send_signal(fd, sig)
         return True
-    except ProcessLookupError:
-        return True
+    except (ProcessLookupError, FileNotFoundError):
+        return False
     finally:
-        os.close(pidfd)
+        os.close(fd)
+
+
+def _signal_group(leader_fd, leader, since, sig):
+    """Signal a live leader's group through pidfds only. With PIDFD_SIGNAL_PROCESS_GROUP the kernel signals
+    the group of the process the pidfd names, at once. A kernel that refuses the flag (EINVAL, before 6.9):
+    each member through its own pidfd, then the leader. Never a numeric kill() or killpg()."""
+    try:
+        signal.pidfd_send_signal(leader_fd, sig, None, PIDFD_SIGNAL_PROCESS_GROUP)
+        return
+    except ProcessLookupError:
+        return                                     # The leader has exited: _wait_gone decides the rest.
+    except OSError as error:
+        if error.errno != errno.EINVAL:
+            raise
+    for pid in _members(leader, since):
+        _signal_member(pid, leader_fd, leader, since, sig)
+    try:
+        signal.pidfd_send_signal(leader_fd, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _wait_gone(leader_fd, leader, since, timeout):
+    """True once the leader has exited (its pidfd readable) and its group has no live member left."""
+    deadline = time.monotonic() + timeout
+    readable, _w, _x = select.select([leader_fd], [], [], timeout)
+    if not readable:
+        return False
+    while _members(leader, since):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _terminate(p, name, uid):
+    """Stop local staging's own process of that name and its group, and confirm it. Returns "stopped", or
+    "absent" when no process of ours runs under that record; raises StopFailed when that cannot be confirmed
+    (no pidfd, an unreadable identity, a process that outlives SIGTERM and SIGKILL, or a group whose leader
+    has exited). The pidfd is taken before the identity is checked, so the check and every signal concern the
+    same process."""
+    record = _record(p, name)
+    if not record:
+        return "absent"
+    pid, since = record["pid"], None
+    try:
+        leader_fd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        leader_fd = None
+    except (OSError, AttributeError) as error:
+        raise StopFailed(f"no process handle (pidfd) for the {name} process {pid}: {error}") from None
+    try:
+        if leader_fd is None:
+            # The leader has exited. Its group may live on, but its PID no longer proves whose it is.
+            since = record.get("started") if record.get("boot") == _boot() else None
+            left = _members(pid, since) if since is not None else _members(pid, 0)
+            if left:
+                raise StopFailed(f"the {name} process {pid} has exited but its group still runs (PIDs "
+                                 f"{', '.join(map(str, left))}); stop them by hand")
+            return "absent"
+        state = _identity(record, name, uid)
+        if state == "unknown":
+            raise StopFailed(f"cannot read the {name} process {pid}'s identity")
+        if state != "ours":
+            return "absent"                        # Its PID is another process's now: our group has ended.
+        since = record.get("started") if not record.get("legacy") else None
+        if type(since) is not int:
+            since = _started(pid)
+        signal.pidfd_send_signal(leader_fd, 0)     # Still the checked process (the start time read was its own).
+        _signal_group(leader_fd, pid, since, signal.SIGTERM)
+        if _wait_gone(leader_fd, pid, since, STOP_GRACE):
+            return "stopped"
+        say(f"the {name} process {pid} did not stop within {STOP_GRACE:g}s of SIGTERM; sending SIGKILL")
+        try:
+            signal.pidfd_send_signal(leader_fd, 0)
+            _signal_group(leader_fd, pid, since, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if _wait_gone(leader_fd, pid, since, KILL_WAIT):
+            return "stopped"
+        raise StopFailed(f"the {name} process {pid} (or its group) is still running after SIGKILL")
+    except (ProcessLookupError, FileNotFoundError):
+        # It exited between the check and a signal: confirmed only if nothing of its group is left.
+        if _members(pid, since if since is not None else 0):
+            raise StopFailed(f"the {name} process {pid} has exited but its group still runs") from None
+        return "absent"
+    finally:
+        if leader_fd is not None:
+            os.close(leader_fd)
 
 
 def _spawn(name, extra, p, uid, gid, env):
@@ -705,12 +833,23 @@ def start(args):
 def stop(args):
     uid, gid, group, home = identity()
     p = paths()
+    failures = []
     for name in ("web", "app"):
-        _terminate(p, name, uid)
+        try:
+            _terminate(p, name, uid)
+        except StopFailed as error:
+            failures.append(str(error))
+            continue                                   # Its records stay: the next stop tries again.
         for stale in (f"{name}.json", f"{name}.pid"):
             (p["run"] / stale).unlink(missing_ok=True)
     if p["pg"].exists() and pg_running(p, pg_bin(home), uid, gid):
-        as_user([f"{pg_bin(home)}/pg_ctl", "-D", str(p["pg"]), "stop", "-m", "fast"], uid, gid, capture_output=True)
+        result = as_user([f"{pg_bin(home)}/pg_ctl", "-D", str(p["pg"]), "stop", "-m", "fast"], uid, gid,
+                         capture_output=True)
+        if result.returncode != 0 or pg_running(p, pg_bin(home), uid, gid):
+            failures.append("PostgreSQL did not stop (pg_ctl stop -m fast)")
+    if failures:
+        fail("could not confirm that local staging stopped:\n  " + "\n  ".join(failures)
+             + "\nIts process records are kept and nothing was deleted.")
     say("stopped")
 
 
@@ -853,7 +992,10 @@ def refresh_web(args):
     The application and its data are not touched."""
     uid, gid, group, home = identity()
     p = paths()
-    _terminate(p, "web", uid, timeout=10.0)
+    try:
+        _terminate(p, "web", uid)
+    except StopFailed as error:
+        fail(f"{error}. The front server's record is kept; the web root was not rebuilt.")
     for stale in ("web.json", "web.pid"):
         (p["run"] / stale).unlink(missing_ok=True)
     build_webroot(p)

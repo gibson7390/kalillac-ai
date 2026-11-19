@@ -456,3 +456,186 @@ def test_a_process_of_this_checkout_without_the_launch_token_is_not_ours(tool, c
     (p["run"] / "app.json").write_text(json.dumps(forged))
     assert tool("stop", root=checkout.root) == 0
     assert by_hand.poll() is None and real.poll() is None         # The forged one untouched; the real one unnamed.
+
+
+# --- F1, third round: a stop is confirmed or it fails; every signal goes through a pidfd -------------------
+
+IGNORES_TERM = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(120)\n"
+WITH_CHILD = ("import os, subprocess, sys, time\n"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+              "open(os.environ['CHILD_PID_FILE'], 'w').write(str(child.pid))\n"
+              "time.sleep(120)\n")
+
+
+@pytest.fixture
+def quick(monkeypatch):
+    """Short grace periods, so an unresponsive process is decided in seconds, not half a minute."""
+    monkeypatch.setattr(local, "STOP_GRACE", 1.0, raising=False)
+    monkeypatch.setattr(local, "KILL_WAIT", 2.0, raising=False)
+    real_select = local.select.select
+    monkeypatch.setattr(local.select, "select", lambda r, w, x, timeout=None: real_select(r, w, x, min(timeout, 2.0)))
+
+
+def records(p, name):
+    return [f for f in (f"{name}.json", f"{name}.pid") if (p["run"] / f).exists()]
+
+
+def alive(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        return state != "Z"
+    except OSError:
+        return False
+
+
+def write_script(name, text):
+    (local.CANDIDATE / local.SCRIPTS[name]).write_text(text)
+
+
+def test_a_process_that_ignores_sigterm_is_never_reported_stopped_while_it_runs(tool, checkout, quick):
+    """Codex's F1-C: the wait for the exit timed out, yet the records were removed and "stopped" reported, so a
+    reset would then have deleted the files under a running process. Now either the stop is confirmed (here, by
+    SIGKILL after the grace period, through the pidfd) or it fails and keeps the records."""
+    write_script("app", IGNORES_TERM)
+    app = checkout("app")
+    time.sleep(0.3)
+    p = local.paths()
+    code = tool("stop", root=checkout.root)
+    assert (code == 0 and gone(app) and not records(p, "app")) or \
+           (code == 2 and alive(app.pid) and records(p, "app") == ["app.json"]), (code, app.poll(), records(p, "app"))
+    assert code == 0 and app.returncode == -signal.SIGKILL
+
+
+def test_an_unstoppable_process_keeps_its_records_and_reset_deletes_nothing(tool, checkout, quick, monkeypatch):
+    """Signals that never take effect (a process stuck in the kernel): the stop is not confirmed, so it fails,
+    keeps the records, and reset never reaches its delete."""
+    app = checkout("app")
+    time.sleep(0.3)
+    p = local.paths()
+    monkeypatch.setattr(local.signal, "pidfd_send_signal", lambda fd, sig, *args, **kwargs: None)
+    monkeypatch.setattr(local.os, "killpg", lambda pid, sig: None)
+    deleted = []
+    monkeypatch.setattr(local.shutil, "rmtree", raced(local.shutil.rmtree, lambda: deleted.append(True)))
+    before = tree(checkout.root)
+    assert tool("stop", root=checkout.root) == 2
+    assert alive(app.pid) and records(p, "app") == ["app.json"]
+    assert tool("reset", "--yes", root=checkout.root) == 2
+    assert deleted == [] and alive(app.pid) and tree(checkout.root) == before
+
+
+@pytest.mark.parametrize("unavailable", ["error", "missing"])
+def test_without_a_process_handle_the_stop_fails_and_nothing_is_deleted(tool, checkout, quick, monkeypatch,
+                                                                       unavailable):
+    app = checkout("app")
+    time.sleep(0.3)
+    p = local.paths()
+    if unavailable == "error":
+        def refuse(pid, flags=0):
+            raise OSError(38, "Function not implemented (injected)")
+        monkeypatch.setattr(local.os, "pidfd_open", refuse)
+    else:
+        monkeypatch.delattr(local.os, "pidfd_open")
+    deleted = []
+    monkeypatch.setattr(local.shutil, "rmtree", raced(local.shutil.rmtree, lambda: deleted.append(True)))
+    assert tool("stop", root=checkout.root) == 2
+    assert tool("reset", "--yes", root=checkout.root) == 2
+    assert alive(app.pid) and records(p, "app") == ["app.json"] and deleted == []
+
+
+def numeric_signals_forbidden(patch):
+    def forbidden(*args):
+        raise AssertionError("a numeric process or group signal was sent")
+    patch.setattr(local.os, "killpg", forbidden)
+    patch.setattr(local.os, "kill", forbidden)
+
+
+@pytest.mark.parametrize("path", ["group-flag", "member-by-member"])
+def test_stop_ends_the_whole_group_through_pidfds_only(tool, checkout, quick, monkeypatch, tmp_path, path):
+    """The application's own children (its group) end with it. With PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9) the
+    group is signalled through the leader's pidfd; where the kernel refuses that flag, each member through its
+    own pidfd while the leader is alive, the leader last. Never a numeric kill or killpg."""
+    if path == "member-by-member":
+        monkeypatch.setattr(local, "PIDFD_SIGNAL_PROCESS_GROUP", 1 << 30, raising=False)   # Refused: EINVAL.
+    child_file = tmp_path / "child.pid"
+    monkeypatch.setenv("CHILD_PID_FILE", str(child_file))
+    write_script("app", WITH_CHILD)
+    app = checkout("app")
+    deadline = time.monotonic() + 10
+    while not child_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child = int(child_file.read_text())
+    assert os.getpgid(child) == app.pid
+    with monkeypatch.context() as patch:              # Only around the stop: the fixture's cleanup may kill.
+        numeric_signals_forbidden(patch)
+        assert tool("stop", root=checkout.root) == 0
+    assert gone(app) and app.returncode == -signal.SIGTERM
+    deadline = time.monotonic() + 5
+    while alive(child) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not alive(child) and not records(local.paths(), "app")
+
+
+def test_a_member_is_signalled_only_while_it_is_in_the_leaders_group(checkout, monkeypatch):
+    """The member path checks each process through its own pidfd: a process outside the group (here, one in a
+    session of its own) is never signalled, even when its PID is offered as a member."""
+    leader = checkout("app")
+    outsider = checkout("web", cwd=local.CANDIDATE)
+    time.sleep(0.3)
+    fd = os.pidfd_open(leader.pid)
+    try:
+        since = local._started(leader.pid)
+        assert local._signal_member(outsider.pid, fd, leader.pid, since, signal.SIGTERM) is False
+        time.sleep(0.2)
+        assert outsider.poll() is None
+    finally:
+        os.close(fd)
+
+
+def test_a_group_left_behind_by_an_exited_leader_is_reported_not_guessed(tool, checkout, quick, monkeypatch,
+                                                                        tmp_path):
+    """The leader is gone but processes of its group remain: without a live leader the group's id is no longer
+    proof of identity, so nothing is signalled, the stop fails with their PIDs, and the records are kept."""
+    child_file = tmp_path / "child.pid"
+    monkeypatch.setenv("CHILD_PID_FILE", str(child_file))
+    write_script("app", WITH_CHILD.replace("time.sleep(120)\n", "") + "")
+    app = checkout("app")
+    app.wait(timeout=10)                                   # The leader exits; its child stays in the group.
+    child = int(child_file.read_text())
+    try:
+        assert alive(child)
+        assert tool("stop", root=checkout.root) == 2
+        assert alive(child) and records(local.paths(), "app") == ["app.json"]
+    finally:
+        os.kill(child, signal.SIGKILL)
+
+
+def test_postgresql_that_does_not_stop_fails_the_stop(tool, checkout, quick, monkeypatch):
+    (checkout.root / "pg").mkdir()
+    monkeypatch.setattr(local, "pg_running", lambda *args: True)
+    monkeypatch.setattr(local, "pg_bin", lambda home: "/nonexistent")
+    monkeypatch.setattr(local, "as_user", lambda argv, uid, gid, **kwargs: subprocess.CompletedProcess(argv, 1))
+    deleted = []
+    monkeypatch.setattr(local.shutil, "rmtree", raced(local.shutil.rmtree, lambda: deleted.append(True)))
+    assert tool("stop", root=checkout.root) == 2
+    assert tool("reset", "--yes", root=checkout.root) == 2 and deleted == []
+
+
+def test_this_kernel_either_signals_a_group_through_a_pidfd_or_refuses_the_flag(tmp_path):
+    """Records which path the environment uses (CI and WSL): the flag works, or is refused with EINVAL, never
+    anything else."""
+    import errno
+    import platform
+    leader = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    fd = os.pidfd_open(leader.pid)
+    try:
+        try:
+            signal.pidfd_send_signal(fd, 0, None, local.PIDFD_SIGNAL_PROCESS_GROUP)
+            outcome = "supported"
+        except OSError as error:
+            assert error.errno == errno.EINVAL, error
+            outcome = "refused (EINVAL): member-by-member"
+        print(f"kernel {platform.release()}: PIDFD_SIGNAL_PROCESS_GROUP {outcome}")
+    finally:
+        os.close(fd)
+        leader.kill()
+        leader.wait()

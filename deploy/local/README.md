@@ -101,6 +101,10 @@ process is stopped or anything is deleted. `reset` deletes through a descriptor 
 directory renamed or exchanged on the path after the check cannot redirect it. `stop` signals only the
 application and front server that `start` launched: each launch is recorded (start time, boot, a random token in
 the process's environment, this checkout, the script's absolute path) and a process is signalled only when all of
-them match, so a reused PID or another checkout's process never is. A root set up before the marker existed is marked by the next
+them match, so a reused PID or another checkout's process never is. Every signal goes through a process
+descriptor (pidfd), never a numeric PID: the whole group at once on Linux 6.9 and later (WSL's kernel is newer),
+otherwise each of its processes in turn. A stop is either confirmed (the processes have exited, after SIGKILL
+if SIGTERM was not enough within 30 seconds) or it fails with the reason: the records are kept and `reset`
+deletes nothing while anything may still be running. A root set up before the marker existed is marked by the next
 `status` or `start` (the default path only); `reset` never marks one. Chinese, Japanese and Korean PDFs need the large
 CJK fonts once: in WSL, `cd candidate && ~/kf15/bin/python tools/fetch_document_fonts.py`.
