@@ -96,8 +96,8 @@ def journey(live, monkeypatch):
     w.classified = []
     status = provider_controls.account_status
 
-    def spy(authenticated, paid_entitlement=None):
-        status(authenticated, paid_entitlement)
+    def spy(authenticated, paid_entitlement=None, account_id=None):
+        status(authenticated, paid_entitlement, account_id=account_id)
         w.classified.append(provider_controls.current_request().traffic_class)
     monkeypatch.setattr(provider_controls, "account_status", spy)
     monkeypatch.setattr(modes, "CONFIG", load_modes())
