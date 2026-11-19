@@ -1,0 +1,321 @@
+"""Offline local-upgrade primitives. No installation is accessed at import time."""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+from sqlalchemy import create_engine, make_url, text
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(REPO / "candidate"), str(REPO / "candidate/tools")]
+OLD = "0025_v1_row_lock_anchor"
+NEW = "0026_account_provider_attempts"
+RELEASE = "d8f45f71a8d6d4ec80512e7c770b9625293e34bb"
+DEPLOYMENT = "kalillac-local-staging"
+
+
+class Refused(RuntimeError):
+    pass
+
+
+def require(condition, reason):
+    if not condition:
+        raise Refused(reason)
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def env_file(path):
+    values = {}
+    for line in Path(path).read_text().splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            require(key not in values, "duplicate environment setting")
+            values[key] = value
+    return values
+
+
+def file_hash(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode), "non-regular file")
+        h = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                h.update(block)
+        after = os.fstat(fd)
+        require((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "file changed while hashing")
+        return h.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def tree_manifest(root):
+    """Content, ownership and modes, including dotfiles. Refuse links/sockets/external tablespaces."""
+    root = Path(root)
+    require(root.is_dir() and not root.is_symlink(), "missing or linked directory")
+    result = {}
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        for path in [Path(folder), *(Path(folder) / n for n in sorted(dirs + files))]:
+            info = path.lstat()
+            key = str(path.relative_to(root))
+            require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "unsupported filesystem entry")
+            item = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
+            if stat.S_ISREG(info.st_mode):
+                item.update(size=info.st_size, sha256=file_hash(path))
+            result[key] = item
+    return result
+
+
+def copy_tree(source, destination):
+    require(not Path(destination).exists(), "copy destination already exists")
+    tree_manifest(source)
+    subprocess.run(["cp", "-a", "--", str(source), str(destination)], check=True, capture_output=True)
+    require(tree_manifest(source) == tree_manifest(destination), "copied filesystem differs")
+
+
+def save_json(path, value):
+    """Exclusive, durable creation; receipts/backups are never overwritten."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(value, stream, sort_keys=True, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def quote(identifier):
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def database_snapshot(engine, *, project_new=False):
+    """One repeatable, read-only snapshot. Hash sorted complete rows, preserving duplicates.
+
+    Only the exact Alembic version and 0026's new counter may differ. Existing columns,
+    sequence positions and every other application's row remain part of the comparison.
+    """
+    tables, sequences = {}, {}
+    with engine.connect().execution_options(isolation_level="REPEATABLE READ") as c, c.begin():
+        c.exec_driver_sql("SET TRANSACTION READ ONLY")
+        c.exec_driver_sql("SET LOCAL timezone = 'UTC'")
+        c.exec_driver_sql("SET LOCAL bytea_output = 'hex'")
+        versions = list(c.scalars(text("SELECT version_num FROM kalillac.alembic_version")))
+        require(versions == [NEW if project_new else OLD], "unexpected database migration version")
+        names = c.execute(text("""SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE c.relkind IN ('r','p') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+            ORDER BY 1,2""")).all()
+        for schema, table in names:
+            if (schema, table) == ("kalillac", "alembic_version"):
+                continue
+            fq = quote(schema) + "." + quote(table)
+            columns = [tuple(r) for r in c.execute(text("""SELECT a.attname,format_type(a.atttypid,a.atttypmod),
+                a.attnotnull,pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a
+                LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+                WHERE a.attrelid=to_regclass(:fq) AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum"""),
+                {"fq": fq})]
+            expression = "to_jsonb(t)"
+            if project_new and (schema, table) == ("kalillac", "account_usage_daily"):
+                require(columns[-1] == ("provider_attempts", "bigint", True, "0"), "unexpected counter definition")
+                require(c.scalar(text(f"SELECT count(*) FROM {fq} WHERE provider_attempts IS DISTINCT FROM 0")) == 0,
+                        "new provider attempts were not initialized to zero")
+                expression += " - 'provider_attempts'"
+                columns = columns[:-1]
+            h, count = hashlib.sha256(), 0
+            for row in c.execution_options(stream_results=True).execute(
+                    text(f'SELECT ({expression})::text FROM {fq} t ORDER BY ({expression})::text COLLATE "C"')):
+                h.update(row[0].encode() + b"\n")
+                count += 1
+            tables[f"{schema}.{table}"] = {"columns": columns, "rows": count, "sha256": h.hexdigest()}
+        for schema, name in c.execute(text("""SELECT schemaname,sequencename FROM pg_sequences
+                WHERE schemaname <> 'information_schema' AND schemaname !~ '^pg_' ORDER BY 1,2""")):
+            sequences[f"{schema}.{name}"] = tuple(c.execute(
+                text(f"SELECT last_value,is_called FROM {quote(schema)}.{quote(name)}")).one())
+        activation = dict(c.execute(text("""SELECT state,authority_version,deployment_id,release_sha,
+                    activation_id::text FROM kalillac.account_security_activation""")).mappings().one())
+    return {"tables": tables, "sequences": sequences, "activation": activation}
+
+
+def same_contents(before, after):
+    require(digest(before) == digest(after), "existing database contents, schema or activation changed")
+
+
+def database_identity(engine, pg, database, activation):
+    with engine.connect() as c:
+        row = c.execute(text("SELECT current_setting('data_directory'),current_database(),"
+                             " current_setting('server_version_num')::integer")).one()
+        require(Path(row[0]).resolve() == Path(pg).resolve() and row[1] == database and 160000 <= row[2] < 170000,
+                "database endpoint is not the expected PostgreSQL 16 destination")
+        latch = c.execute(text("SELECT state,deployment_id,release_sha FROM kalillac.account_security_activation")).one()
+        require(tuple(latch) == ("active", DEPLOYMENT, activation), "activation or deployment binding mismatch")
+
+
+def migrate(engine, deployment, target=NEW, *, after_sql=None):
+    """0025->0026 in one transaction, with the deployment's own migration login/owner."""
+    from alembic import command
+    from alembic.config import Config
+    keys = ("KALILLAC_MIGRATION_OWNER_ROLE", "KALILLAC_MIGRATION_APP_ROLE",
+            "KALILLAC_MIGRATION_REGISTRATION_ROLE")
+    original = {k: os.environ.get(k) for k in keys}
+    try:
+        for key in keys:
+            os.environ[key] = deployment[key]
+        config = Config(str(REPO / "candidate/alembic.ini"))
+        config.set_main_option("script_location", str(REPO / "candidate/migrations"))
+        with engine.begin() as c:
+            config.attributes["connection"] = c
+            (command.upgrade if target == NEW else command.downgrade)(config, target)
+            if after_sql:
+                after_sql(c)  # Test injection inside the same transaction, never a CLI argument.
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+class Cluster:
+    """Explicit status and stop confirmation. Never removes a data directory."""
+    def __init__(self, pg, bindir, uid, gid):
+        self.pg, self.bin, self.uid, self.gid = Path(pg), str(bindir), uid, gid
+
+    def command(self, *args, tool="pg_ctl"):
+        drop = {"user": self.uid, "group": self.gid, "extra_groups": []} if os.geteuid() == 0 else {}
+        return subprocess.run([f"{self.bin}/{tool}", *args], env={**os.environ, "LC_ALL": "C"},
+                              capture_output=True, text=True, **drop)
+
+    def status(self):
+        result = self.command("-D", str(self.pg), "status")
+        require(result.returncode in (0, 3), "PostgreSQL status unknown; data preserved")
+        return result.returncode
+
+    def stopped(self):
+        require(self.status() == 3, "PostgreSQL is still running; data preserved")
+        result = self.command("-D", str(self.pg), tool="pg_controldata")
+        states = [v.strip() for k, _, v in (line.partition(":") for line in result.stdout.splitlines())
+                  if k.strip() == "Database cluster state"]
+        require(result.returncode == 0 and states == ["shut down"], "PostgreSQL is not cleanly shut down")
+
+    def stop(self):
+        if self.status() == 0:
+            require(self.command("-D", str(self.pg), "-w", "-m", "fast", "stop").returncode == 0,
+                    "PostgreSQL shutdown failed; data preserved")
+        self.stopped()
+
+    def start(self, socket, port, *, sandbox=None):
+        self.stopped()
+        # All paths passed in -o must be shell-word safe (pg_ctl interprets this option).
+        for p in (self.pg, socket, sandbox):
+            require(p is None or all(ch.isalnum() or ch in "/._-" for ch in str(p)), "unsafe PostgreSQL path")
+        options = f"-p {int(port)} -k {socket} -c listen_addresses=127.0.0.1"
+        if sandbox:
+            options += f" -c config_file={sandbox}"
+            # postgresql.auto.conf is read even with a separate config file. Command-line
+            # overrides keep its archive, replication, libraries and external paths inert.
+            options += (f" -c data_directory={self.pg} -c hba_file={Path(sandbox).with_suffix('.hba')}"
+                        f" -c ident_file={Path(sandbox).with_suffix('.ident')}"
+                        " -c archive_mode=off -c archive_command= -c restore_command= -c primary_conninfo="
+                        " -c shared_preload_libraries= -c session_preload_libraries= -c local_preload_libraries="
+                        " -c external_pid_file= -c ssl=off -c max_logical_replication_workers=0")
+        result = self.command("-D", str(self.pg), "-l", str(self.pg / "upgrade-postgres.log"),
+                              "-w", "-o", options, "start")
+        require(result.returncode == 0 and self.status() == 0, "PostgreSQL startup failed; data preserved")
+
+
+def settings_identity(payload, activation):
+    settings = env_file(payload / "settings.env")
+    deployment = env_file(payload / "deployment/deployment.env")
+    local = json.loads((payload / "local.json").read_text())
+    require(deployment.get("KALILLAC_DEPLOYMENT_ID") == DEPLOYMENT and local.get("deployment") == DEPLOYMENT,
+            "wrong deployment")
+    require(settings.get("KALILLAC_RELEASE_SHA") == activation and local.get("release_sha") == activation,
+            "wrong activation release")
+    require(settings.get("KALILLAC_SITE_ORIGIN") == "http://localhost:8010" and
+            settings.get("KALILLAC_STRIPE_MODE") == "test" and local.get("stripe") == "simulated",
+            "only the simulated local installation is supported")
+    for name in ("provider-keys.env", "stripe.env"):
+        path = payload / "secrets" / name
+        require(not path.exists() or not any(env_file(path).values()), "real provider credentials are configured")
+    require((payload / "pg/PG_VERSION").read_text().strip() == "16", "PostgreSQL major version must be 16")
+    require(not any((payload / "pg/pg_tblspc").iterdir()), "external tablespaces are unsupported")
+    require(not any((payload / "pg" / n).exists() for n in ("standby.signal", "recovery.signal")),
+            "recovery/replica clusters are unsupported")
+    return settings, deployment
+
+
+def validate_backup(backup, expected_hash):
+    backup = Path(backup)
+    require(not backup.is_symlink() and backup.is_dir(), "backup path invalid")
+    require(file_hash(backup / "manifest.json") == expected_hash, "backup manifest checksum mismatch")
+    manifest = json.loads((backup / "manifest.json").read_text())
+    require(manifest["format"] == 1, "unknown backup format")
+    require(tree_manifest(backup / "payload") == manifest["files"], "backup contents or permissions changed")
+    settings_identity(backup / "payload", manifest["activation"])
+    return manifest
+
+
+@contextmanager
+def copied_cluster(backup, expected_hash, bindir, *, port):
+    """A backup is copied into a new scratch root, never started in place.
+
+    Cleanup only follows a confirmed stop and successful body. Every unexpected failure
+    keeps the entire scratch directory, even if the database was stopped.
+    """
+    manifest = validate_backup(backup, expected_hash)
+    work = Path(tempfile.mkdtemp(prefix="kalillac-upgrade-copy-"))
+    os.chmod(work, 0o711)
+    identity = (work.stat().st_dev, work.stat().st_ino)
+    payload = work / "payload"
+    cluster, success = None, False
+    try:
+        copy_tree(Path(backup) / "payload", payload)
+        require(tree_manifest(payload) == manifest["files"], "clone differs from verified backup")
+        pg_owner = payload.joinpath("pg").stat()
+        cluster = Cluster(payload / "pg", bindir, pg_owner.st_uid, pg_owner.st_gid)
+        sock = work / "socket"
+        sock.mkdir(mode=0o700)
+        if os.geteuid() == 0:
+            os.chown(sock, pg_owner.st_uid, pg_owner.st_gid)
+        # Do not load the source's configuration, archive commands, replication or preload libraries.
+        config, hba, ident = (work / n for n in ("sandbox.conf", "sandbox.hba", "sandbox.ident"))
+        hba.write_text("local all all trust\nhost all all 127.0.0.1/32 scram-sha-256\n")
+        ident.write_text("")
+        config.write_text(f"data_directory='{payload / 'pg'}'\nhba_file='{hba}'\nident_file='{ident}'\n")
+        cluster.start(sock, port, sandbox=config)
+        yield payload, manifest, cluster
+        success = True
+    finally:
+        if cluster is not None:
+            try:
+                cluster.stop()  # Any failure here preserves work, irrespective of body success.
+            except BaseException:
+                print(f"shutdown unconfirmed; rehearsal state preserved: {work}", file=sys.stderr)
+                raise
+        if success:
+            require((work.stat().st_dev, work.stat().st_ino) == identity, "scratch root identity changed")
+            shutil.rmtree(work)
+        else:
+            print(f"rehearsal state preserved: {work}", file=sys.stderr)
+
+
+def engines(payload, port):
+    deployment = env_file(payload / "deployment/deployment.env")
+    admin = make_url((payload / "admin/admin-url").read_text().strip())
+    require(admin.host in ("localhost", "127.0.0.1") and admin.database in ("postgres", deployment["KALILLAC_DB_NAME"]),
+            "non-local database credentials")
+    url = admin.set(host="127.0.0.1", port=port, database=deployment["KALILLAC_DB_NAME"])
+    login = json.loads((payload / "deployment/private/migration-login.json").read_text())
+    return (create_engine(url, hide_parameters=True),
+            create_engine(url.set(username=login["role"], password=login["password"]), hide_parameters=True))

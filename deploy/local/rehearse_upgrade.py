@@ -1,103 +1,102 @@
-"""Rehearse the local install's database upgrade on a COPY: never writes to the running install.
-
-Run as root in WSL, from the candidate/ of the checkout to upgrade to (it supplies the migrations):
-    wsl -u root -- sh -c "cd /mnt/c/Kalillac/<checkout>/candidate && /home/kalillac/kf15/bin/python -B ../deploy/local/rehearse_upgrade.py"
-Run on 2026-11-19 from integration/premium-corrections-v1 (1cc3251): 0025 -> 0026, 29 tables, 91 rows, nothing
-changed, the original identical before and after, the copy removed. The original cluster (55433) is only read: a base backup
-(replication over its local socket) and SELECT count(*) per table. The copy runs on 55434 in a temporary folder
-owned by the service user, is migrated with the deployment's own migration login, compared, then removed."""
+"""Rehearse ONLY a verified cold backup; never connects to the installed database."""
+from __future__ import annotations
+import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
+import socket
+import sys
 
-ROOT = Path("/var/lib/kalillac-local-staging")
-BIN = "/home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin"
-COPY_PORT = 55434
-CANDIDATE = Path.cwd()
-sys.path.insert(0, str(CANDIDATE))
-
-import pwd  # noqa: E402
-service = pwd.getpwnam("kalillac")
-work = Path(tempfile.mkdtemp(prefix="kalillac-upgrade-rehearsal-", dir="/tmp"))
-os.chown(work, service.pw_uid, service.pw_gid)
+from sqlalchemy import text
+from upgrade_support import (NEW, OLD, RELEASE, copied_cluster, database_identity, database_snapshot,
+                             digest, engines, env_file, migrate, require, same_contents, save_json, tree_manifest)
 
 
-def as_service(argv, **kwargs):
-    return subprocess.run(argv, user=service.pw_uid, group=service.pw_gid, extra_groups=[], check=True,
-                          capture_output=True, text=True, **kwargs)
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
-def env_file(path):
-    return dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line and not line.startswith("#"))
-
-
-from sqlalchemy import create_engine, make_url, text  # noqa: E402
-
-admin = make_url((ROOT / "admin" / "admin-url").read_text().strip())
-deployment = env_file(ROOT / "deployment" / "deployment.env")
-database = deployment["KALILLAC_DB_NAME"]
-
-
-def counts(port, user=None, password=None):
-    url = admin.set(port=port, database=database)
-    if user:
-        url = url.set(username=user, password=password)
-    engine = create_engine(url, hide_parameters=True)
-    try:
-        with engine.connect() as c:
-            tables = [r[0] for r in c.execute(text(
-                "SELECT tablename FROM pg_tables WHERE schemaname='kalillac' ORDER BY tablename"))]
-            out = {t: c.scalar(text(f'SELECT count(*) FROM kalillac."{t}"')) for t in tables}
-            out["__version__"] = c.scalar(text("SELECT version_num FROM kalillac.alembic_version"))
-            out["__latch__"] = list(c.execute(text(
-                "SELECT state, authority_version, deployment_id, release_sha FROM kalillac.account_security_activation")).one())
-            return out
-    finally:
-        engine.dispose()
-
-
-try:
-    before = counts(55433)                                               # Read-only, the original.
-    as_service([f"{BIN}/pg_basebackup", "-h", str(ROOT / "pgsock"), "-p", "55433", "-U", "postgres",
-                "-D", str(work / "pg"), "-X", "stream", "-c", "fast"])
-    as_service([f"{BIN}/pg_ctl", "-D", str(work / "pg"), "-l", str(work / "copy.log"), "-w", "-o",
-                f"-p {COPY_PORT} -k {work} -c listen_addresses=127.0.0.1", "start"])
-    copy_before = counts(COPY_PORT)
-    assert copy_before == before, "the copy differs from the original"
-
-    # The upgrade itself, as the deployment's migration login, exactly as provision_deployment._migrate runs it.
-    login = json.loads((ROOT / "deployment" / "private" / "migration-login.json").read_text())
-    for key in ("KALILLAC_MIGRATION_OWNER_ROLE", "KALILLAC_MIGRATION_APP_ROLE", "KALILLAC_MIGRATION_REGISTRATION_ROLE"):
-        os.environ[key] = deployment[key]
-    from alembic import command
-    from alembic.config import Config
-    migration = create_engine(admin.set(port=COPY_PORT, database=database, username=login["role"],
-                                        password=login["password"]), hide_parameters=True)
-    config = Config(str(CANDIDATE / "alembic.ini"))
-    config.set_main_option("script_location", str(CANDIDATE / "migrations"))
-    with migration.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
-    migration.dispose()
-
-    after = counts(COPY_PORT)
-    attempts = None
-    engine = create_engine(admin.set(port=COPY_PORT, database=database), hide_parameters=True)
+def stored_files(payload, engine):
+    """Check ownership mapping, record id/size, bytes and actual access of unexpired files."""
+    from kalillac_files.store import FileStore
+    root = payload / "state/files"
+    files = tree_manifest(root)
+    now = datetime.now(timezone.utc)
     with engine.connect() as c:
-        attempts = sorted({r[0] for r in c.execute(text("SELECT provider_attempts FROM kalillac.account_usage_daily"))})
-    engine.dispose()
-    changed = {k: (before[k], after.get(k)) for k in before if k != "__version__" and before[k] != after.get(k)}
-    print(json.dumps({"original_version": before["__version__"], "copy_after_upgrade": after["__version__"],
-                      "tables": len([k for k in before if not k.startswith("__")]),
-                      "rows_total": sum(v for k, v in before.items() if not k.startswith("__")),
-                      "changed_tables_or_latch": changed, "provider_attempts_values": attempts,
-                      "original_unchanged": counts(55433) == before}, indent=1))
-finally:
-    subprocess.run([f"{BIN}/pg_ctl", "-D", str(work / "pg"), "-m", "fast", "-w", "stop"],
-                   user=service.pw_uid, group=service.pw_gid, extra_groups=[], capture_output=True)
-    shutil.rmtree(work)
-    print("copy removed:", not work.exists())
+        owners = {hashlib.sha256(str(row[0]).encode()).hexdigest()[:32]: str(row[0])
+                  for row in c.execute(text("SELECT id FROM kalillac.users"))}
+    store = FileStore(root, clock=lambda: now)
+    records = accessible = 0
+    for path in root.glob("*/*.json"):
+        record = json.loads(path.read_text())
+        owner = owners.get(path.parent.name)
+        require(owner is not None and record["file_id"] == path.stem, "stored file owner or id does not match")
+        data = path.with_suffix(".bin")
+        require(data.is_file() and data.stat().st_size == record["size"], "stored file data missing or wrong size")
+        if datetime.fromisoformat(record["expires_at"]).astimezone(timezone.utc) > now:
+            _metadata, content = store.get(owner, path.stem)
+            require(hashlib.sha256(content).hexdigest() == files[str(data.relative_to(root))]["sha256"],
+                    "stored file access returned different bytes")
+            accessible += 1
+        records += 1
+    return {"manifest": files, "records": records, "accessible": accessible}
+
+
+def rehearse(backup, backup_hash, bindir, receipt):
+    port = free_port()
+    with copied_cluster(backup, backup_hash, bindir, port=port) as (payload, manifest, cluster):
+        admin, migration = engines(payload, port)
+        try:
+            database_identity(admin, cluster.pg, env_file(payload / "deployment/deployment.env")["KALILLAC_DB_NAME"],
+                              manifest["activation"])
+            before = database_snapshot(admin)
+            file_before = stored_files(payload, admin)
+            migrate(migration, env_file(payload / "deployment/deployment.env"))
+            same_contents(before, database_snapshot(admin, project_new=True))
+            require(stored_files(payload, admin) == file_before, "files changed during migration")
+            migrate(migration, env_file(payload / "deployment/deployment.env"), OLD)
+            same_contents(before, database_snapshot(admin))
+            require(stored_files(payload, admin) == file_before, "files changed during downgrade")
+        finally:
+            admin.dispose()
+            migration.dispose()
+    # Restore a second copy independently of the upgraded/downgraded copy.
+    port = free_port()
+    with copied_cluster(backup, backup_hash, bindir, port=port) as (payload, manifest, cluster):
+        admin, migration = engines(payload, port)
+        try:
+            database_identity(admin, cluster.pg, env_file(payload / "deployment/deployment.env")["KALILLAC_DB_NAME"],
+                              manifest["activation"])
+            same_contents(before, database_snapshot(admin))
+            require(stored_files(payload, admin) == file_before, "restored files differ")
+        finally:
+            admin.dispose()
+            migration.dispose()
+    result = {"format": 1, "release": RELEASE, "backup_sha256": backup_hash, "database": before,
+              "files": file_before, "upgraded_to": NEW, "restored_to": OLD}
+    save_json(receipt, result)
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backup", type=Path, required=True)
+    parser.add_argument("--backup-sha256", required=True)
+    parser.add_argument("--pg-bin", required=True)
+    parser.add_argument("--receipt", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = rehearse(args.backup, args.backup_sha256, args.pg_bin, args.receipt)
+        print(json.dumps({"verified": True, "tables": len(result["database"]["tables"]),
+                          "files": result["files"]["records"], "receipt_sha256": digest(result)}))
+        return 0
+    except Exception as error:
+        print(f"rehearsal failed ({type(error).__name__}); retained state must be inspected", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
