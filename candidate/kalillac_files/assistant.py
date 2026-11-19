@@ -198,6 +198,9 @@ class FileRequest:
     # offer(file id, edit digest) -> confirmation id, minted by the service when a precise edit is refused.
     offer: Callable | None = None
     offered: list = field(default_factory=list)
+    # stopped() -> True once the request's temporary chat session has ended (End & erase): checked before
+    # every model call and every tool, so nothing more runs for an ended session.
+    stopped: Callable | None = None
 
     def __post_init__(self):
         from . import worker
@@ -230,6 +233,10 @@ class AssistantError(RuntimeError):
     def __init__(self, code):
         super().__init__(code)
         self.code = code
+
+
+class AssistantStopped(Exception):
+    """The request's chat session ended while it ran; nothing more was done for it."""
 
 
 def _refused(code, detail=None):
@@ -405,8 +412,13 @@ def run_file_assistant(message: str, history: Sequence[Mapping[str, str]], reque
     images = _image_parts(request)
     items.append({"role": "user", "content": [{"type": "input_text", "text": text}, *images] if images else text})
 
+    def check_open():
+        if request.stopped is not None and request.stopped():
+            raise AssistantStopped()
+
     rounds = calls = model_calls = 0
     while True:
+        check_open()
         model_calls += 1
         response = call_model(deepcopy(items))
         output = response.get("output") if isinstance(response, Mapping) else None
@@ -427,6 +439,7 @@ def run_file_assistant(message: str, history: Sequence[Mapping[str, str]], reque
             raise AssistantError("tool_limit_exceeded")
         items.extend(deepcopy(output))
         for item in function_calls:
+            check_open()
             calls += 1
             name, call_id = item.get("name"), item.get("call_id")
             if not isinstance(call_id, str) or not call_id:

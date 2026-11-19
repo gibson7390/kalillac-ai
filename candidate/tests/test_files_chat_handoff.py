@@ -77,7 +77,12 @@ class Request:
         self.cookies = {"kalillac_session": account}
 def handoff(account, message, file_ids=None):
     request = a.ChatRequest(message=message, history=[], file_ids=file_ids)
-    found = asyncio.run(a._file_chat_handoff(Request(account), request, []))
+    session = a.SimpleNamespace(work=None)
+    try:
+        found = asyncio.run(a._file_chat_handoff(Request(account), request, [], session))
+    finally:
+        if session.work is not None:
+            a._release_session_work(session.work)
     return None if found is None else [found.status_code, json.loads(found.body)]
 print(json.dumps({
     "plain_question": handoff("paid", "What is the capital of Peru?"),

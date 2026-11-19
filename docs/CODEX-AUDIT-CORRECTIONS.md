@@ -367,6 +367,123 @@ upload never block an edit. Regression tests in `test_file_editing.py` and `test
 Still open, from Codex's architecture recommendation: dependency checks for figures stated in prose
 and metrics, and shared typed facts feeding tables, metrics, charts and prose.
 
+## Premium audit of 2026-11-18: six confirmed findings (F1 to F6)
+
+Codex's independent audit of Kalillac Premium confirmed six findings, besides the account-erasure and
+retention launch gaps. Each original failure was reproduced before the correction and is kept as a test.
+Codex's first verification (of `c6fcaeb`): F3, F5 and F6 verified; F1 and F4 still open; F2 partially verified. The second-round corrections are below.
+
+| Finding | Correction (branch, SHA) | Original failure reproduced | Corrected behaviour and regression coverage |
+|---|---|---|---|
+| F1. Local reset could delete any directory | `fix/local-reset-ownership` `afa247a` (fast-forwarded into `feat/local-staging`) | On `8760bfc`, `KALILLAC_LOCAL_ROOT=<unrelated dir> reset --yes` (as root) stopped the process groups named in its `run/` folder and deleted it | Every command checks the root first: absolute, normal, named `kalillac-local-staging`, no symlink, a root-owned parent nobody else can write, and the ownership marker naming this deployment, the path, the device and the inode. `reset` never adopts an unmarked directory and re-checks after stopping; `stop` signals only local staging's own processes. `test_local_reset.py` (29, real directories through the real command). Also: the web root is no longer world-writable |
+| F2. Expired files | `fix/premium-audit-corrections` `8de030b` | On `4a36dd7`: an expired file could not be deleted (404); quotas ignored expired files, so storage grew past the quota (six files under a three-file quota); expired files were deleted only at application startup | Quotas count every file on disk; owners delete expired files; the application runs the retention cleanup at startup and hourly under the operator command's lock, period `KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS` (0 unless set, as before; D-9). `test_files_retention_access.py` |
+| F3. Failed requests could consume provider spending without limit | `a12bf14` (cherry-picked from `3a82e0a`) | On `ac1f2a9`: six failing requests from one account all reached the provider, no account count changed (kept as `test_without_the_account_limit_failing_requests_reach_the_provider_every_time`) | Each provider attempt of a signed-in account's request is counted on its UTC day (migration 0026) in the pool's transaction and refused at the account's limit before dispatch; refunds for never-dispatched attempts; Free/paid limits required, no default (owner values). `test_account_attempts.py` (11), `test_account_attempts_postgres.py` (4) |
+| F4. End & erase during a file request | `4a36dd7` | On `ac1f2a9`: the end reported no active request; the file was created after the end and the late reply delivered (200, the ended session's id) | The file request is registered work of its chat session, its budget is cancelled by the end, the assistant stops before the next model call or tool, and the late result is replaced by 409 `session_ended`. `test_files_session_and_modes.py` (deterministic: the model call is held until the end) |
+| F5. Reasoning modes on file requests | `4a36dd7` | On `ac1f2a9`: Deep reached the provider as the default effort; invalid and unauthorized modes were not refused | The chat resolves the mode before the file handoff and carries it into the worker thread; `/api/files/assist` accepts and checks `reasoning_mode`. The provider payload is asserted on both paths |
+| F6. Files after Premium ends | `8de030b` | Every `/api/files` route required the paid tier | List, download and delete need only the signed-in owner; upload and the assistant keep the tier; `can_add` drives the chat; "Your files" on the account page. Real PostgreSQL journey continued past cancellation |
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 | yes | `subscription-foundation-verification` `44410273831` success on `afa247a` (job 697 tests, including the 29 reset tests) | pending (Codex) | no (pending) |
+| F2 | yes | on `a12bf14`: file generation `44424864471` (1,093), frontend `44424873844` (1,933 / 1,914 passed), anonymous allowance `44424887336` (646), provider ceilings `44424878148`, safety `44424900568`: success; after the test-stub follow-up `52b2408`: subscription `44435167879` (suites 1,583; PostgreSQL job 657) and Spaces `44435172942`: success (on `a12bf14` they had failed on three stubs of the old signature, one stalling the PostgreSQL job until cancelled) | pending (Codex) | no (pending) |
+| F3 | yes | the same runs | pending (Codex) | no (pending) |
+| F4 | yes | file generation `44414037930` success on `4a36dd7`; and the runs above | pending (Codex) | no (pending) |
+| F5 | yes | the same as F4 | pending (Codex) | no (pending) |
+| F6 | yes | the runs above | pending (Codex) | no (pending) |
+
+**Open questions for Codex:**
+1. F1: is adopting an unmarked root at the default path (non-destructive commands only, and only when it holds this deployment's record) acceptable, or should the owner mark it by hand?
+2. F2: the default deletion period stays 0 days when unset (the release's behaviour since `36e1053`). Should a files deployment instead refuse to start without an explicit period?
+3. F3: attempts are counted for every provider (OpenAI, Brave, Tavily) against one per-account number. Is one combined limit right, or should each provider have its own?
+4. F4: files already stored before the end stay in the account (account files are not the conversation's). Is that the right boundary?
+5. F6: a downgraded account keeps download access to images it uploaded. Can that path be used for any analysis without the tier?
+
+
+### Second round: Codex's verification of `c6fcaeb` (2026-11-18)
+
+Codex verified F3, F5 and F6 and found four residual defects: two in F1, one in F2 and one in F4. Each was
+reproduced with Codex's own probe before correcting it. The probe and the new tests fail on the previous code
+and pass on the correction. **None is marked resolved here;** F1, F2 and F4 await Codex's second verification.
+F3, F5 and F6 were not reopened: their code is unchanged, and their suites were rerun (below).
+
+| Residual defect | Correction (branch, full SHA) | Original failure, reproduced | Corrected behaviour | Regression tests |
+|---|---|---|---|---|
+| F1-A. Exchanging an ancestor redirects the reset | `fix/local-reset-ownership` `8ae23d51c0c7f408fb5cdd10134da26b4f7b7bc7` | Codex's probe on `afa247a`, as root in WSL: an ancestor owned by uid 65534, the parent exchanged immediately before `rmtree`: `{"accepted_untrusted_ancestor": true, "exit": 0, "unrelated_data_survives": false}` | Every directory from `/` to the parent is opened component by component with `O_NOFOLLOW` and checked as it is opened: owned by root and writable by no one else; a sticky directory such as `/tmp` is accepted above the parent. `reset` pins the parent by descriptor, checks the marker through it and deletes with `shutil.rmtree(name, dir_fd=parent)`. After correction the probe gives `{"accepted_untrusted_ancestor": false, "exit": 2, "unrelated_data_survives": true}` | `test_local_reset.py`: ancestor writable by others refused, sticky accepted; exchange immediately before the delete (the unrelated data survives and the checked root is the one deleted); exchange before the pinned check (refused, both intact); root-only: Codex's exact scenario (a new `sudo` CI step) |
+| F1-B. `stop` signals another checkout's process | same | Codex's probe on `afa247a`: another checkout's `tools/local_staging_web.py` was classified as ours (`true`) and killed (`-15`) | `start` records each launch in `run/NAME.json` (mode 0600): PID, start time, boot ID, a random token placed in the process's environment, this checkout and the script's absolute path. A process counts as ours only if it is the service user's, leads its group, has this checkout as its working directory, runs this checkout's script and matches every field. It is signalled through a pidfd taken before the check. A PID file from an older `start` is honoured only for this checkout's script, started within the two minutes before the file was written. After correction the probe gives `{"unrelated_checkout_classified_ours": false, "bystander_returncode": null}` | another checkout (relative and absolute script, forged record without the token); reused PID (start time, boot), wrong or missing token, another user; a legacy PID file older than its process; genuine `stop` of recorded and legacy processes; the original bystander test kept |
+| F2. Interrupted uploads escape the quota | `fix/premium-audit-corrections` `68730da364f18014d04c73d1d03d7f11f8a2b99d` | Codex's probe on `c6fcaeb`: 12 bytes stored under a 4-byte, one-file quota, 0 records, all 3 blobs kept by the cleanup. The new test on `c6fcaeb`'s store: 8 bytes after two interrupted uploads; 8 concurrent processes stored 15 bytes under a 10-byte quota | Quotas count what is physically in the owner's folder: all data, with or without a record, upload temporaries and records. `put`/`delete` hold an owner lock that spans processes (`flock` on the owner's folder, POSIX). While it is held, abandoned data and temporaries in that owner's folder are reclaimed. Failed writes remove their temporary; a failed record write removes its data. After correction the probe stores 4 bytes on Linux and on Windows | `test_files_physical_quota.py` (9): processes killed after and before the rename, then a restart; 8 concurrent processes and 8 threads; an upload in progress in another process (waited for, never reclaimed); injected record and data write failures; another owner's files and unknown entries untouched |
+| F4. A detached file worker escapes End & erase | `fix/premium-audit-corrections` `7d2ed5bdeb817763b252a848a4e564f86d99b4eb` | Codex's test on `c6fcaeb`: `registered_after_disconnect: 0`, `active_requests: 0`, `cancellation: none`, 2 model calls, 1 file after the end; the assistant slot was also freed while the thread ran | The worker runs on an executor future (in the request's context) behind `asyncio.shield`. On cancellation it takes its own session claim through `hold()`, and a done callback releases that claim and the assistant slot when the thread ends. Codex's test now passes unchanged: registered 1, active 1, cancellation requested, 1 model call, 0 files | `test_files_detached_worker.py` (3): Codex's sequence through the real app (registration drained afterwards, slot returned, no revival, 409); the same without an end (the worker finishes, its file stays in the account); the direct `/api/files/assist` route keeps its slot until its worker ends. All three fail on `c6fcaeb` |
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 (A, B) | yes | `subscription-foundation-verification` `44449773539` success on `8ae23d5`: main job 705 tests, 0 skipped (the 38 reset tests less the root-only one); new root step 38 tests, 0 skipped | partially verified (Codex, second verification): see the third round | no (pending) |
+| F2 | yes | on `7d2ed5b` (contains `68730da`): file generation `44451748532` (1,105 tests, 0 skipped), subscription `44451753992` (suites and PostgreSQL job), Spaces `44451758997`, provider ceilings `44451764464`, frontend `44451769309`, safety `44451773662`, anonymous allowance `44451778632`: all success | **verified** (Codex, second verification, `68730da`) | no (pending) |
+| F4 | yes | the same runs on `7d2ed5b` | **verified** (Codex, second verification, `7d2ed5b`) | no (pending) |
+| F3, F5, F6 (verified by Codex on `c6fcaeb`; not reopened) | unchanged | the same runs on `7d2ed5b`, plus real PostgreSQL locally (13 passed: `test_v1_premium_files_postgres.py`, `test_v1_file_allowance_postgres.py`, `test_account_attempts_postgres.py`, `test_v1_premium_journey_postgres.py`) and the F5 test in `test_files_session_and_modes.py` | verified (Codex, `c6fcaeb`) | no (pending) |
+
+**Known limitations (deliberate, for Codex to judge):**
+1. F1-B: between the pidfd liveness check and `killpg` the group leader could exit and its PID be reused as a new group leader. The window is microseconds and needs a PID wraparound. The leader itself is always signalled correctly.
+2. F1-B: a process started by the old `start` (a PID file, no record) is accepted within a two-minute start-time window and only for this checkout's script, so the running local install can still be stopped after the upgrade.
+3. F2: without a lock that spans processes (Windows, not a deployment target), abandoned data is counted but not reclaimed at the next upload. Uploads are refused until the hourly cleanup removes data older than an hour, so the quota still holds.
+4. F2: on POSIX an abandoned blob counts against its owner until that owner's next upload, or until the cleanup after an hour.
+5. F4: ending the session stops the worker at its next model call or tool. A model call already in flight completes at the provider and is charged, as for ordinary chat. Files stored before the end stay in the account.
+
+### Third round: F1 after Codex's second verification (2026-11-19)
+
+Codex's second verification: **F2 and F4 verified**; F3, F5 and F6 remain verified. **F1 partially verified**:
+the ancestor-exchange and foreign-process corrections hold. Two further points were raised, and both are
+corrected here. F1 is not marked resolved: it awaits Codex's final verification.
+
+| Defect | Correction (branch, full SHA) | Original failure, reproduced before correcting | Corrected behaviour | Regression tests |
+|---|---|---|---|---|
+| F1-C. A timed-out stop reported success | `fix/local-reset-ownership` `69c8e8b755fd0e2b4045bb2c2d8475156bc29e3c` | On `8ae23d5`: a real process ignoring SIGTERM gave `stop` exit 0 with the process still running and its records removed; Codex's mocked sequence gave the same events (numeric group SIGTERM, records removed, "stopped"); a failing or missing `pidfd_open` also counted as success | `_terminate` returns "stopped" only after the leader's pidfd shows that it exited and no member of its group is left: SIGTERM, then SIGKILL after `STOP_GRACE` (30 s), then `KILL_WAIT` (10 s). It returns "absent" when no process of ours runs under the record. Otherwise it raises `StopFailed`: no pidfd, an unreadable identity, a process that outlives SIGKILL, or a group whose leader has already exited. `stop` keeps the records of anything it could not confirm, checks that PostgreSQL really stopped, and fails with the reasons, so `reset` never reaches its delete (`refresh-web` likewise). On Codex's sequence: exit 2, no record removed, the reason printed | SIGTERM ignored (confirmed stopped by SIGKILL); signals with no effect (stop and reset fail, records kept, `rmtree` never called); `pidfd_open` failing and missing (the same); PostgreSQL not stopping |
+| F1-D. The group was signalled by its numeric id | same | `os.killpg(pid, SIGTERM)` after a pidfd liveness check (source; Codex did not reproduce PID reuse, nor did I) | Every signal goes through a pidfd. The group is signalled with `PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9 and later). Where the kernel refuses that flag (`EINVAL`), each member is signalled through its own pidfd, after its membership is read while both it and the leader are alive, and the leader is signalled last. A group whose leader has exited is reported, never signalled. No numeric `kill` or `killpg` remains | The whole group (leader and child) ended on both paths, with numeric signals made to raise; a process outside the group never signalled through the member path; a group left by an exited leader reported with its PIDs, untouched; the kernel's flag support recorded |
+
+Environments: WSL (your local staging) runs kernel 6.18.58.1, where the group flag works. The CI runner's
+kernel is 7.0.0-1017-azure (the group flag is supported; the fallback is exercised by the test that forces the kernel to refuse the flag). Python has no named constant for the flag, so the code uses the kernel header's value, `1 << 2`.
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 (A to D) | yes | `subscription-foundation-verification` `44464689210` success on `69c8e8b`: main job 715 tests, 0 skipped; root step 48 tests, 0 skipped (all reset tests, the root-only case included). Locally in WSL: 71 passed, 1 skipped (the root-only case) as the user, and 48 passed as root | F1-D verified; F1-C still open (Codex, third verification): see the final round | no (pending) |
+
+**Known limitations:**
+1. On kernels before 6.9, each member is signalled separately: a process the group spawns after that pass is
+   not signalled by it. The confirmation step then sees it, the SIGKILL pass gets it, and if it survives that,
+   the stop fails.
+2. A group whose leader has already exited is never signalled. The stop fails and names the PIDs to stop by
+   hand, because without a live leader the group's id no longer proves whose group it is.
+3. A stop can take up to 40 s (the SIGTERM grace, then the SIGKILL wait) before it fails.
+4. Limitation 1 of the second round (the numeric `killpg` window) no longer applies. The legacy PID-file window
+   (limitation 2 of the second round) is unchanged.
+
+### Final F1-C round: Codex's verification of `69c8e8b` (2026-11-19)
+
+Codex's third verification: **F1-D verified**; F2 to F6 remain verified. **F1-C still open**, on two further
+cases, both corrected here. F1 is not marked resolved: it awaits Codex's final verification. Codex's evidence
+(`tmp/final-f1-evidence-lc10wrn5/`) was read and not modified. Its test file is in the repository unchanged:
+`candidate/tests/test_independent_final_f1.py`, sha256
+`29664edc03ca1786b1c8eb8b0e8c38245218bd9e37beacd0dc1596bb5b0444f6`, identical to Codex's copy and to the
+committed blob.
+
+| Defect | Correction (branch, full SHA) | Original failure, reproduced before correcting | Corrected behaviour | Regression tests |
+|---|---|---|---|---|
+| F1-C (1). An unreaped leader with a live child counted as stopped | `fix/local-reset-ownership` `364637399d77abf7922a5aab610975882fba6d57` | Codex's file on `69c8e8b`, in WSL: `stop` exit 0 with the record removed and the child alive; `reset` exit 0 with 1 deletion call under the live child. `pidfd_open` succeeds on a zombie, its identity reads "other", and "other" meant "absent" | `_terminate` asks the pidfd whether the leader has exited (`_exited`: readable at once), before trusting the identity and again if the identity reads "other". An exited leader, reaped or not, goes to `_leaderless`: "absent" only if no live member of its group is left, otherwise `StopFailed` with the members' PIDs, which are never signalled. The record is kept, so the next `stop` confirms once they are gone | Codex's 2 cases (`stop` and `reset`); mine: the zombie leader's child is never signalled and is untouched, then the next stop confirms (real processes); a zombie leader whose group has ended is confirmed stopped (the normal case) |
+| F1-C (2). PostgreSQL status errors counted as stopped | same | Codex's file on `69c8e8b`: statuses 1 and 4, at the first check or at the check after `pg_ctl stop`, gave exit 0 and a deletion | `pg_running`: 0 means running, 3 means not running, and any other answer raises `PgStatusUnknown`. `stop` asks for the status before and after `pg_ctl stop` and fails closed on an unknown answer, so `reset` deletes nothing. `pg_start` (`start`, `setup`) refuses likewise | Codex's 7 cases (4 errors, 2 successful stops, 1 failed stop); mine: `start` refuses statuses 1, 2, 4 and 127; `pg_running` against the real `pg_ctl` and a disposable cluster (4 unknown, 3 stopped, 0 running) |
+
+On `69c8e8b`, Codex's file gives **6 failed, 6 passed**, exactly as in its evidence. On `3646373` all 12 pass.
+My six new tests fail there too; the empty-group control passes on both commits.
+
+**F1-D unchanged.** `_members`, `_signal_member`, `_signal_group`, `_wait_gone`, `_identity`, `_ours`,
+`_record`, `_spawn`, `_open_parent`, `pinned_root` and `reset` are byte-identical to `69c8e8b` (compared by
+AST source segments). Only `_terminate`, `stop`, `pg_running` and `pg_start` changed, plus the new helpers
+`_exited` and `_leaderless`.
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 (A to D, final F1-C) | yes | `subscription-foundation-verification` `44473349667` success on `3646373`: main job 734 tests, 0 skipped (Codex's 12 included); root step 66 tests, 0 skipped (runner kernel 7.0.0-1017-azure). Locally in WSL (kernel 6.18): 90 passed as the user (1 skipped: the root-only case); 66 passed as root (1 skipped: the real-`pg_ctl` test, which `initdb` refuses as root; it is deselected in the CI root step and runs in the main job) | pending (Codex, final) | no (pending) |
+
+**Known limitations:** unchanged from the third round. A group left behind by an exited leader, reaped or
+not, must be stopped by hand; the stop names its PIDs and keeps the record.
+
 ## Reproducing locally
 
 Windows, from `candidate/`, with the worktree's `.venv`:

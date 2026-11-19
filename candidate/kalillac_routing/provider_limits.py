@@ -22,9 +22,19 @@ class AbuseLimit:
     concurrent: int
 
 @dataclass(frozen=True)
+class AccountAttemptLimit:
+    """Provider attempts one signed-in account's requests may start per UTC day, successful or failed
+    (Codex finding F3): Free and paid. Operator values with no default; the commercial choice is the
+    owner's."""
+    free: int
+    paid: int
+
+
+@dataclass(frozen=True)
 class ControlConfig:
     providers: dict
     abuse: AbuseLimit | None = None
+    accounts: AccountAttemptLimit | None = None
 
 
 def enabled(name):
@@ -63,4 +73,9 @@ def load_controls():
     limits = None
     if abuse:
         limits = AbuseLimit(integer("KALILLAC_ANONYMOUS_SESSION_BURST", 1, 10000), integer("KALILLAC_ANONYMOUS_SESSION_WINDOW_SECONDS", 1), integer("KALILLAC_ANONYMOUS_SESSION_CONCURRENT", 1, 10000))
-    return ControlConfig(providers, limits)
+    accounts = None
+    if enabled("KALILLAC_ACCOUNTS_ENABLED"):
+        # Every signed-in request's provider attempts are bounded per account: required, never defaulted.
+        accounts = AccountAttemptLimit(integer("KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE", 0, 1_000_000),
+                                       integer("KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_PAID", 0, 1_000_000))
+    return ControlConfig(providers, limits, accounts)

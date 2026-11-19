@@ -71,7 +71,7 @@ function errorCode(body: unknown): string | null {
     : null;
 }
 
-async function request(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>):
+async function request(method: 'GET' | 'POST' | 'DELETE', path: string, body?: Record<string, unknown>):
     Promise<{ response: Response; json: unknown; body: Body } | ApiError> {
   const init: RequestInit = {
     method,
@@ -307,4 +307,58 @@ export function startCheckout(): Promise<ApiResult<string>> {
 
 export function openBillingPortal(): Promise<ApiResult<string>> {
   return billingRedirect('/api/account/billing/portal', 'portal_url', 'billing.stripe.com');
+}
+
+/* --- the account's stored files (/api/files, a files deployment only) ---------------------------------------- */
+
+export type StoredFile = {
+  id: string;
+  filename: string;
+  size: number;
+  /* When it stops being available (ISO 8601); after that it can only be deleted. */
+  expires_at: string;
+  available: boolean;
+};
+
+const FILE_ID = /^[A-Za-z0-9_-]{22}$/;
+
+function parseFiles(json: unknown): StoredFile[] | null {
+  if (!isRecord(json) || !Array.isArray(json.files)) return null;
+  const files: StoredFile[] = [];
+  for (const item of json.files) {
+    if (!isRecord(item) || typeof item.id !== 'string' || !FILE_ID.test(item.id)
+        || typeof item.filename !== 'string' || item.filename.length === 0 || item.filename.length > 255
+        || typeof item.size !== 'number' || !Number.isSafeInteger(item.size) || item.size < 0
+        || typeof item.expires_at !== 'string' || Number.isNaN(Date.parse(item.expires_at))
+        || typeof item.available !== 'boolean') return null;
+    files.push({ id: item.id, filename: item.filename, size: item.size, expires_at: item.expires_at,
+                 available: item.available });
+  }
+  return files;
+}
+
+/* The signed-in account's files, expired ones included (they can only be deleted). */
+export async function listFiles(): Promise<ApiResult<StoredFile[]>> {
+  const result = await request('GET', '/api/files');
+  if ('ok' in result) return result;
+  const { response, json } = result;
+  const files = response.status === 200 ? parseFiles(json) : null;
+  return files ? { ok: true, status: 200, data: files } : failure(response, json);
+}
+
+/* Deletes one of the account's files from storage. */
+export async function deleteFile(id: string): Promise<ApiResult<null>> {
+  if (!FILE_ID.test(id)) return { ok: false, status: 0, code: null, retryAfter: null };
+  const result = await request('DELETE', `/api/files/${id}`);
+  if ('ok' in result) return result;
+  const { response, json } = result;
+  if (response.status === 200 && isRecord(json) && json.deleted === true) {
+    return { ok: true, status: 200, data: null };
+  }
+  return failure(response, json);
+}
+
+/* The address a stored, still-available file downloads from (an attachment, never rendered). */
+export function fileDownloadPath(id: string): string | null {
+  return FILE_ID.test(id) ? `/api/files/${id}` : null;
 }

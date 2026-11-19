@@ -69,12 +69,12 @@ def classified(monkeypatch):
     seen = []
     status = provider_controls.account_status
 
-    def spy(authenticated, paid_entitlement=None):
-        status(authenticated, paid_entitlement)
+    def spy(authenticated, paid_entitlement=None, account_id=None):
+        status(authenticated, paid_entitlement, account_id=account_id)
         seen.append(provider_controls.current_request().traffic_class)
     # Provider controls on, with attempt leases that always succeed: only the classification is observed.
     monkeypatch.setattr(provider_controls, "SERVICE", SimpleNamespace(
-        config=SimpleNamespace(abuse=None), reserve=lambda *args: object(), release=lambda lease: True))
+        config=SimpleNamespace(abuse=None), reserve=lambda *args, **kwargs: object(), release=lambda lease: True))
     monkeypatch.setattr(provider_controls, "account_status", spy)
     return seen
 

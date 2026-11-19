@@ -44,8 +44,8 @@ def classified(monkeypatch):
     seen = []
     original = provider_controls.account_status
 
-    def spy(authenticated, paid_entitlement=None):
-        original(authenticated, paid_entitlement)
+    def spy(authenticated, paid_entitlement=None, account_id=None):
+        original(authenticated, paid_entitlement, account_id=account_id)
         seen.append((authenticated, provider_controls.current_request().traffic_class))
     monkeypatch.setattr(provider_controls, "account_status", spy)
     return seen

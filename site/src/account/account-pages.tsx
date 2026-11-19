@@ -1021,10 +1021,114 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
         </div>
       </section>
 
+      {FILES_OFFERED && <FilesSection onSessionEnded={onSessionEnded} />}
       {security?.sessions && <SessionsSection onSessionEnded={onSessionEnded} />}
       {security?.password_change && <PasswordSection onSessionEnded={onSessionEnded} />}
       {security?.deletion_request && <DeletionSection paid={tier === 'paid'} onSessionEnded={onSessionEnded} />}
     </div>
+  );
+}
+
+/* --- the account's stored files (a files deployment: data-kalillac-files="on") ----------------------------------
+   Every file the account holds, expired ones included: a customer can download a file while it is available and
+   delete any of them, whatever the plan (Codex F6). Nothing here uploads or makes a file. */
+
+const FILES_OFFERED = document.documentElement.getAttribute('data-kalillac-files') === 'on';
+
+function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib < 10 ? kib.toFixed(1) : Math.round(kib)} KB`;
+  const mib = kib / 1024;
+  return `${mib < 10 ? mib.toFixed(1) : Math.round(mib)} MB`;
+}
+
+function FilesSection({ onSessionEnded }: { onSessionEnded: () => void }) {
+  const [files, setFiles] = useState<Loadable<api.StoredFile[]>>({ state: 'loading' });
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeData | null>(null);
+  const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
+  const remove = usePendingGuard();
+
+  const load = useCallback(async () => {
+    setFiles({ state: 'loading' });
+    const result = await api.listFiles();
+    if (result.ok) setFiles({ state: 'ready', value: result.data });
+    else if (result.status === 401) onSessionEnded();
+    else setFiles({ state: 'error' });
+  }, [onSessionEnded]);
+  useEffect(() => { void load(); }, [load]);
+
+  const deleteFile = (file: api.StoredFile) => void remove.run(async () => {
+    setNotice(null);
+    const result = await api.deleteFile(file.id);
+    if (result.ok || result.status === 404) {   // Gone either way: it is no longer in the account.
+      setConfirming(null);
+      setFiles((current) => current.state === 'ready'
+        ? { state: 'ready', value: current.value.filter((item) => item.id !== file.id) } : current);
+      setNotice({ tone: 'success', title: 'File deleted', body: `${file.filename} was removed from your account.` });
+    } else if (result.status === 401) { onSessionEnded(); return; }
+    else setNotice(result.status === 0 ? UNREACHABLE : SECURITY_UNAVAILABLE);
+    focusNotice();
+  });
+
+  return (
+    <section className="acct-section" aria-labelledby="acct-files-heading" data-testid="files-section">
+      <h2 id="acct-files-heading" className="acct-section-title">Your files</h2>
+      <p className="acct-section-text">
+        Files you attach or Kalillac creates are stored in your account and stay available for 30 days, even when
+        the conversation was temporary. You can download a file while it’s available and delete any file at any time.
+      </p>
+      {notice && <Notice notice={notice} focusRef={noticeRef} />}
+      {files.state === 'loading' && <p className="acct-quiet-inline">Loading your files…</p>}
+      {files.state === 'error' && (
+        <p className="acct-inline-problem">Your files couldn’t be loaded. <button type="button" className="acct-text-button"
+          onClick={() => void load()}>Try again</button></p>
+      )}
+      {files.state === 'ready' && files.value.length === 0 && (
+        <p className="acct-section-text" data-testid="files-empty">No files are stored in your account.</p>
+      )}
+      {files.state === 'ready' && files.value.length > 0 && (
+        <ul className="acct-files" data-testid="files-list">
+          {files.value.map((file) => {
+            const until = formatDate(file.expires_at, true);
+            const download = file.available ? api.fileDownloadPath(file.id) : null;
+            return (
+              <li key={file.id} className="acct-file" data-testid="file-row" data-available={file.available}>
+                <div className="acct-file-main">
+                  <span className="acct-file-name">{file.filename}</span>
+                  <span className="acct-file-meta">
+                    {fileSize(file.size)} · {file.available
+                      ? (until ? `Available until ${until}` : 'Available')
+                      : 'Expired, no longer downloadable'}
+                  </span>
+                </div>
+                {confirming === file.id ? (
+                  <div className="acct-file-actions" role="group" aria-label={`Delete ${file.filename}?`}>
+                    <span className="acct-file-confirm">Delete it permanently?</span>
+                    <button type="button" className="acct-button acct-button-danger acct-button-compact"
+                            aria-disabled={remove.pending || undefined} onClick={() => deleteFile(file)}
+                            data-testid="button-confirm-delete-file">
+                      {remove.pending && <Spinner />}{remove.pending ? 'Deleting…' : 'Delete'}
+                    </button>
+                    <button type="button" className="acct-button acct-button-secondary acct-button-compact"
+                            onClick={() => setConfirming(null)} data-testid="button-cancel-delete-file">Cancel</button>
+                  </div>
+                ) : (
+                  <div className="acct-file-actions">
+                    {download && <a className="acct-button acct-button-secondary acct-button-compact" href={download}
+                                    download={file.filename} data-testid="link-download-file">Download</a>}
+                    <button type="button" className="acct-button acct-button-secondary acct-button-compact"
+                            onClick={() => { setNotice(null); setConfirming(file.id); }}
+                            aria-label={`Delete ${file.filename}`} data-testid="button-delete-file">Delete</button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 

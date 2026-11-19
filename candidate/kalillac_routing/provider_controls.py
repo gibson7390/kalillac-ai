@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from functools import wraps
 import threading
 import time
+import uuid
 from .bounded_transport import TransportError
 from .request_budget import RequestBudgetError, current_budget
 from .provider_limits import PROVIDERS
@@ -48,6 +49,11 @@ class RequestCostCeiling(CeilingStop):
     status_code = 422
     code = "processing_limit_reached"
 
+class AccountAttemptLimitReached(CeilingStop):
+    """This account's requests started today's allowed number of provider attempts (successful or not)."""
+    status_code = 429
+    code = "account_processing_limit_reached"
+
 @dataclass
 class Lease:
     provider: str
@@ -55,6 +61,7 @@ class Lease:
     anonymous: bool
     dispatch_deadline: float
     finance: object = None  # finance_ledger.FinanceLease when Financial Safeguards is on
+    account: tuple | None = None  # (account id, UTC date) the attempt was counted on, for a refund
     dispatched: bool = False
     released: bool = False
     lock: object = field(default_factory=threading.Lock, repr=False)
@@ -107,12 +114,20 @@ class ProviderControls:
             print("WARN: PROVIDER_CEILING_DATABASE_FAILED", type(error).__name__)
             raise CeilingUnavailable() from None
 
-    def reserve(self, provider, anonymous, charge=None):
-        from kalillac_db.repositories.provider_usage import reserve
+    def reserve(self, provider, anonymous, charge=None, account=None):
+        """Admit one attempt. account: (account id, paid) for a signed-in account's request; with
+        account limits configured it is required for every request that is not anonymous, and the
+        attempt is counted on that account's UTC day in the same transaction as the pool."""
+        from kalillac_db.repositories.provider_usage import reserve, reserve_account_attempt
         if provider not in PROVIDERS or type(anonymous) is not bool:
             raise CeilingUnavailable()
         if (self.finance is None) != (charge is None):
             raise CeilingUnavailable()  # Never one ledger without the other.
+        accounts = getattr(self.config, "accounts", None)
+        if accounts is not None and not anonymous:
+            if (type(account) is not tuple or len(account) != 2 or not isinstance(account[0], uuid.UUID)
+                    or type(account[1]) is not bool):
+                raise CeilingUnavailable()  # A signed-in request with no account: never unbounded.
         limit = self.config.providers[provider]
         def operation(session):
             checkpoint = {}
@@ -120,6 +135,11 @@ class ProviderControls:
                 checkpoint["monotonic"] = time.monotonic()
                 return self._now(session)
             start, now = reserve(session, provider, limit, clock, anonymous)
+            counted = None
+            if accounts is not None and not anonymous:
+                day = now.date()
+                reserve_account_attempt(session, account[0], day, accounts.paid if account[1] else accounts.free)
+                counted = (account[0], day)
             finance = None
             if charge is not None:
                 from kalillac_db.repositories import finance_ledger
@@ -127,18 +147,20 @@ class ProviderControls:
                     raise CeilingUnavailable()
                 finance = finance_ledger.reserve(session, charge, now, self.finance.limits)
             end = checkpoint["monotonic"] + start + limit.period_seconds - now.timestamp()
-            return Lease(provider, start, anonymous, end, finance)
+            return Lease(provider, start, anonymous, end, finance, counted)
         return self._transaction(operation)
 
     def release(self, lease):
         """Refund a never-dispatched attempt. True only when the refund
         committed (with Financial Safeguards on: the reservation returned)."""
-        from kalillac_db.repositories.provider_usage import release
+        from kalillac_db.repositories.provider_usage import release, release_account_attempt
         with lease.lock:
             if lease.dispatched or lease.released: return False
             lease.released = True  # Exactly one refund attempt, no hidden retry.
         def operation(session):
             release(session, lease)
+            if lease.account is not None:
+                release_account_attempt(session, *lease.account)
             if lease.finance is not None:
                 from kalillac_db.repositories import finance_ledger
                 return finance_ledger.release(session, lease.finance, self._now(session))
@@ -180,6 +202,7 @@ class ControlRequest:
         from kalillac_finance.scopes import TrafficClass
         self.service, self.anonymous = service, True
         self.traffic_class = TrafficClass.ANONYMOUS
+        self.account_id = None  # The signed-in account this request runs for (its attempt limit).
         self.lock = threading.Lock()
         self.closed = self.started = self.finished = False
         self.session = self.session_lock = None
@@ -262,15 +285,32 @@ def current_request():
     return _REQUEST.get()
 
 
-def account_status(authenticated, paid_entitlement=None):
-    """The request's only traffic classification (see kalillac_finance.traffic)."""
+def account_status(authenticated, paid_entitlement=None, account_id=None):
+    """The request's only traffic classification (see kalillac_finance.traffic), and the account whose
+    daily provider-attempt limit its attempts count against."""
     from kalillac_finance.traffic import resolve_traffic_class
     state = _REQUEST.get()
     if state is not None:
         state.anonymous = not authenticated
+        state.account_id = _account_uuid(account_id) if authenticated else None
         state.traffic_class = resolve_traffic_class(
             authenticated=authenticated is True, request=state, paid_entitlement=paid_entitlement)
 
+
+
+def _account_uuid(value):
+    try:
+        return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _attempt_account(request):
+    """(account id, paid) for a signed-in request, or None (anonymous, or no account known)."""
+    from kalillac_finance.scopes import TrafficClass
+    if request.anonymous or request.account_id is None:
+        return None
+    return request.account_id, request.traffic_class is TrafficClass.PAID_ACCOUNT
 
 
 def session_admit(state, lock):
@@ -301,8 +341,9 @@ def protect(function, provider=None):
         # Budgeted Tavily is protected by its shared search/extract seam.
         if provider is None and selected == "tavily": return function(*args, **kwargs)
         finance = getattr(service, "finance", None)
+        account = _attempt_account(request)
         if finance is None:
-            lease = service.reserve(selected, request.anonymous)
+            lease = service.reserve(selected, request.anonymous, account=account)
         else:
             from kalillac_finance.runtime import charge_for
             try:
@@ -314,7 +355,7 @@ def protect(function, provider=None):
             # The request's own dollar ceiling, before either ledger is touched.
             request.authorize_cost(charge.reserved, ceiling)
             try:
-                lease = service.reserve(selected, request.anonymous, charge)
+                lease = service.reserve(selected, request.anonymous, charge, account=account)
             except BaseException:
                 request.adjust_cost(-charge.reserved)  # Nothing was reserved.
                 raise

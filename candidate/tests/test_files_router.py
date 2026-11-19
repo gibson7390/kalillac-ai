@@ -79,13 +79,14 @@ def test_cross_site_and_query_requests_are_refused_before_any_work(tmp_path, wor
     assert store.list("a") == []
 
 
-def test_signed_out_and_free_accounts_are_refused_while_files_require_premium(tmp_path, workbook):
+def test_signed_out_is_refused_and_free_accounts_add_nothing_while_files_require_premium(tmp_path, workbook):
     client, _ = build(tmp_path)
     assert client.get("/api/files", headers=headers("nobody")).status_code == 401
-    assert (client.get("/api/files", headers=headers("free-c")).json()) == {"error": "files_require_premium"}
+    # A free account may see its own files (none here) but is told it cannot add any (F6).
+    assert client.get("/api/files", headers=headers("free-c")).json() == {"files": [], "can_add": False}
     assert upload(client, workbook, "f.xlsx", "free-c").status_code == 403
     client, _ = build(tmp_path / "any", tier="any")
-    assert client.get("/api/files", headers=headers("free-c")).status_code == 200
+    assert client.get("/api/files", headers=headers("free-c")).json() == {"files": [], "can_add": True}
 
 
 def test_an_upload_is_checked_by_intake_stored_and_downloaded_safely(tmp_path, workbook):
@@ -95,8 +96,9 @@ def test_an_upload_is_checked_by_intake_stored_and_downloaded_safely(tmp_path, w
     file = reply.json()["file"]
     assert file["filename"] == "Plan 2027 _ final.xlsx" and file["media_type"] == XLSX and file["origin"] == "uploaded"
     assert set(file) == {"id", "filename", "media_type", "size", "origin", "created_at", "expires_at", "parent_id"}
-    listed = client.get("/api/files", headers=headers()).json()["files"]
-    assert [item["id"] for item in listed] == [file["id"]]
+    listed = client.get("/api/files", headers=headers()).json()
+    assert [item["id"] for item in listed["files"]] == [file["id"]] and listed["can_add"] is True
+    assert listed["files"][0] == {**file, "available": True}
     download = client.get(f"/api/files/{file['id']}", headers=headers())
     assert download.content == workbook and download.headers["content-type"] == XLSX
     assert download.headers["content-disposition"].startswith("attachment;")
@@ -105,7 +107,7 @@ def test_an_upload_is_checked_by_intake_stored_and_downloaded_safely(tmp_path, w
     # Another account sees nothing, and cannot tell a file exists.
     assert client.get(f"/api/files/{file['id']}", headers=headers("paid-b")).json() == {"error": "file_not_found"}
     assert client.delete(f"/api/files/{file['id']}", headers=headers("paid-b")).status_code == 404
-    assert client.get("/api/files", headers=headers("paid-b")).json() == {"files": []}
+    assert client.get("/api/files", headers=headers("paid-b")).json() == {"files": [], "can_add": True}
     assert client.delete(f"/api/files/{file['id']}", headers=headers()).json() == {"deleted": True}
     assert client.get(f"/api/files/{file['id']}", headers=headers()).status_code == 404
 

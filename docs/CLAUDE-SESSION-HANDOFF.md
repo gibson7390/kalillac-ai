@@ -130,3 +130,16 @@ corrections. Evidence and open questions: Codex handoff section 14. Edge configu
 `deploy/staging/CLOUDFLARE-ACCESS.md`. Host: a separate temporary server is the owner's leaning; no server has been
 contacted. Before pushing to a branch, run every workflow that lists a touched test file (two counts were missed
 once: each workflow pins its own).
+
+## Update: the Premium audit corrections (2026-11-18, late)
+
+Codex confirmed six findings (F1-F6). Corrections: F1 `afa247a` (`fix/local-reset-ownership`, now in
+`feat/local-staging`; the owner's local root carries its ownership marker), F4/F5 `4a36dd7`, F2/F6 `8de030b`,
+F3 `a12bf14` + `52b2408`, all on `fix/premium-audit-corrections` (stacked on `feat/data-lifecycle`). Status and
+evidence: `docs/CODEX-AUDIT-CORRECTIONS.md`; Codex's section: handoff 16. Not yet integrated into
+`release/staging-v1` (it needs migration 0026 and the two new owner settings). The disclosure branch
+`fix/files-storage-disclosure` (`12dc940`) is separate. Lessons recorded: list every `FAILED` line of a run,
+never a tail (a disclosure failure was misattributed to load); a monkeypatched function must keep the real
+signature (three stubs broke when F3 added an argument; one stalled a PostgreSQL job until cancelled).
+Owner decisions now required for Premium staging: KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE / _PAID and
+KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS (D-9); erasure E-1 to E-8 (`docs/DATA-LIFECYCLE.md` 3.1).

@@ -20,7 +20,7 @@ import shutil
 import sys
 
 MARKS = ("accounts", "files", "images", "reasoning", "spaces")
-SITE_MARKS = ("accounts",)        # the only mark the site reads (site/src/App.tsx)
+SITE_MARKS = ("accounts", "files")   # the marks the site reads (App.tsx: accounts; the account page: files)
 HTML = '<html lang="en">'
 
 
@@ -40,7 +40,8 @@ def build(site, frontend, out, marks):
     if out.exists():
         raise ValueError("--out already exists")
     page = marked((frontend / "index.html").read_text(encoding="utf-8"), [m for m in MARKS if m in marks])
-    site_marks = [m for m in SITE_MARKS if m in marks]
+    # The site's marks belong to its account pages, which exist only with accounts.
+    site_marks = [m for m in SITE_MARKS if m in marks] if "accounts" in marks else []
     pages = {path.name: marked(path.read_text(encoding="utf-8"), site_marks)
              for path in sorted(site.glob("*.html"))} if site_marks else {}
     shutil.copytree(site, out)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import os
+import time
 
 import pytest
 
@@ -86,10 +87,17 @@ def test_expired_files_disappear_and_are_purged(store, clock, tmp_path):
     with pytest.raises(FileNotFound):
         store.get("a", old.file_id)
     assert [r.file_id for r in store.list("a")] == [new.file_id]
-    stale = next((tmp_path / "files").iterdir()) / "leftover.tmp"
-    stale.write_bytes(b"partial")
-    assert store.purge() == 1 and not stale.exists()
-    assert sorted(path.suffix for path in next((tmp_path / "files").iterdir()).iterdir()) == [".bin", ".json"]
+    folder = next((tmp_path / "files").iterdir())
+    # An upload's temporary file: removed only once abandoned (older than an hour), never while in progress.
+    in_progress = folder / (new.file_id + ".bin.0123456789ab.tmp")
+    abandoned = folder / (old.file_id + ".json.abcdefabcdef.tmp")
+    for path, age in ((in_progress, timedelta(0)), (abandoned, timedelta(hours=2))):
+        path.write_bytes(b"partial")
+        stamp = time.time() - age.total_seconds()        # ages on disk are judged by the real clock
+        os.utime(path, (stamp, stamp))
+    assert store.purge() == 1 and not abandoned.exists() and in_progress.exists()
+    assert sorted(path.name for path in folder.iterdir()) == sorted(
+        [new.file_id + ".bin", new.file_id + ".json", in_progress.name])
     assert store.get("a", new.file_id)[1] == b"new"
 
 

@@ -112,13 +112,16 @@
   if (scenarioName.indexOf("images_") === 0) {
     document.documentElement.setAttribute("data-kalillac-files", "on");
     document.documentElement.setAttribute("data-kalillac-images", "on");
-    queue.push({ status: 200, json: { files: [] } });
+    queue.push({ status: 200, json: { files: [], can_add: true } });
   }
   if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access"
       || scenarioName === "files_edit_confirm") {
     document.documentElement.setAttribute("data-kalillac-files", "on");
-    queue.push(scenarioName !== "files_offered_no_access" ? { status: 200, json: { files: [] } }
-                                                : { status: 403, json: { error: "files_require_premium" } });
+    // Any signed-in account may list its own files (F6): an account that may not add any (Free, or
+    // after Premium ends) is answered 200 with can_add false, and its own files listed.
+    queue.push(scenarioName !== "files_offered_no_access" ? { status: 200, json: { files: [], can_add: true } }
+      : { status: 200, json: { can_add: false, files: [{ id: "EeEeEeEeEeEeEeEeEeEeEe", filename: "kept.pdf",
+                                                          available: true }] } });
   }
 
   // ---- scenario page: the End & erase timeout, under the scenario's control --
@@ -697,7 +700,7 @@
     request_timeout: 504, internal_error: 500,
     session_ended: 409, unsupported_media_type: 415,
     reasoning_mode_not_allowed: 403, files_require_premium: 403, not_authenticated: 401,
-    daily_limit_reached: 429, account_unavailable: 403, too_many_images: 502, image_unavailable: 502,
+    daily_limit_reached: 429, account_processing_limit_reached: 429, account_unavailable: 403, too_many_images: 502, image_unavailable: 502,
     file_not_found: 404, file_assistant_unavailable: 502, model_output_unusable: 502,
     model_output_incomplete: 502, model_refused: 502, tool_limit_exceeded: 502
   };

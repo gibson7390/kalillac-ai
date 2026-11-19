@@ -257,6 +257,137 @@ CI: file generation 44368926553 (1,054 passed), subscription 44368936581 (every 
 **Nothing is resolved by this integration.** Codex verified `78b7a05`; the merge is new code. Every pending
 audit (D3 through the allowance correction, sections 1–13) stays open and now applies to this combination too.
 
+## 15. Data lifecycle: expired files and usage records (`feat/data-lifecycle` at `c0beeb9`, docs `1057222`)
+
+From `release/staging-v1` `fed4a6c`. Not merged into the release. Nothing is scheduled and no environment ran it.
+
+* `kalillac_files/retention.py` and `tools/data_lifecycle.py files`: delete a file once it has been
+  expired for an explicit period plus a one-hour margin, plus abandoned upload temporaries and orphaned data.
+  It enters only `[0-9a-f]{32}` owner folders and FileStore's own names. Each file is decided from its own
+  record in its own folder. On POSIX, every stat and unlink is relative to a folder opened `O_NOFOLLOW`. Data
+  is deleted before its record, unreadable records are never deleted, and a run lock (`.retention.lock`, flock)
+  keeps runs apart. Nothing is deleted without `--apply --confirm-deployment <KALILLAC_DEPLOYMENT_ID>`, there
+  is no default period, and the output is counts only.
+* `FileStore.purge` now uses these rules. **Behaviour change worth checking:** it used to delete every
+  `*.tmp`, uploads in progress included.
+* **A race found and fixed while testing**: a cleanup whose expiry clock ran ahead judged a fresh upload
+  (data written, record not yet) as orphaned. Ages on disk now use the real clock; regression test
+  `test_an_upload_caught_between_its_data_and_its_record_survives_any_expiry_clock`.
+* `kalillac_accounts/usage_retention.py` and `tools/data_lifecycle.py usage`: delete
+  `account_usage_daily` and `account_usage_slots` rows older than an explicit number of days (at least 8),
+  as the runtime login, by the database's UTC date, with `lock_timeout` 5 s and `statement_timeout` 60 s.
+* `docs/DATA-LIFECYCLE.md`: the data map, the erasure plan (not built; V1's security tables reference
+  `users` with no `ON DELETE`, so a tombstone is proposed), what is buildable now and what needs the owner.
+  It also records a **gap: no customer page lists or deletes stored files** (the API does both).
+
+Questions for Codex:
+1. Can any interleaving of `FileStore.save`/`read`/`delete` with a cleanup run delete live data, or leave a
+   record pointing at deleted data? (On Windows an open file cannot be unlinked; that run leaves it for the
+   next. The exactly-once deletion count is asserted on POSIX only.)
+2. Is a one-hour stale-temporary age safe against the slowest legitimate upload (10 MiB)?
+3. Should the usage cleanup run as R (today), or as a narrower function owned by S/P?
+
+Tests: `test_file_retention.py` 24 on a real filesystem (threshold, dry run, isolation across accounts
+and foreign names, symlinks, interrupted runs, temporaries, orphans, unreadable records, repeated runs,
+threads and separate processes with uploads and reads, the command); `test_data_lifecycle_postgres.py`
+9 on real PostgreSQL under the final grants (exactly the old rows of two accounts deleted as the runtime
+login with no account table written, dry run, repeated runs, the owner report still reading its week, the
+8-day floor and malformed periods refused, four concurrent cleanups racing today's quota writes with each
+old row deleted once, the command's confirmation and counts-only output). CI on `c0beeb9`: file generation 44406198275
+(1,078 passed), subscription 44406206211 (both jobs green; the PostgreSQL job ran its pinned 653).
+
+**Nothing here resolves an audit finding.** The legal review's gaps 1 and 2 are mechanisms only until the
+owner sets D-9 and D-11 and approves a schedule per environment.
+
+## 16. Corrections for the Premium audit of 2026-11-18 (F1 to F6): verification requested
+
+Details, original failures, coverage and open questions: `docs/CODEX-AUDIT-CORRECTIONS.md`, section "Premium
+audit of 2026-11-18". Nothing is marked resolved; please verify each at its SHA.
+
+| Finding | Branch | Full SHA | Reproduce the original failure |
+|---|---|---|---|
+| F1 | `fix/local-reset-ownership` (fast-forwarded into `feat/local-staging`) | `afa247ad58c33c9e11e601d4ee261b0f23942d8a` | `test_local_reset.py` against `8760bfc`'s `tools/local_staging.py` (the new API does not exist there; the commit message shows the direct reproduction: an unrelated directory deleted) |
+| F4, F5 | `fix/premium-audit-corrections` | `4a36dd7a47fa7812d5424311e7cad722dfe35572` | `test_files_session_and_modes.py` fails on `ac1f2a9` (both tests) |
+| F2, F6 | same | `8de030b172487d2339c769cb2292f280aa9730b9` | `test_files_retention_access.py` on `4a36dd7` (the store and router assertions) |
+| F3 | same | `a12bf1411610b05ade658736187a5a2783451d71` (test-stub follow-up `52b2408927aabb7c46bc840007e684e0d532d53b`) | `test_without_the_account_limit_failing_requests_reach_the_provider_every_time` keeps the original behaviour as evidence |
+
+Worth an independent look:
+* F3 adds migration `0026_account_provider_attempts` (a counter on `account_usage_daily`) and moves the release
+  head, so `tools/v1_security_transition.py`'s `HEAD` is now 0026. The column is covered by the runtime role's
+  existing table grant; the V1 transition's catalog checks were rerun on real PostgreSQL (173 passed).
+* F3's limit is required configuration whenever accounts and provider ceilings are on; production (accounts
+  off) is unaffected. Is refusing a signed-in request that carries no account id (rather than counting it
+  nowhere) the right failure mode?
+* F2: the application now deletes expired files on its own schedule. The default period is 0 days when unset,
+  which matches the startup purge it replaces; the staging template requires an explicit value.
+* F6: `GET /api/files` now answers 200 to every signed-in account, so the chat reads `can_add` instead of
+  the status. Any client that relied on 403 for "files not offered" must follow.
+
+Also on this branch: `docs/DATA-LIFECYCLE.md` corrected (expired files were deleted at startup, not never) and
+the decisions that complete account erasure (E-1 to E-8).
+
+## 17. Second-round corrections after your verification of `c6fcaeb`: verification requested
+
+You verified F3, F5 and F6. These correct the four residual defects you reproduced. Details, the probe
+results before and after, the regression tests, CI and known limitations are in `docs/CODEX-AUDIT-CORRECTIONS.md`,
+section "Second round". Nothing is marked resolved.
+
+| Defect | Branch | Full SHA | Your reproduction, rerun |
+|---|---|---|---|
+| F1-A ancestor exchange, F1-B process identity | `fix/local-reset-ownership` (not merged into `feat/local-staging`; the running local install is untouched) | `8ae23d51c0c7f408fb5cdd10134da26b4f7b7bc7` | Your probe, run as root in WSL: on `afa247a` the unrelated data was deleted and the other checkout's process killed (-15). On `8ae23d5` the reset is refused (exit 2), the data survives, and the process is not classified as ours or signalled |
+| F2 physical quota | `fix/premium-audit-corrections` | `68730da364f18014d04c73d1d03d7f11f8a2b99d` | Your probe: 12 bytes before, 4 after (Linux and Windows) |
+| F4 detached worker | same | `7d2ed5bdeb817763b252a848a4e564f86d99b4eb` (tip of the branch) | Your `test_disconnected_file_worker_still_belongs_to_the_session`, unchanged, passes: registered 1, active 1, cancellation requested, 1 model call, 0 files |
+
+Worth an independent look:
+* F1: `_open_parent` trusts uid 0 and `ROOT_OWNER` only, and accepts a sticky ancestor (not the parent).
+  `reset` then deletes with `shutil.rmtree(name, dir_fd=parent)`, which needs Python 3.11 or later; the
+  command refuses on older versions.
+* F1: the pidfd liveness check before `killpg` (limitation 1), and the legacy PID-file window (limitation 2).
+* F2: reclaiming relies on every writer of an owner folder holding its `flock`. `FileStore.put` is the only
+  writer. The retention cleanup does not take the owner lock: it deletes only expired files, and data or
+  temporaries older than an hour.
+* F4: `asyncio.shield` and `run_in_executor` replace `run_in_threadpool` for the assistant thread, with
+  `contextvars.copy_context()` so that the request budget and account context still reach it. The assistant
+  slot is now held until the thread ends, also on `/api/files/assist`.
+
+## 18. F1-C and F1-D after your second verification: final F1 verification requested
+
+You verified F2 (`68730da`) and F4 (`7d2ed5b`). This corrects the two F1 points you raised. Details, the
+reproduction, tests and limitations are in `docs/CODEX-AUDIT-CORRECTIONS.md`, section "Third round". F1 is not
+marked resolved.
+
+| Defect | Branch | Full SHA | Your reproduction, rerun |
+|---|---|---|---|
+| F1-C, F1-D | `fix/local-reset-ownership` (not merged into `feat/local-staging`; the running install is untouched) | `69c8e8b755fd0e2b4045bb2c2d8475156bc29e3c` | Your mocked `stop` sequence: on `8ae23d5` exit 0, `numeric_group_signal`, records removed, "stopped"; on `69c8e8b` exit 2, only `pidfd_signal` events (`15, 4` then `9, 4`: the group flag), no record removed, the reasons printed |
+
+CI: `44464689210` (main job 715, root step 48, runner kernel 7.0.0-1017-azure (the group flag is supported; the fallback is exercised by the test that forces the kernel to refuse the flag)).
+
+Worth an independent look:
+* `_signal_group`'s fallback, used where the kernel refuses `PIDFD_SIGNAL_PROCESS_GROUP`: members are taken
+  from `/proc` (group and session equal to the leader's PID, started no earlier than it), and each is signalled
+  through its own pidfd only after a read made while both it and the leader are alive.
+* `_wait_gone` confirms an exit through the leader's pidfd, then waits for the group to empty. It errs towards
+  failing.
+* `_identity` is now three-way ("ours", "other", "unknown"); only "ours" is ever signalled. Its last plain
+  `False` return was caught by the foreign-checkout test while I was making this change.
+
+## 19. The two remaining F1-C cases after your verification of `69c8e8b`: final F1 verification requested
+
+You verified F1-D. This corrects the two F1-C cases you reproduced. Details are in
+`docs/CODEX-AUDIT-CORRECTIONS.md`, section "Final F1-C round". F1 is not marked resolved.
+
+| Case | Branch | Full SHA | Your tests |
+|---|---|---|---|
+| Unreaped leader with a live child; PostgreSQL status errors | `fix/local-reset-ownership` (not merged into `feat/local-staging`; your local install and its data untouched) | `364637399d77abf7922a5aab610975882fba6d57` | `test_independent_final_f1.py` committed unchanged (sha256 `29664edc...0444f6`): 6 failed and 6 passed on `69c8e8b`, as in your evidence; 12 passed on `3646373`, as the user and as root |
+
+CI: `44473349667` (main job 734, root step 66, runner kernel 7.0.0-1017-azure).
+
+Worth an independent look:
+* `_exited` is a non-blocking `select` on the leader's pidfd, made before `_identity` and again whenever the
+  identity reads "other". So "other" means "absent" only for a live process that is not ours.
+* `stop` treats only `pg_ctl status` 3 as "stopped"; it checks before and after `pg_ctl stop`.
+* The F1-D signalling functions are byte-identical to `69c8e8b`.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image

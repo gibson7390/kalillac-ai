@@ -35,6 +35,33 @@ def reserve(session, provider, limit, now, anonymous):
     return start, now
 
 
+def reserve_account_attempt(session, user_id, usage_date, limit):
+    """Admit one provider attempt for an account on a UTC day: its daily row locked, refused at the limit."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    from kalillac_routing.provider_controls import AccountAttemptLimitReached
+    from ..models import AccountUsageDaily
+    insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    session.execute(insert(AccountUsageDaily).values(user_id=user_id, usage_date=usage_date)
+                    .on_conflict_do_nothing(index_elements=["user_id", "usage_date"]))
+    row = session.scalar(select(AccountUsageDaily).where(AccountUsageDaily.user_id == user_id,
+                                                         AccountUsageDaily.usage_date == usage_date).with_for_update())
+    if row.provider_attempts >= limit:
+        raise AccountAttemptLimitReached()
+    row.provider_attempts += 1
+    session.flush()
+
+
+def release_account_attempt(session, user_id, usage_date):
+    """Refund one never-dispatched attempt to the day it was counted on."""
+    from ..models import AccountUsageDaily
+    row = session.scalar(select(AccountUsageDaily).where(AccountUsageDaily.user_id == user_id,
+                                                         AccountUsageDaily.usage_date == usage_date).with_for_update())
+    if row is not None and row.provider_attempts > 0:
+        row.provider_attempts -= 1
+        session.flush()
+
+
 def release(session, lease):
     row = session.scalar(select(ProviderUsagePool).where(ProviderUsagePool.provider == lease.provider).with_for_update())
     # A late local rejection cannot refund another accounting period.

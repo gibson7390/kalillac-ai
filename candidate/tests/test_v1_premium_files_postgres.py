@@ -23,7 +23,7 @@ from kalillac_files.store import FileStore
 from kalillac_finance.scopes import TrafficClass
 from test_billing import _subscription
 from test_v1_lifecycle_postgres import COOKIE, EMAIL, ORIGIN, PASSWORDS, SETTINGS, account_row, live  # noqa: F401
-from test_v1_premium_journey_postgres import journey, post, webhook  # noqa: F401
+from test_v1_premium_journey_postgres import get, journey, post, webhook  # noqa: F401
 from test_v1_transition_postgres import world  # noqa: F401
 
 Image = pytest.importorskip("PIL.Image")
@@ -106,3 +106,28 @@ def test_premium_files_and_images_from_purchase_to_cancellation(files):
     assert webhook(w, "evt_canceled", "customer.subscription.deleted", user).json()["result"] == "processed"
     again, _ = assist(w, cookie, "And now?", [record["id"]])
     assert (again.status_code, again.json()["error"]) == (403, "files_require_premium")
+    refused = upload(w, cookie, photo(), "another.jpg")
+    assert (refused.status_code, refused.json()["error"]) == (403, "files_require_premium")
+
+    # F6: the customer still manages the files Premium made (V1 authentication, the real entitlement): sees
+    # them, downloads them, and nobody else reaches them; deleting removes them from disk.
+    listed = get(w, "/api/files", cookie)
+    assert listed.status_code == 200 and listed.json()["can_add"] is False
+    assert [(f["id"], f["available"]) for f in listed.json()["files"]] == [(record["id"], True)]
+    assert get(w, f"/api/files/{record['id']}", cookie).content == kept
+
+    other = "other.customer@example.test"
+    assert post(w, "/api/account/register", {"email": other}).status_code == 202
+    assert post(w, "/api/account/register/confirm", {"token": w.token(), "password": PASSWORDS[0]}).status_code == 200
+    stranger = post(w, "/api/account/login", {"email": other, "password": PASSWORDS[0]}).cookies.get(COOKIE)
+    assert get(w, "/api/files", stranger).json() == {"files": [], "can_add": False}
+    assert get(w, f"/api/files/{record['id']}", stranger).status_code == 404
+    w.client.cookies.clear()
+    assert w.client.delete(f"/api/files/{record['id']}", headers={
+        "Cookie": f"{COOKIE}={stranger}", "Origin": ORIGIN}).status_code == 404
+    assert w.store.get(str(user), record["id"])[1] == kept
+
+    w.client.cookies.clear()
+    deleted = w.client.delete(f"/api/files/{record['id']}", headers={"Cookie": f"{COOKIE}={cookie}", "Origin": ORIGIN})
+    assert deleted.json() == {"deleted": True}
+    assert not any(w.store._folder(str(user)).iterdir())

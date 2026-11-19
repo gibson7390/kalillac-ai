@@ -43,6 +43,10 @@ class AccountUsageDaily(Base):
             "response_chars >= 0",
             name="response_chars_non_negative",
         ),
+        CheckConstraint(
+            "provider_attempts >= 0",
+            name="provider_attempts_non_negative",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -72,6 +76,15 @@ class AccountUsageDaily(Base):
 
     # Characters of the final reply returned to the client.
     response_chars: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+
+    # Provider attempts admitted for this account's requests (0026), successful or not: the
+    # account's own bound on billable provider work (kalillac_routing.provider_controls).
+    provider_attempts: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
         default=0,

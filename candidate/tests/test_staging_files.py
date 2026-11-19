@@ -133,12 +133,16 @@ def test_the_web_root_marks_exactly_what_the_chat_reads(tmp_path):
             ' data-kalillac-reasoning="on" data-kalillac-spaces="on">') in page
     original = (frontend / "index.html").read_text(encoding="utf-8")
     assert page == original.replace('<html lang="en">', page[page.index("<html"):page.index(">", page.index("<html")) + 1])
-    # The site reads exactly one mark (accounts: Sign in and Create account), and every one of its pages gets it.
-    app_tsx = (CANDIDATE.parent / "site" / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert set(re.findall(r"getAttribute\('data-kalillac-([a-z]+)'\)", app_tsx)) == set(webroot.SITE_MARKS)
+    # The site reads exactly two marks (accounts: Sign in and Create account; files: the account page's files),
+    # and every one of its pages gets those it is built with.
+    site_src = CANDIDATE.parent / "site" / "src"
+    read = set()
+    for source in list(site_src.rglob("*.tsx")) + list(site_src.rglob("*.ts")):
+        read |= set(re.findall(r"getAttribute\('data-kalillac-([a-z]+)'\)", source.read_text(encoding="utf-8")))
+    assert read == set(webroot.SITE_MARKS) == {"accounts", "files"}
     for name in ("index.html", "privacy.html"):
         assert (out / name).read_text(encoding="utf-8") == (
-            '<!DOCTYPE html><html lang="en" data-kalillac-accounts="on"><body>site</body></html>')
+            '<!DOCTYPE html><html lang="en" data-kalillac-accounts="on" data-kalillac-files="on"><body>site</body></html>')
     for name in ("app.js", "app.css"):
         assert (out / "app" / name).read_bytes() == (frontend / name).read_bytes()
     plain = webroot.build(site(tmp_path / "second"), frontend, tmp_path / "plain", [])
