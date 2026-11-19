@@ -319,13 +319,27 @@ def read_env(path: Path):
 
 # --- PostgreSQL ---------------------------------------------------------------------------------------
 
+class PgStatusUnknown(Exception):
+    """pg_ctl status answered neither "running" (0) nor "not running" (3)."""
+
+
 def pg_running(p, bindir, uid, gid):
-    return as_user([f"{bindir}/pg_ctl", "-D", str(p["pg"]), "status"], uid, gid, capture_output=True).returncode == 0
+    """True if PostgreSQL runs (pg_ctl status 0), False if it does not (3). Any other answer (1, 4: no
+    accessible data directory, an error) establishes nothing and raises PgStatusUnknown."""
+    result = as_user([f"{bindir}/pg_ctl", "-D", str(p["pg"]), "status"], uid, gid, capture_output=True)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 3:
+        return False
+    raise PgStatusUnknown(f"pg_ctl status exited {result.returncode}")
 
 
 def pg_start(p, bindir, uid, gid):
-    if pg_running(p, bindir, uid, gid):
-        return
+    try:
+        if pg_running(p, bindir, uid, gid):
+            return
+    except PgStatusUnknown as error:
+        fail(f"PostgreSQL's state could not be established ({error}); see {p['state'] / 'postgres.log'}")
     result = as_user([f"{bindir}/pg_ctl", "-D", str(p["pg"]), "-l", str(p["state"] / "postgres.log"), "-w", "-o",
                       f"-p {PG_PORT} -k {p['pgsock']} -c listen_addresses=127.0.0.1 -c max_connections=100",
                       "start"], uid, gid, capture_output=True, text=True)
@@ -716,6 +730,23 @@ def _wait_gone(leader_fd, leader, since, timeout):
     return True
 
 
+def _exited(leader_fd):
+    """Whether the process a pidfd names has exited (readable at once), reaped or a zombie."""
+    return bool(select.select([leader_fd], [], [], 0)[0])
+
+
+def _leaderless(record, pid, name):
+    """A leader that has exited: "absent" only if no live member of its group is left, else StopFailed (with
+    the members' PIDs, which are not signalled: without a live leader the group's id proves nothing)."""
+    started = record.get("started")
+    since = started if (not record.get("legacy") and type(started) is int and record.get("boot") == _boot()) else 0
+    left = _members(pid, since)
+    if left:
+        raise StopFailed(f"the {name} process {pid} has exited but its group still runs (PIDs "
+                         f"{', '.join(map(str, left))}); stop them by hand")
+    return "absent"
+
+
 def _terminate(p, name, uid):
     """Stop local staging's own process of that name and its group, and confirm it. Returns "stopped", or
     "absent" when no process of ours runs under that record; raises StopFailed when that cannot be confirmed
@@ -733,19 +764,17 @@ def _terminate(p, name, uid):
     except (OSError, AttributeError) as error:
         raise StopFailed(f"no process handle (pidfd) for the {name} process {pid}: {error}") from None
     try:
-        if leader_fd is None:
-            # The leader has exited. Its group may live on, but its PID no longer proves whose it is.
-            since = record.get("started") if record.get("boot") == _boot() else None
-            left = _members(pid, since) if since is not None else _members(pid, 0)
-            if left:
-                raise StopFailed(f"the {name} process {pid} has exited but its group still runs (PIDs "
-                                 f"{', '.join(map(str, left))}); stop them by hand")
-            return "absent"
+        # The leader has exited, whether reaped (no pidfd) or not yet (a zombie: its pidfd is readable and its
+        # identity unreadable). Its group may live on, and is then neither signalled nor declared stopped.
+        if leader_fd is None or _exited(leader_fd):
+            return _leaderless(record, pid, name)
         state = _identity(record, name, uid)
         if state == "unknown":
             raise StopFailed(f"cannot read the {name} process {pid}'s identity")
         if state != "ours":
-            return "absent"                        # Its PID is another process's now: our group has ended.
+            if _exited(leader_fd):                 # It exited while being read.
+                return _leaderless(record, pid, name)
+            return "absent"                        # A live process that is not ours holds the PID: ours has ended.
         since = record.get("started") if not record.get("legacy") else None
         if type(since) is not int:
             since = _started(pid)
@@ -842,11 +871,18 @@ def stop(args):
             continue                                   # Its records stay: the next stop tries again.
         for stale in (f"{name}.json", f"{name}.pid"):
             (p["run"] / stale).unlink(missing_ok=True)
-    if p["pg"].exists() and pg_running(p, pg_bin(home), uid, gid):
-        result = as_user([f"{pg_bin(home)}/pg_ctl", "-D", str(p["pg"]), "stop", "-m", "fast"], uid, gid,
-                         capture_output=True)
-        if result.returncode != 0 or pg_running(p, pg_bin(home), uid, gid):
-            failures.append("PostgreSQL did not stop (pg_ctl stop -m fast)")
+    if p["pg"].exists():
+        # Stopped only on pg_ctl's own word: status 3, before or after `stop`. Any other answer fails closed.
+        try:
+            if pg_running(p, pg_bin(home), uid, gid):
+                result = as_user([f"{pg_bin(home)}/pg_ctl", "-D", str(p["pg"]), "stop", "-m", "fast"], uid, gid,
+                                 capture_output=True)
+                if result.returncode != 0:
+                    failures.append(f"PostgreSQL did not stop (pg_ctl stop exited {result.returncode})")
+                elif pg_running(p, pg_bin(home), uid, gid):
+                    failures.append("PostgreSQL still runs after pg_ctl stop")
+        except PgStatusUnknown as error:
+            failures.append(f"PostgreSQL's state could not be established ({error})")
     if failures:
         fail("could not confirm that local staging stopped:\n  " + "\n  ".join(failures)
              + "\nIts process records are kept and nothing was deleted.")

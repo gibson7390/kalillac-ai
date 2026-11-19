@@ -639,3 +639,115 @@ def test_this_kernel_either_signals_a_group_through_a_pidfd_or_refuses_the_flag(
         os.close(fd)
         leader.kill()
         leader.wait()
+
+
+# --- F1-C, final round: an exited leader and PostgreSQL's status prove nothing they do not say ---------------
+# Codex's own cases are kept unchanged in tests/test_independent_final_f1.py; these complete them.
+
+EXITS_AT_ONCE = "import sys\nsys.exit(0)\n"
+REAL_PG_RUNNING = local.pg_running              # The checkout fixture replaces it; these tests need it.
+
+
+def zombie(process, timeout=10):
+    """Wait until the process has exited but is not reaped (its parent, this test, has not waited for it)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if local._stat(process.pid)[0] == "Z":
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_an_unreaped_leader_with_a_live_child_is_reported_never_signalled_and_recoverable(tool, checkout, quick,
+                                                                                           monkeypatch, tmp_path):
+    """The leader has exited (a zombie, its PID still held) and its child runs on: the stop fails and keeps the
+    record, nothing is signalled (the child is untouched), and once the child is gone the next stop confirms."""
+    child_file = tmp_path / "child.pid"
+    monkeypatch.setenv("CHILD_PID_FILE", str(child_file))
+    write_script("app", WITH_CHILD.replace("time.sleep(120)\n", ""))
+    app = checkout("app")
+    deadline = time.monotonic() + 10
+    while not child_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert zombie(app)
+    child = int(child_file.read_text())
+    sent = []
+    real = local.signal.pidfd_send_signal
+    monkeypatch.setattr(local.signal, "pidfd_send_signal",
+                        lambda fd, sig, *a: sent.append(int(sig)) if sig else real(fd, sig, *a))
+    try:
+        assert tool("stop", root=checkout.root) == 2
+        assert alive(child) and sent == [] and records(local.paths(), "app") == ["app.json"]
+    finally:
+        os.kill(child, signal.SIGKILL)
+    deadline = time.monotonic() + 5
+    while alive(child) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert tool("stop", root=checkout.root) == 0 and not records(local.paths(), "app")
+    app.wait(timeout=10)
+
+
+def test_an_unreaped_leader_whose_group_has_ended_is_confirmed_stopped(tool, checkout, quick):
+    """Normal shutdown is unchanged: a leader that exited with nothing left in its group is simply gone."""
+    write_script("app", EXITS_AT_ONCE)
+    app = checkout("app")
+    assert zombie(app)
+    assert tool("stop", root=checkout.root) == 0 and not records(local.paths(), "app")
+    app.wait(timeout=10)
+
+
+@pytest.mark.parametrize("returncode", [1, 2, 4, 127])
+def test_start_refuses_when_postgresqls_status_is_unknown(checkout, monkeypatch, returncode):
+    """Every command that asks pg_ctl status treats an answer other than 0 or 3 as unknown: start fails rather
+    than starting a second server over a data directory it could not read."""
+    started = []
+
+    def pg_command(argv, uid, gid, **kwargs):
+        started.append(argv[-1])
+        return subprocess.CompletedProcess(argv, returncode if argv[-1] == "status" else 0, stdout="", stderr="")
+    monkeypatch.setattr(local, "as_user", pg_command)
+    monkeypatch.setattr(local, "pg_running", REAL_PG_RUNNING)
+    with pytest.raises(SystemExit) as refused:
+        local.pg_start(local.paths(), "/nonexistent", os.getuid(), os.getgid())
+    assert refused.value.code == 2 and started == ["status"]
+
+
+def _pg_bin():
+    for candidate in (os.environ.get("KALILLAC_LOCAL_PG_BIN", ""),
+                      str(Path.home() / "pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin"),
+                      "/usr/lib/postgresql/16/bin"):
+        if candidate and Path(candidate, "pg_ctl").is_file():
+            return candidate
+    return None
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0 or _pg_bin() is None,
+                    reason="initdb refuses root; needs PostgreSQL 16 binaries")
+def test_pg_running_reads_a_real_pg_ctl_status(tmp_path, monkeypatch, checkout):
+    """Against the real pg_ctl and a disposable cluster: 4 (no cluster there) is unknown, 3 is stopped, 0 is
+    running, and stop() confirms the stop through the same status."""
+    import socket
+    bindir = _pg_bin()
+    monkeypatch.setattr(local, "pg_running", REAL_PG_RUNNING)
+    monkeypatch.setattr(local, "as_user", lambda argv, uid, gid, env=None, **kwargs: subprocess.run(argv, env=env,
+                                                                                                    **kwargs))
+    p = dict(local.paths(), pg=tmp_path / "cluster", state=tmp_path / "state", pgsock=tmp_path / "sock")
+    p["state"].mkdir()
+    p["pgsock"].mkdir()
+    p["pg"].mkdir(mode=0o700)
+    uid, gid = os.getuid(), os.getgid()
+    with pytest.raises(local.PgStatusUnknown, match="exited 4"):
+        local.pg_running(p, bindir, uid, gid)
+    subprocess.run([f"{bindir}/initdb", "-D", str(p["pg"]), "-U", "postgres", "--auth=trust", "-E", "UTF8"],
+                   check=True, capture_output=True)
+    assert local.pg_running(p, bindir, uid, gid) is False
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(local, "PG_PORT", port)
+    try:
+        local.pg_start(p, bindir, uid, gid)
+        assert local.pg_running(p, bindir, uid, gid) is True
+    finally:
+        subprocess.run([f"{bindir}/pg_ctl", "-D", str(p["pg"]), "stop", "-m", "immediate"], capture_output=True)
+    assert local.pg_running(p, bindir, uid, gid) is False
