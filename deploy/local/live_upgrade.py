@@ -64,6 +64,26 @@ def offline(root, bindir, uid, gid):
     return cluster
 
 
+def stop_install(root, checkout, bindir):
+    """Bind the F1 command to verified arguments, overriding ambient local-tool settings."""
+    import local_staging
+    prior = (local_staging.CANDIDATE, local_staging.REPO, local_staging.ROOT)
+    values = {"KALILLAC_LOCAL_ROOT": str(root), "KALILLAC_LOCAL_PG_BIN": str(bindir)}
+    ambient = {key: os.environ.get(key) for key in values}
+    try:
+        os.environ.update(values)
+        local_staging.CANDIDATE = checkout / "candidate"
+        local_staging.REPO = checkout
+        require(local_staging.main(["stop"]) == 0, "shutdown unconfirmed")
+    finally:
+        local_staging.CANDIDATE, local_staging.REPO, local_staging.ROOT = prior
+        for key, value in ambient.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def backup_install(root, output, activation, bindir, uid, gid):
     """A failed or incomplete backup never gets a usable manifest."""
     offline(root, bindir, uid, gid)
@@ -160,11 +180,7 @@ def main(argv=None):
         _settings, _deployment, uid, gid = destination(args.root, args.device, args.inode, args.activation_release,
                                                       args.checkout, args.checkout_sha)
         if args.operation == "stop":
-            # Use the verified shutdown implementation with identity bound to the checkout that launched it.
-            import local_staging
-            local_staging.CANDIDATE = args.checkout / "candidate"
-            local_staging.REPO = args.checkout
-            require(local_staging.main(["stop"]) == 0, "shutdown unconfirmed")
+            stop_install(args.root, args.checkout, args.pg_bin)
         elif args.operation == "backup":
             require(args.backup is not None, "new backup destination required")
             checksum = backup_install(args.root, args.backup, args.activation_release, args.pg_bin, uid, gid)

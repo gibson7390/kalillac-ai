@@ -32,6 +32,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 16, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 17, "skipped": 0, "failures": 0, "errors": 0}:
               raise SystemExit("The complete upgrade suite must run without skips.")
           PY

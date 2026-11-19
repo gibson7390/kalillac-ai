@@ -289,3 +289,22 @@ def test_checks_survive_python_optimization():
         f"import sys;sys.path.insert(0,{str(Path(u.__file__).parent)!r});"
         "import upgrade_support as u;u.require(False,'integrity failure')"], capture_output=True, text=True)
     assert result.returncode != 0 and "Refused" in result.stderr
+
+
+def test_stop_uses_verified_destination_not_ambient_settings(tmp_path, monkeypatch):
+    import local_staging
+    root, checkout, bindir = tmp_path / "verified-root", tmp_path / "checkout", tmp_path / "pg-bin"
+    monkeypatch.setenv("KALILLAC_LOCAL_ROOT", "/different/installation")
+    monkeypatch.setenv("KALILLAC_LOCAL_PG_BIN", "/different/postgres")
+    prior = (local_staging.CANDIDATE, local_staging.REPO, local_staging.ROOT)
+    observed = []
+    def checked_stop(argv):
+        observed.append((argv, os.environ["KALILLAC_LOCAL_ROOT"], os.environ["KALILLAC_LOCAL_PG_BIN"],
+                         local_staging.CANDIDATE, local_staging.REPO))
+        return 0
+    monkeypatch.setattr(local_staging, "main", checked_stop)
+    live_tool.stop_install(root, checkout, bindir)
+    assert observed == [(["stop"], str(root), str(bindir), checkout / "candidate", checkout)]
+    assert os.environ["KALILLAC_LOCAL_ROOT"] == "/different/installation"
+    assert os.environ["KALILLAC_LOCAL_PG_BIN"] == "/different/postgres"
+    assert (local_staging.CANDIDATE, local_staging.REPO, local_staging.ROOT) == prior

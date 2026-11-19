@@ -36,7 +36,7 @@ These are inspection evidence, not defaults to override a future identity mismat
   and refusing dirty work. Describes authorized manual recovery without replacing the original root inode.
 - candidate/tests/test_local_upgrade.py: isolated root harness, PostgreSQL running as nobody, synthetic
   credentials, fresh loopback ports, full migrated application schema and active V1.
-- .github/workflows/local-upgrade-verification.yml: separate CI check, exactly 16 tests, zero skips.
+- .github/workflows/local-upgrade-verification.yml: separate CI check, exactly 17 tests, zero skips.
   Existing workflows and pinned collections were not weakened.
 
 The migration target is exactly 0026_account_provider_attempts, not a future head. Every existing
@@ -48,7 +48,7 @@ cluster, roles/WAL, credentials, registration/file-access keys and other filesys
 
 ## Verification
 
-Local Linux run: 16 passed, no skips, real disposable PostgreSQL 16.
+Local Linux run: 17 passed, no skips, real disposable PostgreSQL 16.
 Servers ran as uid 65534; the owner's service identity is separate. Only test clusters were stopped.
 
 Coverage includes:
@@ -64,6 +64,11 @@ Coverage includes:
 6. Live apply helper exercised ONLY against a disposable fixture/fresh port, preserving data and files,
    with unchanged activation and labelled synthetic configuration.
 7. Wrong destination/release/authorization refused; integrity checks execute under Python -O.
+8. Ambient local-root or PostgreSQL-bin settings cannot redirect the verified stop destination.
+
+An additional disposable-copy probe executed the real previous-version (afa247a) V1 startup gate,
+usage-model reads and file reads before upgrade and after restoration, plus the current-version gate
+after migration: passed. This is stronger than schema equality and does not claim full browser acceptance.
 
 CI runs on the development PR; inspect the exact checked-out SHA in Actions logs. The final implementation
 report supplies the run links and results. Successful CI does not establish commercial launch readiness.
