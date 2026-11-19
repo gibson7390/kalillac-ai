@@ -491,7 +491,7 @@ jobs:
       # PostgreSQL; E3 the whole lifecycle through the routes: 1 real PostgreSQL;
       # the Premium journey through the real application: 1 real PostgreSQL;
       # provisioning a new deployment: 18 real PostgreSQL; the staging files: 9
-      # unit; the staging preflight: 34 unit; usage-record cleanup: 9 real PostgreSQL; Spaces under V1 authorization: 4 real PostgreSQL; billing, usage and the daily quota under
+      # unit; the staging preflight: 34 unit; usage-record cleanup: 9 real PostgreSQL; local staging's provider simulation: 24 unit; Spaces under V1 authorization: 4 real PostgreSQL; billing, usage and the daily quota under
       # V1 authorization: 10 real PostgreSQL; the owner report as the runtime login: 1 real
       # PostgreSQL; Space sends of a Premium and a Free customer: 1 real PostgreSQL;
       # Premium files and images from purchase to cancellation: 1 real PostgreSQL; file and image
@@ -533,12 +533,16 @@ jobs:
           tests/test_staging_preflight.py
           tests/test_data_lifecycle_postgres.py
           tests/test_account_attempts_postgres.py
+          tests/test_local_staging.py
+          tests/test_local_reset.py
+          tests/test_independent_final_f1.py
           tests/test_spaces_v1_postgres.py
           tests/test_v1_billing_usage_quota_postgres.py
           tests/test_owner_report_postgres.py
           tests/test_v1_premium_spaces_postgres.py
           tests/test_v1_premium_files_postgres.py
           tests/test_v1_file_allowance_postgres.py
+          --deselect tests/test_local_reset.py::test_as_root_an_ancestor_another_user_owns_is_refused_and_its_exchange_deletes_nothing
           -q -ra -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/v1-02d-authority.xml"
 
@@ -550,7 +554,22 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 657, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 747, "skipped": 0, "failures": 0, "errors": 0}
+          PY
+
+      # Local staging's reset and stop as root, as the owner runs them: among them Codex's F1 scenario, an
+      # ancestor owned by another user exchanged immediately before the delete. Disposable fixtures only.
+      - name: Run the local staging reset and stop tests as root
+        run: |
+          echo "kernel $(uname -r)"
+          sudo "$(command -v python)" -B -m pytest candidate/tests/test_local_reset.py candidate/tests/test_independent_final_f1.py --deselect candidate/tests/test_local_reset.py::test_pg_running_reads_a_real_pg_ctl_status -q -ra -p no:cacheprovider --junitxml="$RUNNER_TEMP/local-reset-root.xml"
+          python - "$RUNNER_TEMP/local-reset-root.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 66, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       # The staging runbook's own commands (deploy/staging/README.md, steps 4, 7 and 8), as root on the
