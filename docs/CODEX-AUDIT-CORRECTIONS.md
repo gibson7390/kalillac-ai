@@ -371,7 +371,7 @@ and metrics, and shared typed facts feeding tables, metrics, charts and prose.
 
 Codex's independent audit of Kalillac Premium confirmed six findings, besides the account-erasure and
 retention launch gaps. Each original failure was reproduced before the correction and is kept as a test.
-**None is marked resolved here:** each awaits Codex's independent verification at the SHA below.
+Codex's first verification (of `c6fcaeb`): F3, F5 and F6 verified; F1 and F4 still open; F2 partially verified. The second-round corrections are below.
 
 | Finding | Correction (branch, SHA) | Original failure reproduced | Corrected behaviour and regression coverage |
 |---|---|---|---|
@@ -398,6 +398,34 @@ retention launch gaps. Each original failure was reproduced before the correctio
 4. F4: files already stored before the end stay in the account (account files are not the conversation's). Is that the right boundary?
 5. F6: a downgraded account keeps download access to images it uploaded. Can that path be used for any analysis without the tier?
 
+
+### Second round: Codex's verification of `c6fcaeb` (2026-11-18)
+
+Codex verified F3, F5 and F6 and found four residual defects: two in F1, one in F2 and one in F4. Each was
+reproduced with Codex's own probe before correcting it. The probe and the new tests fail on the previous code
+and pass on the correction. **None is marked resolved here;** F1, F2 and F4 await Codex's second verification.
+F3, F5 and F6 were not reopened: their code is unchanged, and their suites were rerun (below).
+
+| Residual defect | Correction (branch, full SHA) | Original failure, reproduced | Corrected behaviour | Regression tests |
+|---|---|---|---|---|
+| F1-A. Exchanging an ancestor redirects the reset | `fix/local-reset-ownership` `8ae23d51c0c7f408fb5cdd10134da26b4f7b7bc7` | Codex's probe on `afa247a`, as root in WSL: an ancestor owned by uid 65534, the parent exchanged immediately before `rmtree`: `{"accepted_untrusted_ancestor": true, "exit": 0, "unrelated_data_survives": false}` | Every directory from `/` to the parent is opened component by component with `O_NOFOLLOW` and checked as it is opened: owned by root and writable by no one else; a sticky directory such as `/tmp` is accepted above the parent. `reset` pins the parent by descriptor, checks the marker through it and deletes with `shutil.rmtree(name, dir_fd=parent)`. After correction the probe gives `{"accepted_untrusted_ancestor": false, "exit": 2, "unrelated_data_survives": true}` | `test_local_reset.py`: ancestor writable by others refused, sticky accepted; exchange immediately before the delete (the unrelated data survives and the checked root is the one deleted); exchange before the pinned check (refused, both intact); root-only: Codex's exact scenario (a new `sudo` CI step) |
+| F1-B. `stop` signals another checkout's process | same | Codex's probe on `afa247a`: another checkout's `tools/local_staging_web.py` was classified as ours (`true`) and killed (`-15`) | `start` records each launch in `run/NAME.json` (mode 0600): PID, start time, boot ID, a random token placed in the process's environment, this checkout and the script's absolute path. A process counts as ours only if it is the service user's, leads its group, has this checkout as its working directory, runs this checkout's script and matches every field. It is signalled through a pidfd taken before the check. A PID file from an older `start` is honoured only for this checkout's script, started within the two minutes before the file was written. After correction the probe gives `{"unrelated_checkout_classified_ours": false, "bystander_returncode": null}` | another checkout (relative and absolute script, forged record without the token); reused PID (start time, boot), wrong or missing token, another user; a legacy PID file older than its process; genuine `stop` of recorded and legacy processes; the original bystander test kept |
+| F2. Interrupted uploads escape the quota | `fix/premium-audit-corrections` `68730da364f18014d04c73d1d03d7f11f8a2b99d` | Codex's probe on `c6fcaeb`: 12 bytes stored under a 4-byte, one-file quota, 0 records, all 3 blobs kept by the cleanup. The new test on `c6fcaeb`'s store: 8 bytes after two interrupted uploads; 8 concurrent processes stored 15 bytes under a 10-byte quota | Quotas count what is physically in the owner's folder: all data, with or without a record, upload temporaries and records. `put`/`delete` hold an owner lock that spans processes (`flock` on the owner's folder, POSIX). While it is held, abandoned data and temporaries in that owner's folder are reclaimed. Failed writes remove their temporary; a failed record write removes its data. After correction the probe stores 4 bytes on Linux and on Windows | `test_files_physical_quota.py` (9): processes killed after and before the rename, then a restart; 8 concurrent processes and 8 threads; an upload in progress in another process (waited for, never reclaimed); injected record and data write failures; another owner's files and unknown entries untouched |
+| F4. A detached file worker escapes End & erase | `fix/premium-audit-corrections` `7d2ed5bdeb817763b252a848a4e564f86d99b4eb` | Codex's test on `c6fcaeb`: `registered_after_disconnect: 0`, `active_requests: 0`, `cancellation: none`, 2 model calls, 1 file after the end; the assistant slot was also freed while the thread ran | The worker runs on an executor future (in the request's context) behind `asyncio.shield`. On cancellation it takes its own session claim through `hold()`, and a done callback releases that claim and the assistant slot when the thread ends. Codex's test now passes unchanged: registered 1, active 1, cancellation requested, 1 model call, 0 files | `test_files_detached_worker.py` (3): Codex's sequence through the real app (registration drained afterwards, slot returned, no revival, 409); the same without an end (the worker finishes, its file stays in the account); the direct `/api/files/assist` route keeps its slot until its worker ends. All three fail on `c6fcaeb` |
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 (A, B) | yes | `subscription-foundation-verification` `44449773539` success on `8ae23d5`: main job 705 tests, 0 skipped (the 38 reset tests less the root-only one); new root step 38 tests, 0 skipped | pending (Codex) | no (pending) |
+| F2 | yes | on `7d2ed5b` (contains `68730da`): file generation `44451748532` (1,105 tests, 0 skipped), subscription `44451753992` (suites and PostgreSQL job), Spaces `44451758997`, provider ceilings `44451764464`, frontend `44451769309`, safety `44451773662`, anonymous allowance `44451778632`: all success | pending (Codex) | no (pending) |
+| F4 | yes | the same runs on `7d2ed5b` | pending (Codex) | no (pending) |
+| F3, F5, F6 (verified by Codex on `c6fcaeb`; not reopened) | unchanged | the same runs on `7d2ed5b`, plus real PostgreSQL locally (13 passed: `test_v1_premium_files_postgres.py`, `test_v1_file_allowance_postgres.py`, `test_account_attempts_postgres.py`, `test_v1_premium_journey_postgres.py`) and the F5 test in `test_files_session_and_modes.py` | verified (Codex, `c6fcaeb`) | no (pending) |
+
+**Known limitations (deliberate, for Codex to judge):**
+1. F1-B: between the pidfd liveness check and `killpg` the group leader could exit and its PID be reused as a new group leader. The window is microseconds and needs a PID wraparound. The leader itself is always signalled correctly.
+2. F1-B: a process started by the old `start` (a PID file, no record) is accepted within a two-minute start-time window and only for this checkout's script, so the running local install can still be stopped after the upgrade.
+3. F2: without a lock that spans processes (Windows, not a deployment target), abandoned data is counted but not reclaimed at the next upload. Uploads are refused until the hourly cleanup removes data older than an hour, so the quota still holds.
+4. F2: on POSIX an abandoned blob counts against its owner until that owner's next upload, or until the cleanup after an hour.
+5. F4: ending the session stops the worker at its next model call or tool. A model call already in flight completes at the provider and is charged, as for ordinary chat. Files stored before the end stay in the account.
 
 ## Reproducing locally
 

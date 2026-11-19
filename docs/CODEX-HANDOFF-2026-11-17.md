@@ -326,6 +326,30 @@ Worth an independent look:
 Also on this branch: `docs/DATA-LIFECYCLE.md` corrected (expired files were deleted at startup, not never) and
 the decisions that complete account erasure (E-1 to E-8).
 
+## 17. Second-round corrections after your verification of `c6fcaeb`: verification requested
+
+You verified F3, F5 and F6. These correct the four residual defects you reproduced. Details, the probe
+results before and after, the regression tests, CI and known limitations are in `docs/CODEX-AUDIT-CORRECTIONS.md`,
+section "Second round". Nothing is marked resolved.
+
+| Defect | Branch | Full SHA | Your reproduction, rerun |
+|---|---|---|---|
+| F1-A ancestor exchange, F1-B process identity | `fix/local-reset-ownership` (not merged into `feat/local-staging`; the running local install is untouched) | `8ae23d51c0c7f408fb5cdd10134da26b4f7b7bc7` | Your probe, run as root in WSL: on `afa247a` the unrelated data was deleted and the other checkout's process killed (-15). On `8ae23d5` the reset is refused (exit 2), the data survives, and the process is not classified as ours or signalled |
+| F2 physical quota | `fix/premium-audit-corrections` | `68730da364f18014d04c73d1d03d7f11f8a2b99d` | Your probe: 12 bytes before, 4 after (Linux and Windows) |
+| F4 detached worker | same | `7d2ed5bdeb817763b252a848a4e564f86d99b4eb` (tip of the branch) | Your `test_disconnected_file_worker_still_belongs_to_the_session`, unchanged, passes: registered 1, active 1, cancellation requested, 1 model call, 0 files |
+
+Worth an independent look:
+* F1: `_open_parent` trusts uid 0 and `ROOT_OWNER` only, and accepts a sticky ancestor (not the parent).
+  `reset` then deletes with `shutil.rmtree(name, dir_fd=parent)`, which needs Python 3.11 or later; the
+  command refuses on older versions.
+* F1: the pidfd liveness check before `killpg` (limitation 1), and the legacy PID-file window (limitation 2).
+* F2: reclaiming relies on every writer of an owner folder holding its `flock`. `FileStore.put` is the only
+  writer. The retention cleanup does not take the owner lock: it deletes only expired files, and data or
+  temporaries older than an hour.
+* F4: `asyncio.shield` and `run_in_executor` replace `run_in_threadpool` for the assistant thread, with
+  `contextvars.copy_context()` so that the request budget and account context still reach it. The assistant
+  slot is now held until the thread ends, also on `/api/files/assist`.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
