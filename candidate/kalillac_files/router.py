@@ -25,7 +25,9 @@ errors are stable codes.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
+import contextvars
 from dataclasses import dataclass
 import json
 import secrets
@@ -205,12 +207,19 @@ class FileService:
             return None, _error(401, "not_authenticated")
         return found, None
 
-    async def assist(self, account, message, history, file_ids, confirmations=(), *, scope=None, stopped=None):
+    async def assist(self, account, message, history, file_ids, confirmations=(), *, scope=None, stopped=None,
+                     hold=None):
         """Run the file assistant: ({"reply", "files"[, "confirmations"]}, None) or (None, the refusal
         response). confirmations: exact-edit confirmation ids the customer confirmed in the product.
         scope(): a context manager entered in the worker thread inside request_scope (the request's
         reasoning mode and its chat session's cancellation). stopped(): True once the request's chat
-        session has ended; the assistant then does nothing more."""
+        session has ended; the assistant then does nothing more.
+
+        The worker thread cannot be stopped from outside, so it owns what it uses for as long as it really
+        runs: if the request is cancelled (the client went away) while it runs, this returns at once, but
+        the assistant slot is released only when the thread finishes, and hold() (the caller's claim, such
+        as the chat session's registration) is taken before returning and its release (what hold() returns)
+        called then too. End & erase therefore still finds, and stops, a worker whose request is gone."""
         from .assistant import AssistantError, AssistantStopped, FileRequest, run_file_assistant
         for file_id in file_ids:
             try:
@@ -219,6 +228,7 @@ class FileService:
                 return None, _error(404, "file_not_found")
         if not self.assists.acquire(blocking=False):
             return None, _error(503, "busy")
+        detached = False
         try:
             file_request = FileRequest(account.owner, self.store, tuple(dict.fromkeys(file_ids)),
                                        run_generate=self.worker.run_generate, run_outline=self.worker.run_outline,
@@ -228,7 +238,23 @@ class FileService:
             def run():
                 with self.request_scope(account), (scope or nullcontext)():
                     return run_file_assistant(message, history, file_request, self.call_model)
-            result = await run_in_threadpool(run)
+            # In this request's context (its budget, its account), on a future that cancelling the
+            # request cannot cancel: the thread runs to its end either way.
+            worker = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, run)
+            try:
+                result = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                release = hold() if hold is not None else None
+                detached = True
+
+                def finished(future, release=release):
+                    if not future.cancelled():
+                        future.exception()             # Retrieved: nothing is reported for a detached worker.
+                    self.assists.release()
+                    if release is not None:
+                        release()
+                worker.add_done_callback(finished)
+                raise
         except AssistantStopped:
             return None, _error(499, "request_cancelled")
         except AssistantError as failed:
@@ -240,7 +266,8 @@ class FileService:
             print(f"WARN: FILE_ASSISTANT_FAILED {type(failed).__name__}")
             return None, _error(502, "file_assistant_unavailable")
         finally:
-            self.assists.release()
+            if not detached:
+                self.assists.release()
         content = {"reply": result.text, "files": [record.public() for record in result.files]}
         if result.confirmations:
             content["confirmations"] = list(result.confirmations)

@@ -15215,8 +15215,10 @@ def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_co
         thread. A request that is handled here is registered as work of its chat session (session.work,
         released and checked by the chat route as for any chat): End & erase marks it ended, cancels its
         request budget, the assistant stops before its next model call or tool, and the late result is
-        replaced by session_ended. Files already stored stay in the account (they are the account's, not
-        the conversation's)."""
+        replaced by session_ended. If the request itself is cancelled while the assistant runs, the worker
+        keeps its own claim on the session until its thread ends (hold), so End & erase still finds and
+        stops it. Files already stored stay in the account (they are the account's, not the
+        conversation's)."""
         attached = req.file_ids if req.file_ids is not None else []
         if type(attached) is not list:
             return JSONResponse(status_code=422, content={"error": "invalid_request"})
@@ -15257,8 +15259,12 @@ def _build_file_chat_handoff(service, wants_file, valid_assist_request, valid_co
             return refusal
         if work.ended:
             return _session_ended_response()
+        def hold():
+            """The worker outlives a cancelled request: it keeps its own claim on the session until it ends."""
+            _hold_session_work(work)
+            return lambda: _release_session_work(work)
         content, refusal = await service.assist(account, req.message, turns, attached, confirmations,
-                                                scope=scope, stopped=lambda: work.ended)
+                                                scope=scope, stopped=lambda: work.ended, hold=hold)
         if refusal is not None:
             return refusal
         reply = {"reply": content["reply"], "session_id": session_id, "files": content["files"]}
