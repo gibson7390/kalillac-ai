@@ -373,22 +373,82 @@ def _inside(path, prefix, payload):
     return Path(payload) / path[len(prefix) + 1:]
 
 
-def runtime_access(payload, installed_root, uid, gid):
-    """Everything the application reads at startup, readable as the service identity, inside the backup.
+# What the application's startup loaders read, derived from its configuration (Codex U3-R1). Registration
+# (kalillac_accounts.registration_startup.bootstrap, when KALILLAC_ACCOUNT_REGISTRATION_V2_ENABLED) reads four
+# protected files through registration_files.read_protected, the activation's ".evidence.json" companion among
+# them, each with its own size ceiling. The database and billing loaders read CREDENTIALS_DIRECTORY files.
+REGISTRATION_FILES = (("KALILLAC_ACCOUNT_REGISTRATION_KEYRING_FILE", "", 16384),
+                      ("KALILLAC_ACCOUNT_REGISTRATION_ACTIVATION_FILE", "", 8192),
+                      ("KALILLAC_ACCOUNT_REGISTRATION_ACTIVATION_FILE", ".evidence.json", 65536),
+                      ("KALILLAC_ACCOUNT_REGISTRATION_DATABASE_CREDENTIAL_FILE", "", 8192))
+_TRUE = {"1", "true", "yes", "on"}            # kalillac_db.config, kalillac_billing.config, registration_startup.
+_ACL = ("system.posix_acl_access", "system.posix_acl_default")
 
-    Every *_FILE setting (deployment.env: registration keyring, activation and database credential; settings.env),
-    every file of credentials/ (CREDENTIALS_DIRECTORY: database password, Stripe test secrets) and the writable
-    state folders. Contents are compared with the manifest, never shown. Returns counts."""
+
+def startup_environment(payload):
+    """The settings the application starts with: deployment.env, then settings.env (local_staging.service_env)."""
     payload = Path(payload)
+    return {**env_file(payload / "deployment/deployment.env"), **env_file(payload / "settings.env")}
+
+
+def _protected_policy(path, top, gid, ceiling, *, above_top=False):
+    """registration_files.read_protected's rules, checked as root: the file root's, in the service's group,
+    exactly 0440, one link, 0 < size <= ceiling, no POSIX ACL; every directory from `top` down to it root's,
+    in group 0 or the service's, writable by no one else, no ACL (and above `top` too for the live root; a
+    rehearsal copy's scratch ancestors are not the installation's)."""
+    st = os.lstat(path)
+    require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and st.st_gid == gid and stat.S_IMODE(st.st_mode) == 0o440
+            and st.st_nlink == 1 and 0 < st.st_size <= ceiling and not set(os.listxattr(path, follow_symlinks=False))
+            & set(_ACL), "a protected registration file does not meet its loader's requirements")
+    top = Path(top)
+    directories = [d for d in Path(path).parents if d == top or top in d.parents]
+    if above_top:
+        directories += list(top.parents)
+    for directory in directories:
+        d = os.lstat(directory)
+        require(stat.S_ISDIR(d.st_mode) and d.st_uid == 0 and d.st_gid in (0, gid) and not stat.S_IMODE(d.st_mode) & 0o7022
+                and not set(os.listxattr(directory, follow_symlinks=False)) & set(_ACL),
+                "a folder above a protected registration file does not meet its loader's requirements")
+
+
+def runtime_access(payload, installed_root, uid, gid, *, live=False):
+    """Everything the application reads at startup, present, inside the installation (and so its backup),
+    meeting its loader's rules, and readable as the service identity. Contents are compared with root's own
+    hash, never shown. Returns counts.
+
+    * every *_FILE setting;
+    * with registration enabled, all four protected registration files, the activation's evidence companion
+      included, under read_protected's rules;
+    * with the database enabled, credentials/kalillac_db_password; with billing enabled, the two Stripe
+      credentials; and every file in credentials/;
+    * the state folders the application writes."""
+    payload = Path(payload)
+    env = startup_environment(payload)
     paths = []
-    for name in ("deployment/deployment.env", "settings.env"):
-        for key, value in env_file(payload / name).items():
-            if key.endswith("_FILE") and value:
-                paths.append(_inside(value, installed_root, payload))
+    for key, value in env.items():
+        if key.endswith("_FILE") and value:
+            paths.append(_inside(value, installed_root, payload))
+    registration = []
+    if env.get("KALILLAC_ACCOUNT_REGISTRATION_V2_ENABLED", "").strip().lower() in _TRUE:
+        for key, suffix, ceiling in REGISTRATION_FILES:
+            require(env.get(key), "registration is enabled but a required protected file is not configured")
+            path = _inside(env[key] + suffix, installed_root, payload)
+            require(os.path.lexists(path), "a required protected registration file is missing")
+            _protected_policy(path, payload, gid, ceiling, above_top=live)
+            registration.append(path)
     credentials = payload / "credentials"
+    required = []
+    if env.get("KALILLAC_DB_ENABLED", "").strip().lower() in _TRUE:
+        required.append("kalillac_db_password")
+    if env.get("KALILLAC_BILLING_ENABLED", "").strip().lower() in _TRUE:
+        required += ["stripe_secret_key", "stripe_webhook_secret"]
+    for name in required:
+        require((credentials / name).is_file() and (credentials / name).stat().st_size > 0,
+                "a credential the application requires at startup is missing")
     listing = [credentials] if credentials.is_dir() else []
     if credentials.is_dir():
         paths += sorted(p for p in credentials.iterdir() if p.is_file())
+    paths = list(dict.fromkeys([*paths, *registration]))
     for path in paths:
         require(path.is_file() and not path.is_symlink(), "a configured runtime file is missing")
     writable = [payload / d for d in ("state", "state/files", "state/locks", "state/outbox") if (payload / d).is_dir()]

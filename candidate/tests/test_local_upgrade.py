@@ -1,5 +1,6 @@
 """Local upgrade: real disposable PostgreSQL and filesystem copies, never the installed root."""
 from __future__ import annotations
+import contextlib
 import hashlib
 import json
 import os
@@ -784,7 +785,8 @@ def test_restore_after_a_failed_upgrade_into_the_same_root_and_start_the_restore
         assert not os.path.lexists(failed)
 
         restored = live_tool.restore_install(p.root, p.backup, p.checksum, failed, p.bindir, SERVICE, SERVICE)
-        assert restored == {"restored": True, "failed_state": str(failed), "runtime": result["runtime"]}
+        assert restored == {"restored": True, "failed_state": str(failed), "runtime": result["runtime"],
+                            "journal": str(failed.with_name(failed.name + live_tool.JOURNAL))}
         # The same root folder (the F1 marker names its inode), exactly the backup's contents and permissions.
         assert (p.root.stat().st_dev, p.root.stat().st_ino) == identity
         manifest = u.validate_backup(p.backup, p.checksum)
@@ -827,3 +829,473 @@ def test_new_refusals_survive_python_optimization(tmp_path):
               "print(','.join(out))")
     result = subprocess.run([sys.executable, "-O", "-c", script], capture_output=True, text=True)
     assert result.returncode == 0 and result.stdout.strip() == "refused,refused", result.stderr[-2000:]
+
+
+# --- Codex's verification of 93ac509: R1, R2, U3-R1 and U4-R1 as permanent regressions -----------------------
+
+import errno  # noqa: E402
+
+import local_staging  # noqa: E402
+
+
+# U3-R1: registration's protected files, its activation evidence companion included, under the loader's rules.
+
+REGISTRATION = (("KALILLAC_ACCOUNT_REGISTRATION_ACTIVATION_FILE", "activation.json"),
+                ("KALILLAC_ACCOUNT_REGISTRATION_DATABASE_CREDENTIAL_FILE", "credential.json"))
+
+
+def protected(path, content="{}\n", owner=(0, SERVICE), mode=0o440):
+    path.write_text(content)
+    os.chown(path, *owner)
+    os.chmod(path, mode)
+    return path
+
+
+@pytest.fixture
+def registration_root(runtime_root):
+    root = runtime_root
+    folder = root / "deployment/protected"
+    with (root / "settings.env").open("a") as stream:
+        stream.write("KALILLAC_ACCOUNT_REGISTRATION_V2_ENABLED=true\n")
+    with (root / "deployment/deployment.env").open("a") as stream:
+        for key, name in REGISTRATION:
+            stream.write(f"{key}={protected(folder / name)}\n")
+    protected(folder / "activation.json.evidence.json")
+    return root
+
+
+def test_u3r1_the_complete_registration_set_passes(registration_root):
+    # credentials/kalillac_db_password, keyring, activation, its evidence companion, the database credential.
+    assert u.runtime_access(registration_root, registration_root, SERVICE, SERVICE)["runtime_files"] == 5
+
+
+@pytest.mark.parametrize("damage", ["missing", "root-group", "mode-0640", "service-owned", "folder-closed", "symlink",
+                                    "credential-unset", "empty"])
+def test_u3r1_an_evidence_companion_or_registration_file_the_loader_would_refuse_is_refused(registration_root, damage):
+    root = registration_root
+    folder = root / "deployment/protected"
+    evidence = folder / "activation.json.evidence.json"
+    if damage == "missing":
+        evidence.unlink()
+    elif damage == "root-group":
+        os.chown(evidence, 0, 0)                                # Root can read; the service cannot.
+        assert not service_can_read(evidence)
+    elif damage == "mode-0640":
+        os.chmod(evidence, 0o640)                               # Readable, but not the loader's exact 0440.
+    elif damage == "service-owned":
+        os.chown(evidence, SERVICE, SERVICE)                    # Readable, but the loader requires root's.
+    elif damage == "folder-closed":
+        os.chmod(folder, 0o700)                                 # The service cannot traverse to any of them.
+    elif damage == "symlink":
+        evidence.unlink()
+        evidence.symlink_to(folder / "activation.json")
+    elif damage == "credential-unset":
+        text_ = (root / "deployment/deployment.env").read_text()
+        (root / "deployment/deployment.env").write_text(
+            "".join(line + "\n" for line in text_.splitlines() if "DATABASE_CREDENTIAL_FILE" not in line))
+    else:
+        protected(evidence, "")
+    with pytest.raises(u.Refused):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+@pytest.mark.parametrize("feature,name", [("KALILLAC_DB_ENABLED", "kalillac_db_password"),
+                                          ("KALILLAC_BILLING_ENABLED", "stripe_secret_key")])
+def test_u3r1_a_credential_an_enabled_feature_needs_at_startup_must_exist(runtime_root, feature, name):
+    root = runtime_root
+    with (root / "settings.env").open("a") as stream:
+        stream.write(f"{feature}=true\n")
+    if (root / "credentials" / name).exists():
+        (root / "credentials" / name).unlink()
+    with pytest.raises(u.Refused, match="credential"):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+def test_u3r1_a_rehearsal_without_the_evidence_companion_issues_no_receipt(prepared, pg, tmp_path):
+    """Codex's reproduction: registration enabled, the activation evidence companion missing. The complete
+    PostgreSQL rehearsal now refuses, and no receipt exists."""
+    p = prepared
+    folder = p.root / "deployment/protected"
+    folder.mkdir()
+    keyring = protected(folder / "keyring")
+    with (p.root / "settings.env").open("a") as stream:
+        stream.write("KALILLAC_ACCOUNT_REGISTRATION_V2_ENABLED=true\n")
+    with (p.root / "deployment/deployment.env").open("a") as stream:
+        stream.write(f"KALILLAC_ACCOUNT_REGISTRATION_KEYRING_FILE={keyring}\n")
+        for key, name in REGISTRATION:
+            stream.write(f"{key}={protected(folder / name)}\n")
+    backup = pg.base / ("u3r1-" + uuid.uuid4().hex[:6])
+    pg.cluster.stop()
+    try:
+        checksum = live_tool.backup_install(p.root, backup, "a" * 40, p.bindir, SERVICE, SERVICE)
+    finally:
+        pg.cluster.start(pg.socket, pg.port)
+    receipt = tmp_path / "receipt.json"
+    with pytest.raises(u.Refused, match="registration"):
+        rehearsal.rehearse(backup, checksum, p.bindir, receipt)
+    assert not receipt.exists()
+    shutil.rmtree(backup)
+
+
+# U4-R1: an original edited in place after staging is never overwritten.
+
+@pytest.fixture
+def staged_settings(tmp_path):
+    target = tmp_path / "settings.env"
+    target.write_text("KALILLAC_RELEASE_SHA=" + "a" * 40 + "\nOTHER=original\n")
+    os.chmod(target, 0o600)
+    return target, live_tool.stage_settings(target, live_tool.SETTINGS_ADDITION)
+
+
+@pytest.mark.parametrize("change", ["same-size-edit", "longer-edit", "touch", "chmod", "xattr"])
+def test_u4r1_an_original_changed_in_place_after_staging_is_kept_and_not_replaced(staged_settings, change):
+    target, staged = staged_settings
+    inode = target.stat().st_ino
+    if change == "same-size-edit":
+        target.write_text("KALILLAC_RELEASE_SHA=" + "a" * 40 + "\nOTHER=operator\n")
+    elif change == "longer-edit":
+        with target.open("a") as stream:
+            stream.write("ADDED_BY_OPERATOR=1\n")
+    elif change == "touch":
+        os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1_000_000_000))
+    elif change == "chmod":
+        os.chmod(target, 0o640)
+    else:
+        os.setxattr(target, "user.kalillac-test", b"1")
+    edited = (target.read_bytes(), stat.S_IMODE(target.stat().st_mode))
+    assert target.stat().st_ino == inode                              # The same file, changed in place.
+    with pytest.raises(u.Refused, match="changed since staging"):
+        live_tool.commit_settings(staged)
+    assert (target.read_bytes(), stat.S_IMODE(target.stat().st_mode)) == edited   # The operator's change kept.
+    assert Path(staged.path).exists()                                 # The staged file kept for review.
+
+
+def test_u4r1_an_unchanged_original_still_gets_exactly_the_three_additions(staged_settings):
+    target, staged = staged_settings
+    original = target.read_bytes()
+    live_tool.commit_settings(staged)
+    assert target.read_bytes() == original + live_tool.SETTINGS_ADDITION.encode()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert u.env_file(target)["KALILLAC_RELEASE_SHA"] == "a" * 40
+
+
+def test_u4r1_an_edit_during_the_migration_is_kept_and_the_apply_reports_it(prepared, pg, tmp_path, monkeypatch):
+    """The settings are edited in place while the migration runs: the migration completes, the edited settings
+    are left exactly as edited, the staged file is kept, and apply fails with that state named."""
+    p = prepared
+    receipt = tmp_path / "receipt.json"
+    result = rehearsal.rehearse(p.backup, p.checksum, p.bindir, receipt)
+    path = p.root / "settings.env"
+    real_migrate = live_tool.migrate
+
+    def migrate_then_edit(*args, **kwargs):
+        real_migrate(*args, **kwargs)
+        with path.open("a") as stream:
+            stream.write("OPERATOR_EDIT=1\n")
+    monkeypatch.setattr(live_tool, "migrate", migrate_then_edit)
+    pg.cluster.stop()
+    try:
+        with pytest.raises(u.Refused, match="changed since staging"):
+            live_tool.apply_upgrade(p.root, p.backup, p.checksum, receipt, u.digest(result), "a" * 40,
+                                    p.bindir, SERVICE, SERVICE, u.RELEASE, port=rehearsal.free_port())
+    finally:
+        pg.cluster.start(pg.socket, pg.port)
+    settings = path.read_text()
+    assert "OPERATOR_EDIT=1" in settings and "KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE" not in settings
+    assert (p.root / "settings.env.upgrade-new").exists()
+    (p.root / "settings.env.upgrade-new").unlink()                    # Fixture teardown expects 0025 again.
+    cluster = u.Cluster(p.root / "pg", p.bindir, SERVICE, SERVICE)
+    port = rehearsal.free_port()
+    pg.cluster.stop()
+    try:
+        cluster.start(p.root / "pgsock", port)
+        admin, migration = u.engines(p.root, port)
+        try:
+            u.same_contents(p.before, u.database_snapshot(admin, project_new=True))   # Migrated, nothing lost.
+        finally:
+            admin.dispose()
+            migration.dispose()
+            cluster.stop()
+    finally:
+        pg.cluster.start(pg.socket, pg.port)
+
+
+# R1: a restore never writes into, or nests with, its own recovery backup; everything is checked before any change.
+
+@pytest.fixture
+def marked_install(prepared, pg):
+    """A correctly marked disposable installation (the F1 marker, real ownership checks), with a verified cold
+    backup, then changed after it, as a failed upgrade would leave it."""
+    p = prepared
+    parent = pg.base / ("recovery-" + uuid.uuid4().hex[:6])
+    parent.mkdir(mode=0o755)
+    root = local_staging.owned_root(str(parent / "kalillac-local-staging"), create=True)
+    subprocess.run(["cp", "-a", "--", f"{p.root}/.", f"{root}/"], check=True)
+    backup = parent / "backup"
+    pg.cluster.stop()
+    try:
+        checksum = live_tool.backup_install(root, backup, "a" * 40, p.bindir, SERVICE, SERVICE)
+    finally:
+        pg.cluster.start(pg.socket, pg.port)
+    with (root / "settings.env").open("a") as stream:
+        stream.write("WRITTEN_AFTER_THE_BACKUP=1\n")
+    after = root / "state/files/written-after-backup"
+    after.write_text("x")
+    os.chown(after, SERVICE, SERVICE)
+    yield SimpleNamespace(root=root, backup=backup, checksum=checksum, parent=parent, prepared=p,
+                          identity=(root.stat().st_dev, root.stat().st_ino))
+    shutil.rmtree(parent)
+
+
+@contextlib.contextmanager
+def offline(pg):
+    """The conservative service-uid guard sees the source fixture cluster: stop it for the restore."""
+    pg.cluster.stop()
+    try:
+        yield
+    finally:
+        pg.cluster.start(pg.socket, pg.port)
+
+
+def restore_refused(m, pg, failed, match):
+    before = (u.tree_manifest(m.backup), u.tree_manifest(m.root))
+    with offline(pg), pytest.raises(u.Refused, match=match):
+        live_tool.restore_install(m.root, m.backup, m.checksum, failed, m.prepared.bindir, SERVICE, SERVICE)
+    assert (u.tree_manifest(m.backup), u.tree_manifest(m.root)) == before
+    assert not any(os.path.lexists(x) for x in live_tool._evidence_paths(Path(failed)))
+    u.validate_backup(m.backup, m.checksum)
+
+
+def test_r1_codex_overlap_a_failed_state_inside_the_backup_is_refused_before_any_change(marked_install, pg):
+    restore_refused(marked_install, pg, marked_install.backup / "payload/failed-state", "outside the backup")
+
+
+@pytest.mark.parametrize("where", ["backup-top", "payload-deep", "inside-root"])
+def test_r1_nested_failed_states_are_refused_before_any_change(marked_install, pg, where):
+    m = marked_install
+    failed = {"backup-top": m.backup / "failed", "payload-deep": m.backup / "payload/state/failed",
+              "inside-root": m.root / "state/failed"}[where]
+    restore_refused(m, pg, failed, "outside|not trusted")
+
+
+def test_r1_a_symlink_alias_of_the_backup_cannot_hide_the_overlap(marked_install, pg):
+    m = marked_install
+    alias = m.parent / "alias"
+    alias.symlink_to(m.backup / "payload")
+    restore_refused(m, pg, alias / "failed", "symlink")
+
+
+def test_r1_a_bind_mount_alias_of_the_backup_cannot_hide_the_overlap(marked_install, pg):
+    m = marked_install
+    alias = m.parent / "bind-alias"
+    alias.mkdir(mode=0o755)
+    subprocess.run(["mount", "--bind", str(m.backup), str(alias)], check=True)
+    try:
+        restore_refused(m, pg, alias / "payload/failed", "inside the installation or the backup")
+    finally:
+        subprocess.run(["umount", str(alias)], check=True)
+
+
+@pytest.mark.parametrize("collision", ["folder", "manifest", "journal"])
+def test_r1_an_existing_failed_state_or_evidence_destination_is_refused(marked_install, pg, collision):
+    m = marked_install
+    failed = m.parent / "failed"
+    target = {"folder": failed, "manifest": failed.with_name("failed" + live_tool.EVIDENCE),
+              "journal": failed.with_name("failed" + live_tool.JOURNAL)}[collision]
+    target.mkdir() if collision == "folder" else target.write_text("{}")
+    before = (u.tree_manifest(m.backup), u.tree_manifest(m.root))
+    with offline(pg), pytest.raises(u.Refused, match="already exists"):
+        live_tool.restore_install(m.root, m.backup, m.checksum, failed, m.prepared.bindir, SERVICE, SERVICE)
+    assert (u.tree_manifest(m.backup), u.tree_manifest(m.root)) == before
+
+
+def test_r1_a_backup_inside_the_installation_is_refused(marked_install, pg):
+    m = marked_install
+    inner = m.root / "state/backup-copy"
+    subprocess.run(["cp", "-a", "--", str(m.backup), str(inner)], check=True)
+    manifest = u.validate_backup(inner, m.checksum)
+    with pytest.raises(u.Refused, match="overlap"):
+        live_tool.restore_preflight(m.root, inner, m.parent / "failed", manifest)
+    shutil.rmtree(inner)
+
+
+def test_r1_not_enough_space_is_refused_before_any_change(marked_install, pg, monkeypatch):
+    m = marked_install
+    real = os.statvfs
+
+    def small(path):
+        v = real(path)
+        return os.statvfs_result((v.f_bsize, v.f_frsize, v.f_blocks, 1, 1, v.f_files, v.f_ffree, v.f_favail,
+                                  v.f_flag, v.f_namemax))
+    monkeypatch.setattr(live_tool.os, "statvfs", small)
+    restore_refused(m, pg, m.parent / "failed", "free space")
+
+
+# R2: an interrupted restore is completed by resume-restore, never by weakening the ordinary gate.
+
+def interrupt(fault, m, kind, after=1):
+    """Install one interruption: the Nth rename of a root entry, the copy before anything is written, a partial
+    copy, or a full disk part-way through the copy."""
+    if kind == "rename":
+        real, moved = os.rename, []
+
+        def rename(source, destination, *a, **k):
+            if Path(source).parent == m.root:
+                if len(moved) >= after - 1:
+                    raise OSError(errno.ENOSPC, "injected interruption while moving")
+                moved.append(source)
+            return real(source, destination, *a, **k)
+        fault.setattr(os, "rename", rename)
+        return
+    real_run = subprocess.run
+
+    def run(command, *a, **k):
+        if command[:3] == ["cp", "-a", "--"] and str(command[-1]) == f"{m.root}/":
+            if kind in ("partial", "enospc"):
+                source = Path(command[-2].rstrip("."))
+                for name in sorted(os.listdir(source))[:3]:
+                    real_run(["cp", "-a", "--", str(source / name), f"{m.root}/"], check=True)
+                (m.root / "partial-copy").write_text("interrupted")
+            raise subprocess.CalledProcessError(1, ["cp"], stderr=b"No space left on device"
+                                                if kind == "enospc" else b"injected interruption while copying")
+        return real_run(command, *a, **k)
+    fault.setattr(subprocess, "run", run)
+
+
+def interrupted(m, pg, monkeypatch, kind, failed, *, journal=None, after=1):
+    with offline(pg), monkeypatch.context() as fault, pytest.raises((OSError, subprocess.CalledProcessError)):
+        interrupt(fault, m, kind, after)
+        if journal is None:
+            live_tool.restore_install(m.root, m.backup, m.checksum, failed, m.prepared.bindir, SERVICE, SERVICE)
+        else:
+            live_tool.resume_restore(m.root, m.backup, m.checksum, journal, failed, m.prepared.bindir)
+    path = failed.with_name(failed.name + live_tool.JOURNAL)
+    assert json.loads(path.read_text())["phase"].startswith("interrupted-")
+    assert (m.root.stat().st_dev, m.root.stat().st_ino) == m.identity         # The same root folder.
+    u.validate_backup(m.backup, m.checksum)                                  # The backup untouched.
+    return path
+
+
+def cli(m, operation, repository, failed, journal=None):
+    argv = [operation, "--root", str(m.root), "--device", str(m.identity[0]), "--inode", str(m.identity[1]),
+            "--activation-release", "a" * 40, "--checkout", str(repository.main), "--checkout-sha", repository.sha,
+            "--pg-bin", m.prepared.bindir, "--backup", str(m.backup), "--backup-sha256", m.checksum,
+            "--failed-state", str(failed), "--authorize-live-operation"]
+    return live_tool.main(argv + (["--journal", str(journal)] if journal else []))
+
+
+@pytest.mark.parametrize("kind,after", [("rename", 1), ("rename", 3), ("copy", 1), ("partial", 1), ("enospc", 1)])
+def test_r2_each_interruption_leaves_a_resumable_state_with_nothing_lost(marked_install, pg, monkeypatch,
+                                                                         repository, kind, after):
+    m = marked_install
+    names = set(os.listdir(m.root))
+    failed = m.parent / "failed-1"
+    journal = interrupted(m, pg, monkeypatch, kind, failed, after=after)
+    # Every original entry is somewhere: still in the root, or moved into the failed state; none deleted.
+    assert names <= set(os.listdir(m.root)) | set(os.listdir(failed))
+    original = (m.backup / "payload" / local_staging.MARKER).read_bytes()
+    markers = [(w / local_staging.MARKER).read_bytes() for w in (m.root, failed) if (w / local_staging.MARKER).exists()]
+    assert markers and set(markers) == {original}                 # Wherever it is, only the original marker.
+    monkeypatch.setattr(live_tool, "INSTALLED", m.root)
+    if not (m.root / local_staging.MARKER).exists():              # The ordinary gate still refuses an unmarked root.
+        with offline(pg):
+            assert cli(m, "restore", repository, m.parent / "failed-ordinary") == 2
+    with offline(pg):
+        assert cli(m, "resume-restore", repository, m.parent / "failed-2", journal) == 0
+    assert u.tree_manifest(m.root) == u.validate_backup(m.backup, m.checksum)["files"]
+    assert failed.is_dir() and (m.parent / "failed-2").is_dir()   # Every failed state kept.
+
+
+def test_r2_repeated_interruptions_then_resume_restore_completes_and_the_old_release_starts(
+        marked_install, pg, monkeypatch, repository, world):  # noqa: F811
+    """Interrupted at the first rename, then a resume interrupted at a later rename, then one interrupted part-way
+    through the copy, then one with a full disk: each preserved, each resumable. The last resume completes
+    through the CLI. Then the result is checked end to end, against the real database."""
+    m, p = marked_install, marked_install.prepared
+    backup_before = u.tree_manifest(m.backup)
+    journal = interrupted(m, pg, monkeypatch, "rename", m.parent / "failed-1", after=1)
+    journal = interrupted(m, pg, monkeypatch, "rename", m.parent / "failed-2", journal=journal, after=4)
+    journal = interrupted(m, pg, monkeypatch, "partial", m.parent / "failed-3", journal=journal)
+    journal = interrupted(m, pg, monkeypatch, "enospc", m.parent / "failed-4", journal=journal)
+    monkeypatch.setattr(live_tool, "INSTALLED", m.root)
+    with offline(pg):
+        assert cli(m, "resume-restore", repository, m.parent / "failed-5", journal) == 0
+    assert (m.root.stat().st_dev, m.root.stat().st_ino) == m.identity
+    assert u.tree_manifest(m.backup) == backup_before                       # The backup never changed.
+    manifest = u.validate_backup(m.backup, m.checksum)
+    assert u.tree_manifest(m.root) == manifest["files"]                     # Exactly the backed-up installation.
+    assert local_staging.owned_root(str(m.root)) == m.root                  # The F1 marker valid again, unchanged.
+    for n in range(1, 6):                                                    # Every failed state and its evidence.
+        failed = m.parent / f"failed-{n}"
+        assert failed.is_dir() and failed.with_name(failed.name + live_tool.JOURNAL).is_file()
+    assert json.loads((m.parent / ("failed-5" + live_tool.JOURNAL)).read_text())["phase"] == "complete"
+    # The failed upgrade's post-backup writes are preserved exactly once, somewhere among the failed states.
+    failed_states = [m.parent / f"failed-{n}" for n in range(1, 6)]
+    assert sum((f / "settings.env").read_text().count("WRITTEN_AFTER_THE_BACKUP") for f in failed_states
+               if (f / "settings.env").is_file()) == 1
+    assert sum((f / "state/files/written-after-backup").is_file() for f in failed_states) == 1
+    port = rehearsal.free_port()
+    with offline(pg):
+        cluster = u.Cluster(m.root / "pg", p.bindir, SERVICE, SERVICE)
+        cluster.start(m.root / "pgsock", port)
+        try:
+            admin, migration = u.engines(m.root, port)
+            try:
+                u.same_contents(p.before, u.database_snapshot(admin))        # Data and activation as backed up.
+                assert rehearsal.stored_files(m.root, admin, SERVICE, SERVICE)["accessible"] == 1
+                u.runtime_access(m.root, m.root, SERVICE, SERVICE)
+            finally:
+                admin.dispose()
+                migration.dispose()
+            assert old_code_startup(world, port) == {"qualified": True}     # A startup gate, not acceptance.
+        finally:
+            cluster.stop()
+
+
+def test_r2_resume_restore_refuses_another_installation_backup_journal_or_marker(marked_install, pg, monkeypatch):
+    m = marked_install
+    journal = interrupted(m, pg, monkeypatch, "rename", m.parent / "failed-1", after=2)
+    other = local_staging.owned_root(str(m.parent / "kalillac-local-staging-other"), create=True)
+    before = (u.tree_manifest(m.backup), set(os.listdir(m.root)))
+    with offline(pg):
+        with pytest.raises(u.Refused, match="does not name this installation"):
+            live_tool.resume_restore(other, m.backup, m.checksum, journal, m.parent / "f-a", m.prepared.bindir)
+        tampered = json.loads(journal.read_text())
+        tampered["backup_sha256"] = "0" * 64
+        forged = m.parent / ("forged" + live_tool.JOURNAL)
+        u.save_json(forged, tampered)
+        with pytest.raises(u.Refused, match="journal"):
+            live_tool.resume_restore(m.root, m.backup, m.checksum, forged, m.parent / "f-b", m.prepared.bindir)
+        (m.root / local_staging.MARKER).write_text('{"deployment": "someone-else"}')   # A different marker.
+        with pytest.raises(u.Refused, match="marker"):
+            live_tool.resume_restore(m.root, m.backup, m.checksum, journal, m.parent / "f-c", m.prepared.bindir)
+        (m.root / local_staging.MARKER).unlink()
+    assert (u.tree_manifest(m.backup), set(os.listdir(m.root))) == before
+    assert not any(os.path.lexists(m.parent / f) for f in ("f-a", "f-b", "f-c"))
+
+
+def test_round3_refusals_survive_python_optimization(registration_root, tmp_path):
+    """Under python -O: a failed state inside the backup, a settings file edited in place after staging, and a
+    missing evidence companion are still refused (no check is an assert)."""
+    (registration_root / "deployment/protected/activation.json.evidence.json").unlink()
+    base = Path(tempfile.mkdtemp(prefix="ku-optimized-"))
+    os.chmod(base, 0o755)
+    for d in ("root", "backup/payload"):
+        (base / d).mkdir(parents=True)
+    settings = tmp_path / "settings.env"
+    settings.write_text("A=1\n")
+    script = (f"import sys;sys.path[:0]=[{str(Path(u.__file__).parent)!r}]\n"
+              "from pathlib import Path\nimport upgrade_support as u, live_upgrade as l\n"
+              f"b=Path({str(base)!r});s=Path({str(settings)!r});r=Path({str(registration_root)!r});out=[]\n"
+              "staged=l.stage_settings(s, l.SETTINGS_ADDITION)\n"
+              "s.write_text('A=2\\n')\n"
+              "for call in (lambda: l.restore_preflight(b/'root', b/'backup', b/'backup/payload/failed', {'files': {}}),"
+              " lambda: l.commit_settings(staged), lambda: u.runtime_access(r, r, 65534, 65534)):\n"
+              "    try:\n        call(); out.append('ACCEPTED')\n"
+              "    except u.Refused:\n        out.append('refused')\n"
+              "print(','.join(out))")
+    try:
+        result = subprocess.run([sys.executable, "-O", "-c", script], capture_output=True, text=True)
+    finally:
+        shutil.rmtree(base)
+    assert result.returncode == 0 and result.stdout.strip() == "refused,refused,refused", result.stderr[-2000:]

@@ -176,3 +176,74 @@ correct port and `accessible == 0`, where the correction now refuses outright.
 migration, restore or upgrade was run. `release/staging-v1`, production and every worktree are unchanged apart
 from this branch. PR #40 stays in draft.
 
+## Corrections after the verification of 93ac509 (R1, R2, U3-R1, U4-R1): another review requested
+
+Codex verified U1 and U2 at `93ac509`. Its evidence (`tmp/local-upgrade-correction-evidence-yqeyxbmk/`) is preserved
+unchanged. Its test file, unchanged (sha256 prefix `264740dae3246302`), reproduced **7 failed** on a disposable
+`git archive` snapshot of `93ac509`, matching its log. It ran as root in WSL, with `TMPDIR` on disk
+(`/var/tmp`, 921 GB free), a disposable PostgreSQL 16.2 copy and `afa247a` extracted for the startup gate. Nothing
+here is marked verified. U1 and U2 code is unchanged.
+
+| Defect | Correction | Codex's probe after |
+|---|---|---|
+| R1 restore could write into its own backup | `restore_preflight` runs before any change. Paths must be absolute and normal, with no symlink. The failed state, `FAILED.manifest.json` and `FAILED.restore.json` must not exist. It refuses a failed state inside the installation, the backup or an earlier failed state; a backup inside the installation; and an installation inside the backup. It checks this by path, and by device and inode for every folder above the failed state, so a bind-mount alias is caught. It also requires a trusted parent (F1's `_open_parent`), the installation's own mount (from `/proc/self/mountinfo`; a rename cannot cross mounts), and free space and inodes for the backup plus 256 MB | passes: backup valid, nothing created |
+| R2 no way to finish an interrupted restore | A recovery journal (`FAILED.restore.json`, root's, 0600, created exclusively, replaced atomically) records the root's path, device, inode and activation, the backup path and checksum, the failed state's own identity, and the phase. A separate `resume-restore` operation has its own gate (`recovery_destination`): the fixed root, as root, its device and inode, a clean checkout. It does not use `owned_root`, which is unchanged. Its evidence is the backup verified by its recorded checksum (which names this root's path, device and inode); the journal chain (each journal root's own, naming this root, backup and checksum, each recorded failed state still the same folder); and the original marker, found in the root or a recorded failed state and byte-identical to the backup's, with no foreign marker. It requires F1's `checked_path`, nothing running, and the R1 preflight. It moves the partial state into another new failed state and restores into the same inode | the probe reruns `restore`, which still refuses (the F1 gate, by design); the supported route is `resume-restore`, covered below |
+| U3-R1 evidence companion omitted | `runtime_access` derives startup's inventory from `deployment.env` plus `settings.env`. With registration enabled, it needs all four protected files: keyring, activation, `activation + ".evidence.json"` and database credential. Each must be configured, inside the installation, and meet `read_protected`'s rules: root-owned, the service's group, exactly 0440, one link, size within the loader's ceiling, no ACL; every folder from the installation down root's, group 0 or the service's, not group- or world-writable, no ACL; above the root too on the live root. Each must also be readable as the service. With the database enabled, `credentials/kalillac_db_password` must exist; with billing enabled, both Stripe credentials | missing-evidence rehearsal passes: refused, no receipt. `[missing]` and `[root-only]` are refused at their own baseline, which configures no `DATABASE_CREDENTIAL_FILE`; registration startup reads it unconditionally (`read_protected("")` refuses), so that baseline cannot start |
+| U4-R1 in-place edit overwritten | `stage_settings` records the original's fingerprint: SHA-256 of its bytes read through the descriptor, size, mtime_ns, ctime_ns and link count. `commit_settings` reopens the original without following links. It requires the same device, inode, owner, mode, fingerprint and no xattrs; otherwise it refuses, keeping the edited original and the staged file. `apply_upgrade` reports "migrated, settings not replaced" with the staged path. The remaining interval between the check and the rename is covered by the maintenance window's rule (no settings writer), stated in `UPGRADE.md`, not by a claim of atomicity | passes |
+
+**Tests.** `test_local_upgrade.py`: the earlier 85 with their assertions intact, plus 38 new ones, 123 in total;
+the workflow pins 123. Two adjustments to existing tests:
+* the round-2 restore test's expected return dictionary gains the `journal` path;
+* round 2's own nested-path test now accepts the untrusted-parent refusal, which comes before the containment
+  check when the parent is the service's `state/` folder.
+
+`test_local_upgrade_windows.py`: 9, unchanged. Locally, as root in WSL: **132 passed, 0 skipped** (123 + 9).
+The 38 new tests on `93ac509`'s tools: **35 failed, 3 passed**. The 3 are controls that hold on both versions: a
+closed protected folder, a `chmod` after staging, and the unchanged-settings success case.
+
+New regressions:
+* **U3-R1 (13):** the complete registration set passes. A missing, root-group, 0640, service-owned, symlinked,
+  empty or unconfigured file is refused, as is a closed folder, a missing database credential and a missing
+  billing credential. The complete PostgreSQL rehearsal without the companion issues no receipt.
+* **U4-R1 (7):** same-size and longer in-place edits, a `touch`, a `chmod` and an added xattr are all refused,
+  with the edit and the staged file kept. An unchanged original gets exactly the three additions, mode 0600 and
+  the activation unchanged. An edit made during a real migration is kept, apply reports it, and the database is
+  migrated with nothing lost.
+* **R1 (10):** Codex's overlap; the top of the backup, deep in the payload and inside the root; a symlink alias;
+  a bind-mount alias; existing folder, manifest and journal collisions; a backup inside the installation; and
+  insufficient space. Each is refused with the backup and installation manifests unchanged and nothing created.
+* **R2 (7):** interruptions at the first rename, the third rename, before the copy, part-way through the copy
+  and on a full disk. Each leaves every original entry present, only the original marker, the same inode and a
+  valid backup. Where the root is unmarked, the ordinary `restore` CLI still refuses and `resume-restore`
+  completes it.
+* **The chain:** four interruptions in a row, then `resume-restore` through the CLI. Afterwards: the same root
+  inode, the backup's tree unchanged, five failed states with their journals, the restored tree equal to the
+  manifest, the F1 marker valid again, the post-backup writes preserved exactly once among the failed states, the
+  database and activation exactly as backed up, files and runtime resources usable by the service, and
+  `afa247a`'s V1 startup gate qualifying.
+* **Refusals:** another marked installation, a forged journal checksum and a foreign marker are each refused,
+  with nothing changed.
+* **Python -O:** an overlap, an in-place edit and a missing companion are still refused.
+
+**Known limitations.**
+* The startup gate is a gate, not acceptance: no full application or browser start of a restored installation
+  was run. `runtime_access` checks presence, the loader's file rules and the service's reads; it does not parse
+  or decrypt the protected files, as `bootstrap` does.
+* On a rehearsal copy, the folders above the payload are scratch, so they are not checked against the loader's
+  rules there; they are checked on the live root (apply, restore).
+* The commit-time settings check is not a lock. The maintenance window must exclude any settings writer between
+  the check and the rename.
+* The journal is written by the tool and trusted only together with the backup checksum the operator recorded
+  and the marker comparison. An attacker with root could forge all three, which is outside the threat model.
+* The free-space check measures the root's filesystem at the start. Other writers during the restore are
+  excluded by the offline requirement, not reserved against.
+* The R2 fault injections stand in for real crashes (`os.rename` and `cp` failures, a simulated full disk). A
+  `kill -9` mid-rename leaves the same states, but it was not exercised as a real signal.
+* Codex's limits that still apply: catalog definitions beyond the fingerprints, ACL and xattr attestation of
+  manifests, the offline window not being a lock, time-sensitive cleanup, and the retention of private failed
+  states.
+
+**Preservation.** The owner's installation was not accessed, even to read it. No live stop, backup, migration,
+restore or upgrade was run. Production, `release/staging-v1` and every other worktree are unchanged. PR #40 stays
+in draft. Disposable resources lived under `/var/tmp/ku-r3`.
+

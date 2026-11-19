@@ -119,37 +119,113 @@ After partial committed work or a startup failure, the verified PRE-UPGRADE COLD
 Do not automatically downgrade or restore; preserve the failed state first in another verified cold backup.
 
 **Restoring the pre-upgrade backup DISCARDS EVERY WRITE MADE AFTER THAT BACKUP** (accounts, messages, Spaces,
-files, subscription changes): they survive only in the failed state the restore preserves. Decide it explicitly.
+files, subscription changes, provider attempt counts). Those writes survive only in the failed state the restore
+preserves. Decide it explicitly.
 
-The exact restore, after a separate authorization, is one command. It is run in WSL as root, from the reviewed
-tools checkout, with every value re-read and pasted (never defaulted):
+### Disk capacity and temporary storage
 
-    wsl -u root -- /home/kalillac/kf15/bin/python -B TOOLS/deploy/local/live_upgrade.py restore         --root /var/lib/kalillac-local-staging --device DEVICE --inode INODE         --activation-release 198dbb84de5669d33588f9e253323386211a0a4b         --checkout /mnt/c/Kalillac/kalillac-ai-local --checkout-sha CURRENT_CHECKOUT_SHA         --pg-bin /home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin         --backup /root/BACKUP --backup-sha256 MANIFEST_SHA256_RECORDED_AT_BACKUP         --failed-state /root/kalillac-local-staging-failed-YYYYMMDD --authorize-live-operation
+Plan the space before any live step. Run `df -h /var/lib /root` and `df -i /var/lib /root`.
+* The backup is a full copy of the root (`du -sh /var/lib/kalillac-local-staging`).
+* The rehearsal makes two more full copies, one after the other, under `TMPDIR`. WSL's `/tmp` is a small tmpfs
+  (3.8 GB here), so set `TMPDIR` to a new private, root-only folder on disk, for example
+  `install -d -m 0700 /var/tmp/kalillac-upgrade-tmp`. A failed rehearsal keeps its copy for inspection: leave
+  room for it, and never clear other people's temporary files to make room.
+* A restore copies the backup back. The failed state is moved by rename, not copied, but stays on the root's
+  filesystem. The restore checks free space and inodes before changing anything, and refuses if there are fewer
+  than the backup's size plus 256 MB.
+* Every failed state is kept until the owner decides about it: each holds private data.
+
+### Destinations: the backup, the installation and the failed state are kept apart
+
+Before anything changes, the restore refuses a failed-state folder, or its `.manifest.json` or `.restore.json`
+evidence, that:
+* already exists;
+* is inside the backup (it would change it) or inside the installation;
+* is reached through a symlink, or through any alias of the backup or installation: every folder on its path is
+  also compared by device and inode, so a bind mount cannot hide it;
+* is on a different mount from the installation (it must be moved there by rename);
+* has an untrusted parent.
+
+It also refuses a backup inside the installation, and an installation inside the backup. Use for example:
+backup `/root/kalillac-backup-YYYYMMDD`, failed state `/root/kalillac-local-staging-failed-YYYYMMDD-1`, numbering
+each new attempt.
+
+### The restore
+
+After a separate authorization, it is one command, run in WSL as root from the reviewed tools checkout. Re-read
+every value and paste it; never default one:
+
+    wsl -u root -- /home/kalillac/kf15/bin/python -B TOOLS/deploy/local/live_upgrade.py restore \
+        --root /var/lib/kalillac-local-staging --device DEVICE --inode INODE \
+        --activation-release 198dbb84de5669d33588f9e253323386211a0a4b \
+        --checkout /mnt/c/Kalillac/kalillac-ai-local --checkout-sha CURRENT_CHECKOUT_SHA \
+        --pg-bin /home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin \
+        --backup /root/BACKUP --backup-sha256 MANIFEST_SHA256_RECORDED_AT_BACKUP \
+        --failed-state /root/kalillac-local-staging-failed-YYYYMMDD-1 --authorize-live-operation
 
 What it does, in order, refusing at the first failure:
 1. Verifies the backup against the recorded manifest checksum and every file's checksum, owner and mode. Checks
    that it belongs to this root's path, device and inode.
-2. Requires no process of the service identity, and PostgreSQL status 3 (not running).
-3. Creates the new failed-state folder (0700, under a trusted parent, on the root's own filesystem). It moves
-   every entry of the root into it, dotfiles and the marker included, by rename: nothing is copied or deleted.
-   It records that folder's manifest beside it.
-4. Copies the backup's contents into the SAME root folder (`cp -a payload/. root/`), keeping the root's inode,
+2. Requires no process of the service identity, and no running PostgreSQL.
+3. Checks the destinations and the free space (above).
+4. Creates the new failed-state folder (0700), and beside it the **recovery journal**
+   (`FAILED.restore.json`, root's, 0600). The journal records the root's path, device and inode, the activation,
+   the backup path and checksum, and the failed-state folder's own identity. It also records the phase, updated
+   atomically: `moving`, then `copying`, `verifying`, `complete`; an interruption leaves `interrupted-<phase>`.
+5. Moves every entry of the root into the failed state, dotfiles and the marker included, by rename: nothing is
+   copied or deleted. It records the failed state's manifest (`FAILED.manifest.json`).
+6. Copies the backup's contents into the SAME root folder (`cp -a payload/. root/`), keeping the root's inode,
    which is what the F1 ownership marker names.
-5. Verifies the restored tree against the backup manifest, and verifies that the service identity can read every
-   configured credential file and use its state folders.
+7. Verifies the restored tree against the backup manifest. It then checks, as the service identity, every
+   startup resource: protected registration files, credentials, state folders.
 
-It never starts anything, never deletes the failed state, and never retries. If it stops part-way, the root
-holds a partial copy, the failed state and the backup are intact, and it says so. Review before rerunning it
-(a rerun moves the partial copy into a second new failed-state folder).
+It never starts anything, never deletes or rewrites a failed state, and never writes to the backup.
 
-Proven on disposable installations by `test_restore_after_a_failed_upgrade_into_the_same_root_and_start_the_restored_code`:
-* a real upgrade, then post-backup writes;
-* the restore, into the same inode;
-* the restored tree equal to the manifest;
-* the failed state, its settings additions and the post-backup file preserved;
-* the database back at 0025 with every row as backed up;
-* files and runtime files usable as the service identity;
-* the restored release's own V1 startup gate (`afa247a`) accepting the restored database.
+### An interrupted restore: resume-restore
+
+If the restore stops part-way (a crash, a full disk, a killed process), the root may be empty or half-copied, and
+its ownership marker may be in the failed state. The ordinary commands then refuse the root, and that is correct:
+they need its marker. Do not create a marker, and do not rerun `restore`. Complete the restore with the separate,
+explicitly authorized `resume-restore`:
+
+    wsl -u root -- /home/kalillac/kf15/bin/python -B TOOLS/deploy/local/live_upgrade.py resume-restore \
+        --root /var/lib/kalillac-local-staging --device DEVICE --inode INODE \
+        --activation-release 198dbb84de5669d33588f9e253323386211a0a4b \
+        --checkout /mnt/c/Kalillac/kalillac-ai-local --checkout-sha CURRENT_CHECKOUT_SHA \
+        --pg-bin /home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin \
+        --backup /root/BACKUP --backup-sha256 MANIFEST_SHA256_RECORDED_AT_BACKUP \
+        --journal /root/kalillac-local-staging-failed-YYYYMMDD-1.restore.json \
+        --failed-state /root/kalillac-local-staging-failed-YYYYMMDD-2 --authorize-live-operation
+
+It does not rely on the root's marker or settings. Its evidence:
+* the backup, verified against the checksum recorded when it was made, which names this root's path, device and
+  inode;
+* the journal chain: the given journal and every earlier one it names. Each must be root's own 0600 file, name
+  this root, backup, checksum and activation, and its failed state must still be the folder it recorded;
+* the original marker, found in the root or a recorded failed state, equal byte for byte to the backup's, with no
+  different marker among them. Another installation, another backup, a forged journal or a foreign marker is
+  refused.
+
+It also requires the path and its ancestors to pass the F1 path checks, nothing running, and the destination and
+space checks above. It moves the partial state into the NEW failed-state folder (earlier ones are never touched),
+copies the backup into the same root inode, and verifies as above. If it is itself interrupted, run it again with
+the newest journal and another new failed-state folder. Each attempt preserves its own state and evidence.
+
+### What the disposable tests prove, and what they do not
+
+Proven on disposable installations, with real PostgreSQL 16 and the real F1 ownership checks:
+* a restore after a real upgrade and post-backup writes (`test_restore_after_a_failed_upgrade…`);
+* refusal of overlapping, nested, symlinked, bind-mounted and colliding destinations, and of insufficient
+  space, with the backup and installation unchanged and no folder created (`test_r1_…`);
+* interruptions at the first rename, a later rename, before the copy, part-way through the copy and on a full
+  disk; then four interruptions in a row, completed through the `resume-restore` command (`test_r2_…`). The
+  result: the same root inode, the backup unchanged, every failed state kept, the restored tree equal to the
+  manifest, the database and activation exactly as backed up, files and runtime resources usable by the service,
+  and the restored release's own V1 startup gate (`afa247a`) accepting the database.
+
+A startup gate passing is **not** application acceptance. Before reopening ingress after any real restore, start
+the previous application under a separate authorization, and check sign-in, sessions, subscriptions, Spaces,
+messages and documents in the browser.
 
 Return application code using the saved pre-upgrade Git branch in a clean checkout, retaining the new branch
 history. Do not force a checkout over work. Rebuild the old site. Start PostgreSQL alone and verify exact 0025
