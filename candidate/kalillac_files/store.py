@@ -12,13 +12,20 @@ Rules:
     FileNotFound, so an identifier reveals nothing about anyone else.
   * Identifiers are 128-bit random values; nothing a customer supplies ever becomes a path. Owner
     directories are named by an unkeyed SHA-256 of the owner id, never the id itself.
-  * Quotas per owner (bytes and count) are checked before anything is written, over every file the
-    owner has on disk, expired ones included: an account's storage is bounded by its quota whether or
-    not the retention cleanup has run yet. A file past its availability period cannot be read (get(),
-    record()) and is listed only on request (list(include_expired=True)); its owner can still delete it
-    at once. The retention cleanup (kalillac_files/retention.py: the application's scheduled run and
-    tools/data_lifecycle.py) deletes it from disk once it has been expired for the configured period.
-  * Writes are atomic (temporary file, then rename), metadata included.
+  * Quotas per owner (bytes and count) are checked before anything is written, over what is physically
+    in the owner's folder: every file's data whether or not its record exists (an upload interrupted
+    between the two), every upload temporary, every record, expired ones included. An account's storage
+    is bounded by its quota whether or not the retention cleanup has run, and however its uploads ended.
+    A file past its availability period cannot be read (get(), record()) and is listed only on request
+    (list(include_expired=True)); its owner can still delete it at once. The retention cleanup
+    (kalillac_files/retention.py: the application's scheduled run and tools/data_lifecycle.py) deletes it
+    from disk once it has been expired for the configured period.
+  * One write at a time per owner, across threads and (POSIX) processes: put() and delete() hold the
+    owner's lock (an flock on the owner's folder). While put() holds it no other upload of that owner can
+    be in progress, so data without a record and upload temporaries found then are abandoned (their
+    writer failed or died): put() removes them, in that owner's folder only, before checking the quota.
+  * Writes are atomic (temporary file, then rename), metadata included; a write that fails removes its
+    temporary, and an upload whose record cannot be written removes its data.
 """
 from __future__ import annotations
 
@@ -30,11 +37,15 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import threading
+from contextlib import contextmanager
 
 ORIGINS = ("uploaded", "generated", "edited")
 _ID = re.compile(r"[A-Za-z0-9_-]{22}")
+_ENTRY = re.compile(r"([A-Za-z0-9_-]{22})\.(bin|json)(\.[0-9a-f]{12}\.tmp)?")
 MAX_FILE_BYTES = 10 * 1024 * 1024
+_FLOCK = os.name == "posix" and hasattr(os, "O_NOFOLLOW")
 
 
 class FileNotFound(LookupError):
@@ -86,14 +97,75 @@ class FileStore:
         with self._guard:
             return self._locks.setdefault(owner, threading.Lock())
 
+    @contextmanager
+    def _exclusive(self, owner, folder):
+        """The owner's lock: this process's threads, and on POSIX every process using this root (an flock on
+        the owner's folder, released by the kernel if its holder dies). Yields whether it spans processes."""
+        with self._lock(owner):
+            if not _FLOCK:
+                yield False
+                return
+            import fcntl
+            fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield True
+            finally:
+                os.close(fd)
+
     @staticmethod
     def _write(path, data):
         temporary = path.with_name(path.name + "." + secrets.token_hex(6) + ".tmp")
-        with open(temporary, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            with open(temporary, "xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+    @staticmethod
+    def _usage(folder):
+        """What is physically in an owner's folder: (file ids, data bytes, abandoned entry names). Data is
+        counted whether or not its record exists, temporaries included; a file id counts once whatever of it
+        is on disk. Abandoned: data without a record, and temporaries (only ever so while the owner's lock is
+        held). Entries FileStore does not write (another name, a link, a directory) are left alone."""
+        ids, size, leftover = set(), 0, []
+        try:
+            entries = list(os.scandir(folder))
+        except FileNotFoundError:
+            return ids, size, leftover
+        names = {entry.name for entry in entries}
+        for entry in entries:
+            match = _ENTRY.fullmatch(entry.name)
+            if match is None:
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            file_id, kind, temporary = match.groups()
+            ids.add(file_id)
+            if kind == "bin":
+                size += info.st_size
+            if temporary or (kind == "bin" and file_id + ".json" not in names):
+                leftover.append(entry.name)
+        return ids, size, leftover
+
+    @staticmethod
+    def _remove(folder, names):
+        for name in names:
+            try:
+                (folder / name).unlink()
+            except FileNotFoundError:
+                pass
 
     def _records(self, folder, include_expired=False):
         now = self.clock()
@@ -124,18 +196,27 @@ class FileStore:
         if parent_id is not None and _ID.fullmatch(parent_id) is None:
             raise ValueError("invalid parent")
         folder = self._folder(owner)
-        with self._lock(owner):
-            existing = self._records(folder, include_expired=True)   # Everything on disk counts.
-            if len(existing) + 1 > self.max_owner_files:
+        folder.mkdir(parents=True, exist_ok=True)
+        with self._exclusive(owner, folder) as across_processes:
+            ids, size, leftover = self._usage(folder)               # Everything on disk counts.
+            if leftover and across_processes:
+                # No other upload of this owner can be running: these were abandoned. Reclaim them.
+                self._remove(folder, leftover)
+                ids, size, _leftover = self._usage(folder)
+            if len(ids) + 1 > self.max_owner_files:
                 raise QuotaExceeded("file_count_quota_exceeded")
-            if sum(record.size for record in existing) + len(data) > self.max_owner_bytes:
+            if size + len(data) > self.max_owner_bytes:
                 raise QuotaExceeded("storage_quota_exceeded")
-            folder.mkdir(parents=True, exist_ok=True)
             now = self.clock()
             record = StoredFile(secrets.token_urlsafe(16), filename, media_type, len(data), origin,
                                 now.isoformat(), (now + self.retention).isoformat(), parent_id)
-            self._write(folder / (record.file_id + ".bin"), data)
-            self._write(folder / (record.file_id + ".json"), json.dumps(asdict(record)).encode("utf-8"))
+            blob = folder / (record.file_id + ".bin")
+            self._write(blob, data)
+            try:
+                self._write(folder / (record.file_id + ".json"), json.dumps(asdict(record)).encode("utf-8"))
+            except BaseException:
+                self._remove(folder, [blob.name])                   # No data is left without its record.
+                raise
             return record
 
     def _own(self, owner, file_id):
@@ -172,7 +253,7 @@ class FileStore:
         """Delete one of the owner's files, expired or not: its data, then its record."""
         self._own(owner, file_id)
         folder = self._folder(owner)
-        with self._lock(owner):
+        with self._exclusive(owner, folder):
             for suffix in (".bin", ".json"):
                 try:
                     (folder / (file_id + suffix)).unlink()

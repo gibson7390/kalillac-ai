@@ -22,7 +22,8 @@ Safety rules, each tested in tests/test_file_retention.py:
 * **No race with the application.** A file is deleted only when it has been expired for `delete_after`
   plus SAFETY_MARGIN (an hour), long after FileStore stopped serving it. An upload's temporary file, and
   data whose record is not written yet, is removed only once older than STALE_TEMPORARY (an hour) by the
-  real clock; a fresh one is an upload in progress.
+  real clock; a fresh one is an upload in progress. (Until then it counts against its owner's quota, and on
+  POSIX the owner's next upload, holding the owner's lock and so certain no upload is in progress, removes it.)
 * **Unreadable records are never deleted automatically**; they are counted for an operator to inspect.
 * **Dry run** (`apply=False`) decides exactly the same and deletes nothing.
 
