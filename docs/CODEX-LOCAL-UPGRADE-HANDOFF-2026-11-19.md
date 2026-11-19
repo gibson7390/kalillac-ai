@@ -105,3 +105,74 @@ candidates; repeat the dry run immediately before any separately authorized appl
 
 Account erasure, legal/commercial decisions, real-provider/subscription acceptance and public launch
 approval remain separate.
+
+## Corrections after the audit of ca92dc6 (U1 to U4, recovery): another review requested
+
+The audit (`tmp/upgrade-audit-evidence-a8s3a0ii/`, preserved unchanged) found four confirmed defects. Each was
+reproduced before correction. Codex's own probe file was run, unchanged, in a disposable `git archive` snapshot of
+`ca92dc6`, as root in WSL with a disposable world-readable copy of PostgreSQL 16.2. The result was **4 failed and
+4 passed**, matching the audit's log:
+* U1: requested port 56385, connected to 37477;
+* U2: WSL Git exited 128;
+* U3: the service account got PermissionError, yet the rehearsal reported accessible=1;
+* U4: mode 0o600 became 0o644.
+
+The 17 original tests passed there too. Nothing here is marked verified.
+
+| Defect | Correction | After |
+|---|---|---|
+| U1 connection redirect | `upgrade_support.connection_target` builds both URLs with `URL.create` from validated parts: driver `postgresql+psycopg`, host `127.0.0.1`, the given port, the deployment's database name, and identifier-checked users. It refuses any URL query parameter, a malformed migration login, and any set libpq variable that could redirect a connection (`PGHOST`, `PGHOSTADDR`, `PGPORT`, `PGDATABASE`, `PGSERVICE`, `PGSERVICEFILE`, `PGSYSCONFDIR`, `PGOPTIONS`, `PGTARGETSESSIONATTRS`, `PGLOADBALANCEHOSTS`), all before either engine exists. `_bound_engine` adds an explicit `hostaddr` and empty `options`, and compares the driver's parameters with the destination before any connection. The database identity check is unchanged | Codex's probe: refused ("connection options in the administrative URL are refused"), no engine created |
+| U2 Windows-created worktree | `checkout_identity` classifies the `.git` layout. For a worktree created by Git for Windows (a `gitdir: C:/…` file), it runs Git for Windows through WSL interop: the Git, `core.autocrlf` and index cache that created it. Linux layouts use Linux Git. Both run with `--no-optional-locks` (status never rewrites the index) and a cleaned environment (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `WSLENV` cannot redirect it). Checks: the selected path is the checkout's own top level, HEAD is the exact SHA, the branch when one is required, and nothing tracked, staged or untracked. Without Git for Windows it fails closed. The remote-URL idea was dropped: the 40-character SHA already pins the content | Codex's probe and its synthetic worktree: accepted |
+| U3 root reads | `stored_files` and the new `runtime_access` check access in a child process with the service's uid and primary gid and **no supplementary groups**, which is how `local_staging._spawn` launches the application. The child reads every metadata file and unexpired document, and lists and checks write access to every owner folder and the files root. It also reads every `*_FILE` setting (registration keyring, activation, database credential) and every file in `credentials/`, which must lie inside the installation, and therefore the backup. Contents are compared with the manifest or root's own hash and never printed; any denial or indeterminate result refuses. These run in rehearsal (original and restored copies), apply and restore | Codex's probe: the rehearsal is refused ("a stored file cannot be read by the application service identity"); no receipt |
+| U4 settings mode | `stage_settings` refuses a symlink, a second hard link, extended attributes (ACLs), an existing staging file and a missing final newline. It writes the new file **before** the migration: created 0600, then given the original's uid, gid and mode, written fully, fsynced. `commit_settings` replaces only if the original and the staged file are unchanged, then fsyncs the directory. If the migration fails, the staged file is removed and the original left byte-for-byte untouched. If it fails after the migration, the staged file is kept and reported | Codex's probe: 0o600 kept |
+
+**Recovery.** `live_upgrade.py restore` is explicit and gated. It verifies the backup (manifest checksum, every
+file, and its root's path, device and inode). It requires no service process and PostgreSQL status 3. It moves
+every root entry by rename into a new 0700 failed-state folder on the same filesystem, with its manifest recorded
+beside it. It then copies the backup's contents into the same root inode, and verifies the manifest and the
+service's access to its runtime files. It starts nothing and deletes nothing. `UPGRADE.md` has the exact command,
+and states that a restore discards every write made after the backup.
+
+`test_restore_after_a_failed_upgrade_into_the_same_root_and_start_the_restored_code`:
+* a real upgrade, then post-backup database and file writes;
+* refusals for another root, a failed state inside the root, and a running PostgreSQL;
+* the restore: same inode, tree equal to the manifest;
+* the failed state preserved, including its settings additions and post-backup file;
+* the database at 0025 with every row as backed up;
+* files and runtime files usable as the service;
+* `afa247a`'s own `load_v1_startup` qualifying the restored database. CI extracts that release with `git archive`.
+
+**Tests.** `test_local_upgrade.py`: the original 17, unchanged in their assertions, plus 68 new ones, 85 in total.
+The fixture's stored files are now owned by the service identity (65534), as the application owns them on a real
+installation. Root-owned 0600 fixture files would otherwise be exactly the U3 defect.
+`test_local_upgrade_windows.py` (9, WSL only; it needs Git for Windows) covers:
+* Codex's fixture;
+* new disposable Windows-created detached and branch worktrees with CRLF files;
+* dirty, wrong-SHA, wrong-branch and subdirectory refusals;
+* an environment that cannot redirect the check;
+* the index never being written.
+
+Local, as root in WSL: **94 passed, 0 skipped** (85 + 9). On `ca92dc6`, the new `test_local_upgrade.py` fails at
+collection (`DESTINATION_ENVIRONMENT` does not exist there). With only that name given a fallback in the
+snapshot's copy, it gives 57 failed and 27 passed: the 17 originals and 10 controls that hold on both versions.
+Codex's probes on the correction: 6 passed. The 2 that remain fail because they asserted the old outcome, a
+correct port and `accessible == 0`, where the correction now refuses outright.
+
+**Known limitations.**
+* The Windows-layout tests run only where Git for Windows exists, so not in Linux CI. There, the Linux layouts
+  and the fail-closed refusal are tested.
+* The service check models the launcher's identity: uid, primary gid, no supplementary groups. A future launcher
+  that grants supplementary groups would need this check changed with it.
+* `runtime_access` covers what the application reads at startup through configuration (`*_FILE`,
+  `credentials/`). It is not a full application boot.
+* The limits Codex listed under "Limits and pending evidence" 2 to 5 and 7 to 9 stand: catalog definitions
+  beyond the fingerprints, ACL and xattr attestation, the offline window not being a lock, the startup-failure
+  model, discarded writes, time-sensitive cleanup, and the disposal of private backups.
+* While testing, the tool's own failure-preserved scratch copies filled WSL's 3.8 GB `/tmp` (tmpfs). I removed
+  only the copies my runs created, and ran the suite with `TMPDIR` on disk. An operator should give the
+  rehearsal a `TMPDIR` with room for two full copies.
+
+**Preservation.** The owner's installation was not accessed in this round, not even to read it. No live backup,
+migration, restore or upgrade was run. `release/staging-v1`, production and every worktree are unchanged apart
+from this branch. PR #40 stays in draft.
+

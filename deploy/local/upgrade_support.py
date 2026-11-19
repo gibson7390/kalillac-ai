@@ -6,13 +6,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 
-from sqlalchemy import create_engine, make_url, text
+from sqlalchemy import URL, create_engine, make_url, text
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(REPO / "candidate"), str(REPO / "candidate/tools")]
@@ -310,12 +311,150 @@ def copied_cluster(backup, expected_hash, bindir, *, port):
             print(f"rehearsal state preserved: {work}", file=sys.stderr)
 
 
-def engines(payload, port):
+# --- access as the application's service identity (Codex U3, and the runtime credentials) -------------------
+
+# Run in a child process with the service's uid and primary gid and NO supplementary groups: exactly how local
+# staging launches the application (local_staging._spawn). Prints only hashes of files the manifest already
+# holds, and error class names; never a file's contents.
+_SERVICE_CHECK = r"""
+import hashlib, json, os, sys
+plan = json.load(sys.stdin)
+out = {"read": {}, "list": {}, "write": {}}
+for path in plan["read"]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for block in iter(lambda: stream.read(1 << 20), b""):
+                h.update(block)
+        out["read"][path] = h.hexdigest()
+    except OSError as error:
+        out["read"][path] = "error:" + type(error).__name__
+for path in plan["list"]:
+    try:
+        os.listdir(path)
+        out["list"][path] = "ok"
+    except OSError as error:
+        out["list"][path] = "error:" + type(error).__name__
+for path in plan["write"]:
+    out["write"][path] = "ok" if os.access(path, os.W_OK | os.X_OK) else "error:denied"
+json.dump(out, sys.stdout)
+"""
+
+
+def as_service(uid, gid, *, read=(), listing=(), write=()):
+    """What the service identity can actually do: {"read": {path: sha256|error}, "list": ..., "write": ...}.
+    Refused if it cannot be established (indeterminate access is never treated as access)."""
+    require(type(uid) is int and type(gid) is int and uid > 0 and gid > 0, "invalid service identity")
+    require(os.geteuid() == 0, "the service identity's access can only be checked as root")
+    plan = json.dumps({"read": [str(p) for p in read], "list": [str(p) for p in listing],
+                       "write": [str(p) for p in write]})
+    for interpreter in dict.fromkeys((sys.executable, "/usr/bin/python3")):
+        try:
+            result = subprocess.run([interpreter, "-I", "-S", "-B", "-c", _SERVICE_CHECK], input=plan,
+                                    capture_output=True, text=True, user=uid, group=gid, extra_groups=[],
+                                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, cwd="/", timeout=600)
+        except OSError:
+            continue
+        if result.returncode == 0:
+            try:
+                out = json.loads(result.stdout)
+            except ValueError:
+                continue
+            if set(out) == {"read", "list", "write"}:
+                return out
+    raise Refused("the application service identity's access could not be established")
+
+
+def _inside(path, prefix, payload):
+    """An installed absolute path, as it is inside this payload (the backup or the root itself)."""
+    path, prefix = str(path), str(prefix).rstrip("/")
+    require(path.startswith(prefix + "/") and ".." not in Path(path).parts,
+            "a configured file lies outside the installation (and so outside its backup)")
+    return Path(payload) / path[len(prefix) + 1:]
+
+
+def runtime_access(payload, installed_root, uid, gid):
+    """Everything the application reads at startup, readable as the service identity, inside the backup.
+
+    Every *_FILE setting (deployment.env: registration keyring, activation and database credential; settings.env),
+    every file of credentials/ (CREDENTIALS_DIRECTORY: database password, Stripe test secrets) and the writable
+    state folders. Contents are compared with the manifest, never shown. Returns counts."""
+    payload = Path(payload)
+    paths = []
+    for name in ("deployment/deployment.env", "settings.env"):
+        for key, value in env_file(payload / name).items():
+            if key.endswith("_FILE") and value:
+                paths.append(_inside(value, installed_root, payload))
+    credentials = payload / "credentials"
+    listing = [credentials] if credentials.is_dir() else []
+    if credentials.is_dir():
+        paths += sorted(p for p in credentials.iterdir() if p.is_file())
+    for path in paths:
+        require(path.is_file() and not path.is_symlink(), "a configured runtime file is missing")
+    writable = [payload / d for d in ("state", "state/files", "state/locks", "state/outbox") if (payload / d).is_dir()]
+    seen = as_service(uid, gid, read=paths, listing=listing, write=writable)
+    for path in paths:
+        require(seen["read"][str(path)] == file_hash(path),
+                "the application service identity cannot read a required credential or configuration file")
+    require(all(v == "ok" for v in (*seen["list"].values(), *seen["write"].values())),
+            "the application service identity cannot use a required folder")
+    return {"runtime_files": len(paths), "writable_folders": len(writable)}
+
+
+# libpq reads these when a connection omits the parameter, and some (PGHOSTADDR, PGSERVICE, PGOPTIONS) can
+# redirect or reconfigure a connection whose host and port are explicit. None may be set during an upgrade.
+DESTINATION_ENVIRONMENT = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE", "PGSERVICEFILE",
+                           "PGSYSCONFDIR", "PGOPTIONS", "PGTARGETSESSIONATTRS", "PGLOADBALANCEHOSTS")
+_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+
+
+def connection_target(payload, port):
+    """The only database connection an upgrade makes: (admin URL, migration URL), both built from validated
+    parts, never from a copied DSN. Refused before any engine exists if a query parameter or a libpq
+    environment setting could override the destination (Codex U1)."""
     deployment = env_file(payload / "deployment/deployment.env")
+    database = deployment.get("KALILLAC_DB_NAME", "")
+    require(_IDENTIFIER.fullmatch(database), "invalid database name")
+    require(type(port) is int and 0 < port < 65536, "invalid database port")
+    require(not [k for k in DESTINATION_ENVIRONMENT if os.environ.get(k)],
+            "a libpq environment setting could redirect the connection; unset it")
     admin = make_url((payload / "admin/admin-url").read_text().strip())
-    require(admin.host in ("localhost", "127.0.0.1") and admin.database in ("postgres", deployment["KALILLAC_DB_NAME"]),
+    require(admin.drivername == "postgresql+psycopg", "unsupported database driver")
+    require(not admin.query, "connection options in the administrative URL are refused")
+    require(admin.host in ("localhost", "127.0.0.1") and admin.database in ("postgres", database),
             "non-local database credentials")
-    url = admin.set(host="127.0.0.1", port=port, database=deployment["KALILLAC_DB_NAME"])
+    require(isinstance(admin.username, str) and _IDENTIFIER.fullmatch(admin.username) and admin.password,
+            "incomplete administrative credentials")
     login = json.loads((payload / "deployment/private/migration-login.json").read_text())
-    return (create_engine(url, hide_parameters=True),
-            create_engine(url.set(username=login["role"], password=login["password"]), hide_parameters=True))
+    require(isinstance(login, dict) and set(login) == {"role", "password"} and isinstance(login["role"], str)
+            and _IDENTIFIER.fullmatch(login["role"]) and isinstance(login["password"], str) and login["password"],
+            "invalid migration login")
+    base = dict(drivername="postgresql+psycopg", host="127.0.0.1", port=port, database=database)
+    return (URL.create(username=admin.username, password=admin.password, **base),
+            URL.create(username=login["role"], password=login["password"], **base))
+
+
+def _bound_engine(url):
+    """An engine whose driver parameters are exactly the validated destination, checked before it connects.
+    Explicit hostaddr and an empty options string leave libpq nothing to take from elsewhere."""
+    engine = create_engine(url, hide_parameters=True,
+                           connect_args={"hostaddr": "127.0.0.1", "options": "", "target_session_attrs": "any"})
+    args, params = engine.dialect.create_connect_args(engine.url)
+    params = dict(params)
+    params.pop("context", None)                       # psycopg's type adapters, not a destination.
+    expected = {"host": "127.0.0.1", "port": url.port, "dbname": url.database, "user": url.username,
+                "password": url.password}
+    if args or params != expected:
+        engine.dispose()
+        raise Refused("database connection parameters differ from the verified destination")
+    return engine
+
+
+def engines(payload, port):
+    admin_url, migration_url = connection_target(payload, port)
+    admin = _bound_engine(admin_url)
+    try:
+        return admin, _bound_engine(migration_url)
+    except BaseException:
+        admin.dispose()
+        raise

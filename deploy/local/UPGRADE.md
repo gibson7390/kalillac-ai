@@ -118,14 +118,38 @@ transaction. A process interruption may leave the cluster running: verify/stop i
 After partial committed work or a startup failure, the verified PRE-UPGRADE COLD BACKUP is the recovery source.
 Do not automatically downgrade or restore; preserve the failed state first in another verified cold backup.
 
-For an authorized restore: independently verify the original backup checksum again; confirm all application,
-front-server and PostgreSQL processes stopped and the original root's device/inode unchanged. Move EVERY
-current root entry (including dotfiles) into a NEW failure-state directory using native filesystem operations;
-keep the original root DIRECTORY itself. Then copy payload CONTENTS with cp -a, preserving ownership/modes,
-back into that same root inode. Compare the complete restored tree against the original backup manifest
-BEFORE starting anything. The original marker must match the original root inode/path. A copied replacement
-root directory will fail ownership verification. Never use glob-based move commands that omit dotfiles, reset,
-setup or recursive deletion of the installed root. Have the restore commands independently reviewed before use.
+**Restoring the pre-upgrade backup DISCARDS EVERY WRITE MADE AFTER THAT BACKUP** (accounts, messages, Spaces,
+files, subscription changes): they survive only in the failed state the restore preserves. Decide it explicitly.
+
+The exact restore, after a separate authorization, is one command. It is run in WSL as root, from the reviewed
+tools checkout, with every value re-read and pasted (never defaulted):
+
+    wsl -u root -- /home/kalillac/kf15/bin/python -B TOOLS/deploy/local/live_upgrade.py restore         --root /var/lib/kalillac-local-staging --device DEVICE --inode INODE         --activation-release 198dbb84de5669d33588f9e253323386211a0a4b         --checkout /mnt/c/Kalillac/kalillac-ai-local --checkout-sha CURRENT_CHECKOUT_SHA         --pg-bin /home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin         --backup /root/BACKUP --backup-sha256 MANIFEST_SHA256_RECORDED_AT_BACKUP         --failed-state /root/kalillac-local-staging-failed-YYYYMMDD --authorize-live-operation
+
+What it does, in order, refusing at the first failure:
+1. Verifies the backup against the recorded manifest checksum and every file's checksum, owner and mode. Checks
+   that it belongs to this root's path, device and inode.
+2. Requires no process of the service identity, and PostgreSQL status 3 (not running).
+3. Creates the new failed-state folder (0700, under a trusted parent, on the root's own filesystem). It moves
+   every entry of the root into it, dotfiles and the marker included, by rename: nothing is copied or deleted.
+   It records that folder's manifest beside it.
+4. Copies the backup's contents into the SAME root folder (`cp -a payload/. root/`), keeping the root's inode,
+   which is what the F1 ownership marker names.
+5. Verifies the restored tree against the backup manifest, and verifies that the service identity can read every
+   configured credential file and use its state folders.
+
+It never starts anything, never deletes the failed state, and never retries. If it stops part-way, the root
+holds a partial copy, the failed state and the backup are intact, and it says so. Review before rerunning it
+(a rerun moves the partial copy into a second new failed-state folder).
+
+Proven on disposable installations by `test_restore_after_a_failed_upgrade_into_the_same_root_and_start_the_restored_code`:
+* a real upgrade, then post-backup writes;
+* the restore, into the same inode;
+* the restored tree equal to the manifest;
+* the failed state, its settings additions and the post-backup file preserved;
+* the database back at 0025 with every row as backed up;
+* files and runtime files usable as the service identity;
+* the restored release's own V1 startup gate (`afa247a`) accepting the restored database.
 
 Return application code using the saved pre-upgrade Git branch in a clean checkout, retaining the new branch
 history. Do not force a checkout over work. Rebuild the old site. Start PostgreSQL alone and verify exact 0025
