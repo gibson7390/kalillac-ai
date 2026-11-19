@@ -412,6 +412,29 @@ four tools, a test file, a Windows launcher and a guide (`deploy/local/README.md
 
 CI: subscription 44385988423 on `a4d5e71` green (PostgreSQL job 668 tests, none skipped, including the 24 simulation tests; root verifiers included). Browser evidence (Edge through the repository's isolated CDP harness, against the running local instance, simulated providers): Premium 6/6 (sign-in with the Secure cookie on localhost, account page, chat, PDF generated and downloaded 101 KB, image checked and re-encoded), Free journey 8/8 (end now, Deep refused, no file on Free, simulated Checkout to Premium with the return notice, a Space with a saved conversation, cancel at period end), editing 2/2 (a Word edit held back by the total check, applied as `proposal-edited.docx` after the customer's confirmation).
 
+## 21. The Premium corrections integrated: `integration/premium-corrections-v1`
+
+You verified all six findings (F1 at `3646373`). The candidate combines the two correction branches on
+`release/staging-v1` (`fed4a6c`). Its code commit is `1cc32515b3b198feef967e8f531184a0c120725b`; a later
+commit adds documents and the local install's upgrade procedure only. The full record is
+`docs/INTEGRATION-PREMIUM-CORRECTIONS-V1.md`.
+
+For your inspection before the release is moved, as you asked:
+* **Conflict resolutions.**
+  * The subscription workflow's V1-02D job takes the union of both branches' test files. Its total is the
+    release's 644, plus the audit branch's 13, plus local staging's 90: **747**, which CI ran exactly, with 0
+    skipped. The root step is unchanged (66).
+  * Two handoff documents keep both sides; local staging becomes section 20.
+* **Integrity.** The 62 non-document files the merge changed each equal one branch's version byte for byte. The
+  verified files equal `3646373` and `7d2ed5b` exactly, including your `test_independent_final_f1.py`.
+* **CI on `1cc3251`.** All required workflows passed. The frontend passed on its second attempt; the first had 24
+  browser start-up errors in one module's setup, with inputs identical to the passing audit branch.
+  Deploy-tooling shows only the known schema-head-0015 failure.
+* **Migration.** An activated `0025` database with data upgraded to `0026` and back with nothing lost. A rehearsal
+  on a copy of the owner's install moved it `0025` to `0026` with 29 tables and 91 rows unchanged.
+
+Nothing has been merged into `release/staging-v1`.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image

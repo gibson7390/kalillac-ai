@@ -369,6 +369,17 @@ and metrics, and shared typed facts feeding tables, metrics, charts and prose.
 
 ## Premium audit of 2026-11-18: six confirmed findings (F1 to F6)
 
+**Status (2026-11-19): all six findings independently verified by Codex**, each at its own checkpoint:
+* F1 at `3646373` (`fix/local-reset-ownership`);
+* F2 at `68730da`;
+* F3 at `a12bf14`;
+* F4 at `7d2ed5b`;
+* F5 at `4a36dd7`;
+* F6 at `8de030b` (`fix/premium-audit-corrections`).
+
+They are combined and tested in `integration/premium-corrections-v1` (`docs/INTEGRATION-PREMIUM-CORRECTIONS-V1.md`).
+The tables below are the record of each round, as it stood at the time.
+
 Codex's independent audit of Kalillac Premium confirmed six findings, besides the account-erasure and
 retention launch gaps. Each original failure was reproduced before the correction and is kept as a test.
 Codex's first verification (of `c6fcaeb`): F3, F5 and F6 verified; F1 and F4 still open; F2 partially verified. The second-round corrections are below.
@@ -479,7 +490,7 @@ AST source segments). Only `_terminate`, `stop`, `pg_running` and `pg_start` cha
 
 | Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
 |---|---|---|---|---|
-| F1 (A to D, final F1-C) | yes | `subscription-foundation-verification` `44473349667` success on `3646373`: main job 734 tests, 0 skipped (Codex's 12 included); root step 66 tests, 0 skipped (runner kernel 7.0.0-1017-azure). Locally in WSL (kernel 6.18): 90 passed as the user (1 skipped: the root-only case); 66 passed as root (1 skipped: the real-`pg_ctl` test, which `initdb` refuses as root; it is deselected in the CI root step and runs in the main job) | pending (Codex, final) | no (pending) |
+| F1 (A to D, final F1-C) | yes | `subscription-foundation-verification` `44473349667` success on `3646373`: main job 734 tests, 0 skipped (Codex's 12 included); root step 66 tests, 0 skipped (runner kernel 7.0.0-1017-azure). Locally in WSL (kernel 6.18): 90 passed as the user (1 skipped: the root-only case); 66 passed as root (1 skipped: the real-`pg_ctl` test, which `initdb` refuses as root; it is deselected in the CI root step and runs in the main job) | **verified** (Codex, final, 2026-11-19, at `3646373`) | no (pending) |
 
 **Known limitations:** unchanged from the third round. A group left behind by an exited leader, reaped or
 not, must be stopped by hand; the stop names its PIDs and keeps the record.

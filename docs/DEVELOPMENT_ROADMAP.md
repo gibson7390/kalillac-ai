@@ -647,6 +647,11 @@ libraries). It was created during this work, lives outside the repository and ca
     unpredictable substitute; decks keep Arial until embedding is solved.
 14. ~~Email verification under V1~~: decided 2026-11-15 (conditional); the conditions now hold with 0021
     (see Milestone 2).
+Premium audit status (2026-11-19): **all six findings (F1 to F6) independently verified by Codex**. They are
+combined in `integration/premium-corrections-v1` (code `1cc3251`; every required workflow passed). It is not
+yet merged into `release/staging-v1`, which awaits the owner. Record: `docs/INTEGRATION-PREMIUM-CORRECTIONS-V1.md`.
+Decisions A-1 to A-3 below still stand.
+
 A-1. **Per-account provider attempts (Codex F3, 2026-11-18):** `KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE`
     and `_PAID`: how many provider attempts one account's requests may start per UTC day, successful or
     failed. Required wherever accounts and provider ceilings are on; staging cannot start without them.

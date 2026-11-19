@@ -150,3 +150,20 @@ never a tail (a disclosure failure was misattributed to load); a monkeypatched f
 signature (three stubs broke when F3 added an argument; one stalled a PostgreSQL job until cancelled).
 Owner decisions now required for Premium staging: KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE / _PAID and
 KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS (D-9); erasure E-1 to E-8 (`docs/DATA-LIFECYCLE.md` 3.1).
+
+## Update: the Premium corrections integrated (2026-11-19)
+
+Codex verified all six findings (F1 at `3646373`). `integration/premium-corrections-v1` combines
+`fix/premium-audit-corrections` and `fix/local-reset-ownership` on `release/staging-v1`. Its code commit
+`1cc3251` passed every required workflow (record: `docs/INTEGRATION-PREMIUM-CORRECTIONS-V1.md`; Codex handoff
+section 21). It is not merged into the release yet: that awaits the owner.
+
+The owner's local install (`kalillac-ai-local` at `afa247a`, database `0025`) is untouched; it is upgraded only
+with `deploy/local/UPGRADE.md`, on approval.
+
+Lessons:
+* A first frontend failure was checked against identical inputs on a passing branch before any rerun; it was
+  not called a flake on sight.
+* A `pkill -f` pattern can match its own shell: never use one inside `bash -lc`.
+* `psql` without `-w` waits for a password: read through SQLAlchemy with `hide_parameters` instead.
+
