@@ -415,9 +415,9 @@ F3, F5 and F6 were not reopened: their code is unchanged, and their suites were 
 
 | Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
 |---|---|---|---|---|
-| F1 (A, B) | yes | `subscription-foundation-verification` `44449773539` success on `8ae23d5`: main job 705 tests, 0 skipped (the 38 reset tests less the root-only one); new root step 38 tests, 0 skipped | pending (Codex) | no (pending) |
-| F2 | yes | on `7d2ed5b` (contains `68730da`): file generation `44451748532` (1,105 tests, 0 skipped), subscription `44451753992` (suites and PostgreSQL job), Spaces `44451758997`, provider ceilings `44451764464`, frontend `44451769309`, safety `44451773662`, anonymous allowance `44451778632`: all success | pending (Codex) | no (pending) |
-| F4 | yes | the same runs on `7d2ed5b` | pending (Codex) | no (pending) |
+| F1 (A, B) | yes | `subscription-foundation-verification` `44449773539` success on `8ae23d5`: main job 705 tests, 0 skipped (the 38 reset tests less the root-only one); new root step 38 tests, 0 skipped | partially verified (Codex, second verification): see the third round | no (pending) |
+| F2 | yes | on `7d2ed5b` (contains `68730da`): file generation `44451748532` (1,105 tests, 0 skipped), subscription `44451753992` (suites and PostgreSQL job), Spaces `44451758997`, provider ceilings `44451764464`, frontend `44451769309`, safety `44451773662`, anonymous allowance `44451778632`: all success | **verified** (Codex, second verification, `68730da`) | no (pending) |
+| F4 | yes | the same runs on `7d2ed5b` | **verified** (Codex, second verification, `7d2ed5b`) | no (pending) |
 | F3, F5, F6 (verified by Codex on `c6fcaeb`; not reopened) | unchanged | the same runs on `7d2ed5b`, plus real PostgreSQL locally (13 passed: `test_v1_premium_files_postgres.py`, `test_v1_file_allowance_postgres.py`, `test_account_attempts_postgres.py`, `test_v1_premium_journey_postgres.py`) and the F5 test in `test_files_session_and_modes.py` | verified (Codex, `c6fcaeb`) | no (pending) |
 
 **Known limitations (deliberate, for Codex to judge):**
@@ -426,6 +426,34 @@ F3, F5 and F6 were not reopened: their code is unchanged, and their suites were 
 3. F2: without a lock that spans processes (Windows, not a deployment target), abandoned data is counted but not reclaimed at the next upload. Uploads are refused until the hourly cleanup removes data older than an hour, so the quota still holds.
 4. F2: on POSIX an abandoned blob counts against its owner until that owner's next upload, or until the cleanup after an hour.
 5. F4: ending the session stops the worker at its next model call or tool. A model call already in flight completes at the provider and is charged, as for ordinary chat. Files stored before the end stay in the account.
+
+### Third round: F1 after Codex's second verification (2026-11-19)
+
+Codex's second verification: **F2 and F4 verified**; F3, F5 and F6 remain verified. **F1 partially verified**:
+the ancestor-exchange and foreign-process corrections hold. Two further points were raised, and both are
+corrected here. F1 is not marked resolved: it awaits Codex's final verification.
+
+| Defect | Correction (branch, full SHA) | Original failure, reproduced before correcting | Corrected behaviour | Regression tests |
+|---|---|---|---|---|
+| F1-C. A timed-out stop reported success | `fix/local-reset-ownership` `69c8e8b755fd0e2b4045bb2c2d8475156bc29e3c` | On `8ae23d5`: a real process ignoring SIGTERM gave `stop` exit 0 with the process still running and its records removed; Codex's mocked sequence gave the same events (numeric group SIGTERM, records removed, "stopped"); a failing or missing `pidfd_open` also counted as success | `_terminate` returns "stopped" only after the leader's pidfd shows that it exited and no member of its group is left: SIGTERM, then SIGKILL after `STOP_GRACE` (30 s), then `KILL_WAIT` (10 s). It returns "absent" when no process of ours runs under the record. Otherwise it raises `StopFailed`: no pidfd, an unreadable identity, a process that outlives SIGKILL, or a group whose leader has already exited. `stop` keeps the records of anything it could not confirm, checks that PostgreSQL really stopped, and fails with the reasons, so `reset` never reaches its delete (`refresh-web` likewise). On Codex's sequence: exit 2, no record removed, the reason printed | SIGTERM ignored (confirmed stopped by SIGKILL); signals with no effect (stop and reset fail, records kept, `rmtree` never called); `pidfd_open` failing and missing (the same); PostgreSQL not stopping |
+| F1-D. The group was signalled by its numeric id | same | `os.killpg(pid, SIGTERM)` after a pidfd liveness check (source; Codex did not reproduce PID reuse, nor did I) | Every signal goes through a pidfd. The group is signalled with `PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9 and later). Where the kernel refuses that flag (`EINVAL`), each member is signalled through its own pidfd, after its membership is read while both it and the leader are alive, and the leader is signalled last. A group whose leader has exited is reported, never signalled. No numeric `kill` or `killpg` remains | The whole group (leader and child) ended on both paths, with numeric signals made to raise; a process outside the group never signalled through the member path; a group left by an exited leader reported with its PIDs, untouched; the kernel's flag support recorded |
+
+Environments: WSL (your local staging) runs kernel 6.18.58.1, where the group flag works. The CI runner's
+kernel is 7.0.0-1017-azure (the group flag is supported; the fallback is exercised by the test that forces the kernel to refuse the flag). Python has no named constant for the flag, so the code uses the kernel header's value, `1 << 2`.
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 (A to D) | yes | `subscription-foundation-verification` `44464689210` success on `69c8e8b`: main job 715 tests, 0 skipped; root step 48 tests, 0 skipped (all reset tests, the root-only case included). Locally in WSL: 71 passed, 1 skipped (the root-only case) as the user, and 48 passed as root | pending (Codex, final) | no (pending) |
+
+**Known limitations:**
+1. On kernels before 6.9, each member is signalled separately: a process the group spawns after that pass is
+   not signalled by it. The confirmation step then sees it, the SIGKILL pass gets it, and if it survives that,
+   the stop fails.
+2. A group whose leader has already exited is never signalled. The stop fails and names the PIDs to stop by
+   hand, because without a live leader the group's id no longer proves whose group it is.
+3. A stop can take up to 40 s (the SIGTERM grace, then the SIGKILL wait) before it fails.
+4. Limitation 1 of the second round (the numeric `killpg` window) no longer applies. The legacy PID-file window
+   (limitation 2 of the second round) is unchanged.
 
 ## Reproducing locally
 

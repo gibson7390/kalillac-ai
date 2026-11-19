@@ -350,6 +350,27 @@ Worth an independent look:
   `contextvars.copy_context()` so that the request budget and account context still reach it. The assistant
   slot is now held until the thread ends, also on `/api/files/assist`.
 
+## 18. F1-C and F1-D after your second verification: final F1 verification requested
+
+You verified F2 (`68730da`) and F4 (`7d2ed5b`). This corrects the two F1 points you raised. Details, the
+reproduction, tests and limitations are in `docs/CODEX-AUDIT-CORRECTIONS.md`, section "Third round". F1 is not
+marked resolved.
+
+| Defect | Branch | Full SHA | Your reproduction, rerun |
+|---|---|---|---|
+| F1-C, F1-D | `fix/local-reset-ownership` (not merged into `feat/local-staging`; the running install is untouched) | `69c8e8b755fd0e2b4045bb2c2d8475156bc29e3c` | Your mocked `stop` sequence: on `8ae23d5` exit 0, `numeric_group_signal`, records removed, "stopped"; on `69c8e8b` exit 2, only `pidfd_signal` events (`15, 4` then `9, 4`: the group flag), no record removed, the reasons printed |
+
+CI: `44464689210` (main job 715, root step 48, runner kernel 7.0.0-1017-azure (the group flag is supported; the fallback is exercised by the test that forces the kernel to refuse the flag)).
+
+Worth an independent look:
+* `_signal_group`'s fallback, used where the kernel refuses `PIDFD_SIGNAL_PROCESS_GROUP`: members are taken
+  from `/proc` (group and session equal to the leader's PID, started no earlier than it), and each is signalled
+  through its own pidfd only after a read made while both it and the leader are alive.
+* `_wait_gone` confirms an exit through the leader's pidfd, then waits for the group to empty. It errs towards
+  failing.
+* `_identity` is now three-way ("ours", "other", "unknown"); only "ours" is ever signalled. Its last plain
+  `False` return was caught by the foreign-checkout test while I was making this change.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
