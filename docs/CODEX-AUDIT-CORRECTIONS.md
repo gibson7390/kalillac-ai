@@ -443,7 +443,7 @@ kernel is 7.0.0-1017-azure (the group flag is supported; the fallback is exercis
 
 | Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
 |---|---|---|---|---|
-| F1 (A to D) | yes | `subscription-foundation-verification` `44464689210` success on `69c8e8b`: main job 715 tests, 0 skipped; root step 48 tests, 0 skipped (all reset tests, the root-only case included). Locally in WSL: 71 passed, 1 skipped (the root-only case) as the user, and 48 passed as root | pending (Codex, final) | no (pending) |
+| F1 (A to D) | yes | `subscription-foundation-verification` `44464689210` success on `69c8e8b`: main job 715 tests, 0 skipped; root step 48 tests, 0 skipped (all reset tests, the root-only case included). Locally in WSL: 71 passed, 1 skipped (the root-only case) as the user, and 48 passed as root | F1-D verified; F1-C still open (Codex, third verification): see the final round | no (pending) |
 
 **Known limitations:**
 1. On kernels before 6.9, each member is signalled separately: a process the group spawns after that pass is
@@ -454,6 +454,35 @@ kernel is 7.0.0-1017-azure (the group flag is supported; the fallback is exercis
 3. A stop can take up to 40 s (the SIGTERM grace, then the SIGKILL wait) before it fails.
 4. Limitation 1 of the second round (the numeric `killpg` window) no longer applies. The legacy PID-file window
    (limitation 2 of the second round) is unchanged.
+
+### Final F1-C round: Codex's verification of `69c8e8b` (2026-11-19)
+
+Codex's third verification: **F1-D verified**; F2 to F6 remain verified. **F1-C still open**, on two further
+cases, both corrected here. F1 is not marked resolved: it awaits Codex's final verification. Codex's evidence
+(`tmp/final-f1-evidence-lc10wrn5/`) was read and not modified. Its test file is in the repository unchanged:
+`candidate/tests/test_independent_final_f1.py`, sha256
+`29664edc03ca1786b1c8eb8b0e8c38245218bd9e37beacd0dc1596bb5b0444f6`, identical to Codex's copy and to the
+committed blob.
+
+| Defect | Correction (branch, full SHA) | Original failure, reproduced before correcting | Corrected behaviour | Regression tests |
+|---|---|---|---|---|
+| F1-C (1). An unreaped leader with a live child counted as stopped | `fix/local-reset-ownership` `364637399d77abf7922a5aab610975882fba6d57` | Codex's file on `69c8e8b`, in WSL: `stop` exit 0 with the record removed and the child alive; `reset` exit 0 with 1 deletion call under the live child. `pidfd_open` succeeds on a zombie, its identity reads "other", and "other" meant "absent" | `_terminate` asks the pidfd whether the leader has exited (`_exited`: readable at once), before trusting the identity and again if the identity reads "other". An exited leader, reaped or not, goes to `_leaderless`: "absent" only if no live member of its group is left, otherwise `StopFailed` with the members' PIDs, which are never signalled. The record is kept, so the next `stop` confirms once they are gone | Codex's 2 cases (`stop` and `reset`); mine: the zombie leader's child is never signalled and is untouched, then the next stop confirms (real processes); a zombie leader whose group has ended is confirmed stopped (the normal case) |
+| F1-C (2). PostgreSQL status errors counted as stopped | same | Codex's file on `69c8e8b`: statuses 1 and 4, at the first check or at the check after `pg_ctl stop`, gave exit 0 and a deletion | `pg_running`: 0 means running, 3 means not running, and any other answer raises `PgStatusUnknown`. `stop` asks for the status before and after `pg_ctl stop` and fails closed on an unknown answer, so `reset` deletes nothing. `pg_start` (`start`, `setup`) refuses likewise | Codex's 7 cases (4 errors, 2 successful stops, 1 failed stop); mine: `start` refuses statuses 1, 2, 4 and 127; `pg_running` against the real `pg_ctl` and a disposable cluster (4 unknown, 3 stopped, 0 running) |
+
+On `69c8e8b`, Codex's file gives **6 failed, 6 passed**, exactly as in its evidence. On `3646373` all 12 pass.
+My six new tests fail there too; the empty-group control passes on both commits.
+
+**F1-D unchanged.** `_members`, `_signal_member`, `_signal_group`, `_wait_gone`, `_identity`, `_ours`,
+`_record`, `_spawn`, `_open_parent`, `pinned_root` and `reset` are byte-identical to `69c8e8b` (compared by
+AST source segments). Only `_terminate`, `stop`, `pg_running` and `pg_start` changed, plus the new helpers
+`_exited` and `_leaderless`.
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 (A to D, final F1-C) | yes | `subscription-foundation-verification` `44473349667` success on `3646373`: main job 734 tests, 0 skipped (Codex's 12 included); root step 66 tests, 0 skipped (runner kernel 7.0.0-1017-azure). Locally in WSL (kernel 6.18): 90 passed as the user (1 skipped: the root-only case); 66 passed as root (1 skipped: the real-`pg_ctl` test, which `initdb` refuses as root; it is deselected in the CI root step and runs in the main job) | pending (Codex, final) | no (pending) |
+
+**Known limitations:** unchanged from the third round. A group left behind by an exited leader, reaped or
+not, must be stopped by hand; the stop names its PIDs and keeps the record.
 
 ## Reproducing locally
 

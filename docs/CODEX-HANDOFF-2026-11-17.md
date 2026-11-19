@@ -371,6 +371,23 @@ Worth an independent look:
 * `_identity` is now three-way ("ours", "other", "unknown"); only "ours" is ever signalled. Its last plain
   `False` return was caught by the foreign-checkout test while I was making this change.
 
+## 19. The two remaining F1-C cases after your verification of `69c8e8b`: final F1 verification requested
+
+You verified F1-D. This corrects the two F1-C cases you reproduced. Details are in
+`docs/CODEX-AUDIT-CORRECTIONS.md`, section "Final F1-C round". F1 is not marked resolved.
+
+| Case | Branch | Full SHA | Your tests |
+|---|---|---|---|
+| Unreaped leader with a live child; PostgreSQL status errors | `fix/local-reset-ownership` (not merged into `feat/local-staging`; your local install and its data untouched) | `364637399d77abf7922a5aab610975882fba6d57` | `test_independent_final_f1.py` committed unchanged (sha256 `29664edc...0444f6`): 6 failed and 6 passed on `69c8e8b`, as in your evidence; 12 passed on `3646373`, as the user and as root |
+
+CI: `44473349667` (main job 734, root step 66, runner kernel 7.0.0-1017-azure).
+
+Worth an independent look:
+* `_exited` is a non-blocking `select` on the leader's pidfd, made before `_identity` and again whenever the
+  identity reads "other". So "other" means "absent" only for a live process that is not ours.
+* `stop` treats only `pg_ctl status` 3 as "stopped"; it checks before and after `pg_ctl stop`.
+* The F1-D signalling functions are byte-identical to `69c8e8b`.
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image
