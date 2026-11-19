@@ -367,6 +367,38 @@ upload never block an edit. Regression tests in `test_file_editing.py` and `test
 Still open, from Codex's architecture recommendation: dependency checks for figures stated in prose
 and metrics, and shared typed facts feeding tables, metrics, charts and prose.
 
+## Premium audit of 2026-11-18: six confirmed findings (F1 to F6)
+
+Codex's independent audit of Kalillac Premium confirmed six findings, besides the account-erasure and
+retention launch gaps. Each original failure was reproduced before the correction and is kept as a test.
+**None is marked resolved here:** each awaits Codex's independent verification at the SHA below.
+
+| Finding | Correction (branch, SHA) | Original failure reproduced | Corrected behaviour and regression coverage |
+|---|---|---|---|
+| F1. Local reset could delete any directory | `fix/local-reset-ownership` `afa247a` (fast-forwarded into `feat/local-staging`) | On `8760bfc`, `KALILLAC_LOCAL_ROOT=<unrelated dir> reset --yes` (as root) stopped the process groups named in its `run/` folder and deleted it | Every command checks the root first: absolute, normal, named `kalillac-local-staging`, no symlink, a root-owned parent nobody else can write, and the ownership marker naming this deployment, the path, the device and the inode. `reset` never adopts an unmarked directory and re-checks after stopping; `stop` signals only local staging's own processes. `test_local_reset.py` (29, real directories through the real command). Also: the web root is no longer world-writable |
+| F2. Expired files | `fix/premium-audit-corrections` `8de030b` | On `4a36dd7`: an expired file could not be deleted (404); quotas ignored expired files, so storage grew past the quota (six files under a three-file quota); expired files were deleted only at application startup | Quotas count every file on disk; owners delete expired files; the application runs the retention cleanup at startup and hourly under the operator command's lock, period `KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS` (0 unless set, as before; D-9). `test_files_retention_access.py` |
+| F3. Failed requests could consume provider spending without limit | `a12bf14` (cherry-picked from `3a82e0a`) | On `ac1f2a9`: six failing requests from one account all reached the provider, no account count changed (kept as `test_without_the_account_limit_failing_requests_reach_the_provider_every_time`) | Each provider attempt of a signed-in account's request is counted on its UTC day (migration 0026) in the pool's transaction and refused at the account's limit before dispatch; refunds for never-dispatched attempts; Free/paid limits required, no default (owner values). `test_account_attempts.py` (11), `test_account_attempts_postgres.py` (4) |
+| F4. End & erase during a file request | `4a36dd7` | On `ac1f2a9`: the end reported no active request; the file was created after the end and the late reply delivered (200, the ended session's id) | The file request is registered work of its chat session, its budget is cancelled by the end, the assistant stops before the next model call or tool, and the late result is replaced by 409 `session_ended`. `test_files_session_and_modes.py` (deterministic: the model call is held until the end) |
+| F5. Reasoning modes on file requests | `4a36dd7` | On `ac1f2a9`: Deep reached the provider as the default effort; invalid and unauthorized modes were not refused | The chat resolves the mode before the file handoff and carries it into the worker thread; `/api/files/assist` accepts and checks `reasoning_mode`. The provider payload is asserted on both paths |
+| F6. Files after Premium ends | `8de030b` | Every `/api/files` route required the paid tier | List, download and delete need only the signed-in owner; upload and the assistant keep the tier; `can_add` drives the chat; "Your files" on the account page. Real PostgreSQL journey continued past cancellation |
+
+| Finding | Implemented | CI passed (run, exact tested SHA) | Independently verified | Owner accepted |
+|---|---|---|---|---|
+| F1 | yes | `subscription-foundation-verification` `44410273831` success on `afa247a` (job 697 tests, including the 29 reset tests) | pending (Codex) | no (pending) |
+| F2 | yes | on `a12bf14`: file generation `44424864471` (1,093), frontend `44424873844` (1,933 / 1,914 passed), anonymous allowance `44424887336` (646), provider ceilings `44424878148`, safety `44424900568`: success; after the test-stub follow-up `52b2408`: subscription `44435167879` (suites 1,583; PostgreSQL job 657) and Spaces `44435172942`: success (on `a12bf14` they had failed on three stubs of the old signature, one stalling the PostgreSQL job until cancelled) | pending (Codex) | no (pending) |
+| F3 | yes | the same runs | pending (Codex) | no (pending) |
+| F4 | yes | file generation `44414037930` success on `4a36dd7`; and the runs above | pending (Codex) | no (pending) |
+| F5 | yes | the same as F4 | pending (Codex) | no (pending) |
+| F6 | yes | the runs above | pending (Codex) | no (pending) |
+
+**Open questions for Codex:**
+1. F1: is adopting an unmarked root at the default path (non-destructive commands only, and only when it holds this deployment's record) acceptable, or should the owner mark it by hand?
+2. F2: the default deletion period stays 0 days when unset (the release's behaviour since `36e1053`). Should a files deployment instead refuse to start without an explicit period?
+3. F3: attempts are counted for every provider (OpenAI, Brave, Tavily) against one per-account number. Is one combined limit right, or should each provider have its own?
+4. F4: files already stored before the end stay in the account (account files are not the conversation's). Is that the right boundary?
+5. F6: a downgraded account keeps download access to images it uploaded. Can that path be used for any analysis without the tier?
+
+
 ## Reproducing locally
 
 Windows, from `candidate/`, with the worktree's `.venv`:

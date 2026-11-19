@@ -299,6 +299,33 @@ old row deleted once, the command's confirmation and counts-only output). CI on 
 **Nothing here resolves an audit finding.** The legal review's gaps 1 and 2 are mechanisms only until the
 owner sets D-9 and D-11 and approves a schedule per environment.
 
+## 16. Corrections for the Premium audit of 2026-11-18 (F1 to F6): verification requested
+
+Details, original failures, coverage and open questions: `docs/CODEX-AUDIT-CORRECTIONS.md`, section "Premium
+audit of 2026-11-18". Nothing is marked resolved; please verify each at its SHA.
+
+| Finding | Branch | Full SHA | Reproduce the original failure |
+|---|---|---|---|
+| F1 | `fix/local-reset-ownership` (fast-forwarded into `feat/local-staging`) | `afa247ad58c33c9e11e601d4ee261b0f23942d8a` | `test_local_reset.py` against `8760bfc`'s `tools/local_staging.py` (the new API does not exist there; the commit message shows the direct reproduction: an unrelated directory deleted) |
+| F4, F5 | `fix/premium-audit-corrections` | `4a36dd7a47fa7812d5424311e7cad722dfe35572` | `test_files_session_and_modes.py` fails on `ac1f2a9` (both tests) |
+| F2, F6 | same | `8de030b172487d2339c769cb2292f280aa9730b9` | `test_files_retention_access.py` on `4a36dd7` (the store and router assertions) |
+| F3 | same | `a12bf1411610b05ade658736187a5a2783451d71` (test-stub follow-up `52b2408927aabb7c46bc840007e684e0d532d53b`) | `test_without_the_account_limit_failing_requests_reach_the_provider_every_time` keeps the original behaviour as evidence |
+
+Worth an independent look:
+* F3 adds migration `0026_account_provider_attempts` (a counter on `account_usage_daily`) and moves the release
+  head, so `tools/v1_security_transition.py`'s `HEAD` is now 0026. The column is covered by the runtime role's
+  existing table grant; the V1 transition's catalog checks were rerun on real PostgreSQL (173 passed).
+* F3's limit is required configuration whenever accounts and provider ceilings are on; production (accounts
+  off) is unaffected. Is refusing a signed-in request that carries no account id (rather than counting it
+  nowhere) the right failure mode?
+* F2: the application now deletes expired files on its own schedule. The default period is 0 days when unset,
+  which matches the startup purge it replaces; the staging template requires an explicit value.
+* F6: `GET /api/files` now answers 200 to every signed-in account, so the chat reads `can_add` instead of
+  the status. Any client that relied on 403 for "files not offered" must follow.
+
+Also on this branch: `docs/DATA-LIFECYCLE.md` corrected (expired files were deleted at startup, not never) and
+the decisions that complete account erasure (E-1 to E-8).
+
 ## Not in these checkpoints
 
 E1b (entitlement and billing grants behind a reviewed billing path), erasure (owner decision 6), image

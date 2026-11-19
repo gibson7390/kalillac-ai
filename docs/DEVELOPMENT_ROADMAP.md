@@ -646,6 +646,12 @@ libraries). It was created during this work, lives outside the repository and ca
     unpredictable substitute; decks keep Arial until embedding is solved.
 14. ~~Email verification under V1~~: decided 2026-11-15 (conditional); the conditions now hold with 0021
     (see Milestone 2).
+A-1. **Per-account provider attempts (Codex F3, 2026-11-18):** `KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE`
+    and `_PAID`: how many provider attempts one account's requests may start per UTC day, successful or
+    failed. Required wherever accounts and provider ceilings are on; staging cannot start without them.
+A-2. **Expired-file deletion period (D-9):** `KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS`; 0 (delete once expired)
+    is the current behaviour when unset.
+A-3. **Account erasure (refines decision 6):** E-1 to E-8 in `docs/DATA-LIFECYCLE.md` section 3.1.
 
 Resolved by the owner on 2026-11-15, recorded so they are not asked again: decision 5 (write the
 V1-02D/E plan from the code, keeping the private database authorities and adding no legacy path),
