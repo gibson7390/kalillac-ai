@@ -93,10 +93,14 @@ Resend. Those need the real keys above (or the server staging run).
 
 `Kalillac-Local.cmd reset --yes` deletes local staging's database and files (only
 `/var/lib/kalillac-local-staging`); `setup` builds it again. Every command first checks that the root is
-local staging's own: an absolute path named `kalillac-local-staging` with no symlink in it, in a parent only
-root can write, holding the ownership marker `.kalillac-local-staging` that setup writes (this deployment, the
-path, the directory's device and inode). Anything else, including another directory given in
-`KALILLAC_LOCAL_ROOT`, is refused before any process is stopped or anything is deleted. `stop` signals only
-local staging's own application and front server. A root set up before the marker existed is marked by the next
+local staging's own: an absolute path named `kalillac-local-staging` with no symlink in it, every directory
+above it root's and writable by no one else (a sticky one such as `/tmp` excepted above the parent), holding the
+ownership marker `.kalillac-local-staging` that setup writes (this deployment, the path, the directory's device
+and inode). Anything else, including another directory given in `KALILLAC_LOCAL_ROOT`, is refused before any
+process is stopped or anything is deleted. `reset` deletes through a descriptor of the checked parent, so a
+directory renamed or exchanged on the path after the check cannot redirect it. `stop` signals only the
+application and front server that `start` launched: each launch is recorded (start time, boot, a random token in
+the process's environment, this checkout, the script's absolute path) and a process is signalled only when all of
+them match, so a reused PID or another checkout's process never is. A root set up before the marker existed is marked by the next
 `status` or `start` (the default path only); `reset` never marks one. Chinese, Japanese and Korean PDFs need the large
 CJK fonts once: in WSL, `cd candidate && ~/kf15/bin/python tools/fetch_document_fonts.py`.

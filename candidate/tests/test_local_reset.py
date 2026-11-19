@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -217,7 +218,241 @@ def test_stop_never_signals_a_process_that_is_not_local_stagings(tool, tmp_path)
             (root / "run" / f"{name}.pid").write_text(str(bystander.pid))
         assert tool("stop", root=root) == 0
         assert bystander.poll() is None                            # Still running: not ours, never signalled.
-        assert local._ours(bystander.pid, "app") is False and local._ours(os.getpid(), "web") is False
+        for pid in (bystander.pid, os.getpid()):
+            assert local._ours({"pid": pid, "written": 0, "legacy": True}, "app", os.getuid()) is False
     finally:
         os.killpg(bystander.pid, signal.SIGKILL)
         bystander.wait()
+
+
+# --- F1, second round: the whole path, and the process's identity -------------------------------------------
+
+def test_an_ancestor_others_can_write_is_refused_but_a_sticky_one_like_tmp_is_not(tool, tmp_path):
+    for label, mode, expected in (("open", 0o777, 2), ("group", 0o775, 2), ("sticky", 0o1777, 0)):
+        ancestor = tmp_path / label
+        ancestor.mkdir(mode=0o755)
+        (ancestor / "parent").mkdir(mode=0o755)
+        root = marked(ancestor / "parent" / "kalillac-local-staging")
+        os.chmod(ancestor, mode)
+        before = tree(root)
+        assert tool("reset", "--yes", root=root) == expected, label
+        assert (tree(root) == before) if expected else not os.path.lexists(root)
+
+
+def exchange(first: Path, second: Path, saved: Path):
+    """What the owner of an ancestor can do in one instant: move one directory aside, put another in its place."""
+    os.rename(first, saved)
+    os.rename(second, first)
+
+
+def raced(real_rmtree, swap):
+    def rmtree(path, *args, **kwargs):
+        swap()
+        return real_rmtree(path, *args, **kwargs)
+    rmtree.avoids_symlink_attacks = True
+    return rmtree
+
+
+def test_an_ancestor_exchanged_after_the_last_check_cannot_redirect_the_delete(tool, tmp_path, monkeypatch):
+    """Codex's reproduction: the parent exchanged for another directory immediately before the recursive delete.
+    The delete is bound to the checked parent's descriptor, so it removes the checked root, wherever it now is,
+    and the directory swapped in under the same path survives untouched."""
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir(mode=0o755)
+    parent = ancestor / "parent"
+    parent.mkdir(mode=0o755)
+    root = marked(parent / "kalillac-local-staging")
+    (root / "valid-deployment.txt").write_text("disposable fixture")
+    replacement = ancestor / "replacement"
+    replacement.mkdir(mode=0o755)
+    victim = customer_data(replacement / "kalillac-local-staging")
+    before = tree(victim)
+    monkeypatch.setattr(local.shutil, "rmtree",
+                        raced(local.shutil.rmtree, lambda: exchange(parent, replacement, ancestor / "saved")))
+    assert tool("reset", "--yes", root=root) == 0
+    assert tree(parent / "kalillac-local-staging") == before                      # The unrelated data survives.
+    assert not os.path.lexists(ancestor / "saved" / "kalillac-local-staging")     # The checked root was deleted.
+
+
+def test_an_ancestor_exchanged_before_the_pinned_check_is_refused(tool, tmp_path, monkeypatch):
+    """Exchanged after the first check but before the root is pinned (while stopping): the root then found is
+    not the marked one, so nothing is deleted, there or in the moved original."""
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir(mode=0o755)
+    parent = ancestor / "parent"
+    parent.mkdir(mode=0o755)
+    root = marked(parent / "kalillac-local-staging")
+    replacement = ancestor / "replacement"
+    replacement.mkdir(mode=0o755)
+    victim = customer_data(replacement / "kalillac-local-staging")
+    before, original = tree(victim), tree(root)
+    monkeypatch.setattr(local, "stop", lambda args: exchange(parent, replacement, ancestor / "saved"))
+    assert tool("reset", "--yes", root=root) == 2
+    assert tree(parent / "kalillac-local-staging") == before
+    assert tree(ancestor / "saved" / "kalillac-local-staging") == original
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root: another user's ancestor")
+def test_as_root_an_ancestor_another_user_owns_is_refused_and_its_exchange_deletes_nothing(monkeypatch, tmp_path):
+    """Codex's exact scenario, as root: an unprivileged user (uid 65534) owns an ancestor and exchanges the
+    root-owned parent for its own directory immediately before the delete."""
+    monkeypatch.setattr(local, "ROOT_OWNER", 0)
+    monkeypatch.setattr(local, "_running_as_root", lambda: True)
+    monkeypatch.setattr(local, "stop", lambda args: None)
+    os.chmod(tmp_path, 0o755)
+    untrusted = tmp_path / "untrusted"
+    untrusted.mkdir(mode=0o755)
+    parent = untrusted / "root-owned-parent"
+    parent.mkdir(mode=0o755)
+    root = parent / "kalillac-local-staging"
+    os.chown(untrusted, 65534, 65534)
+    with pytest.raises(local.UnsafeRoot):                       # Setup itself refuses such a path.
+        local.owned_root(str(root), create=True)
+    os.chown(untrusted, 0, 0)
+    local.owned_root(str(root), create=True)                   # Marked while the path was trusted...
+    (root / "valid-deployment.txt").write_text("disposable fixture")
+    os.chown(untrusted, 65534, 65534)                          # ...then an ancestor given to another user.
+    replacement = untrusted / "replacement"
+    replacement.mkdir(mode=0o755)
+    victim = customer_data(replacement / "kalillac-local-staging")
+    os.chown(replacement, 65534, 65534)
+    before, original = tree(victim), tree(root)
+
+    def swap():
+        subprocess.run([sys.executable, "-c", "import os,sys;os.rename(sys.argv[1],sys.argv[2]);"
+                        "os.rename(sys.argv[3],sys.argv[1])", str(parent), str(untrusted / "saved"), str(replacement)],
+                       user=65534, group=65534, extra_groups=[], check=True)
+    monkeypatch.setattr(local.shutil, "rmtree", raced(local.shutil.rmtree, swap))
+    monkeypatch.setenv("KALILLAC_LOCAL_ROOT", str(root))
+    with pytest.raises(SystemExit) as refused:
+        local.main(["reset", "--yes"])
+    assert refused.value.code == 2 and tree(root) == original and tree(victim) == before
+
+
+# --- processes: only the ones this deployment launched from this checkout ------------------------------------
+
+HARMLESS = "import time\ntime.sleep(120)\n"
+
+
+@pytest.fixture
+def checkout(tool, tmp_path, monkeypatch):
+    """A checkout whose staging scripts are harmless, a marked root with run/ and state/, the test's user as the
+    service user."""
+    import grp
+    candidate = tmp_path / "checkout" / "candidate"
+    (candidate / "tools").mkdir(parents=True)
+    for script in local.SCRIPTS.values():
+        (candidate / script).write_text(HARMLESS)
+    monkeypatch.setattr(local, "CANDIDATE", candidate)
+    monkeypatch.setattr(local, "identity", lambda: (os.getuid(), os.getgid(), grp.getgrgid(os.getgid()).gr_name,
+                                                   str(tmp_path)))
+    root = marked(tmp_path / "kalillac-local-staging")
+    (root / "run").mkdir()
+    monkeypatch.setattr(local, "ROOT", root)
+    monkeypatch.setattr(local, "pg_running", lambda *args: False)
+    started = []
+
+    def launch(name, cwd=None, argv=None):
+        if cwd is None:
+            process = local._spawn(name, [], local.paths(), os.getuid(), os.getgid(), dict(os.environ))
+        else:
+            process = subprocess.Popen(argv or [sys.executable, "-B", local.SCRIPTS[name]], cwd=cwd,
+                                       start_new_session=True)
+        started.append(process)
+        return process
+    launch.root = root
+    yield launch
+    for process in started:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def gone(process):
+    try:
+        process.wait(timeout=10)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def test_stop_ends_local_stagings_own_processes(tool, checkout):
+    app, web = checkout("app"), checkout("web")
+    p = local.paths()
+    assert local._running(p, "app") == app.pid and local._running(p, "web") == web.pid
+    assert oct(os.stat(p["run"] / "app.json").st_mode & 0o777) == "0o600"
+    assert tool("stop", root=checkout.root) == 0
+    assert gone(app) and gone(web) and app.returncode == -signal.SIGTERM
+    assert not any((p["run"] / f).exists() for f in ("app.json", "web.json", "app.pid", "web.pid"))
+
+
+def test_stop_never_signals_another_checkouts_process_with_the_same_script(tool, checkout, tmp_path):
+    """Codex's reproduction: tools/local_staging_web.py run from another checkout, its PID in run/."""
+    other = tmp_path / "other-checkout"
+    (other / "tools").mkdir(parents=True)
+    (other / "tools" / "local_staging_web.py").write_text(HARMLESS)
+    relative = checkout("web", cwd=other)
+    absolute = checkout("app", cwd=other, argv=[sys.executable, "-B", str(other / "tools" / "local_staging_web.py")])
+    time.sleep(0.2)
+    p = local.paths()
+    (p["run"] / "web.pid").write_text(str(relative.pid))         # As an older start would have written it.
+    (p["run"] / "app.json").write_text(json.dumps({            # A record as complete as one can be without
+        "pid": absolute.pid, "started": local._started(absolute.pid), "boot": local._boot(),   # the launch.
+        "token": "0" * 32, "script": local._script("app"), "checkout": local._checkout()}))
+    assert tool("stop", root=checkout.root) == 0
+    assert relative.poll() is None and absolute.poll() is None   # Neither was signalled.
+
+
+def test_a_reused_pid_a_wrong_token_or_another_user_is_not_ours(tool, checkout):
+    app = checkout("app")
+    p = local.paths()
+    record = json.loads((p["run"] / "app.json").read_text())
+    uid = os.getuid()
+    assert local._ours(record, "app", uid)
+    for change in ({"started": record["started"] + 1},             # Same PID, another process: reused.
+                   {"boot": "another-boot"},
+                   {"token": "f" * 32},                            # Not the token this launch was given.
+                   {"token": None},
+                   {"script": "/elsewhere/tools/local_staging_app.py"},
+                   {"pid": os.getpid()},
+                   {"pid": 1}):
+        assert not local._ours({**record, **change}, "app", uid), change
+    assert not local._ours(record, "web", uid)                    # Not the other name's script.
+    assert not local._ours(record, "app", uid + 1)                # Not the service user's.
+    (p["run"] / "app.json").unlink()
+    (p["run"] / "app.json").write_text(json.dumps({**record, "token": "f" * 32}))
+    assert tool("stop", root=checkout.root) == 0 and app.poll() is None
+
+
+def test_a_process_launched_before_records_existed_is_stopped_only_if_its_pid_file_is_its_own(tool, checkout):
+    """Upgrading must not strand the running instance: the old start launched `python -B tools/NAME.py` from the
+    checkout and wrote run/NAME.pid. It is ours only if it started no later than that file was written and at
+    most two minutes before (a PID reused since then started later)."""
+    p = local.paths()
+    stale = checkout("web", cwd=local.CANDIDATE)
+    time.sleep(0.2)
+    (p["run"] / "web.pid").write_text(str(stale.pid))
+    hour_ago = time.time() - 3600
+    os.utime(p["run"] / "web.pid", (hour_ago, hour_ago))          # Written long before this process started.
+    assert local._running(p, "web") is None
+    old = checkout("app", cwd=local.CANDIDATE)
+    time.sleep(0.2)
+    (p["run"] / "app.pid").write_text(str(old.pid))
+    assert local._running(p, "app") == old.pid
+    assert tool("stop", root=checkout.root) == 0
+    assert gone(old) and stale.poll() is None
+
+
+def test_a_process_of_this_checkout_without_the_launch_token_is_not_ours(tool, checkout):
+    """The same script, from this checkout, started by hand: its PID put in a record copied from a real launch."""
+    real = checkout("app")
+    p = local.paths()
+    record = json.loads((p["run"] / "app.json").read_text())
+    by_hand = checkout("web", cwd=local.CANDIDATE, argv=[sys.executable, "-B", local._script("app")])
+    time.sleep(0.2)
+    forged = {**record, "pid": by_hand.pid, "started": local._started(by_hand.pid)}
+    assert not local._ours(forged, "app", os.getuid())
+    (p["run"] / "app.json").unlink()
+    (p["run"] / "app.json").write_text(json.dumps(forged))
+    assert tool("stop", root=checkout.root) == 0
+    assert by_hand.poll() is None and real.poll() is None         # The forged one untouched; the real one unnamed.

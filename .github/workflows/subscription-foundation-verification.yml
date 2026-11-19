@@ -537,6 +537,7 @@ jobs:
           tests/test_v1_premium_spaces_postgres.py
           tests/test_v1_premium_files_postgres.py
           tests/test_v1_file_allowance_postgres.py
+          --deselect tests/test_local_reset.py::test_as_root_an_ancestor_another_user_owns_is_refused_and_its_exchange_deletes_nothing
           -q -ra -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/v1-02d-authority.xml"
 
@@ -548,7 +549,21 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 697, "skipped": 0, "failures": 0, "errors": 0}
+          assert totals == {"tests": 705, "skipped": 0, "failures": 0, "errors": 0}
+          PY
+
+      # Local staging's reset and stop as root, as the owner runs them: among them Codex's F1 scenario, an
+      # ancestor owned by another user exchanged immediately before the delete. Disposable fixtures only.
+      - name: Run the local staging reset and stop tests as root
+        run: |
+          sudo "$(command -v python)" -B -m pytest candidate/tests/test_local_reset.py -q -ra -p no:cacheprovider --junitxml="$RUNNER_TEMP/local-reset-root.xml"
+          python - "$RUNNER_TEMP/local-reset-root.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
+          print(totals)
+          assert totals == {"tests": 38, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       # The staging runbook's own commands (deploy/staging/README.md, steps 4, 7 and 8), as root on the

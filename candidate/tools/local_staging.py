@@ -11,10 +11,18 @@ Run as root (in WSL: `wsl -u root`), with the repository's Python environment, f
     python3 -B tools/local_staging.py reset --yes  delete local staging entirely (its database and files only)
 
 The root (default /var/lib/kalillac-local-staging, or KALILLAC_LOCAL_ROOT) is checked before anything else:
-an absolute path with no symlink in it, named kalillac-local-staging (optionally -suffix), in a parent only
-root can write. Setup creates it with an ownership marker (.kalillac-local-staging: this deployment, this
-path and this directory's device and inode); every other command, and above all `reset`, refuses a root
-without that exact marker, so it can never stop processes in, or delete, any other directory.
+an absolute path with no symlink in it, named kalillac-local-staging (optionally -suffix), every directory
+above it root's and writable by no one else (a sticky directory such as /tmp excepted above the parent), so no
+other user can rename or exchange any part of the path. Setup creates it with an ownership marker
+(.kalillac-local-staging: this deployment, this path and this directory's device and inode); every other
+command, and above all `reset`, refuses a root without that exact marker. `reset` deletes through directory
+descriptors opened from / without following a link and checked as they are opened, so what it deletes is the
+directory it checked, wherever its path points by then.
+
+`stop` signals only the processes `start` launched: each launch records its process's start time, the boot,
+a random token in the process's environment, this checkout and the script's absolute path, and the process
+(the service user's, in this checkout) is signalled through a pidfd only after all of them match: a reused PID
+or another checkout's process never does.
 
 Then open http://localhost:8010 (the local panel: http://localhost:8010/__local__/).
 
@@ -41,6 +49,7 @@ from pathlib import Path
 import pwd
 import re
 import secrets
+import select
 import shutil
 import signal
 import stat
@@ -88,9 +97,48 @@ class UnsafeRoot(Exception):
     """The configured root is not local staging's own directory."""
 
 
+def _trusted_owners():
+    return {0, ROOT_OWNER}
+
+
+def _open_parent(path: Path) -> int:
+    """A descriptor of the root's parent, reached from / one component at a time without following a link,
+    each directory checked as it is opened: root's (or ROOT_OWNER's) and writable by no one else, so no other
+    user can rename, replace or exchange any directory on the way. Above the parent a sticky directory (/tmp)
+    is accepted: there only an entry's owner, here a trusted one, can move it. The caller closes it."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        components = path.parent.parts[1:]
+        where = Path("/")
+        for index in range(len(components) + 1):
+            st = os.fstat(fd)
+            parent = index == len(components)
+            sticky = bool(st.st_mode & stat.S_ISVTX) and not parent
+            if st.st_uid not in _trusted_owners() or (st.st_mode & 0o022 and not sticky):
+                owners = "root" if ROOT_OWNER == 0 else f"root or uid {ROOT_OWNER}"
+                raise UnsafeRoot(f"every directory above the root must belong to {owners} and not be writable by "
+                                 f"others: {where}")
+            if parent:
+                return fd
+            where = where / components[index]
+            try:
+                child = os.open(components[index], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise UnsafeRoot(f"the root must not be inside a symlink: {where}") from None
+                if error.errno == errno.ENOENT:
+                    raise UnsafeRoot(f"the root's parent must exist: {path.parent}") from None
+                raise
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def checked_path(raw) -> Path:
     """The root's path alone: absolute, already normal, named for local staging, no symlink anywhere in it,
-    and in a parent only its owner can write (so nothing can be swapped in beneath it)."""
+    and every directory above it trusted (so nothing can be swapped in anywhere along it)."""
     raw = str(raw or "")
     if not raw.startswith("/") or os.path.normpath(raw) != raw or "\0" in raw:
         raise UnsafeRoot(f"the root must be an absolute, normal path: {raw!r}")
@@ -99,10 +147,7 @@ def checked_path(raw) -> Path:
         raise UnsafeRoot(f"the root must be a directory named kalillac-local-staging, not {path}")
     if os.path.realpath(path) != raw:
         raise UnsafeRoot(f"the root must not be, or be inside, a symlink: {path}")
-    parent = os.stat(path.parent) if os.path.isdir(path.parent) else None
-    if parent is None or parent.st_uid != ROOT_OWNER or parent.st_mode & 0o022:
-        raise UnsafeRoot(f"the root's parent must exist, belong to uid {ROOT_OWNER} and not be writable by others: "
-                         f"{path.parent}")
+    os.close(_open_parent(path))
     return path
 
 
@@ -110,9 +155,9 @@ def _expected_marker(path: Path, st):
     return {"deployment": DEPLOYMENT, "root": str(path), "device": st.st_dev, "inode": st.st_ino}
 
 
-def _directory(path: Path):
+def _directory(path: Path, parent_fd=None):
     try:
-        st = os.lstat(path)
+        st = os.lstat(path) if parent_fd is None else os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
     if not stat.S_ISDIR(st.st_mode):
@@ -122,9 +167,12 @@ def _directory(path: Path):
     return st
 
 
-def read_marker(path: Path):
+def read_marker(path: Path, parent_fd=None):
     """The marker's contents, read without following a symlink, or None if there is none."""
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if parent_fd is None:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    else:
+        fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         try:
             marker = os.open(MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
@@ -200,6 +248,24 @@ def owned_root(raw, *, create=False, adopt=False):
     if marker != _expected_marker(path, st):
         raise UnsafeRoot(f"{path}'s ownership marker belongs to another directory or deployment; refusing to use it")
     return path
+
+
+def pinned_root(path: Path) -> int:
+    """The parent's descriptor, with the root in it proven by its marker through that same descriptor: what
+    a destructive operation then does inside it happens to the checked directory, even if a directory on the
+    path is renamed or exchanged afterwards. The caller closes it."""
+    checked_path(str(path))
+    parent_fd = _open_parent(path)
+    try:
+        st = _directory(path, parent_fd)
+        if st is None:
+            raise UnsafeRoot(f"{path} no longer exists")
+        if read_marker(path, parent_fd) != _expected_marker(path, st):
+            raise UnsafeRoot(f"{path} is no longer the marked local staging root")
+        return parent_fd
+    except BaseException:
+        os.close(parent_fd)
+        raise
 
 
 # --- the service identity and paths -------------------------------------------------------------------
@@ -459,33 +525,143 @@ def service_env(p, home):
 
 # --- processes ----------------------------------------------------------------------------------------
 
-def _alive(pidfile: Path):
-    try:
-        pid = int(pidfile.read_text())
-        os.kill(pid, 0)
-        return pid
-    except (OSError, ValueError):
-        return None
-
-
 SCRIPTS = {"app": "tools/local_staging_app.py", "web": "tools/local_staging_web.py"}
+INSTANCE = "KALILLAC_LOCAL_INSTANCE"
 
 
-def _ours(pid, name):
-    """True only if pid is local staging's own process of that name, leading its own process group."""
+def _checkout():
+    return os.path.realpath(CANDIDATE)
+
+
+def _script(name) -> str:
+    return os.path.join(_checkout(), SCRIPTS[name])
+
+
+def _boot():
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def _started(pid):
+    """The process's start time in clock ticks since boot (/proc/PID/stat field 22): a reused PID has another."""
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return int(fields[19])
+
+
+def _run_file(p, filename):
+    """A file in run/ (root's, not a link), opened, with its status; None if it is absent or not trusted."""
     try:
-        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        return SCRIPTS[name].encode() in argv and os.getpgid(pid) == pid
-    except (OSError, KeyError):
+        fd = os.open(p["run"] / filename, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    handle = os.fdopen(fd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid not in _trusted_owners() or st.st_mode & 0o022:
+        handle.close()
+        return None
+    return handle, st
+
+
+def _record(p, name):
+    """What `start` recorded for that process (run/NAME.json), or what an older start left (run/NAME.pid: only
+    the PID and the time the file was written), or None."""
+    opened = _run_file(p, f"{name}.json")
+    if opened:
+        handle, _st = opened
+        with handle:
+            try:
+                record = json.load(handle)
+            except ValueError:
+                return None
+        return record if isinstance(record, dict) and type(record.get("pid")) is int else None
+    opened = _run_file(p, f"{name}.pid")
+    if opened:
+        handle, st = opened
+        with handle:
+            try:
+                return {"pid": int(handle.read().strip()), "written": st.st_mtime, "legacy": True}
+            except ValueError:
+                return None
+    return None
+
+
+def _ours(record, name, uid):
+    """True only if the process the record names is still the one `start` launched, for this deployment and
+    this checkout: the service user's, leading its own group, in this checkout running this checkout's script,
+    started at the recorded time on this boot (not a reused PID), with the launch's token in its environment."""
+    try:
+        pid = record["pid"]
+        if type(pid) is not int or pid <= 1:
+            return False
+        proc = Path(f"/proc/{pid}")
+        if os.stat(proc).st_uid != uid or os.getpgid(pid) != pid or os.readlink(proc / "cwd") != _checkout():
+            return False
+        argv = [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0")]
+        if record.get("legacy"):
+            # Launched as `python -B tools/NAME.py` from this checkout; started no later than its PID file was
+            # written and no earlier than two minutes before (a PID reused since then started after it).
+            started_at = (time.time() - float(Path("/proc/uptime").read_text().split()[0])
+                          + _started(pid) / os.sysconf("SC_CLK_TCK"))
+            return SCRIPTS[name] in argv[1:3] and record["written"] - 120 <= started_at <= record["written"] + 2
+        token = record.get("token")
+        environ = (proc / "environ").read_bytes().split(b"\0")
+        return (record.get("script") == _script(name) and _script(name) in argv[1:3]
+                and record.get("boot") == _boot() and record.get("started") == _started(pid)
+                and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
+                and f"{INSTANCE}={token}".encode() in environ)
+    except (OSError, KeyError, ValueError, TypeError, IndexError):
         return False
 
 
-def _spawn(name, argv, p, uid, gid, env):
+def _running(p, name, uid=None):
+    """The PID of local staging's own process of that name, or None."""
+    uid = identity()[0] if uid is None else uid
+    record = _record(p, name)
+    return record["pid"] if record and _ours(record, name, uid) else None
+
+
+def _terminate(p, name, uid, timeout=30.0):
+    """SIGTERM to local staging's own process of that name and its group, through a pidfd taken before its
+    identity is checked (so the check and the signal concern the same process), then wait for it to exit.
+    Returns True if it was ours, False if there was nothing of ours to stop."""
+    record = _record(p, name)
+    if not record:
+        return False
+    try:
+        pidfd = os.pidfd_open(record["pid"])
+    except (OSError, TypeError, ValueError, AttributeError):
+        return False                                   # Gone already, or no pidfd here: never signal blindly.
+    try:
+        if not _ours(record, name, uid):
+            return False
+        # Still alive after the check, through the pidfd: its PID, its group's id, cannot have been reused.
+        signal.pidfd_send_signal(pidfd, 0)
+        os.killpg(record["pid"], signal.SIGTERM)
+        select.select([pidfd], [], [], timeout)        # Readable once it has exited.
+        return True
+    except ProcessLookupError:
+        return True
+    finally:
+        os.close(pidfd)
+
+
+def _spawn(name, extra, p, uid, gid, env):
     log = open(p["state"] / f"{name}.log", "ab")
     os.chown(p["state"] / f"{name}.log", uid, gid)
-    process = subprocess.Popen(argv, cwd=CANDIDATE, env=env, user=uid, group=gid, extra_groups=[], stdout=log,
-                               stderr=subprocess.STDOUT, start_new_session=True)
-    (p["run"] / f"{name}.pid").write_text(str(process.pid))
+    token = secrets.token_hex(16)
+    drop = {} if os.geteuid() == uid else {"user": uid, "group": gid, "extra_groups": []}
+    process = subprocess.Popen([sys.executable, "-B", _script(name), *extra], cwd=_checkout(),
+                               env={**env, INSTANCE: token}, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True, **drop)
+    try:
+        started = _started(process.pid)
+    except OSError:
+        started = None                                 # Exited at once: a record that matches nothing.
+    for stale in (f"{name}.json", f"{name}.pid"):
+        (p["run"] / stale).unlink(missing_ok=True)
+    fd = os.open(p["run"] / f"{name}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump({"pid": process.pid, "started": started, "boot": _boot(), "token": token,
+                   "script": _script(name), "checkout": _checkout()}, handle)
     return process
 
 
@@ -506,21 +682,20 @@ def start(args):
         fail("not set up yet: run `setup` first")
     pg_start(p, pg_bin(home), uid, gid)
     env = service_env(p, home)
-    if not _alive(p["run"] / "app.pid"):
-        _spawn("app", [sys.executable, "-B", "tools/local_staging_app.py", "--host", "127.0.0.1", "--port", str(APP_PORT)],
-               p, uid, gid, env)
+    if not _running(p, "app", uid):
+        _spawn("app", ["--host", "127.0.0.1", "--port", str(APP_PORT)], p, uid, gid, env)
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             if _get(f"http://127.0.0.1:{APP_PORT}/api/health")[0] == 200:
                 break
-            if not _alive(p["run"] / "app.pid"):
+            if not _running(p, "app", uid):
                 fail("the application stopped while starting; see " + str(p["state"] / "app.log"))
             time.sleep(1)
         else:
             fail("the application did not answer in time; see " + str(p["state"] / "app.log"))
-    if not _alive(p["run"] / "web.pid"):
-        _spawn("web", [sys.executable, "-B", "tools/local_staging_web.py", "--webroot", str(p["webroot"]),
-                       "--upstream", f"http://127.0.0.1:{APP_PORT}", "--port", str(WEB_PORT)], p, uid, gid, env)
+    if not _running(p, "web", uid):
+        _spawn("web", ["--webroot", str(p["webroot"]), "--upstream", f"http://127.0.0.1:{APP_PORT}",
+                       "--port", str(WEB_PORT)], p, uid, gid, env)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and _get(f"http://127.0.0.1:{WEB_PORT}/")[0] != 200:
             time.sleep(0.5)
@@ -531,14 +706,9 @@ def stop(args):
     uid, gid, group, home = identity()
     p = paths()
     for name in ("web", "app"):
-        pid = _alive(p["run"] / f"{name}.pid")
-        if pid and _ours(pid, name):
-            os.killpg(pid, signal.SIGTERM)
-            for _ in range(60):
-                if not _alive(p["run"] / f"{name}.pid"):
-                    break
-                time.sleep(0.5)
-        (p["run"] / f"{name}.pid").unlink(missing_ok=True)
+        _terminate(p, name, uid)
+        for stale in (f"{name}.json", f"{name}.pid"):
+            (p["run"] / stale).unlink(missing_ok=True)
     if p["pg"].exists() and pg_running(p, pg_bin(home), uid, gid):
         as_user([f"{pg_bin(home)}/pg_ctl", "-D", str(p["pg"]), "stop", "-m", "fast"], uid, gid, capture_output=True)
     say("stopped")
@@ -552,8 +722,8 @@ def status(args):
     info = json.loads((ROOT / "local.json").read_text())
     _keys, simulated = provider_keys(p)
     say(f"Kalillac local staging, release {info['release_sha'][:12]}, deployment {info['deployment']}")
-    say(f"  application: {'running' if _alive(p['run'] / 'app.pid') else 'stopped'};  "
-        f"front server: {'running' if _alive(p['run'] / 'web.pid') else 'stopped'}")
+    say(f"  application: {'running' if _running(p, 'app') else 'stopped'};  "
+        f"front server: {'running' if _running(p, 'web') else 'stopped'}")
     say(f"  open:  {ORIGIN}      local panel: {ORIGIN}/__local__/")
     say(f"  simulated providers: {simulated or 'none'}  (real keys: {p['secrets']}/provider-keys.env, stripe.env)")
     demo = ROOT / "demo-accounts.txt"
@@ -683,14 +853,9 @@ def refresh_web(args):
     The application and its data are not touched."""
     uid, gid, group, home = identity()
     p = paths()
-    pid = _alive(p["run"] / "web.pid")
-    if pid and _ours(pid, "web"):
-        os.killpg(pid, signal.SIGTERM)
-        for _ in range(40):
-            if not _alive(p["run"] / "web.pid"):
-                break
-            time.sleep(0.25)
-        (p["run"] / "web.pid").unlink(missing_ok=True)
+    _terminate(p, "web", uid, timeout=10.0)
+    for stale in ("web.json", "web.pid"):
+        (p["run"] / stale).unlink(missing_ok=True)
     build_webroot(p)
     say("web root rebuilt from the current site build")
     start(args)
@@ -702,14 +867,19 @@ def reset(args):
     if not os.path.lexists(ROOT):
         say(f"nothing to remove: {ROOT} does not exist")
         return
+    if not shutil.rmtree.avoids_symlink_attacks or sys.version_info < (3, 11):
+        fail("this platform's recursive delete cannot be bound to a directory descriptor; remove it by hand")
     stop(None)
     try:
-        owned_root(str(ROOT))             # Still the marked directory after stopping, immediately before deleting.
+        parent_fd = pinned_root(ROOT)     # After stopping: the marked directory, held by descriptor.
     except UnsafeRoot as error:
         fail(f"{error}. Local staging was stopped; nothing was deleted.")
-    if not shutil.rmtree.avoids_symlink_attacks:
-        fail("this platform's recursive delete can follow symlinks; remove the directory by hand")
-    shutil.rmtree(ROOT)
+    try:
+        # Relative to the held parent: a directory renamed or exchanged anywhere on the path since cannot
+        # redirect it, and rmtree itself checks that the entry it opens is the one it examined.
+        shutil.rmtree(ROOT.name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
     say(f"removed {ROOT}")
 
 
