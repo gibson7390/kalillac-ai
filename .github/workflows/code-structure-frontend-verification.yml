@@ -125,7 +125,7 @@ jobs:
           --junitxml="$RUNNER_TEMP/code-structure-frontend-verification.xml"
 
       # A green run must mean every focused test executed: exactly the
-      # expected number collected (1933, from `pytest --collect-only` over the
+      # expected number collected (1961, from `pytest --collect-only` over the
       # files above: the homepage composer is now native, so the 395 tests of
       # the framed homepage chat were replaced by 527 native-composer, handoff
       # (ledger, deadline, stall recovery, early Back and ownership) and /app/
@@ -140,7 +140,10 @@ jobs:
       # conversation editing one; the account pages' responsive pass five: two
       # more reflow sizes, the form measure, the note and phone-width actions;
       # the return from Stripe four; the Spaces dialog on a phone one;
-      # homepage account navigation eleven; the account page's files five; the account processing limit one), exactly 1914 passed and exactly 19 skipped --
+      # homepage account navigation eleven; the account page's files five; the account processing limit one;
+      # signed-in customer navigation, the Free/Premium polish and the footer plan twenty-eight: the account menu
+      # and way back to a Space, footer profile links, reasoning availability, attachment cards, reuse of empty
+      # conversations, Premium discovery and the confirmed plan), exactly 1942 passed and exactly 19 skipped --
       # each skip one of the homepage tests' own per-viewport skips -- and none
       # failed or errored.
       # The suite totals and every test case's own outcome must both agree.
@@ -179,7 +182,7 @@ jobs:
                       unexpected.append(f"{case.get('classname')}::{case.get('name')}: {reason.strip()}")
           for line in unexpected:
               print("unexpected skip:", line)
-          expected = {"tests": 1933, "passed": 1914, "skipped": 19, "failures": 0, "errors": 0}
+          expected = {"tests": 1961, "passed": 1942, "skipped": 19, "failures": 0, "errors": 0}
           if totals != expected or counted != expected or unexpected:
               sys.exit("the focused verification did not run completely")
           PY
