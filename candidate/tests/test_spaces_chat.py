@@ -682,3 +682,81 @@ def test_a_space_answers_retention_questions_truthfully_end_to_end(world, api, p
     assert response.json()["assistant_message"]["content"] == SPACE_RETENTION_REPLY
     assert provider.payloads == []                                 # a fixed reply, no model call
     assert world.count(Message) == 2                               # and it is itself saved
+
+
+# --- automatic conversation titles (repository.automatic_title, applied in complete_exchange) -------------
+
+def conversation_of(api, space_id, conversation_id, key="a"):
+    response = api.get(f"/api/spaces/{space_id}/conversations/{conversation_id}", headers=headers(key))
+    assert response.status_code == 200, response.text
+    return response.json()["conversation"]
+
+
+@pytest.mark.parametrize("message,title", [
+    ("How do I plan a product launch?", "How do I plan a product launch?"),
+    ("  ## Draft   a cover letter\nfor the role", "Draft a cover letter"),
+    ("```python\nprint('hi')\n```\nWhy does this fail?", "print('hi')"),
+    ("Summarize the main causes of the 2008 financial crisis and how regulators responded afterwards",
+     "Summarize the main causes of the 2008 financial crisis and…"),
+    ("hi", None), ("?!", None), ("   \n\n", None),
+])
+def test_automatic_titles_are_local_and_deterministic(message, title):
+    assert repo.automatic_title(message) == title
+    if title:
+        assert 1 <= len(title) <= 60
+
+
+def test_a_default_titled_conversation_is_named_by_its_first_meaningful_message(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    assert conversation_of(api, space_id, conversation_id)["title"] == "New conversation"
+    # A greeting is too short to name it: the next message does.
+    assert send(api, space_id, conversation_id, "hi").status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "New conversation"
+    reply = send(api, space_id, conversation_id, "Explain how encryption uses keys.")
+    assert reply.status_code == 200 and reply.json()["conversation"]["title"] == "Explain how encryption uses keys."
+    # Once named, later messages never rename it.
+    assert send(api, space_id, conversation_id, "And what about hashing?").status_code == 200
+    named = conversation_of(api, space_id, conversation_id)
+    assert named["title"] == "Explain how encryption uses keys." and named["version"] == 1
+
+
+def test_a_title_the_customer_chose_is_never_replaced(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    renamed = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                        json={"title": "Launch checklist", "expected_version": 1}, headers=headers("a"))
+    assert renamed.status_code == 200
+    assert send(api, space_id, conversation_id, "Explain how encryption uses keys.").status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "Launch checklist"
+    created = api.post(f"/api/spaces/{space_id}/conversations", json={"title": "Budget"}, headers=headers("a"))
+    other = created.json()["conversation"]["id"]
+    assert send(api, space_id, other, "Explain how encryption uses keys.").status_code == 200
+    assert conversation_of(api, space_id, other)["title"] == "Budget"
+
+
+def test_an_automatic_title_does_not_block_a_rename_made_from_the_version_read_before_it(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    assert send(api, space_id, conversation_id, "Explain how encryption uses keys.").status_code == 200
+    renamed = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                        json={"title": "Crypto notes", "expected_version": 1}, headers=headers("a"))
+    assert renamed.status_code == 200 and renamed.json()["conversation"]["title"] == "Crypto notes"
+
+
+def test_edited_instructions_apply_to_the_next_send_in_that_space_only(api, provider):
+    x = new_space(api, "SENTINEL-FIRST-INSTRUCTIONS", name="X")
+    y = new_space(api, "SENTINEL-Y-INSTRUCTIONS", name="Y")
+    x_conversation, y_conversation = new_conversation(api, x), new_conversation(api, y)
+    assert send(api, x, x_conversation, "Explain how encryption uses keys.").status_code == 200
+    edited = api.put(f"/api/spaces/{x}/instructions",
+                     json={"instructions": "SENTINEL-EDITED-INSTRUCTIONS", "expected_version": 1}, headers=headers("a"))
+    assert edited.status_code == 200, edited.text
+    assert send(api, x, x_conversation, "And how are keys exchanged?").status_code == 200
+    assert send(api, y, y_conversation, "Explain how encryption uses keys.").status_code == 200
+    before, after, other = (json.dumps(p) for p in provider.payloads)
+    assert "SENTINEL-FIRST-INSTRUCTIONS" in before
+    # The effective request is assembled from what is saved now: the edit, and nothing of the earlier text.
+    assert "SENTINEL-EDITED-INSTRUCTIONS" in after and "SENTINEL-FIRST-INSTRUCTIONS" not in after
+    assert "SENTINEL-Y-INSTRUCTIONS" in other
+    assert "SENTINEL-EDITED-INSTRUCTIONS" not in other and "SENTINEL-FIRST-INSTRUCTIONS" not in other

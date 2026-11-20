@@ -518,6 +518,8 @@ def test_account_module_uses_only_fixed_same_origin_paths_and_safe_fetch_options
         "/api/account/billing", "/api/account/billing/checkout", "/api/account/billing/portal",
         # Account security (V1 mode): offered only when the server's /security route answers.
         "/api/account/security", "/api/account/sessions/revoke-others", "/api/account/sessions/revoke-all",
+        # What Premium would add for a Free account: the chat's own reasoning-modes answer.
+        "/api/chat/reasoning-modes",
         "/api/account/password", "/api/account/deletion-request",
         # The account's stored files (a files deployment): listed here, each deleted at /api/files/<id>.
         "/api/files",
@@ -1161,7 +1163,7 @@ def assert_only_current_functionality(page):
     assert "your account currently holds your sign-in email, verification status, plan and billing settings." in text
 
 
-@pytest.mark.parametrize("tier,label", [("paid", "Paid plan"), ("free", "Free account")])
+@pytest.mark.parametrize("tier,label", [("paid", "Kalillac Premium"), ("free", "Free account")])
 def test_plans_are_described_without_invented_features_or_prices(page, tier, label):
     billing = {"subscription_status": "active" if tier == "paid" else None, "cancel_at_period_end": False,
                "current_period_end": "2026-12-01T17:00:00+00:00" if tier == "paid" else None,
@@ -1315,7 +1317,7 @@ def test_return_from_checkout_explains_confirmation_and_rechecks_the_plan(page):
     with page.site.api.lock:
         page.site.api.tier, page.site.api.billing = "paid", dict(PAID_ACTIVE)
     page.click_selector("[data-testid='button-check-plan']")
-    page.wait_for("document.querySelector('[data-testid=\"account-plan\"]').textContent === 'Paid plan'"
+    page.wait_for("document.querySelector('[data-testid=\"account-plan\"]').textContent === 'Kalillac Premium'"
                   " && document.querySelector('[data-testid=\"checkout-return\"]')")
     assert page.text("[data-testid='checkout-return']") == "Your paid plan is active\nStripe has confirmed your payment."
     assert page.eval("return document.querySelector('[data-testid=\"button-check-plan\"]');") is None
@@ -1792,8 +1794,8 @@ def test_a_signed_in_customer_gets_the_customer_header_instead_of_sign_in(page, 
     page.open("/account", ready=OVERVIEW_READY)
     page.wait_for("document.querySelector('.site-header[data-customer=\"signed-in\"]')")
     assert [t for t in ENTRY_IDS if page.eval(f"return !!document.querySelector('[data-testid=\"{t}\"]');")] == []
-    expected = [["Chat", "/app/"], ["My Spaces", "/app/?spaces=open"], ["Account", "/account"],
-                ["Billing", "/account?show=billing"], ["Sign out", None]]
+    # Billing is a section of the account page itself: the header does not repeat it.
+    expected = [["Chat", "/app/"], ["My Spaces", "/app/?spaces=open"], ["Account", "/account"], ["Sign out", None]]
     if mobile:
         page.click_selector("[data-testid='button-mobile-menu']")
         page.wait_for("document.querySelector('#mobile-site-menu')")
@@ -1806,7 +1808,7 @@ def test_a_signed_in_customer_gets_the_customer_header_instead_of_sign_in(page, 
     else:
         assert header_items(page) == expected
         assert all(shown(page, t) for t in ("link-chat-nav", "link-spaces-nav", "link-account-nav",
-                                             "link-billing-nav", "button-sign-out-nav"))
+                                             "button-sign-out-nav"))
     assert no_overflow(page)
     # Learned from the session request the account page already makes: nothing more was asked for it.
     assert len(api_calls(page, "/api/account/me")) == 1
@@ -1853,12 +1855,8 @@ def test_billing_opens_the_account_at_billing(page):
     page.resize((1280, 600), False)
     page.open("/account?show=billing", ready="document.querySelector('[data-testid=\"billing-section\"]')")
     page.wait_for("Math.abs(document.getElementById('acct-billing-heading').getBoundingClientRect().top) < 120")
-    # On the account page itself, the header's Billing scrolls there without leaving the page.
-    page.eval("window.scrollTo(0, 0);")
-    page.wait_for("document.getElementById('acct-billing-heading').getBoundingClientRect().top > 120")
-    page.click_selector("[data-testid='link-billing-nav']")
-    page.wait_for("Math.abs(document.getElementById('acct-billing-heading').getBoundingClientRect().top) < 120")
     assert page.eval("return location.pathname + location.search;") == "/account"
+    assert page.eval("return !!document.querySelector('[data-testid=\"link-billing-nav\"]');") is False
 
 
 def test_a_customer_known_to_be_signed_in_is_never_shown_registration(page):
@@ -1899,4 +1897,59 @@ def test_the_footer_refuses_any_other_profile_address(page, marks):
     page.site.profile_marks = marks
     page.open("/", ready=HERO)
     assert page.eval("return document.querySelector('.footer-social');") is None
+
+
+# --- Kalillac Premium, for a Free account (PremiumDiscovery) -----------------------------------------------
+
+MODES_WITH_PREMIUM = {"modes": ["quick", "balanced"], "default": "balanced", "premium": ["deep"]}
+
+
+def test_a_free_account_sees_what_premium_adds_only_as_this_deployment_offers_it(page):
+    page.site.files_mark = True
+    page.site.api.reset(signed_in=True, tier="free", verification=True, billing=dict(FREE_BILLING), files=[])
+    page.site.api.override("GET", "/api/chat/reasoning-modes", 200, MODES_WITH_PREMIUM)
+    page.open("/account", ready="document.querySelector('[data-testid=\"premium-discovery\"]')")
+    section = page.text("[data-testid='premium-discovery']")
+    assert section.startswith("What Kalillac Premium adds")
+    assert page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] li')]"
+                     ".map(li => li.dataset.testid);") == ["premium-deep", "premium-files"]
+    # Calm: no price, no urgency, no second purchase button; the upgrade stays in Plan and billing below.
+    lower = section.lower()
+    for word in ("$", "€", "£", "price", "now", "today", "limited", "don’t miss", "unlimited"):
+        assert word not in lower, word
+    assert page.eval("return document.querySelectorAll('[data-testid=\"premium-discovery\"] button, "
+                     "[data-testid=\"premium-discovery\"] a').length;") == 0
+    order = page.eval("return [...document.querySelectorAll('main section')].map(s => s.dataset.testid || '');")
+    assert order.index("premium-discovery") < order.index("billing-section")
+    assert page.text("[data-testid='button-upgrade']") == "Upgrade to Kalillac Premium"
+
+
+@pytest.mark.parametrize("modes,files,expected", [
+    ({"modes": ["quick", "balanced", "deep"], "default": "balanced", "premium": []}, None, None),
+    (None, None, None),
+    (MODES_WITH_PREMIUM, None, ["premium-deep"]),
+])
+def test_premium_discovery_lists_only_what_the_server_confirms(page, modes, files, expected):
+    page.site.api.reset(signed_in=True, tier="free", verification=True, billing=dict(FREE_BILLING), files=files)
+    if modes is not None:
+        page.site.api.override("GET", "/api/chat/reasoning-modes", 200, modes)
+    page.open("/account", ready="document.querySelector('[data-testid=\"billing-section\"]')")
+    deadline = time.monotonic() + 10
+    while not api_calls(page, "/api/chat/reasoning-modes") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert api_calls(page, "/api/chat/reasoning-modes")        # Asked once the Free plan is known,
+    time.sleep(0.4)                                             # and its answer has been drawn.
+    found = page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] li')]"
+                      ".map(li => li.dataset.testid);")
+    assert (found or None) == expected
+
+
+def test_a_premium_account_sees_its_plan_and_no_discovery(page):
+    page.site.api.reset(signed_in=True, tier="paid", verification=True, billing=dict(PAID_ACTIVE))
+    page.site.api.override("GET", "/api/chat/reasoning-modes", 200, MODES_WITH_PREMIUM)
+    page.open("/account", ready="document.querySelector('[data-testid=\"billing-section\"]')")
+    assert page.text("[data-testid='account-plan']") == "Kalillac Premium"
+    assert page.eval("return !!document.querySelector('[data-testid=\"account-plan\"] svg[aria-hidden=true]');") is True
+    assert page.eval("return !!document.querySelector('[data-testid=\"premium-discovery\"]');") is False
+    assert api_calls(page, "/api/chat/reasoning-modes") == []
 

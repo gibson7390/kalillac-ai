@@ -1367,6 +1367,53 @@
     shell.bubble.appendChild(list);
   }
 
+  // The kind of an attached file, from its name only (the server checked its contents when it was added).
+  var ATTACH_KINDS = { pdf: "PDF", docx: "Word", xlsx: "Excel", pptx: "PowerPoint", txt: "Text", md: "Markdown",
+                       csv: "CSV", json: "JSON", png: "Image", jpg: "Image", jpeg: "Image", webp: "Image",
+                       gif: "Image" };
+  var ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+    '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
+  var ICON_REMOVE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+    'stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M7 7l10 10M17 7L7 17"/></svg>';
+  var attachHint = null;
+
+  function attachKind(filename) {
+    var dot = filename.lastIndexOf(".");
+    var ext = dot === -1 ? "" : filename.slice(dot + 1).toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ATTACH_KINDS, ext) ? ATTACH_KINDS[ext] : "File";
+  }
+
+  /* What to do next, under the attached files: ask Kalillac, or summarize them in one explicit step.
+     Choosing a file never sends anything; only Send or Summarize does. */
+  function renderAttachHint() {
+    if (!attachmentList) return;
+    if (!attachHint) {
+      attachHint = document.createElement("div");
+      attachHint.className = "attach-hint";
+      attachHint.id = "attach-hint";
+      var text = document.createElement("span");
+      text.className = "attach-hint-text";
+      attachHint.appendChild(text);
+      var summarize = document.createElement("button");
+      summarize.type = "button";
+      summarize.className = "attach-summarize";
+      summarize.id = "attach-summarize";
+      summarize.textContent = "Summarize";
+      summarize.addEventListener("click", function () {
+        if (!ATTACHED.length || inFlight) return;
+        sendFixed(ATTACHED.length === 1 ? "Summarize the attached file." : "Summarize the attached files.");
+      });
+      attachHint.appendChild(summarize);
+      attachmentList.parentNode.insertBefore(attachHint, attachmentList.nextSibling);
+    }
+    attachHint.firstChild.textContent = ATTACHED.length === 1
+      ? "Ask Kalillac what to do with this file, or"
+      : "Ask Kalillac what to do with these files, or";
+    attachHint.lastChild.textContent = ATTACHED.length === 1 ? "Summarize file" : "Summarize files";
+    attachHint.hidden = ATTACHED.length === 0;
+  }
+
   function renderAttachments() {
     if (!attachmentList) return;
     while (attachmentList.firstChild) attachmentList.removeChild(attachmentList.firstChild);
@@ -1379,24 +1426,40 @@
         preview.src = f.thumb;
         preview.alt = "";                 // The name beside it says what it is.
         item.appendChild(preview);
+      } else {
+        var icon = document.createElement("span");
+        icon.className = "attachment-icon";
+        icon.innerHTML = ICON_FILE;       // Fixed markup; nothing from the file.
+        item.appendChild(icon);
       }
+      var text = document.createElement("span");
+      text.className = "attachment-text";
       var name = document.createElement("span");
+      name.className = "attachment-name";
       name.textContent = f.filename;
+      name.title = f.filename;
+      var state = document.createElement("span");
+      state.className = "attachment-state";
+      state.textContent = attachKind(f.filename) + " · Ready";
+      text.appendChild(name);
+      text.appendChild(state);
       var remove = document.createElement("button");
       remove.type = "button";
       remove.className = "attachment-remove";
       remove.setAttribute("aria-label", "Remove " + f.filename);
-      remove.textContent = "×";
+      remove.innerHTML = ICON_REMOVE;
       remove.addEventListener("click", function () {
         var removed = ATTACHED.splice(index, 1)[0];
         if (removed && removed.thumb) URL.revokeObjectURL(removed.thumb);
         renderAttachments();
+        input.focus();
       });
-      item.appendChild(name);
+      item.appendChild(text);
       item.appendChild(remove);
       attachmentList.appendChild(item);
     });
     attachmentList.hidden = ATTACHED.length === 0;
+    renderAttachHint();
   }
 
   /* --- Account link ------------------------------------------------------
@@ -1452,20 +1515,85 @@
     if (focus) chosen.focus();
   }
 
+  /* Which modes this browser may use, from GET /api/chat/reasoning-modes: the server applies exactly the
+     rule it uses for every request (paid modes only with a verified Premium plan). A mode outside the
+     answer is shown, marked unavailable, and cannot be chosen; the selection is always a mode the next
+     request will run with. Without an answer every mode stays offered and the server still decides. */
+  var MODE_NAMES = { quick: "Quick", balanced: "Balanced", deep: "Deep" };
+  var MODE_LOCK = '<svg class="mode-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+    '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  var modeNote = null;
+
+  function modeAvailable(option) {
+    return option.getAttribute("aria-disabled") !== "true";
+  }
+
+  function showModeNote(text) {
+    if (!modeNote) {
+      modeNote = document.createElement("p");
+      modeNote.className = "mode-note";
+      modeNote.id = "mode-note";
+      modeNote.setAttribute("role", "status");
+      modePicker.parentNode.insertBefore(modeNote, modePicker.nextSibling);
+    }
+    modeNote.textContent = text;
+    modeNote.hidden = !text;
+  }
+
+  function applyAllowedModes(data) {
+    if (!data || !Array.isArray(data.modes) || !data.modes.length) return;
+    var allowed = data.modes.filter(function (m) { return Object.prototype.hasOwnProperty.call(MODE_NAMES, m); });
+    if (!allowed.length) return;
+    modeOptions().forEach(function (option) {
+      var mode = option.getAttribute("data-mode");
+      if (allowed.indexOf(mode) !== -1) return;
+      option.setAttribute("aria-disabled", "true");
+      option.classList.add("is-unavailable");
+      option.title = MODE_NAMES[mode] + " reasoning is part of Kalillac Premium";
+      option.insertAdjacentHTML("beforeend", MODE_LOCK);
+      var hint = document.createElement("span");
+      hint.className = "sr-only";
+      hint.textContent = ", available with Kalillac Premium";
+      option.appendChild(hint);
+    });
+    if (allowed.indexOf(reasoningMode) === -1) {
+      var fallback = allowed.indexOf(data.default) !== -1 ? data.default : allowed[0];
+      selectMode(fallback, false);
+    }
+  }
+
   if (REASONING_OFFERED && modePicker) {
     modePicker.hidden = false;
     selectMode("balanced", false);
     modeOptions().forEach(function (option, index, all) {
-      option.addEventListener("click", function () { selectMode(option.getAttribute("data-mode"), false); });
+      option.addEventListener("click", function () {
+        if (!modeAvailable(option)) {
+          showModeNote(MODE_NAMES[option.getAttribute("data-mode")] + " reasoning is part of Kalillac Premium. " +
+                       "Your message will use " + MODE_NAMES[reasoningMode] + ".");
+          return;
+        }
+        showModeNote("");
+        selectMode(option.getAttribute("data-mode"), false);
+      });
       option.addEventListener("keydown", function (event) {
         var step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 :
                    event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
         if (!step) return;
         event.preventDefault();
-        var next = all[(index + step + all.length) % all.length];
-        selectMode(next.getAttribute("data-mode"), true);
+        // Arrow keys move among the modes this browser may use; an unavailable one is skipped.
+        for (var hop = 1; hop < all.length; hop++) {
+          var next = all[(index + step * hop + all.length * hop) % all.length];
+          if (modeAvailable(next)) {
+            selectMode(next.getAttribute("data-mode"), true);
+            return;
+          }
+        }
       });
     });
+    fetch("/api/chat/reasoning-modes", { method: "GET" }).then(function (res) {
+      return res.status === 200 ? res.json() : null;
+    }).then(applyAllowedModes, function () { /* the server still decides each request */ });
   }
 
   function uploadFile(file) {
@@ -1491,6 +1619,8 @@
           var entry = { id: f.id, filename: typeof f.filename === "string" ? f.filename : file.name, thumb: null };
           ATTACHED.push(entry);
           renderAttachments();
+          input.focus();                    // Ready: the next step is the message.
+
           if (IMAGES_OFFERED && IMAGE_MEDIA[f.media_type]) loadThumb(entry);
           return;
         }
@@ -1834,6 +1964,7 @@
      twice. Leaving returns to a new temporary conversation. Names and messages from the server are
      only ever set as text, or rendered through the same sanitizer as any reply. */
   var SPACES_OFFERED = document.documentElement.getAttribute("data-kalillac-spaces") === "on";
+  var DEFAULT_TITLE = "New conversation";   // The server's title for a conversation not yet named.
   var SPACE = null;            // {space: {id, name}, conversation: {id, title}, restore} while one is open
   var SPACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   var SPACE_NAME_MAX = 80;
@@ -1853,11 +1984,14 @@
   var spacesNew = document.getElementById("spaces-new");
   var spacesNewName = document.getElementById("spaces-new-name");
   var spacesNewLabel = document.getElementById("spaces-new-label");
+  var spacesNewSubmit = document.getElementById("spaces-new-submit");
+  var spacesHint = document.getElementById("spaces-dialog-hint");
   var spacesBack = document.getElementById("spaces-back");
   var spacesClose = document.getElementById("spaces-close");
   var spaceBar = document.getElementById("space-bar");
   var spaceBarName = document.getElementById("space-bar-name");
   var spaceBarTitle = document.getElementById("space-bar-title");
+  var spaceBarLabel = spaceBar ? spaceBar.querySelector(".space-bar-label") : null;   // Its tooltip: the full names.
   var spaceLeave = document.getElementById("space-leave");
   var spaceConversations = document.getElementById("space-conversations");
   var spaceNew = document.getElementById("space-new");
@@ -1949,9 +2083,11 @@
     spacesTitle.textContent = "Spaces";
     spacesBack.hidden = true;
     clearManage();
-    spacesNewLabel.textContent = "New Space name";
-    spacesNewName.placeholder = "New Space name";
+    spacesNewLabel.textContent = "Name a new Space";
+    spacesNewName.placeholder = "Name a new Space";
     spacesNewName.maxLength = SPACE_NAME_MAX;
+    spacesNewSubmit.textContent = "Create";
+    spacesHint.hidden = false;
     clearSpacesList();
     setSpacesStatus("Loading…");
     return spacesRequest("GET", "/api/spaces?limit=" + SPACE_PAGE_MAX).then(function (r) {
@@ -1981,6 +2117,8 @@
     spacesNewLabel.textContent = "New conversation title (optional)";
     spacesNewName.placeholder = "Conversation title (optional)";   // Fits a 360 px phone in full.
     spacesNewName.maxLength = SPACE_TITLE_MAX;
+    spacesNewSubmit.textContent = "Start";
+    spacesHint.hidden = true;
     spacesNewName.value = "";
     clearSpacesList();
     manageBar(view);
@@ -2125,6 +2263,7 @@
           if (SPACE && SPACE.conversation.id === c.id) {
             SPACE.conversation.title = saved.title;
             spaceBarTitle.textContent = " · " + saved.title;
+            spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
           }
           renderConversations(view);
           setSpacesStatus("Renamed.");
@@ -2196,9 +2335,20 @@
       var label = document.createElement("label");
       label.className = "spaces-edit-label";
       label.htmlFor = "spaces-edit-field";
-      label.textContent = field === "name" ? "Space name" : "Instructions for every conversation in this Space";
+      label.textContent = field === "name" ? "Space name" : "Instructions for this Space";
       var box = document.createElement(field === "name" ? "input" : "textarea");
       box.id = "spaces-edit-field";
+      var help = null;
+      if (field !== "name") {
+        // What instructions do, plainly: they travel with every message in this Space and nowhere else.
+        help = document.createElement("p");
+        help.className = "spaces-edit-help";
+        help.id = "spaces-edit-help";
+        help.textContent = "Sent with every message in this Space, and only this Space: for example your role, " +
+          "the tone you prefer, or background to keep in mind. Leave empty for none.";
+        box.setAttribute("aria-describedby", "spaces-edit-help");
+        box.placeholder = "For example: I’m preparing a product launch. Keep answers short and practical.";
+      }
       box.className = "spaces-edit-field";
       box.maxLength = field === "name" ? SPACE_NAME_MAX : SPACE_INSTRUCTIONS_MAX;
       box.value = field === "name" ? s.name : s.instructions;
@@ -2208,10 +2358,12 @@
       var save = document.createElement("button");
       save.type = "submit";
       save.className = "spaces-manage-btn spaces-primary";
+      save.setAttribute("data-kind", "primary");
       save.textContent = "Save";
       actions.appendChild(save);
       actions.appendChild(spacesButton("Cancel", "spaces-manage-btn", function () { manageBar(view); }));
       form.appendChild(label);
+      if (help) form.appendChild(help);
       form.appendChild(box);
       form.appendChild(actions);
       form.addEventListener("submit", function (event) {
@@ -2303,6 +2455,15 @@
       });
       return;
     }
+    if (!value && view.conversations) {
+      var empty = view.conversations.filter(function (c) {
+        return c.message_count === 0 && (!c.title || c.title === DEFAULT_TITLE);
+      })[0];
+      if (empty) {
+        openSpaceConversation(view.space, { id: empty.id, title: empty.title }, false);
+        return;
+      }
+    }
     setSpacesStatus("Creating…");
     spacesRequest("POST", spaceUrl(view.space.id, "/conversations"), value ? { title: value } : {}).then(function (r) {
       if (spacesView !== view) return;
@@ -2361,6 +2522,11 @@
   function newConversationInSpace() {
     var open = SPACE;
     if (!open || inFlight || spaceNew.disabled) return;
+    // The open conversation is still empty: it already is a new conversation.
+    if (TURNS.length === 0 && !failedExchange && !thread.querySelector(".msg")) {
+      input.focus();
+      return;
+    }
     spaceNew.disabled = true;
     spacesRequest("POST", spaceUrl(open.space.id, "/conversations"), {}).then(function (r) {
       spaceNew.disabled = false;
@@ -2589,6 +2755,7 @@
     SPACE = { space: space, conversation: conversation, restore: restore, earlier: earlier || null };
     spaceBarName.textContent = space.name;
     spaceBarTitle.textContent = conversation.title ? " · " + conversation.title : "";
+    spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
     spaceBar.hidden = false;
     if (sessionStatus) sessionStatus.hidden = true;
     if (eraseBtn) eraseBtn.hidden = true;
@@ -2612,6 +2779,7 @@
     spaceBar.hidden = true;
     spaceBarName.textContent = "";
     spaceBarTitle.textContent = "";
+    spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
     if (sessionStatus) sessionStatus.hidden = false;
     if (eraseBtn) eraseBtn.hidden = false;
     if (modePicker && restore.picker !== null) modePicker.hidden = restore.picker;
@@ -2652,6 +2820,13 @@
           }
           var saved = data && data.assistant_message;
           var reply = saved && typeof saved.content === "string" ? saved.content : "";
+          var named = data && data.conversation;
+          if (named && named.id === open.conversation.id && validName(named.title, SPACE_TITLE_MAX) &&
+              named.title !== open.conversation.title) {
+            open.conversation.title = named.title;
+            spaceBarTitle.textContent = " · " + named.title;
+            spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
+          }
           if ((data && typeof data.error === "string") || !reply.trim()) {
             failExchange(exchange, OUTCOME_INCOMPLETE);
             return;
@@ -2729,7 +2904,7 @@
   var RECEIPT_LIMITS = "Information already sent to AI or search providers, required allowance records, and operational or security logs are not erased by this action. Provider processing may not stop immediately.";
   var RECEIPT_FAILED = "Cleared from this device, but Kalillac could not confirm removal of its temporary server memory.";
   var RECEIPT_LOCAL = "Cleared from this device. No Kalillac session had been confirmed for this conversation.";
-  var ERASE_CONFIRM_FALLBACK = "End and erase this conversation? This clears it from this device " +
+  var ERASE_CONFIRM_FALLBACK = "End and erase this conversation? This clears it from this device, " +
                                "and asks Kalillac to remove its temporary memory of this session. " +
                                "This can’t be undone.";
 

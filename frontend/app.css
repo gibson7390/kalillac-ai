@@ -1870,3 +1870,167 @@ button.account-menu-button { gap: 4px; cursor: pointer; font-family: inherit; }
 .mode-option[aria-checked="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-soft); }
 .mode-option:hover:not([aria-checked="true"]) { color: var(--ink); }
 .mode-option:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* ==== Customer polish: reasoning icons and availability, attachments, End & erase details, Spaces ==== */
+
+/* Reasoning: an icon beside each label; a mode this browser may not use reads as unavailable. */
+.mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color var(--ease), background var(--ease), box-shadow var(--ease);
+}
+.mode-icon { width: 15px; height: 15px; flex: none; }
+.mode-option[aria-checked="true"] .mode-icon { color: var(--blue); }
+.mode-option:active:not(.is-unavailable) { background: rgba(0, 105, 255, 0.08); }
+.mode-option.is-unavailable,
+.mode-option.is-unavailable:hover { color: #8792a6; cursor: not-allowed; }
+.mode-lock { width: 12px; height: 12px; flex: none; }
+.mode-note { margin: -2px 0 8px; font-size: 12.5px; line-height: 1.4; color: var(--muted); }
+.mode-note[hidden] { display: none; }
+
+/* Attachments: a small file card (type, name, state, remove) and the next step beneath. */
+.attachment {
+  gap: 10px;
+  padding: 6px 6px 6px 8px;
+  border-radius: 12px;
+  max-width: min(100%, 340px);
+  box-shadow: var(--shadow-soft);
+}
+.attachment .attachment-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: #eef4ff;
+  color: var(--blue-deep);
+}
+.attachment-icon svg { width: 18px; height: 18px; }
+.attachment-thumb { width: 34px; height: 34px; margin-left: 0; border-radius: 9px; }
+.attachment .attachment-text { display: grid; min-width: 0; line-height: 1.25; }
+.attachment-name { font-weight: 600; }
+.attachment .attachment-state { font-size: 12px; color: #1d6b45; }
+.attachment-remove {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 8px;
+  transition: background var(--ease), color var(--ease);
+}
+.attachment-remove svg { width: 15px; height: 15px; }
+.attachment-remove:hover { background: var(--panel-2); color: var(--ink); }
+.attachment-remove:active { background: #e6ecf6; }
+.attach-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.attach-hint[hidden] { display: none; }
+.attach-summarize {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #b9cdec;
+  border-radius: 999px;
+  background: #f3f8ff;
+  color: var(--blue-deep);
+  font: 600 13px/1 var(--font-ui);
+  cursor: pointer;
+  transition: background var(--ease), border-color var(--ease);
+}
+.attach-summarize:hover { background: #e7f0ff; border-color: #8faad6; }
+.attach-summarize:active { background: #dbe8ff; }
+.attach-summarize:focus-visible { outline: 3px solid rgba(0, 105, 255, 0.35); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .attachment-remove, .attach-summarize { min-height: 44px; min-width: 44px; }
+}
+
+/* End & erase: the warning on its own line; what is not erased one click away. */
+.erase-dialog-warning { margin: 10px 0 0; color: var(--ink); font-size: 15px; font-weight: 600; }
+.erase-dialog-details {
+  margin-top: 14px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.erase-dialog-details summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  color: var(--ink);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 6px;
+}
+.erase-dialog-details summary::-webkit-details-marker { display: none; }
+.erase-dialog-details summary::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--ease);
+}
+.erase-dialog-details[open] summary::before { transform: rotate(45deg); }
+.erase-dialog-details summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.erase-dialog-details p { margin: 4px 0 0; }
+.erase-dialog-confirm:active { background: #851a11; }
+.erase-dialog-cancel:active { background: #edf3ff; }
+
+/* The open Space: a quiet blue band with a Space mark; Exit Space is plain, never alarming. */
+.space-bar { background: #f3f8ff; border-bottom-color: #d6e4fb; box-shadow: inset 0 -1px 0 rgba(0, 83, 207, 0.04); }
+.space-bar-icon { width: 16px; height: 16px; margin-right: 8px; vertical-align: -3px; color: var(--blue-deep); }
+.space-bar-title { color: var(--ink); font-weight: 600; }
+.space-leave, .spaces-secondary, .spaces-new-submit, .spaces-item, .spaces-manage-btn, .spaces-earlier {
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
+}
+.space-leave:hover, .spaces-secondary:hover, .spaces-manage-btn:hover:not(:disabled) {
+  border-color: #8faad6;
+  background: #f7faff;
+  color: var(--blue-deep);
+}
+.space-leave:active, .spaces-secondary:active, .spaces-manage-btn:active:not(:disabled), .spaces-item:active {
+  background: #e9f1ff;
+}
+.space-exit, .spaces-secondary { display: inline-flex; align-items: center; gap: 6px; }
+.space-exit svg, .spaces-secondary svg { width: 15px; height: 15px; flex: none; }
+
+/* Spaces dialogs: primary (Create, Save) in blue, navigation as outlined buttons, Close in muted grey,
+   Delete keeps its danger colour. */
+.spaces-primary, .spaces-new-submit.spaces-primary {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #ffffff;
+}
+.spaces-primary:hover:not(:disabled), .spaces-new-submit.spaces-primary:hover {
+  border-color: var(--blue-deep);
+  background: var(--blue-deep);
+  color: #ffffff;
+}
+.spaces-primary:active:not(:disabled), .spaces-new-submit.spaces-primary:active { background: #0045ad; }
+.spaces-primary:focus-visible { outline: 3px solid rgba(0, 105, 255, 0.35); outline-offset: 2px; }
+.spaces-close { border-color: transparent; background: transparent; color: var(--muted); }
+.spaces-close:hover { border-color: transparent; background: var(--panel-2); color: var(--ink); }
+.spaces-close:active { background: #e6ecf6; }
+.spaces-danger:active:not(:disabled) { background: #fbe1de; }
+.spaces-edit-help { margin: -2px 0 2px; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.spaces-edit-field::placeholder { color: #8792a6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-option, .attachment-remove, .attach-summarize, .space-leave, .spaces-secondary, .spaces-new-submit,
+  .spaces-item, .spaces-manage-btn, .spaces-earlier, .erase-dialog-details summary::before { transition: none; }
+}
+/* A long title never widens the Spaces dialog: the name gives way (ellipsis), the badge and count stay. */
+.spaces-list > li, .spaces-item { min-width: 0; }

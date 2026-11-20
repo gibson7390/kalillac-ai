@@ -47,11 +47,11 @@
     <!-- Shown only while a conversation from a Space is open: it is saved to the account. -->
     <div class="space-bar" id="space-bar" hidden>
       <div class="space-bar-inner">
-        <span class="space-bar-label">Saved to your account in <strong id="space-bar-name"></strong><span class="space-bar-title" id="space-bar-title"></span></span>
+        <span class="space-bar-label"><svg class="space-bar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/><path d="M8 13h8"/><path d="M8 16h5"/></svg>Saved to your account in <strong id="space-bar-name"></strong><span class="space-bar-title" id="space-bar-title"></span></span>
         <span class="space-bar-actions">
           <button type="button" class="space-leave space-bar-action" id="space-conversations" aria-haspopup="dialog">Conversations</button>
           <button type="button" class="space-leave space-bar-action" id="space-new">New conversation</button>
-          <button type="button" class="space-leave" id="space-leave">Leave Space</button>
+          <button type="button" class="space-leave space-exit" id="space-leave"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M10 16l-4-4 4-4"/><path d="M6 12h10"/></svg>Exit Space</button>
         </span>
       </div>
     </div>
@@ -114,11 +114,11 @@
         <!-- How much reasoning the next message gets. Shown only on a deployment with reasoning modes on. -->
         <div class="mode-picker" id="mode-picker" role="radiogroup" aria-label="Reasoning" hidden>
           <button type="button" role="radio" class="mode-option" data-mode="quick" aria-checked="false"
-                  tabindex="-1">Quick</button>
+                  tabindex="-1"><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 8h5"/><path d="M3 12h7"/><path d="M4 16h5"/><path d="M14 6l6 6-6 6"/></svg><span class="mode-label">Quick</span></button>
           <button type="button" role="radio" class="mode-option" data-mode="balanced" aria-checked="true"
-                  tabindex="0">Balanced</button>
+                  tabindex="0"><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12h4"/><path d="M17 12h4"/><path d="M12 7l5 5-5 5-5-5z"/></svg><span class="mode-label">Balanced</span></button>
           <button type="button" role="radio" class="mode-option" data-mode="deep" aria-checked="false"
-                  tabindex="-1">Deep</button>
+                  tabindex="-1"><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg><span class="mode-label">Deep</span></button>
         </div>
         <div class="composer-shell" id="composer-shell">
           <!-- End & erase: in the composer, next to what it ends. Its label is
@@ -193,10 +193,15 @@
   </dialog>
   <!-- The End & erase confirmation. Fixed copy; app.js opens it as a native
        modal dialog and only End & erase confirms. -->
-  <dialog class="erase-dialog" id="erase-dialog" aria-labelledby="erase-dialog-title" aria-describedby="erase-dialog-text">
+  <dialog class="erase-dialog" id="erase-dialog" aria-labelledby="erase-dialog-title" aria-describedby="erase-dialog-text erase-dialog-warning">
     <div class="erase-dialog-panel">
       <h2 class="erase-dialog-title" id="erase-dialog-title">End and erase this conversation?</h2>
-      <p class="erase-dialog-text" id="erase-dialog-text">This clears the conversation and any unsent draft from this device and asks Kalillac to remove its temporary memory of this session. This can’t be undone.</p>
+      <p class="erase-dialog-text" id="erase-dialog-text">This clears the conversation and any unsent draft from this device, and asks Kalillac to remove its temporary memory of this session.</p>
+      <p class="erase-dialog-warning" id="erase-dialog-warning">This can’t be undone.</p>
+      <details class="erase-dialog-details">
+        <summary>What this doesn’t erase</summary>
+        <p>Information already sent to AI or search providers, required allowance records, and operational or security logs are not erased by this action. Provider processing may not stop immediately.</p>
+      </details>
       <div class="erase-dialog-actions">
         <button type="button" class="erase-dialog-cancel" id="erase-dialog-cancel">Cancel</button>
         <button type="button" class="erase-dialog-confirm" id="erase-dialog-confirm">End &amp; erase</button>
@@ -208,17 +213,17 @@
   <dialog class="spaces-dialog" id="spaces-dialog" aria-labelledby="spaces-dialog-title">
     <div class="spaces-dialog-panel">
       <h2 class="spaces-dialog-title" id="spaces-dialog-title">Spaces</h2>
-      <p class="spaces-dialog-hint">Conversations in a Space are saved to your account. Opening one replaces the temporary conversation on this screen.</p>
+      <p class="spaces-dialog-hint" id="spaces-dialog-hint">A Space groups related conversations and can have its own instructions. Its conversations are saved to your account; opening one replaces the temporary conversation on this screen.</p>
       <p class="spaces-status" id="spaces-status" role="status" aria-live="polite"></p>
       <ul class="spaces-list" id="spaces-list"></ul>
       <form class="spaces-new" id="spaces-new" autocomplete="off">
-        <label class="sr-only" for="spaces-new-name" id="spaces-new-label">New Space name</label>
-        <input type="text" id="spaces-new-name" placeholder="New Space name">
-        <button type="submit" class="spaces-new-submit" id="spaces-new-submit">Create</button>
+        <label class="sr-only" for="spaces-new-name" id="spaces-new-label">Name a new Space</label>
+        <input type="text" id="spaces-new-name" placeholder="Name a new Space">
+        <button type="submit" class="spaces-new-submit spaces-primary" id="spaces-new-submit">Create</button>
       </form>
       <div class="spaces-dialog-actions">
-        <button type="button" class="spaces-secondary" id="spaces-back" hidden>All Spaces</button>
-        <button type="button" class="spaces-secondary" id="spaces-close">Close</button>
+        <button type="button" class="spaces-secondary" id="spaces-back" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg>All Spaces</button>
+        <button type="button" class="spaces-secondary spaces-close" id="spaces-close">Close</button>
       </div>
     </div>
   </dialog>

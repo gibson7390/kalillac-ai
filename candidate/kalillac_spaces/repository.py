@@ -486,9 +486,45 @@ def insert_exchange(session, conversation: Conversation, user_id, request_id: uu
     return user_row, reply_row
 
 
+AUTO_TITLE_MAX = 60
+_TITLE_LEAD = "#>*-+`~_=|•·:;,. \t"
+
+
+def automatic_title(message: str) -> str | None:
+    """A conversation title from a user message, deterministically and locally (no model call): its first
+    non-empty line, without leading Markdown marks, whitespace collapsed, cut at a word boundary to
+    AUTO_TITLE_MAX characters with an ellipsis. None when the message has fewer than three letters or
+    digits (a greeting such as "hi"): the next message is tried instead."""
+    for line in message.splitlines():
+        raw = " ".join(line.split())
+        if raw.startswith("```"):                     # A code fence line is not a title.
+            continue
+        text = raw.lstrip(_TITLE_LEAD).strip()
+        if not text:
+            continue
+        if sum(ch.isalnum() for ch in text) < 3:
+            return None
+        if len(text) <= AUTO_TITLE_MAX:
+            return text
+        cut = text[:AUTO_TITLE_MAX - 1]
+        space_at = cut.rfind(" ")
+        if space_at >= AUTO_TITLE_MAX // 2:
+            cut = cut[:space_at]
+        return cut.rstrip(" ,.;:-") + "…"
+    return None
+
+
 def complete_exchange(session, conversation: Conversation, space: Space, rows, now: datetime) -> Replay:
-    """Advance the conversation, clear its lease, touch the Space; flush."""
+    """Advance the conversation, clear its lease, touch the Space; flush.
+
+    A conversation still carrying the default title takes one from this exchange's user message
+    (automatic_title). A title the customer set is never replaced, and the conversation's version is
+    left alone, so a rename made with the version the customer last read still succeeds."""
     user_row, reply_row = rows
+    if conversation.title == DEFAULT_CONVERSATION_TITLE:
+        title = automatic_title(user_row.content)
+        if title:
+            conversation.title = title
     conversation.message_count = reply_row.seq
     conversation.last_message_at = now
     conversation.updated_at = now

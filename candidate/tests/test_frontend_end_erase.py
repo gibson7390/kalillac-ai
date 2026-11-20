@@ -34,8 +34,10 @@ RECEIPT_FAILED = ("Cleared from this device, but Kalillac could not confirm remo
 RECEIPT_LOCAL = "Cleared from this device. No Kalillac session had been confirmed for this conversation."
 SESSION_ENDED = "This conversation was ended. Your next message starts a new one."
 DIALOG_TITLE = "End and erase this conversation?"
-DIALOG_TEXT = ("This clears the conversation and any unsent draft from this device and asks Kalillac "
-               "to remove its temporary memory of this session. This can’t be undone.")
+DIALOG_TEXT = ("This clears the conversation and any unsent draft from this device, and asks Kalillac "
+               "to remove its temporary memory of this session.")
+DIALOG_WARNING = "This can’t be undone."
+DIALOG_DETAILS_SUMMARY = "What this doesn’t erase"
 
 SCENARIOS = (
     "erase_enablement", "erase_cancel_paths", "erase_removed", "erase_not_found",
@@ -136,6 +138,7 @@ def test_confirmation_is_a_modal_dialog_and_every_dismissal_keeps_everything(era
     assert opened["dialogOpen"] is True and opened["dialogModal"] is True
     assert opened["focusIsCancel"] is True                  # the safe choice has focus
     assert DIALOG_TITLE in opened["dialogText"] and DIALOG_TEXT in opened["dialogText"]
+    assert DIALOG_WARNING in opened["dialogText"]
 
     for label in ("after-cancel", "after-escape", "after-backdrop"):
         snap = step(result, label)
@@ -435,9 +438,13 @@ def test_markup_is_accessible_fixed_copy():
     header = page[page.index('<header class="app-header">'):page.index("</header>")]
     assert "erase" not in header
     assert ('<dialog class="erase-dialog" id="erase-dialog" aria-labelledby="erase-dialog-title" '
-            'aria-describedby="erase-dialog-text">') in page
+            'aria-describedby="erase-dialog-text erase-dialog-warning">') in page
     assert f'<h2 class="erase-dialog-title" id="erase-dialog-title">{DIALOG_TITLE}</h2>' in page
     assert f'<p class="erase-dialog-text" id="erase-dialog-text">{DIALOG_TEXT}</p>' in page
+    assert f'<p class="erase-dialog-warning" id="erase-dialog-warning">{DIALOG_WARNING}</p>' in page
+    # What is not erased, one click away, in exactly the receipt's words (never weakened or reworded).
+    details = page[page.index('<details class="erase-dialog-details">'):page.index("</details>")]
+    assert f"<summary>{DIALOG_DETAILS_SUMMARY}</summary>" in details and f"<p>{RECEIPT_LIMITS}</p>" in details
     assert '<button type="button" class="erase-dialog-cancel" id="erase-dialog-cancel">Cancel</button>' in page
     assert ('<button type="button" class="erase-dialog-confirm" id="erase-dialog-confirm">End &amp; erase'
             '</button>') in page

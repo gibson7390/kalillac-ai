@@ -337,6 +337,24 @@ function parseFiles(json: unknown): StoredFile[] | null {
   return files;
 }
 
+/* What Kalillac Premium would add for this signed-in Free account, as this deployment says: the reasoning
+   modes only a verified Premium plan may use (the chat's own rule), and whether adding files needs Premium
+   (the account may not add any now). Anything not clearly answered counts as not offered, so nothing is
+   advertised that this deployment does not provide. */
+export type PremiumCapabilities = { deepReasoning: boolean; files: boolean };
+
+export async function getPremiumCapabilities(filesOffered: boolean): Promise<PremiumCapabilities> {
+  const [modes, files] = await Promise.all([
+    request('GET', '/api/chat/reasoning-modes'),
+    filesOffered ? request('GET', '/api/files') : Promise.resolve(null),
+  ]);
+  const deepReasoning = modes !== null && !('ok' in modes) && modes.response.status === 200
+    && isRecord(modes.json) && Array.isArray(modes.json.premium) && modes.json.premium.includes('deep');
+  const filesNeedPremium = files !== null && !('ok' in files) && files.response.status === 200
+    && isRecord(files.json) && files.json.can_add === false;
+  return { deepReasoning, files: filesNeedPremium };
+}
+
 /* The signed-in account's files, expired ones included (they can only be deleted). */
 export async function listFiles(): Promise<ApiResult<StoredFile[]>> {
   const result = await request('GET', '/api/files');

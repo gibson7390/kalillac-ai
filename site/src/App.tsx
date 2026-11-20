@@ -1,4 +1,4 @@
-import { type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, type RefObject, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { ArrowRight, ArrowUp, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
 import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
@@ -33,20 +33,13 @@ const IS_FRAMED = (() => {
 })();
 
 
-/* A signed-in customer's way around (known only after an account page asked: customer-session.ts). Billing on
-   the account page itself scrolls there; from anywhere else it opens the account at Billing. */
+/* A signed-in customer's way around (known only after an account page asked: customer-session.ts). Billing is
+   a section of the account page, so the header does not repeat it; the chat's account menu links to it. */
 function useCustomerNav(close: () => void) {
-  const [location, navigate] = useLocation();
+  const [, navigate] = useLocation();
   const { presence, returnTarget } = useCustomerSession();
   const [signingOut, setSigningOut] = useState(false);
   const signedIn = ACCOUNTS_OFFERED && presence === 'signed-in';
-  const billing = (event: ReactMouseEvent) => {
-    close();
-    const heading = location === ACCOUNT_PATHS.overview ? document.getElementById('acct-billing-heading') : null;
-    if (!heading) return;
-    event.preventDefault();
-    heading.scrollIntoView({ block: 'start' });
-  };
   const leave = async () => {
     if (signingOut) return;
     setSigningOut(true);
@@ -55,7 +48,7 @@ function useCustomerNav(close: () => void) {
     close();
     if (ok) navigate(ACCOUNT_PATHS.signIn);
   };
-  return { signedIn, chat: chatHref(returnTarget), billing, leave, signingOut };
+  return { signedIn, chat: chatHref(returnTarget), leave, signingOut };
 }
 
 function SiteHeader() {
@@ -84,10 +77,9 @@ function SiteHeader() {
         </Link>
         <nav className="site-nav" aria-label="Site navigation">
           {customer.signedIn ? <>
-            <a href={customer.chat} className="nav-link nav-chat" data-testid="link-chat-nav">Chat</a>
+            <a href={customer.chat} className="nav-chat" data-testid="link-chat-nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12z"/></svg>Chat</a>
             <a href={SPACES_HREF} className="nav-link" data-testid="link-spaces-nav">My Spaces</a>
             <Link href={ACCOUNT_PATHS.overview} className="nav-link" data-testid="link-account-nav" aria-current={location === ACCOUNT_PATHS.overview ? 'page' : undefined}>Account</Link>
-            <a href={`${ACCOUNT_PATHS.overview}?show=billing`} onClick={customer.billing} className="nav-link" data-testid="link-billing-nav">Billing</a>
             <button type="button" className="nav-link nav-sign-out" onClick={() => void customer.leave()} aria-disabled={customer.signingOut || undefined} data-testid="button-sign-out-nav">{customer.signingOut ? 'Signing out…' : 'Sign out'}</button>
           </> : <>
           <a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>
@@ -109,7 +101,6 @@ function SiteHeader() {
             <a href={customer.chat} onClick={close} data-testid="link-mobile-chat">Chat</a>
             <a href={SPACES_HREF} onClick={close} data-testid="link-mobile-spaces">My Spaces</a>
             <Link href={ACCOUNT_PATHS.overview} onClick={close} data-testid="link-mobile-account">Account</Link>
-            <a href={`${ACCOUNT_PATHS.overview}?show=billing`} onClick={customer.billing} data-testid="link-mobile-billing">Billing</a>
             <button type="button" className="mobile-menu-account" onClick={() => void customer.leave()} aria-disabled={customer.signingOut || undefined} data-testid="button-mobile-sign-out">{customer.signingOut ? 'Signing out…' : 'Sign out'}</button>
           </> : <>
           <a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>

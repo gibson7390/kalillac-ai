@@ -251,3 +251,20 @@
   border: 1px solid #b9cdec; border-radius: 10px; background: #f3f8ff; color: #0047b3; font-weight: 650; text-decoration: none; }
 .acct-return:hover { background: #e7f0ff; border-color: #8faad6; }
 
+/* Kalillac Premium: the plan's name with a small mark, never a generic "paid" label. */
+.acct-identity[data-tier='paid'] .acct-plan::before { display: none; }
+.acct-premium-mark { width: 14px; height: 14px; flex: none; color: var(--k-teal-bright); }
+.acct-identity[data-tier='paid'] .acct-plan { gap: 7px; letter-spacing: .01em; }
+
+/* What Premium adds, for a Free account: calm, informative, no price and no urgency. */
+.acct-premium { border: 1px solid #d6e2f5; border-radius: 14px; padding: 18px 20px; background: #f8fbff; }
+.acct-premium-title { display: flex; align-items: center; gap: 8px; }
+.acct-premium-title .acct-premium-mark { color: #0b1737; }
+.acct-premium-list { display: grid; gap: 14px; margin: 14px 0 0; padding: 0; list-style: none; }
+.acct-premium-list li { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; align-items: start; }
+.acct-premium-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #e8f0ff; color: #0047b3; }
+.acct-premium-icon svg { width: 19px; height: 19px; }
+.acct-premium-list strong { display: block; color: var(--acct-ink); font-size: 15px; }
+.acct-premium-text { display: block; margin-top: 2px; color: var(--acct-soft); font-size: 14px; line-height: 1.5; }
+
+.acct-identity + .acct-premium { margin-top: 18px; }

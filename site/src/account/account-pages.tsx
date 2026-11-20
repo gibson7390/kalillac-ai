@@ -1005,7 +1005,8 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
           {memberSince && <p className="acct-identity-meta">Member since <span data-testid="account-member-since">{memberSince}</span></p>}
         </div>
         <p className="acct-plan" data-testid="account-plan">
-          {plan.state === 'ready' ? (plan.value.tier === 'paid' ? 'Paid plan' : 'Free account')
+          {plan.state === 'ready' ? (plan.value.tier === 'paid'
+              ? <><svg className="acct-premium-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.5l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16.4l-5.6 3.3 1.5-6.3L3 9.2l6.4-.5z" fill="currentColor"/></svg><span>Kalillac Premium</span></> : 'Free account')
             : plan.state === 'loading' ? <span className="acct-quiet-inline">Loading…</span>
               : <span className="acct-inline-problem">Couldn’t load your plan. <button type="button" className="acct-text-button" onClick={onRetryPlan}>Try again</button></span>}
         </p>
@@ -1031,6 +1032,8 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
           {verification && <Notice notice={verification} focusRef={verificationRef} />}
         </section>
       )}
+
+      {tier === 'free' && billing.state === 'ready' && <PremiumDiscovery />}
 
       {billing.state === 'error' && (
         <section className="acct-section" aria-labelledby="acct-billing-heading">
@@ -1060,6 +1063,54 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
       {security?.password_change && <PasswordSection onSessionEnded={onSessionEnded} />}
       {security?.deletion_request && <DeletionSection paid={tier === 'paid'} onSessionEnded={onSessionEnded} />}
     </div>
+  );
+}
+
+/* --- Kalillac Premium, for a Free account ------------------------------------------------------------------------
+   What Premium adds here, and nothing this deployment does not offer (account-api getPremiumCapabilities).
+   No price and no urgency: the upgrade itself is in Plan and billing, just below. */
+
+type PremiumItem = { key: string; title: string; text: string; icon: ReactNode };
+
+const PREMIUM_ICON_PROPS = {
+  viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const, 'aria-hidden': true, focusable: false,
+};
+
+function PremiumDiscovery() {
+  const [capabilities, setCapabilities] = useState<api.PremiumCapabilities | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void api.getPremiumCapabilities(FILES_OFFERED).then((found) => { if (alive) setCapabilities(found); });
+    return () => { alive = false; };
+  }, []);
+  if (!capabilities) return null;
+  const items: PremiumItem[] = [];
+  if (capabilities.deepReasoning) {
+    items.push({ key: 'deep', title: 'Deep reasoning',
+      text: 'Choose Deep in the chat when a question deserves more careful, step-by-step thinking.',
+      icon: <svg {...PREMIUM_ICON_PROPS}><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg> });
+  }
+  if (capabilities.files) {
+    items.push({ key: 'files', title: 'Files',
+      text: 'Attach documents and images to a message, and have Kalillac create Word, Excel, PowerPoint and PDF files.',
+      icon: <svg {...PREMIUM_ICON_PROPS}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h4"/></svg> });
+  }
+  if (!items.length) return null;
+  return (
+    <section className="acct-section acct-premium" aria-labelledby="acct-premium-heading" data-testid="premium-discovery">
+      <h2 id="acct-premium-heading" className="acct-section-title acct-premium-title">
+        <svg className="acct-premium-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.5l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16.4l-5.6 3.3 1.5-6.3L3 9.2l6.4-.5z" fill="currentColor"/></svg><span>What Kalillac Premium adds</span>
+      </h2>
+      <ul className="acct-premium-list">
+        {items.map((item) => (
+          <li key={item.key} data-testid={`premium-${item.key}`}>
+            <span className="acct-premium-icon">{item.icon}</span>
+            <span><strong>{item.title}</strong><span className="acct-premium-text">{item.text}</span></span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -1450,7 +1501,7 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutR
           {tier === 'free' && !needsVerification && !awaitingConfirmation && (
             <button type="button" className="acct-button acct-button-primary" aria-disabled={checkout.pending || undefined}
                     onClick={go(checkout, api.startCheckout)} data-testid="button-upgrade">
-              {checkout.pending && <Spinner />}{checkout.pending ? 'Opening checkout…' : 'Upgrade to the paid plan'}
+              {checkout.pending && <Spinner />}{checkout.pending ? 'Opening checkout…' : 'Upgrade to Kalillac Premium'}
             </button>
           )}
           {status.portal_available && (

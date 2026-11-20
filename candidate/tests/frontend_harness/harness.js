@@ -129,7 +129,7 @@
     queue.push({ status: 200, json: { files: [], can_add: true } });
   }
   if (scenarioName === "files_offered" || scenarioName === "files_offered_no_access"
-      || scenarioName === "files_edit_confirm") {
+      || scenarioName === "files_edit_confirm" || scenarioName === "files_summarize") {
     document.documentElement.setAttribute("data-kalillac-files", "on");
     // Any signed-in account may list its own files (F6): an account that may not add any (Free, or
     // after Premium ends) is answered 200 with can_add false, and its own files listed.
@@ -254,7 +254,18 @@
     });
   }
 
+  // GET /api/chat/reasoning-modes (a reasoning deployment's one question on load) is answered here, outside
+  // the scripted queue, and recorded on its own: every mode by default, Quick and Balanced for a Free account.
+  var modeRequests = [];
+  var MODES_ANSWER = scenarioName === "reasoning_free_account"
+    ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced" } }
+    : { status: 200, json: { modes: ["quick", "balanced", "deep"], default: "balanced" } };
+
   window.fetch = function (url, init) {
+    if (String(url) === "/api/chat/reasoning-modes") {
+      modeRequests.push({ url: String(url), method: init && init.method });
+      return respond(MODES_ANSWER, null);
+    }
     var record = { url: String(url), method: init && init.method };
     try { record.body = JSON.parse(init.body); } catch (e) { record.body = null; }
     record.keepalive = !!(init && init.keepalive);
@@ -612,7 +623,7 @@
                    html: !!chip.querySelector("img, script, iframe, svg") };  // Any element from a name.
         }),
         attachShown: !!attach && !attach.hidden,
-        attachments: list ? Array.prototype.map.call(list.querySelectorAll(".attachment span"), text) : null,
+        attachments: list ? Array.prototype.map.call(list.querySelectorAll(".attachment-name"), text) : null,
         attachmentsShown: !!list && !list.hidden,
         thumbs: list ? Array.prototype.map.call(list.querySelectorAll(".attachment img"), function (img) {
           return { blob: img.src.indexOf("blob:") === 0, alt: img.getAttribute("alt") };
@@ -677,7 +688,13 @@
         pickerShown: !!picker && !picker.hidden,
         checked: picker ? Array.prototype.map.call(picker.querySelectorAll('[aria-checked="true"]'),
                                                    function (o) { return o.getAttribute("data-mode"); }) : null,
-        focused: document.activeElement && document.activeElement.getAttribute("data-mode")
+        focused: document.activeElement && document.activeElement.getAttribute("data-mode"),
+        unavailable: picker ? Array.prototype.map.call(picker.querySelectorAll('[aria-disabled="true"]'),
+                                                       function (o) { return o.getAttribute("data-mode"); }) : null,
+        labels: picker ? Array.prototype.map.call(picker.querySelectorAll(".mode-option"), function (o) {
+          return [text(o.querySelector(".mode-label")), !!o.querySelector("svg.mode-icon")];
+        }) : null,
+        note: $("mode-note") && !$("mode-note").hidden ? text($("mode-note")) : null
       });
     },
     clickMode: function (mode) {
@@ -1468,6 +1485,38 @@
     a.files("sent");
   };
 
+  // A ready file: its card (type, name, state, remove), the next step under it, focus back in the composer.
+  // Choosing the file sends nothing; Summarize sends one explicit request and leaves the draft alone.
+  function card(a, label) {
+    var hint = $("attach-hint");
+    a.push({
+      label: label,
+      cards: Array.prototype.map.call(document.querySelectorAll("#attachments .attachment"), function (li) {
+        return { name: text(li.querySelector(".attachment-name")), state: text(li.querySelector(".attachment-state")),
+                 icon: !!li.querySelector(".attachment-icon svg"),
+                 remove: li.querySelector(".attachment-remove").getAttribute("aria-label") };
+      }),
+      hint: hint && !hint.hidden ? [text(hint.firstChild), text(hint.lastChild)] : null,
+      focused: document.activeElement && document.activeElement.id,
+      draft: $("composer-input").value,
+      requestCount: requests.length
+    });
+  }
+  SCENARIOS.files_summarize = async function (a) {
+    await a.wait(60);
+    a.respondWith({ status: 201, json: { file: { id: "CcCcCcCcCcCcCcCcCcCcCc", filename: "Q3 report.pdf", size: 9000,
+                                                 media_type: "application/pdf" } } },
+                  ok("A summary.", "s-1"));
+    await a.chooseFile("Q3 report.pdf", "%PDF-1.7 synthetic");
+    await a.wait(40);
+    card(a, "ready");
+    $("composer-input").value = "my unsent draft";
+    $("attach-summarize").click();
+    await a.wait(120);
+    card(a, "summarized");
+    a.snap("summarized-page");
+  };
+
   // Images on: an image is attached, its stored clean copy is previewed, and it goes with the message.
   SCENARIOS.images_attach_send = async function (a) {
     await a.wait(60);
@@ -1541,6 +1590,21 @@
     await a.keyOnMode("quick", "ArrowLeft");     // Back to Deep.
     a.modes("arrow-left");
     await a.send("second question");
+    a.snap("sent");
+  };
+
+  // A Free account: Deep is shown as part of Premium, cannot be chosen by click or keys, and is never sent.
+  SCENARIOS.reasoning_free_account = async function (a) {
+    await a.wait(60);
+    a.modes("start");
+    await a.clickMode("deep");
+    a.modes("deep-clicked");
+    await a.keyOnMode("balanced", "ArrowRight");   // Skips Deep, wraps to Quick.
+    a.modes("arrow-right");
+    await a.keyOnMode("quick", "ArrowLeft");       // Skips Deep, back to Balanced.
+    a.modes("arrow-left");
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
     a.snap("sent");
   };
 
@@ -1681,6 +1745,33 @@
     await a.wait(120);
     where(a, "listed");
     a.spaces("listed-dialog");
+    a.snap("idle");
+  };
+
+  // No pile of empty conversations: an untitled Start reuses the Space's empty one, New conversation on an
+  // empty conversation stays put, and a saved exchange's (automatic) title reaches the Space bar.
+  SCENARIOS.spaces_no_empty_pile = async function (a) {
+    await a.wait(60);
+    a.respondWith(spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT }]),
+                  conversationsList([{ id: CONV_A, title: "New conversation", message_count: 0, last_message_at: null,
+                                      updated_at: AT }]));
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await until(function () { return document.querySelector("#spaces-list .spaces-item"); }, "conversations");
+    a.push({ label: "space-view", submit: text($("spaces-new-submit")), hintShown: !$("spaces-dialog-hint").hidden,
+             placeholder: $("spaces-new-name").placeholder, requestCount: requests.length });
+    await a.createInSpaces("");
+    a.spaces("reused");
+    var before = requests.length;
+    $("space-new").click();
+    await a.wait(60);
+    a.push({ label: "new-on-empty", added: requests.length - before, focused: document.activeElement.id });
+    a.respondWith({ status: 200, json: { user_message: savedMessage(1, "user", "x"),
+                                         assistant_message: savedMessage(2, "assistant", "Saved reply."),
+                                         conversation: { id: CONV_A, title: "Plan the product launch" } } });
+    await a.send("Plan the product launch");
+    await a.wait(60);
+    a.spaces("titled");
     a.snap("idle");
   };
 
@@ -1955,6 +2046,7 @@
         error: error || null,
         steps: steps,
         requests: requests,
+        modeRequests: modeRequests,
         copied: copied,
         eraseTimers: eraseTimers.map(function (t) { return { cleared: t.cleared, fired: t.fired }; })
       };

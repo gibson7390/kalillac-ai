@@ -156,8 +156,8 @@ DAILY_LIMIT_SCENARIOS = (
 
 # Files: download links in a reply, and the attach control of a files deployment.
 FILE_SCENARIOS = ("files_in_reply", "files_offered", "files_offered_no_access", "images_attach_send",
-                  "images_refused", "files_edit_confirm")
-REASONING_SCENARIOS = ("reasoning_offered",)
+                  "images_refused", "files_edit_confirm", "files_summarize")
+REASONING_SCENARIOS = ("reasoning_offered", "reasoning_free_account")
 
 # Syntax highlighting of rendered fenced code (frontend presentation only).
 CODE_SCENARIOS = ("syntax_highlighting", "syntax_highlighting_360x640")
@@ -220,7 +220,7 @@ SCENARIOS = (
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
        "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes",
        "spaces_conversations_edit", "spaces_manage_360x640", "spaces_account_menu", "spaces_restore_from_address",
-       "spaces_restore_refused", "spaces_list_from_address"]
+       "spaces_restore_refused", "spaces_list_from_address", "spaces_no_empty_pile"]
 )
 
 
@@ -469,7 +469,7 @@ def test_every_scenario_completed(browser_results):
 def test_no_request_left_the_page(browser_results):
     for name, result in browser_results["results"].items():
         for request in result["requests"]:
-            if name.startswith(("files_offered", "files_edit_confirm")) and request["url"] == "/api/files":
+            if name.startswith(("files_offered", "files_edit_confirm", "files_summarize")) and request["url"] == "/api/files":
                 continue                      # A files deployment's account probe and upload (tested below).
             if name.startswith("images_") and (request["url"] == "/api/files" or (
                     request["url"].startswith("/api/files/") and request["method"] == "GET")):
@@ -1188,7 +1188,7 @@ def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results)
     # controls are gone.
     opened = step(result, "opened")
     assert not opened["dialogOpen"] and opened["barShown"]
-    assert opened["barText"] == "Saved to your account in Research · Plan Conversations New conversation Leave Space"
+    assert opened["barText"] == "Saved to your account in Research · Plan Conversations New conversation Exit Space"
     assert not opened["sessionStatusShown"] and not opened["eraseShown"]
     snap = step(result, "opened")
     view = [s_ for s_ in result["steps"] if s_["label"] == "opened" and "users" in s_][0]
@@ -1239,7 +1239,7 @@ def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_re
     assert created["title"] == "Trip" and created["status"] == "No conversations in this Space yet. Start one below."
     opened = step(result, "created-conversation")
     assert not opened["dialogOpen"] and opened["barShown"]
-    assert opened["barText"] == "Saved to your account in Trip Conversations New conversation Leave Space"
+    assert opened["barText"] == "Saved to your account in Trip Conversations New conversation Exit Space"
     assert spaces_requests(result) == [
         ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
         ("POST", "/api/spaces", {"name": "Trip", "instructions": ""}),
@@ -1408,6 +1408,20 @@ def test_my_spaces_from_the_account_pages_opens_the_spaces_list(browser_results)
     assert listed["dialogOpen"] and listed["address"] == "&spaces=open"      # Read, never rewritten.
     dialog = step(result, "listed-dialog")
     assert dialog["title"] == "Spaces" and dialog["items"] == ["Research1 conversation"]
+
+
+def test_untitled_conversations_are_reused_instead_of_piling_up_and_titles_reach_the_bar(browser_results):
+    result = scenario(browser_results, "spaces_no_empty_pile")
+    view = step(result, "space-view")
+    assert view["submit"] == "Start" and view["hintShown"] is False
+    assert view["placeholder"] == "Conversation title (optional)"
+    reused = step(result, "reused")
+    assert reused["barShown"] and not reused["dialogOpen"]
+    calls = spaces_requests(result)
+    assert not any(method == "POST" and url.endswith("/conversations") for method, url, _ in calls)
+    assert step(result, "new-on-empty") == {"label": "new-on-empty", "added": 0, "focused": "composer-input"}
+    titled = step(result, "titled")
+    assert titled["barText"].startswith("Saved to your account in Research · Plan the product launch")
 
 def test_without_the_spaces_mark_the_page_asks_nothing_about_spaces(browser_results):
     for name, result in browser_results["results"].items():
@@ -1750,6 +1764,22 @@ def test_a_files_deployment_offers_attachments_to_an_account_with_access(browser
     assert [chip["name"] for chip in sent["chips"]] == ["launch-plan.pptx"]
 
 
+
+def test_a_ready_file_shows_its_card_and_next_step_and_summarize_is_one_explicit_request(browser_results):
+    result = scenario(browser_results, "files_summarize")
+    ready = step(result, "ready")
+    assert ready["cards"] == [{"name": "Q3 report.pdf", "state": "PDF · Ready", "icon": True,
+                               "remove": "Remove Q3 report.pdf"}]
+    assert ready["hint"] == ["Ask Kalillac what to do with this file, or", "Summarize file"]
+    # Focus is back in the composer, and choosing the file sent nothing to the chat.
+    assert ready["focused"] == "composer-input" and ready["requestCount"] == 2
+    assert [r["url"] for r in result["requests"][:2]] == ["/api/files", "/api/files"]
+    chat = result["requests"][2]
+    assert chat["url"] == "/api/chat" and chat["body"]["message"] == "Summarize the attached file."
+    assert chat["body"]["file_ids"] == ["CcCcCcCcCcCcCcCcCcCcCc"]
+    summarized = step(result, "summarized")
+    assert summarized["draft"] == "my unsent draft" and summarized["cards"] == [] and summarized["hint"] is None
+
 def test_an_attached_image_is_previewed_from_the_stored_copy_and_sent(browser_results):
     result = scenario(browser_results, "images_attach_send")
     offered = step(result, "offered")
@@ -1819,4 +1849,20 @@ def test_reasoning_modes_are_chosen_with_the_mouse_and_keyboard_and_sent(browser
     assert step(result, "arrow-left")["checked"] == ["deep"]
     first, second = bodies(result)
     assert first["reasoning_mode"] == "balanced" and second["reasoning_mode"] == "deep"
+    # Every mode has its icon and visible label; the one question about modes was asked once, outside the chat.
+    assert start["labels"] == [["Quick", True], ["Balanced", True], ["Deep", True]] and start["unavailable"] == []
+    assert result["modeRequests"] == [{"url": "/api/chat/reasoning-modes", "method": "GET"}]
+
+
+def test_a_free_account_sees_deep_as_premium_and_can_never_select_or_send_it(browser_results):
+    result = scenario(browser_results, "reasoning_free_account")
+    start = step(result, "start")
+    assert start["unavailable"] == ["deep"] and start["checked"] == ["balanced"] and start["note"] is None
+    clicked = step(result, "deep-clicked")
+    assert clicked["checked"] == ["balanced"]
+    assert clicked["note"] == "Deep reasoning is part of Kalillac Premium. Your message will use Balanced."
+    assert step(result, "arrow-right")["checked"] == ["quick"] and step(result, "arrow-right")["focused"] == "quick"
+    assert step(result, "arrow-left")["checked"] == ["balanced"]
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
 
