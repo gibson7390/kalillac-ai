@@ -760,3 +760,40 @@ def test_edited_instructions_apply_to_the_next_send_in_that_space_only(api, prov
     assert "SENTINEL-EDITED-INSTRUCTIONS" in after and "SENTINEL-FIRST-INSTRUCTIONS" not in after
     assert "SENTINEL-Y-INSTRUCTIONS" in other
     assert "SENTINEL-EDITED-INSTRUCTIONS" not in other and "SENTINEL-FIRST-INSTRUCTIONS" not in other
+
+
+@pytest.mark.parametrize("how", ["renamed", "created"])
+def test_a_customer_who_chooses_exactly_new_conversation_keeps_it(api, provider, world, how):
+    space_id = new_space(api)
+    if how == "created":
+        created = api.post(f"/api/spaces/{space_id}/conversations", json={"title": "  New conversation "},
+                           headers=headers("a"))
+        assert created.status_code == 201
+        conversation_id = created.json()["conversation"]["id"]
+    else:
+        conversation_id = new_conversation(api, space_id)
+        assert send(api, space_id, conversation_id, "hi").status_code == 200        # Not named by a greeting.
+        renamed = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                            json={"title": "New conversation", "expected_version": 1}, headers=headers("a"))
+        assert renamed.status_code == 200
+    before = conversation_of(api, space_id, conversation_id)
+    assert before["title"] == "New conversation" and before["version"] == 2
+    reply = send(api, space_id, conversation_id, "Explain how encryption uses keys.")
+    assert reply.status_code == 200 and reply.json()["conversation"]["title"] == "New conversation"
+    after = conversation_of(api, space_id, conversation_id)
+    assert after["id"] == conversation_id and after["title"] == "New conversation" and after["version"] == 2
+    # Its messages are all kept, and a later rename with the version read still succeeds.
+    with world.factory() as session:
+        assert session.query(Message).filter(Message.conversation_id == uuid.UUID(conversation_id)).count() == \
+            (4 if how == "renamed" else 2)
+    later = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                      json={"title": "Encryption", "expected_version": 2}, headers=headers("a"))
+    assert later.status_code == 200 and later.json()["conversation"]["title"] == "Encryption"
+
+
+def test_an_untitled_conversation_still_starts_at_version_one_and_is_named(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    assert conversation_of(api, space_id, conversation_id)["version"] == 1
+    assert send(api, space_id, conversation_id, "Explain how encryption uses keys.").status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "Explain how encryption uses keys."

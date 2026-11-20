@@ -32,10 +32,11 @@ import time
 TOOLS = Path(__file__).resolve().parent
 sys.path[:0] = [str(TOOLS.parent), str(TOOLS)]
 import local_staging as ls  # noqa: E402
+import preview_guard  # noqa: E402
 
 DEV_ROOT = Path("/var/lib/kalillac-local-staging-dev")
 SITE_PORT, APP_PORT, PANEL_PORT, PG_PORT = 8020, 8021, 8022, 55434
-PROTECTED = {"root": Path("/var/lib/kalillac-local-staging"), "ports": (8010, 8011, 55433)}
+PROTECTED = {"root": Path("/var/lib/kalillac-local-staging"), "ports": tuple(sorted(preview_guard.PROTECTED_PORTS))}
 POLL_SECONDS = 1.0
 
 
@@ -70,10 +71,13 @@ def configure(create=False):
 
 
 def _guard_protected_ports():
-    """Refuse, in this process, any HTTP request to local staging's ports or to anything but this machine: the
-    preview must never reach the protected installation, even through a constant bound elsewhere."""
+    """Refuse, in this process, any connection to local staging's ports or to anything but this machine: the
+    preview must never reach the protected installation, even through a constant bound elsewhere, a redirect
+    or another name for loopback. preview_guard fences every TCP connection (tests/test_dev_preview_isolation.py);
+    the urlopen check below refuses such a URL before any request is built."""
     import urllib.request
     from urllib.parse import urlsplit
+    preview_guard.install()
     if getattr(urllib.request.urlopen, "_kalillac_guarded", False):
         return
     real = urllib.request.urlopen
@@ -81,8 +85,10 @@ def _guard_protected_ports():
     def urlopen(request, *args, **kwargs):
         url = request.full_url if isinstance(request, urllib.request.Request) else str(request)
         parts = urlsplit(url)
-        if parts.hostname not in ("localhost", "127.0.0.1") or parts.port in PROTECTED["ports"]:
-            raise RuntimeError(f"the development preview refused a request outside the preview: {url}")
+        try:
+            preview_guard.check(parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80))
+        except preview_guard.PreviewFenceError as refused:
+            raise RuntimeError(f"the development preview refused a request outside the preview: {url}") from refused
         return real(request, *args, **kwargs)
     urlopen._kalillac_guarded = True
     urllib.request.urlopen = urlopen

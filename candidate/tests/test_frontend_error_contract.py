@@ -220,7 +220,7 @@ SCENARIOS = (
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
        "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes",
        "spaces_conversations_edit", "spaces_manage_360x640", "spaces_account_menu", "spaces_restore_from_address",
-       "spaces_restore_refused", "spaces_list_from_address", "spaces_no_empty_pile"]
+       "spaces_restore_refused", "spaces_list_from_address", "spaces_no_empty_pile", "spaces_signed_out_accounts"]
 )
 
 
@@ -1144,6 +1144,8 @@ def test_an_accounts_deployment_links_to_the_account_pages_without_any_request(b
     loaded = step(result, "loaded")
     assert loaded["links"] == [{"href": "/account", "text": "Account", "target": None}]
     assert loaded["requestCount"] == 0                       # Plain navigation: nothing is asked.
+    # No plan is claimed before the server has said which one applies.
+    assert loaded["plan"] == "Adults 18+" and result["planRequests"] == []
     # The two plan refusals say where the plan is shown; nothing from the response is shown.
     refused = step(result, "mode-refused")["assistants"][0]["notes"]
     assert [n["text"] for n in refused] == [
@@ -1154,7 +1156,7 @@ def test_an_accounts_deployment_links_to_the_account_pages_without_any_request(b
 
 def test_without_the_accounts_mark_the_page_has_no_account_link(browser_results):
     result = scenario(browser_results, "success_no_account_link")
-    assert step(result, "loaded") == {"label": "loaded", "links": [], "requestCount": 0}
+    assert step(result, "loaded") == {"label": "loaded", "plan": "Free · adults 18+", "links": [], "requestCount": 0}
     index = INDEX_HTML.read_text(encoding="utf-8")
     assert index.count('href="/account"') == 1 and '<template id="account-link-template">' in index
     assert "data-kalillac-accounts" not in index            # A release marks the page; the source never does.
@@ -1382,6 +1384,20 @@ def test_a_signed_in_account_gets_the_account_menu_and_the_address_follows_the_o
     assert calls[-1] == ("POST", "/api/account/logout", None)
     assert ["Couldn\u2019t sign out. Try again", None] in refused["items"] and refused["menuButton"] == "Account"
 
+
+
+def test_the_footer_states_the_plan_the_server_confirms(browser_results):
+    # A signed-in Premium account: its authoritative entitlement, asked once, after the Spaces answer.
+    premium = scenario(browser_results, "spaces_account_menu")
+    assert step(premium, "loaded")["plan"] == "Kalillac Premium · adults 18+"
+    assert premium["planRequests"] == [{"url": "/api/account/entitlements", "method": "GET"}]
+    # A signed-in Free account.
+    free = scenario(browser_results, "spaces_restore_refused")
+    assert step(free, "refused")["plan"] == "Free · adults 18+" and len(free["planRequests"]) == 1
+    # Not signed in (the Spaces answer is 401): Free, and no entitlement is asked for.
+    signed_out = scenario(browser_results, "spaces_signed_out_accounts")
+    assert step(signed_out, "loaded")["plan"] == "Free · adults 18+" and signed_out["planRequests"] == []
+    assert step(signed_out, "loaded")["menuButton"] is None
 
 def test_a_space_and_conversation_in_the_address_reopen_once_the_account_confirms_them(browser_results):
     result = scenario(browser_results, "spaces_restore_from_address")

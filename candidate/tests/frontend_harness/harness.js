@@ -102,7 +102,7 @@
   // question app.js then asks (may this account use Spaces?) is answered first.
   if (scenarioName.indexOf("spaces_") === 0) {
     document.documentElement.setAttribute("data-kalillac-spaces", "on");
-    queue.push(scenarioName === "spaces_not_offered"
+    queue.push(scenarioName === "spaces_not_offered" || scenarioName === "spaces_signed_out_accounts"
       ? { status: 401, json: { error: "not_authenticated" } }
       : { status: 200, json: { spaces: [], next_cursor: null } });
   }
@@ -261,7 +261,19 @@
     ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced" } }
     : { status: 200, json: { modes: ["quick", "balanced", "deep"], default: "balanced" } };
 
+  // GET /api/account/entitlements (asked once the Spaces answer shows an account) is answered here too:
+  // Premium for the account-menu scenario, Free otherwise.
+  var planRequests = [];
+  var PLAN_ANSWER = { status: 200, json: { entitlements: { tier: scenarioName === "spaces_account_menu" ? "paid" : "free" } } };
+  if (scenarioName === "spaces_signed_out_accounts") {
+    document.documentElement.setAttribute("data-kalillac-accounts", "on");
+  }
+
   window.fetch = function (url, init) {
+    if (String(url) === "/api/account/entitlements") {
+      planRequests.push({ url: String(url), method: init && init.method });
+      return respond(PLAN_ANSWER, null);
+    }
     if (String(url) === "/api/chat/reasoning-modes") {
       modeRequests.push({ url: String(url), method: init && init.method });
       return respond(MODES_ANSWER, null);
@@ -675,6 +687,7 @@
       var links = document.querySelectorAll(".app-header .account-link");
       steps.push({
         label: label,
+        plan: text($("app-plan")),
         links: Array.prototype.map.call(links, function (l) {
           return { href: l.getAttribute("href"), text: l.textContent, target: l.getAttribute("target") };
         }),
@@ -1667,9 +1680,16 @@
       }),
       dialogOpen: !!(dialog && dialog.open),
       barShown: !$("space-bar").hidden,
+      plan: text($("app-plan")),
       requestCount: requests.length
     });
   }
+
+  SCENARIOS.spaces_signed_out_accounts = async function (a) {
+    await a.wait(60);
+    where(a, "loaded");
+    a.snap("idle");
+  };
 
   SCENARIOS.spaces_account_menu = async function (a) {
     await a.wait(60);
@@ -2047,6 +2067,7 @@
         steps: steps,
         requests: requests,
         modeRequests: modeRequests,
+        planRequests: planRequests,
         copied: copied,
         eraseTimers: eraseTimers.map(function (t) { return { cleared: t.cleared, fired: t.fired }; })
       };

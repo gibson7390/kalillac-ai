@@ -293,9 +293,13 @@ def create_conversation(session, user_id, space_id, title, now) -> Conversation:
     )
     if count >= MAX_CONVERSATIONS_PER_SPACE:
         raise LimitReached("conversation_limit_reached")
+    # The version also records who chose the title, without another column: a conversation the customer
+    # created as exactly "New conversation" starts at version 2, as one they renamed (any rename adds one)
+    # would be. Only a version-1 conversation with the default title is named automatically.
+    chosen_default = bool(title) and title == DEFAULT_CONVERSATION_TITLE
     conversation = Conversation(
         space_id=space.id, user_id=user_id, title=title or DEFAULT_CONVERSATION_TITLE,
-        message_count=0, version=1, created_at=now, updated_at=now,
+        message_count=0, version=2 if chosen_default else 1, created_at=now, updated_at=now,
     )
     session.add(conversation)
     space.updated_at = now
@@ -517,11 +521,12 @@ def automatic_title(message: str) -> str | None:
 def complete_exchange(session, conversation: Conversation, space: Space, rows, now: datetime) -> Replay:
     """Advance the conversation, clear its lease, touch the Space; flush.
 
-    A conversation still carrying the default title takes one from this exchange's user message
-    (automatic_title). A title the customer set is never replaced, and the conversation's version is
+    A conversation still carrying the default title it was created with (version 1: never renamed, and not
+    created with that title by choice) takes one from this exchange's user message (automatic_title). A
+    title the customer set, including exactly "New conversation", is never replaced, and the version is
     left alone, so a rename made with the version the customer last read still succeeds."""
     user_row, reply_row = rows
-    if conversation.title == DEFAULT_CONVERSATION_TITLE:
+    if conversation.title == DEFAULT_CONVERSATION_TITLE and conversation.version == 1:
         title = automatic_title(user_row.content)
         if title:
             conversation.title = title

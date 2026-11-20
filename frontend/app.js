@@ -1477,6 +1477,30 @@
     accountLink = accountTemplate.content.firstElementChild.cloneNode(true);
     accountTemplate.parentNode.insertBefore(accountLink, accountTemplate);
   }
+  /* The footer's plan. Without accounts every visitor uses Kalillac free, as the page says. With accounts
+     the page states no plan until the server has said which one applies: Free for a visitor it reports as
+     not signed in, and for a signed-in account its authoritative entitlement (GET /api/account/entitlements,
+     asked only once the Spaces answer shows an account). */
+  var appPlan = document.getElementById("app-plan");
+  var PLAN_LABELS = { free: "Free · adults 18+", paid: "Kalillac Premium · adults 18+" };
+  if (ACCOUNTS_OFFERED && appPlan) appPlan.textContent = "Adults 18+";
+
+  function showPlan(tier) {
+    if (appPlan && Object.prototype.hasOwnProperty.call(PLAN_LABELS, tier)) appPlan.textContent = PLAN_LABELS[tier];
+  }
+
+  function loadAccountPlan() {
+    fetch("/api/account/entitlements", {
+      method: "GET", credentials: "same-origin", cache: "no-store", redirect: "error",
+      headers: { Accept: "application/json" }
+    }).then(function (res) {
+      return res.status === 200 ? res.json() : null;
+    }).then(function (data) {
+      var tier = data && data.entitlements && data.entitlements.tier;
+      if (tier === "free" || tier === "paid") showPlan(tier);
+    }, function () { /* no plan is stated */ });
+  }
+
   if (ACCOUNTS_OFFERED) {
     ERROR_OUTCOMES.reasoning_mode_not_allowed = {
       message: "That reasoning mode isn't part of this account's plan. Account shows your plan.",
@@ -2870,7 +2894,12 @@
     // The one question asked on load: may this account use Spaces? Anything but a list is "no". Its answer
     // also says whether this browser is signed in, for the account menu.
     spacesRequest("GET", "/api/spaces?limit=1").then(function (r) {
-      if (signedInAnswer(r)) showAccountMenu();
+      if (signedInAnswer(r)) {
+        showAccountMenu();
+        if (ACCOUNTS_OFFERED) loadAccountPlan();
+      } else if (ACCOUNTS_OFFERED && r.status === 401) {
+        showPlan("free");                 // Not signed in: the free, temporary chat.
+      }
       if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return;   // Nothing to reopen.
       spacesBtn = spacesTemplate.content.firstElementChild.cloneNode(true);
       spacesTemplate.parentNode.insertBefore(spacesBtn, spacesTemplate);
