@@ -416,12 +416,39 @@ _TRUE = {"1", "true", "yes", "on"}            # kalillac_db.config, kalillac_bil
 _ACL = ("system.posix_acl_access", "system.posix_acl_default")
 
 
+_SETTING = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def launcher_settings(path):
+    """A settings file exactly as the launcher reads it (Codex C2): its values come from local_staging.read_env
+    itself (keys and values stripped, comments skipped), so the paths checked are the paths the application
+    gets. A file the launcher would read differently from how it is written is refused, never reinterpreted: a
+    non-blank line that is not a setting (silently ignored), an invalid name, or one name twice (the last
+    silently wins)."""
+    import local_staging
+    path = Path(path)
+    require(path.is_file() and not path.is_symlink(), f"{path.name} is missing")
+    seen = set()
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        require("=" in line, f"{path.name} line {number} is not a setting (the launcher would ignore it)")
+        key = line.partition("=")[0].strip()
+        require(_SETTING.fullmatch(key) is not None, f"{path.name} line {number} has an invalid setting name")
+        require(key not in seen, f"{path.name} sets {key} more than once (the launcher would use the last)")
+        seen.add(key)
+    values = local_staging.read_env(path)
+    require(set(values) == seen, f"{path.name} is not read as written")
+    return values
+
+
 def startup_environment(payload, installed_root):
-    """The settings the application starts with, as local_staging.service_env builds them: CREDENTIALS_DIRECTORY
-    defaults to the root's credentials/, then deployment.env, then settings.env (either may override it)."""
+    """The settings the application starts with, as local_staging.service_env builds them and with its parser:
+    CREDENTIALS_DIRECTORY defaults to the root's credentials/, then deployment.env, then settings.env (either may
+    override it; a setting in both takes settings.env's value, as the launcher does)."""
     payload = Path(payload)
     return {"CREDENTIALS_DIRECTORY": f"{str(installed_root).rstrip('/')}/credentials",
-            **env_file(payload / "deployment/deployment.env"), **env_file(payload / "settings.env")}
+            **launcher_settings(payload / "deployment/deployment.env"), **launcher_settings(payload / "settings.env")}
 
 
 def _protected_policy(path, top, gid, ceiling, *, above_top=False):
@@ -487,8 +514,9 @@ def runtime_access(payload, installed_root, uid, gid, *, live=False):
     for path in paths:
         require(path.is_file() and not path.is_symlink(), "a configured runtime file is missing")
     writable = [payload / d for d in ("state", "state/files", "state/locks", "state/outbox") if (payload / d).is_dir()]
-    if env.get("KALILLAC_FILES_ROOT"):                  # Where the application stores files, as configured.
-        files_root = _inside(env["KALILLAC_FILES_ROOT"], installed_root, payload)
+    if "KALILLAC_FILES_ROOT" in env or env.get("KALILLAC_FILES_ENABLED", "").strip().lower() in _TRUE:
+        # Where the application stores files, as configured (it refuses to start without one when enabled).
+        files_root = _inside(env.get("KALILLAC_FILES_ROOT", ""), installed_root, payload)
         require(files_root.is_dir() and not files_root.is_symlink(), "the configured file storage folder is missing")
         writable = list(dict.fromkeys([*writable, files_root]))
     seen = as_service(uid, gid, read=paths, listing=listing, write=writable)

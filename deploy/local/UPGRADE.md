@@ -43,6 +43,9 @@ Resolve those separately; do not remove the guard. Backup and apply never implic
 
 1. Run live_upgrade.py backup with the same exact destination/checkout identity and a NEW absolute --backup
    directory outside the installation, under a trusted root-owned parent (for example a new directory in /root).
+   Before anything is created, the destination is refused if it already exists, has a symlink on its path, or
+   lies inside the installation. That is checked by path and by identity: no folder above it may be the
+   installation or any folder inside it, so a bind-mount alias cannot hide an overlap.
 2. Record its backup_manifest_sha256 outside the backup. The backup includes the entire root: PostgreSQL's
    complete cluster/WAL, roles, account/Space/message/subscription/activation data, documents and file metadata,
    credentials, registration keys, settings, process records and web assets. Treat it as secret customer data.
@@ -176,8 +179,14 @@ What it does, in order, refusing at the first failure:
 3. Checks the destinations and the free space (above).
 4. Creates the new failed-state folder (0700), and beside it the **recovery journal**
    (`FAILED.restore.json`, root's, 0600). The journal records the root's path, device and inode, the activation,
-   the backup path and checksum, and the failed-state folder's own identity. It also records the phase, updated
-   atomically: `moving`, then `copying`, `verifying`, `complete`; an interruption leaves `interrupted-<phase>`.
+   the backup path and checksum, and the failed-state folder's own identity, with the phase: `prepared`, then
+   `moving`, `copying`, `verifying` and `complete`; an interruption leaves `interrupted-<phase>`.
+
+   A journal appears only complete. It is written in full to a temporary file of its own and flushed to disk, then
+   renamed into place, and its folder is flushed. Each update is written the same way and replaces the previous
+   version with one rename. These are several steps, not one atomic act: after a crash there is either no journal
+   under that name (at most a partial `.new-…` temporary, kept as evidence) or a complete one. Never a partial
+   journal.
 5. Moves every entry of the root into the failed state, dotfiles and the marker included, by rename: nothing is
    copied or deleted. It records the failed state's manifest (`FAILED.manifest.json`).
 6. Copies the backup's contents into the SAME root folder (`cp -a payload/. root/`), keeping the root's inode,
@@ -187,6 +196,11 @@ What it does, in order, refusing at the first failure:
    `CREDENTIALS_DIRECTORY` (by default `ROOT/credentials`; `deployment.env` or `settings.env` may move it) and
    `KALILLAC_FILES_ROOT`, the protected registration files and the state folders. Configured paths must be
    canonical and inside the installation: a `//`, `.` or `..` is refused.
+
+   Settings are read with the launcher's own parser (`local_staging.read_env`, which strips spaces around names
+   and values), so the values checked are the values the application gets. A file the launcher would read
+   differently from how it is written is refused rather than reinterpreted: a line that is not a setting, an
+   invalid name, or one name twice.
 
 It never starts anything, never deletes or rewrites a failed state, and never writes to the backup.
 
@@ -208,13 +222,21 @@ explicitly authorized `resume-restore`:
 
 It does not rely on the root's marker or settings. Its evidence:
 * the backup, verified against the checksum recorded when it was made, which names this root's path, device and
-  inode;
+  inode. The rehearsal command shows the reason for a known refusal (for example a `TMPDIR` the service cannot
+  traverse); an unexpected error shows only its class;
 * the journal chain: the given journal and every earlier one it names. Each must be root's own 0600 file, name
   this root, backup, checksum and activation, and its failed state must still be the folder it recorded. The given
-  journal must be the **current** transaction: not `complete`, and not superseded. Before a resume changes
-  anything, it writes `superseded_by` (the new journal's path) into the journal it continues. An older journal
-  can therefore never be replayed once a later recovery exists, completed or not. If a crash happens between
-  those two writes, the older journal stays usable: the journal it names does not exist;
+  journal must be the **current** transaction: not `complete`, and not superseded. A resume first publishes its
+  own complete journal (`prepared`), then writes `superseded_by` (that journal's path) into the journal it
+  continues, and only then moves anything. Where it stops decides which journal to use:
+  * before its journal is published: the older journal is still the current one;
+  * after publication but before the older journal is marked: the new journal is complete and resumable, and
+    resuming from it first records the missing link. Resuming from the older one instead leaves the new journal's
+    chain inconsistent, so it is refused afterwards. Only one chain can proceed;
+  * after that: only the new journal.
+
+  An older or completed journal can never be replayed. A journal that exists but cannot be read is damage: it is
+  refused for review, never ignored;
 * the original marker, found in the root or a recorded failed state, equal byte for byte to the backup's, with no
   different marker among them. Another installation, another backup, a forged journal or a foreign marker is
   refused.

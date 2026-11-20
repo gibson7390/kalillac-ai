@@ -1543,3 +1543,358 @@ def test_round4_refusals_survive_python_optimization(runtime_root):
               "print(','.join(out))")
     result = subprocess.run([sys.executable, "-O", "-c", script], capture_output=True, text=True)
     assert result.stdout.strip() == "refused", result.stderr[-1500:]
+
+
+# --- Codex's verification of 0a0957a: journal publication (C1), backup destination (C3), launcher parsing (C2),
+#     rehearsal diagnostics (C4) ---------------------------------------------------------------------------------
+
+def recovery_invariants(m, backup_before, failed_states):
+    """What every interruption must preserve, checked together: the backup unchanged and valid, the root's own
+    folder identity, every failed state still there."""
+    assert u.tree_manifest(m.backup) == backup_before
+    u.validate_backup(m.backup, m.checksum)
+    assert (m.root.stat().st_dev, m.root.stat().st_ino) == m.identity
+    assert all(Path(f).is_dir() for f in failed_states)
+
+
+def completes(m, journal, failed, failed_states, backup_before):
+    with offline_cluster(m):
+        result = live_tool.resume_restore(m.root, m.backup, m.checksum, journal, failed, m.prepared.bindir)
+    assert result["restored"]
+    recovery_invariants(m, backup_before, [*failed_states, failed])
+    assert u.tree_manifest(m.root) == u.validate_backup(m.backup, m.checksum)["files"]
+    return Path(result["journal"])
+
+
+@contextlib.contextmanager
+def offline_cluster(m):
+    m.pg.cluster.stop()
+    try:
+        yield
+    finally:
+        m.pg.cluster.start(m.pg.socket, m.pg.port)
+
+
+@pytest.fixture
+def stranded(marked_install, pg, monkeypatch):
+    """A first restore interrupted while copying: the root empty, its marker in failed-1."""
+    m = marked_install
+    m.pg = pg
+    m.backup_before = u.tree_manifest(m.backup)
+    m.first = interrupted(m, pg, monkeypatch, "copy", m.parent / "failed-1")
+    assert not list(m.root.iterdir())
+    return m
+
+
+def resume_with(m, monkeypatch, fault, failed):
+    """resume-restore from failed-1's journal with one injected fault; returns (raised, successor journal path)."""
+    successor = failed.with_name(failed.name + live_tool.JOURNAL)
+    with offline_cluster(m), monkeypatch.context() as patch:
+        fault(patch, m, successor)
+        try:
+            live_tool.resume_restore(m.root, m.backup, m.checksum, m.first, failed, m.prepared.bindir)
+        except (OSError, u.Refused) as error:
+            return error, successor
+    return None, successor
+
+
+def fail_save_for(patch, target, partial):
+    real = live_tool.save_json
+
+    def save(path, value):
+        if Path(path).name.startswith(target.name + ".new-"):
+            if partial:
+                Path(path).write_text('{"format":')               # A partial temporary, as on a full disk.
+            raise OSError(errno.ENOSPC, "injected full disk while writing a journal")
+        return real(path, value)
+    patch.setattr(live_tool, "save_json", save)
+
+
+def fault_before_creation(patch, m, successor):
+    def mkdir(*a, **k):
+        raise OSError(errno.ENOSPC, "injected failure before the successor journal exists")
+    patch.setattr(Path, "mkdir", mkdir)
+
+
+def fault_during_serialization(patch, m, successor):
+    fail_save_for(patch, successor, partial=True)
+
+
+def fault_before_publication(patch, m, successor):
+    real = os.rename
+
+    def rename(source, destination, *a, **k):
+        if Path(destination) == successor:
+            raise OSError(errno.EIO, "injected failure before the journal is renamed into place")
+        return real(source, destination, *a, **k)
+    patch.setattr(live_tool.os, "rename", rename)
+
+
+def fault_before_predecessor_update(patch, m, successor):
+    fail_save_for(patch, m.first, partial=False)
+
+
+def fault_during_predecessor_update(patch, m, successor):
+    fail_save_for(patch, m.first, partial=True)
+
+
+def fault_after_predecessor_update(patch, m, successor):
+    real = live_tool._write_journal
+
+    def write(path, value):
+        if Path(path) == successor and value.get("phase") == "moving":
+            raise OSError(errno.EIO, "injected failure right after the predecessor was marked")
+        return real(path, value)
+    patch.setattr(live_tool, "_write_journal", write)
+
+
+def fault_during_movement(patch, m, successor):
+    (m.root / "partial-copy").write_text("left by an interrupted copy\n")     # Something for the resume to move.
+    real = os.rename
+
+    def rename(source, destination, *a, **k):
+        if Path(source).parent == m.root:
+            raise OSError(errno.ENOSPC, "injected failure while moving")
+        return real(source, destination, *a, **k)
+    patch.setattr(os, "rename", rename)
+
+
+@pytest.mark.parametrize("fault,published,predecessor_marked", [
+    (fault_before_creation, False, False),
+    (fault_during_serialization, False, False),
+    (fault_before_publication, False, False),
+    (fault_before_predecessor_update, True, False),
+    (fault_during_predecessor_update, True, False),
+    (fault_after_predecessor_update, True, True),
+    (fault_during_movement, True, True),
+])
+def test_round5_every_journal_interruption_stays_recoverable_and_never_replayable(stranded, monkeypatch, fault,
+                                                                                  published, predecessor_marked):
+    """Codex C1 and the eight injection points, checked together: no partial journal is ever published under a
+    journal's name; before publication the predecessor stays current; after it the successor is complete and
+    resumes; once a later recovery completes, nothing earlier can be replayed."""
+    m = stranded
+    failed = m.parent / "failed-2"
+    error, successor = resume_with(m, monkeypatch, fault, failed)
+    assert error is not None
+    recovery_invariants(m, m.backup_before, [m.parent / "failed-1"])
+    assert os.path.lexists(successor) is published
+    if published:
+        json.loads(successor.read_text())                                # Complete, never partial.
+    assert (json.loads(m.first.read_text()).get("superseded_by") == str(successor)) is predecessor_marked
+    if not published:
+        final = completes(m, m.first, m.parent / "failed-3", [m.parent / "failed-1"], m.backup_before)
+    else:
+        final = completes(m, successor, m.parent / "failed-3", [m.parent / "failed-1", failed], m.backup_before)
+        # The repaired or recorded link: the predecessor can never be replayed now.
+        assert json.loads(m.first.read_text())["superseded_by"] == str(successor)
+    assert json.loads(final.read_text())["phase"] == "complete"
+    with offline_cluster(m):
+        for journal in (m.first, successor, final):
+            if os.path.lexists(journal):
+                with pytest.raises(u.Refused, match="superseded|completed|inconsistent"):
+                    live_tool.resume_restore(m.root, m.backup, m.checksum, journal, m.parent / "failed-x",
+                                             m.prepared.bindir)
+    assert not os.path.lexists(m.parent / "failed-x")
+
+
+def test_round5_codex_partial_successor_journal_does_not_strand_recovery(stranded, monkeypatch):
+    """Codex's exact scenario: the initial successor journal write fails part-way with ENOSPC. The predecessor is
+    not superseded and no partial journal exists under the successor's name, so recovery completes."""
+    m = stranded
+    error, successor = resume_with(m, monkeypatch, fault_during_serialization, m.parent / "failed-2")
+    assert isinstance(error, OSError) and not os.path.lexists(successor)
+    assert "superseded_by" not in json.loads(m.first.read_text())
+    assert [p.name for p in m.parent.iterdir() if p.name.startswith("failed-2.restore.json.new-")]   # Evidence.
+    completes(m, m.first, m.parent / "failed-3", [m.parent / "failed-1"], m.backup_before)
+
+
+def test_round5_a_published_successor_and_an_unmarked_predecessor_cannot_both_proceed(stranded, monkeypatch):
+    """After publication but before the predecessor is marked, either journal may be used, but only one chain
+    survives: resuming the predecessor makes the stranded successor inconsistent."""
+    m = stranded
+    _error, stray = resume_with(m, monkeypatch, fault_before_predecessor_update, m.parent / "failed-2")
+    completes(m, m.first, m.parent / "failed-3", [m.parent / "failed-1", m.parent / "failed-2"], m.backup_before)
+    with offline_cluster(m), pytest.raises(u.Refused, match="inconsistent|superseded"):
+        live_tool.resume_restore(m.root, m.backup, m.checksum, stray, m.parent / "failed-x", m.prepared.bindir)
+
+
+def test_round5_a_damaged_journal_is_refused_for_review_not_ignored(stranded):
+    m = stranded
+    m.first.write_text('{"format":')
+    os.chmod(m.first, 0o600)
+    with offline_cluster(m), pytest.raises(u.Refused, match="damaged"):
+        live_tool.resume_restore(m.root, m.backup, m.checksum, m.first, m.parent / "failed-x", m.prepared.bindir)
+
+
+# C3: the backup destination, through the public backup command, refused before anything is created.
+
+def backup_cli(m, repository, output):
+    return live_tool.main(["backup", "--root", str(m.root), "--device", str(m.identity[0]), "--inode",
+                           str(m.identity[1]), "--activation-release", "a" * 40, "--checkout", str(repository.main),
+                           "--checkout-sha", repository.sha, "--pg-bin", m.prepared.bindir, "--backup", str(output),
+                           "--authorize-live-operation"])
+
+
+@pytest.fixture
+def backup_gate(marked_install, pg, repository, monkeypatch):
+    m = marked_install
+    with (m.root / "settings.env").open("a") as stream:
+        stream.write(f"KALILLAC_FILES_ROOT={m.root}/state/files\n")
+    monkeypatch.setattr(live_tool, "INSTALLED", m.root)
+    m.pg, m.repository = pg, repository
+    return m
+
+
+def refused_backup(m, output):
+    before, backup_before = u.tree_manifest(m.root), u.tree_manifest(m.backup)
+    with offline_cluster(m):
+        assert backup_cli(m, m.repository, output) == 2
+    assert u.tree_manifest(m.root) == before and u.tree_manifest(m.backup) == backup_before
+
+
+def test_round5_codex_a_bind_alias_into_the_installation_is_refused_before_any_backup_folder(backup_gate):
+    m = backup_gate
+    alias = m.parent / "alias"
+    alias.mkdir(mode=0o755)
+    subprocess.run(["mount", "--bind", str(m.root / "deployment"), str(alias)], check=True)
+    try:
+        refused_backup(m, alias / "new-backup")
+        assert not os.path.lexists(m.root / "deployment/new-backup")
+    finally:
+        subprocess.run(["umount", str(alias)], check=True)
+
+
+@pytest.mark.parametrize("where", ["nested", "nested-deep", "symlink", "existing", "root-itself", "relative"])
+def test_round5_unsafe_backup_destinations_are_refused_and_nothing_is_created(backup_gate, where):
+    m = backup_gate
+    if where == "nested":
+        output = m.root / "state/new-backup"
+    elif where == "nested-deep":
+        output = m.root / "state/files/a/new-backup"
+    elif where == "symlink":
+        (m.parent / "link").symlink_to(m.root / "state")
+        output = m.parent / "link/new-backup"
+    elif where == "existing":
+        output = m.backup
+    elif where == "root-itself":
+        output = m.root
+    else:
+        output = Path("relative-backup")
+    refused_backup(m, output)
+    if where in ("nested", "symlink"):
+        assert not os.path.lexists(m.root / "state/new-backup")
+
+
+def test_round5_a_correctly_separated_backup_destination_still_works(backup_gate):
+    m = backup_gate
+    output = m.parent / "separate-backup"
+    with offline_cluster(m):
+        assert backup_cli(m, m.repository, output) == 0
+    assert (output / "manifest.json").is_file() and u.tree_manifest(output / "payload") == u.tree_manifest(m.root)
+
+
+# C2: the verifier reads settings with the launcher's own parser and refuses what it would read differently.
+
+def launcher_view(root, monkeypatch):
+    import local_staging
+    monkeypatch.setattr(local_staging, "ROOT", root)
+    return local_staging.service_env(local_staging.paths(), "/unused")
+
+
+@pytest.mark.parametrize("line", ["CREDENTIALS_DIRECTORY ={missing}", "CREDENTIALS_DIRECTORY= {missing}",
+                                  "  CREDENTIALS_DIRECTORY={missing}  ", "CREDENTIALS_DIRECTORY\t=\t{missing}"])
+def test_round5_codex_whitespace_around_a_setting_is_read_as_the_launcher_reads_it(runtime_root, monkeypatch, line):
+    root = runtime_root
+    missing = root / "missing-credentials"
+    with (root / "settings.env").open("a") as stream:
+        stream.write("KALILLAC_DB_ENABLED=true\n" + line.format(missing=missing) + "\n")
+    assert launcher_view(root, monkeypatch)["CREDENTIALS_DIRECTORY"] == str(missing)
+    assert u.startup_environment(root, root)["CREDENTIALS_DIRECTORY"] == str(missing)   # The same path.
+    with pytest.raises(u.Refused, match="credential"):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+def test_round5_codex_a_spaced_files_root_is_checked_where_the_launcher_points(runtime_root, monkeypatch):
+    root = runtime_root
+    with (root / "settings.env").open("a") as stream:
+        stream.write(f"KALILLAC_FILES_ROOT ={root}/missing-files\n")
+    assert launcher_view(root, monkeypatch)["KALILLAC_FILES_ROOT"] == f"{root}/missing-files"
+    with pytest.raises(u.Refused, match="file storage"):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+@pytest.mark.parametrize("content,match", [("CREDENTIALS_DIRECTORY={a}\nCREDENTIALS_DIRECTORY={b}\n", "more than once"),
+                                           ("CREDENTIALS_DIRECTORY={a}\n CREDENTIALS_DIRECTORY ={b}\n", "more than once"),
+                                           ("THIS LINE IS NOT A SETTING\n", "not a setting"),
+                                           ("BAD-NAME=1\n", "invalid setting name"),
+                                           ("=value\n", "invalid setting name")])
+def test_round5_settings_the_launcher_would_read_silently_differently_are_refused(runtime_root, content, match):
+    root = runtime_root
+    with (root / "settings.env").open("a") as stream:
+        stream.write(content.format(a=root / "credentials", b=root / "other"))
+    with pytest.raises(u.Refused, match=match):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+def test_round5_precedence_matches_the_launcher_across_sources(runtime_root, monkeypatch):
+    root = runtime_root
+    other = root / "state/creds-b"
+    other.mkdir()
+    os.chown(other, SERVICE, SERVICE)
+    (root / "deployment/deployment.env").write_text(
+        (root / "deployment/deployment.env").read_text() + f"CREDENTIALS_DIRECTORY={root}/credentials\n")
+    with (root / "settings.env").open("a") as stream:
+        stream.write(f"# a comment\n   # an indented comment\nCREDENTIALS_DIRECTORY = {other}\n")
+    launcher = launcher_view(root, monkeypatch)
+    verifier = u.startup_environment(root, root)
+    for key in ("CREDENTIALS_DIRECTORY", "KALILLAC_ACCOUNT_REGISTRATION_KEYRING_FILE"):
+        assert verifier[key] == launcher[key]
+    assert verifier["CREDENTIALS_DIRECTORY"] == str(other)                             # settings.env wins.
+
+
+def test_round5_codex_no_receipt_when_the_launcher_uses_a_missing_spaced_credentials_directory(prepared, pg,
+                                                                                            tmp_path, monkeypatch):
+    """Codex's exact configuration: valid credentials in the default folder, `CREDENTIALS_DIRECTORY =<missing>` in
+    settings.env. The launcher uses the missing folder and the real loaders find no secret; the complete
+    PostgreSQL rehearsal must now refuse before any receipt."""
+    p = prepared
+    credentials = p.root / "credentials"
+    credentials.mkdir(exist_ok=True)
+    for name in ("kalillac_db_password", "stripe_secret_key", "stripe_webhook_secret"):
+        protected(credentials / name, "synthetic-test-only\n", owner=(SERVICE, SERVICE), mode=0o400)
+    missing = p.root / "missing-runtime-credentials"
+    with (p.root / "settings.env").open("a") as stream:
+        stream.write(f"KALILLAC_DB_ENABLED=true\nKALILLAC_BILLING_ENABLED=true\nCREDENTIALS_DIRECTORY ={missing}\n")
+    assert launcher_view(p.root, monkeypatch)["CREDENTIALS_DIRECTORY"] == str(missing)
+    backup = pg.base / ("c2-" + uuid.uuid4().hex[:6])
+    with offline(pg):
+        checksum = live_tool.backup_install(p.root, backup, "a" * 40, p.bindir, SERVICE, SERVICE)
+    receipt = tmp_path / "receipt.json"
+    with pytest.raises(u.Refused, match="credential"):
+        rehearsal.rehearse(backup, checksum, p.bindir, receipt)
+    assert not receipt.exists()
+    shutil.rmtree(backup)
+
+
+# C4: the rehearsal command explains a known refusal.
+
+def test_round5_the_rehearsal_cli_explains_an_inaccessible_tmpdir(prepared, pg, tmp_path):
+    p = prepared
+    temp = pg.base / "root-only-tmpdir"
+    temp.mkdir(mode=0o700)
+    receipt = tmp_path / "receipt.json"
+    result = subprocess.run([sys.executable, "-B", str(Path(rehearsal.__file__)), "--backup", str(p.backup),
+                             "--backup-sha256", p.checksum, "--pg-bin", p.bindir, "--receipt", str(receipt)],
+                            env={**os.environ, "TMPDIR": str(temp)}, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 2 and not receipt.exists() and not list(temp.iterdir())
+    assert "refused" in result.stderr and "TMPDIR must be traversable" in result.stderr and "0711" in result.stderr
+    assert "synthetic-upgrade-only" not in result.stderr                              # No credential shown.
+
+
+def test_round5_an_unexpected_failure_still_shows_only_its_class(prepared, tmp_path):
+    p = prepared
+    result = subprocess.run([sys.executable, "-B", str(Path(rehearsal.__file__)), "--backup", str(p.backup),
+                             "--backup-sha256", p.checksum, "--pg-bin", "/nonexistent/bin", "--receipt",
+                             str(tmp_path / "r.json")], capture_output=True, text=True, timeout=300)
+    assert result.returncode == 2 and "synthetic-upgrade-only" not in result.stderr

@@ -315,3 +315,64 @@ New regressions:
 `release/staging-v1` and the other worktrees are unchanged. PR #40 stays in draft. Codex's audit folder is kept
 as found; this round's resources were under `/var/tmp/k4` and `/var/tmp/ku-pg-*`.
 
+## Corrections after the focused verification of 0a0957a (C1 to C4): another focused review requested
+
+Codex's evidence (`tmp/pr40-focused-verification-0a0957a/`) is preserved unchanged. Its test file
+`test_pr40_focused_additional.py` (sha256 `3ca3dac7…`), copied into a disposable snapshot of `0a0957a` (base
+`/var/tmp/k6`, short socket paths), reproduced **6 failed**, matching its log. The probes:
+* `launcher-parser-mismatch` (credentials and files);
+* `launcher-parser-false-receipt`;
+* `partial-successor-journal`;
+* `tmpdir-cli-diagnostic`;
+* `backup-destination-bind-alias`.
+
+F1 to F6, U1, U2, U4 and the verified restore protections are not reopened. Nothing is marked verified.
+
+| Finding | Correction |
+|---|---|
+| C1 journal publication (High) | `_publish_journal` writes a new journal in full to an exclusive temporary of its own (`NAME.new-<random>`, 0600, fsynced), renames it into place (refusing an existing journal), then fsyncs the folder. `_write_journal` updates the same way, with `os.replace`. Order in `_restore_into`: create the failed-state folder, publish the journal as `prepared`, mark the predecessor `superseded_by`, update to `moving`, then move. A failure up to publication leaves the predecessor current; after it, the successor is complete and resumable. `resume_restore` first records any link left unrecorded by a crash (sets `superseded_by` on an earlier journal whose successor exists), so nothing earlier in the chain can be replayed; resuming from the predecessor instead leaves the stray successor's chain inconsistent, so it is refused. A journal that exists but cannot be parsed is refused for review, never ignored. These are several separate filesystem operations, not one atomic act; what is guaranteed is that no partial journal ever exists under a journal's name |
+| C3 backup destination (Medium) | `backup_destination` runs before anything is created and again after the offline check. The destination must be absolute and normal, and new. Its parent must be a real folder with no symlink on the path, and trusted (F1's `_open_parent`). It must be neither inside nor containing the installation, by path and by identity: no folder above it may have the device and inode of the installation or of any folder inside it, which catches bind-mount aliases |
+| C2 configuration parsing (Medium) | `launcher_settings` reads each file with the launcher's own parser, `local_staging.read_env` (names and values stripped, comments skipped, including indented ones), so the values checked are the values the application gets. It also refuses, rather than reinterprets, a file the launcher would read differently from how it is written: a non-blank line without `=`, an invalid name, or one name set twice. Precedence is the launcher's: `ROOT/credentials` by default, then `deployment.env`, then `settings.env`. An empty `KALILLAC_FILES_ROOT`, or none while file storage is enabled, refuses |
+| C4 rehearsal diagnostics (Low) | `rehearse_upgrade.main` prints a known `Refused` as `rehearsal of BACKUP refused: <reason>`, says that no receipt was written, and exits 2. The reasons name checks and paths, never contents or credentials. Unexpected exceptions still show only their class |
+
+**Results**
+* Locally, as root in WSL: **198 passed, 0 skipped** (189 Linux + 9 Windows).
+* The 32 new tests on `0a0957a`'s tools: **23 failed, 9 passed**. The 9 are controls that hold on both: the
+  separated destination, the unexpected-class diagnostic, some journal faults the old code also survived.
+* Codex's file on the correction: **5 passed, 1 failed by design**. `test_partial_successor_creation…` injects its
+  ENOSPC into `save_json` on the successor's final path. Publication now writes a temporary and renames it, so the
+  injection never fires ("DID NOT RAISE") and recovery completes. The same fault, at the corrected boundaries, is in
+  the tests below.
+
+New regressions (32; the workflow now pins 189):
+* **C1, the eight injection points** (one test, invariants checked together: the backup unchanged and valid, the
+  root's identity, every failed state kept, completion to exactly the manifest, and no journal replayable
+  afterwards): before the successor exists; during serialization (partial temporary); before publication;
+  after publication before the predecessor is marked; during that update; right after it; during file movement;
+  after completion. Plus Codex's exact partial-successor scenario, the stray-successor case, and a damaged
+  journal.
+* **C3:** Codex's bind alias through the public `backup` command; nested, deeply nested, symlinked, existing,
+  the root itself and relative destinations. For each, the installation is unchanged and no folder is created. A
+  separated destination still works.
+* **C2:** four whitespace forms read exactly as the launcher reads them. The test compares
+  `local_staging.service_env` with `startup_environment`. Also covered: a spaced `KALILLAC_FILES_ROOT`; duplicate
+  (including spaced) names, a non-setting line and invalid names refused; precedence across `deployment.env` and
+  `settings.env` with comments; and Codex's exact false-receipt configuration through a complete PostgreSQL
+  rehearsal, which now issues no receipt.
+* **C4:** the CLI names the TMPDIR reason and shows no credential. An unexpected failure shows only its class.
+
+**Known limitations**
+* Journal publication and supersession are several operations. The guarantee is: no partial journal under a
+  journal's name, and at most one chain can proceed. Power loss without the fsyncs being honoured by storage is
+  outside what software can promise.
+* The parser equivalence relies on `local_staging.read_env` (imported, not copied) and on the launcher's
+  precedence, mirrored in `startup_environment`. A change to `service_env`'s order needs the same change there.
+* Settings a launcher would accept but that are malformed (duplicates, non-setting lines) are refused: an operator
+  must clean them up before an upgrade.
+* All earlier limitations stand: a startup gate is not acceptance, there is no decryption of protected files,
+  the maintenance window is an operational rule, and the fault injection stands in for real crashes.
+
+**Preservation.** The owner's installation was not accessed. No live operation was run. Production,
+`release/staging-v1` and the other worktrees are unchanged. PR #40 stays in draft. Codex's evidence folder is
+intact.
+

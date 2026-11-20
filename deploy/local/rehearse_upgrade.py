@@ -9,7 +9,7 @@ import socket
 import sys
 
 from sqlalchemy import text
-from upgrade_support import (NEW, OLD, RELEASE, as_service, copied_cluster, database_identity, database_snapshot,
+from upgrade_support import (NEW, OLD, RELEASE, Refused, as_service, copied_cluster, database_identity, database_snapshot,
                              digest, engines, env_file, migrate, require, runtime_access, same_contents, save_json,
                              tree_manifest)
 
@@ -113,6 +113,11 @@ def main(argv=None):
         print(json.dumps({"verified": True, "tables": len(result["database"]["tables"]),
                           "files": result["files"]["records"], "receipt_sha256": digest(result)}))
         return 0
+    except Refused as error:
+        # A known refusal: its reason is safe to show (paths and checks, never contents or credentials).
+        print(f"rehearsal of {args.backup} refused: {error}. No receipt was written; any scratch state kept for "
+              "inspection is named above.", file=sys.stderr)
+        return 2
     except Exception as error:
         print(f"rehearsal failed ({type(error).__name__}); retained state must be inspected", file=sys.stderr)
         return 2

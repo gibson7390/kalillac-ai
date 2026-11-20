@@ -146,15 +146,36 @@ def stop_install(root, checkout, bindir):
                 os.environ[key] = value
 
 
-def backup_install(root, output, activation, bindir, uid, gid):
-    """A failed or incomplete backup never gets a usable manifest."""
-    offline(root, bindir, uid, gid)
-    output = Path(output)
-    require(output.is_absolute() and not output.exists() and root not in output.parents,
-            "backup must be a new absolute destination outside the installation")
+def backup_destination(root, output):
+    """Before anything is created (Codex C3): the destination is absolute and normal, new, under a real parent
+    with no symlink on its path and a trusted owner, not inside the installation and not containing it, by path
+    and by identity: no folder above it may be the installation or any folder inside it (a bind-mount alias)."""
     import local_staging
-    parent = local_staging._open_parent(output)
-    os.close(parent)
+    root, output = Path(root), Path(output)
+    require(output.is_absolute() and os.path.normpath(str(output)) == str(output),
+            "backup must be a new absolute destination outside the installation")
+    require(not os.path.lexists(output), "the backup destination already exists; choose a new one")
+    parent = output.parent
+    require(parent.is_dir() and not parent.is_symlink() and os.path.realpath(parent) == str(parent),
+            "the backup destination's parent must be a real folder, with no symlink on its path")
+    try:
+        os.close(local_staging._open_parent(output))
+    except local_staging.UnsafeRoot as error:
+        raise Refused(f"the backup destination's parent is not trusted: {error}") from None
+    require(not _within(output, root) and not _within(root, output),
+            "backup must be a new absolute destination outside the installation")
+    inside = _directories(root)
+    for ancestor in (parent, *parent.parents):
+        require(_identity(ancestor) not in inside, "the backup destination would be inside the installation")
+
+
+def backup_install(root, output, activation, bindir, uid, gid):
+    """A failed or incomplete backup never gets a usable manifest, and an unsafe destination is refused before
+    anything is created."""
+    output = Path(output)
+    backup_destination(root, output)
+    offline(root, bindir, uid, gid)
+    backup_destination(root, output)                    # Unchanged while confirming the installation offline.
     output.mkdir(mode=0o700)
     source = tree_manifest(root)
     copy_tree(root, output / "payload")
@@ -321,31 +342,55 @@ def restore_preflight(root, backup, failed, manifest, *, earlier=()):
             "not enough free space or inodes on the installation's filesystem to copy the backup back")
 
 
-def _write_journal(path, value, *, create=False):
-    """The recovery journal: created exclusively, then replaced atomically after each phase (root's, 0600)."""
-    if create:
-        save_json(path, value)
-        return
-    # A fresh temporary each time: an earlier update interrupted part-way leaves its partial temporary, which is
-    # kept as evidence and never blocks the next update.
-    temporary = path.with_name(f"{path.name}.new-{secrets.token_hex(6)}")
-    save_json(temporary, value)
-    os.replace(temporary, path)
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+def _fsync_folder(folder):
+    directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory)
     finally:
         os.close(directory)
 
 
-def _restore_into(root, backup, manifest, failed, uid, gid, journal):
+def _publish_journal(path, value):
+    """A new journal appears only complete and durable (Codex C1): written in full to an exclusive temporary of
+    its own (0600) and fsynced, then renamed into place and the folder fsynced. These are several steps, not one
+    atomic act: a crash leaves either no journal (at most a partial temporary, kept as evidence) or the complete
+    one, never a partial journal under the journal's name. Existing evidence is never replaced."""
+    require(not os.path.lexists(path), "a recovery journal already exists there")
+    temporary = path.with_name(f"{path.name}.new-{secrets.token_hex(6)}")
+    save_json(temporary, value)
+    require(not os.path.lexists(path), "a recovery journal already exists there")
+    os.rename(temporary, path)
+    _fsync_folder(path.parent)
+
+
+def _write_journal(path, value):
+    """Update a published journal: a complete new version written to a unique temporary, fsynced, then put in
+    place with one rename, and the folder fsynced. An interrupted update leaves the previous version in place
+    (and its partial temporary as evidence), never a partial journal."""
+    temporary = path.with_name(f"{path.name}.new-{secrets.token_hex(6)}")
+    save_json(temporary, value)
+    os.replace(temporary, path)
+    _fsync_folder(path.parent)
+
+
+def _restore_into(root, backup, manifest, failed, uid, gid, journal, *, supersede=None):
     """Move the root's entries into `failed` (rename only), copy the backup's contents into the same root inode,
-    verify. The journal records each phase; an interruption leaves it saying where, for resume-restore."""
+    verify. The journal records each phase; an interruption leaves it saying where, for resume-restore.
+
+    Order (Codex C1): the new journal is published complete ("prepared") BEFORE the journal it resumes is marked
+    superseded, and that BEFORE anything moves. A failure up to the publication leaves the earlier journal the
+    current one; after it, the new journal is complete and resumable."""
     identity = (manifest["device"], manifest["inode"])
     journal_path = failed.with_name(failed.name + JOURNAL)
     failed.mkdir(mode=0o700)
-    journal.update(failed_state=str(failed), failed_identity=list(_identity(failed)), phase="moving")
-    _write_journal(journal_path, journal, create=True)
+    journal.update(failed_state=str(failed), failed_identity=list(_identity(failed)), phase="prepared")
+    _publish_journal(journal_path, journal)
+    if supersede is not None:
+        earlier_path, earlier = supersede
+        earlier["superseded_by"] = str(journal_path)
+        _write_journal(earlier_path, earlier)
+    journal["phase"] = "moving"
+    _write_journal(journal_path, journal)
     try:
         for name in sorted(os.listdir(root)):
             os.rename(root / name, failed / name)
@@ -425,7 +470,10 @@ def _journal_chain(journal_path, root, backup, backup_hash, manifest):
         st = os.lstat(path)
         require(stat.S_ISREG(st.st_mode) and st.st_uid == 0 and stat.S_IMODE(st.st_mode) == 0o600
                 and st.st_nlink == 1, "the recovery journal is not root's own file")
-        journal = json.loads(path.read_text())
+        try:
+            journal = json.loads(path.read_text())
+        except ValueError:
+            raise Refused(f"the recovery journal {path} is damaged; review it by hand") from None
         require(journal.get("format") == 1 and journal.get("operation") in ("restore", "resume-restore")
                 and (journal.get("root"), journal.get("device"), journal.get("inode"), journal.get("backup"),
                      journal.get("backup_sha256"), journal.get("activation"))
@@ -440,6 +488,8 @@ def _journal_chain(journal_path, root, backup, backup_hash, manifest):
     superseded = chain[0][1].get("superseded_by")
     require(not superseded or not os.path.lexists(superseded),
             "that recovery journal was superseded by a later recovery; only the newest journal can be resumed")
+    # Journals are published only complete, so a successor that exists but cannot be read is damage: refuse for
+    # review rather than ignore it (ignoring it would reopen replay).
     for (later_path, _later), (_earlier_path, earlier) in zip(chain, chain[1:]):
         require(earlier.get("superseded_by") in (None, str(later_path)),
                 "the recovery journal chain is inconsistent")
@@ -481,17 +531,17 @@ def resume_restore(root, backup, backup_hash, journal_path, failed_state, bindir
     uid, gid = pg["uid"], pg["gid"]                     # The service identity, from the verified backup.
     _offline_for_recovery(root, bindir, uid, gid, partial=True)
     restore_preflight(root, backup, failed, manifest, earlier=earlier)
+    # A crash between publishing a journal and marking its predecessor leaves that link unrecorded: record it now,
+    # so no journal earlier in this chain can ever be replayed.
+    for (later_path, _later), (earlier_path, earlier_journal) in zip(chain, chain[1:]):
+        if earlier_journal.get("superseded_by") is None:
+            earlier_journal["superseded_by"] = str(later_path)
+            _write_journal(earlier_path, earlier_journal)
     head_path, head = chain[0]
-    new_journal = failed.with_name(failed.name + JOURNAL)
-    # This transaction supersedes the one it resumes, before anything changes: the older journal can never be
-    # replayed once a later transaction exists (completed or not). A crash before the new journal exists leaves
-    # the older one usable: superseded_by then names a journal that does not exist.
-    head["superseded_by"] = str(new_journal)
-    _write_journal(head_path, head)
     journal = {"format": 1, "operation": "resume-restore", "root": str(root), "device": manifest["device"],
                "inode": manifest["inode"], "activation": manifest["activation"], "backup": str(backup),
                "backup_sha256": backup_hash, "resumes": str(head_path)}
-    return _restore_into(root, backup, manifest, failed, uid, gid, journal)
+    return _restore_into(root, backup, manifest, failed, uid, gid, journal, supersede=(head_path, head))
 
 
 def recovery_destination(root, device, inode, checkout, code_sha):
