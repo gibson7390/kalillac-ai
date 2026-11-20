@@ -1,121 +1,276 @@
-# Upgrading the existing local staging install, keeping its data
+# Local Premium upgrade: prepared procedure, awaiting authorization
 
-**For the owner's install**, which runs from `C:\Kalillac\kalillac-ai-local`. On 2026-11-19 it was on
-`afa247a`, with database migration `0025` and V1 activated (bound to release `198dbb84…`). It holds test
-accounts, Spaces, conversations and files. This procedure moves it to the Premium corrections, without a
-reset and without losing anything. Nothing in it deletes data.
+This procedure targets only the existing local installation. It has NOT been executed.
+Stop, backup, Git update, migration, configuration change, rebuild, restart and recovery each remain
+outside this preparation assignment. Obtain separate owner authorization before the live sequence.
+Never invoke reset or setup during an upgrade or recovery.
 
-**Do not run it until the integration is merged into `release/staging-v1` and the owner has approved the
-upgrade.** Never run `reset` or `setup` for an upgrade: `reset` deletes everything, and `setup` refuses an
-installed root.
+Approved application source: release/staging-v1 at d8f45f71a8d6d4ec80512e7c770b9625293e34bb.
+The upgrade tools are delivered on their own development branch and must be independently reviewed.
+Run them from that reviewed tools checkout, not by editing the rehearsal script to point at a live port.
 
-What changes:
-* the code (`tools/local_staging*.py`, the application, the site);
-* one database migration, `0026_account_provider_attempts`. It adds a counter column, `provider_attempts`,
-  that starts at 0 for every existing row, with a non-negative CHECK. No table is rewritten and no row is
-  changed;
-* three new settings that the application now requires: the per-account daily provider-attempt limits and
-  the expired-file deletion period;
-* how processes are tracked: the new `stop` recognises the processes the old `start` launched (`run/*.pid`)
-  and stops them; the next `start` writes the new records (`run/*.json`).
+## Verified installed identity (read-only inspection, 2026-11-19)
 
-Rehearsed on 2026-11-19 against a **copy** of this install's database: the copy was made with `pg_basebackup`,
-which only reads the running server, and the original was never written. The copy was migrated with the
-deployment's own migration login, `0025` to `0026`. All 29 tables and 91 rows were unchanged and the V1
-activation was untouched; the original was identical before and after. Separately, on disposable PostgreSQL,
-an activated database at `0025` holding data was upgraded to `0026`, downgraded to `0025` and upgraded again,
-with every account and usage row kept and the application's startup check satisfied.
+- Checkout: C:/Kalillac/kalillac-ai-local, branch feat/local-staging, commit afa247a.
+- Root: /var/lib/kalillac-local-staging; marker device 2096, inode 26328. Re-read these values before authorization;
+  never substitute a different identity just to get a command to run.
+- Activation release: 198dbb84de5669d33588f9e253323386211a0a4b. This is not the new application commit.
+- Prior schema: 0025_v1_row_lock_anchor; target: 0026_account_provider_attempts.
+- Eight stored files were present. Their recorded expirations are 2026-12-18; none was eligible for zero-day
+  expiration cleanup at inspection. Recheck before starting the upgraded application.
 
-All commands are run in a Windows terminal. `L` stands for `wsl -u root --`.
+The old rehearsal's counts-only claim is not content-verification evidence. Use a new verified cold backup.
 
-## 1. Stop it with the code that started it
+## Preconditions and stop
 
-```
-deploy\local\Kalillac-Local.cmd stop        (from C:\Kalillac\kalillac-ai-local)
-deploy\local\Kalillac-Local.cmd status      expect: application stopped, front server stopped
-```
+Use Python 3.12 with the application's pinned dependencies, root in WSL, PostgreSQL 16 tools, and the reviewed
+upgrade-tools checkout. The tools have no installed-root default. Each live operation requires all of:
+--root, --device, --inode, --activation-release, --checkout, --checkout-sha and --authorize-live-operation.
+The flag records the operator's explicit intent; it does not replace the owner's separate authorization.
+The expected root is fixed to /var/lib/kalillac-local-staging. Wrong deployment, inode, activation, dirty
+checkout, real provider settings, external storage, symlinks and external tablespaces are refused.
 
-## 2. Back it up (PostgreSQL is stopped, so a file copy is consistent)
+First run live_upgrade.py stop with the original installed checkout SHA. This uses the corrected F1
+shutdown implementation, with process identity bound to the old checkout's absolute path. Do not use the
+old stop implementation as evidence of confirmed exit. A leaderless surviving group requires manual review;
+no further step may proceed while shutdown is unconfirmed. No numeric PID guessing is allowed.
 
-```
-L cp -a /var/lib/kalillac-local-staging /root/kalillac-local-staging-backup-20261119
-L du -sh /var/lib/kalillac-local-staging /root/kalillac-local-staging-backup-20261119
-```
+Backup additionally requires no live process under the service identity, pg_ctl status 3, and pg_controldata
+state 'shut down'. This is deliberately conservative: unrelated service-user shells/jobs also block it.
+Resolve those separately; do not remove the guard. Backup and apply never implicitly stop the application.
 
-The backup is outside `/var/lib` and has a different name and inode, so no command of the tool accepts it as
-a root (its marker would not match). Keep it until the upgraded install has been checked.
+## Cold backup and rehearsal
 
-## 3. Move the checkout to the release that contains the corrections
+1. Run live_upgrade.py backup with the same exact destination/checkout identity and a NEW absolute --backup
+   directory outside the installation, under a trusted root-owned parent (for example a new directory in /root).
+   Before anything is created, the destination is refused if it already exists, has a symlink on its path, or
+   lies inside the installation. That is checked by path and by identity: no folder above it may be the
+   installation or any folder inside it, so a bind-mount alias cannot hide an overlap.
+2. Record its backup_manifest_sha256 outside the backup. The backup includes the entire root: PostgreSQL's
+   complete cluster/WAL, roles, account/Space/message/subscription/activation data, documents and file metadata,
+   credentials, registration keys, settings, process records and web assets. Treat it as secret customer data.
+3. Run the separate rehearsal command, which accepts no live database option:
 
-```
-git -C C:\Kalillac\kalillac-ai-local fetch origin
-git -C C:\Kalillac\kalillac-ai-local merge --ff-only origin/feat/local-staging   (once it contains the release)
-cd C:\Kalillac\kalillac-ai-local\site && npm run build
-```
+   python -B deploy/local/rehearse_upgrade.py --backup BACKUP --backup-sha256 HASH --pg-bin PGBIN --receipt NEW_RECEIPT
 
-## 4. Add the three new settings (synthetic, labelled; keep everything else)
+   It verifies every file's SHA-256, ownership and permissions before copying. It starts only a scratch copy
+   on a fresh loopback port with a generated configuration (no source archive/replication/preload commands).
+   It migrates using the copied deployment's migration login, verifies the result, tests an immediate offline
+   downgrade, then starts a second fresh backup copy to verify recovery. A receipt is issued only after both
+   copies have been confirmed stopped. Any failure preserves scratch state and prints its path.
+4. Record receipt_sha256 from the successful output. It binds the backup hash, application release, schema
+   transition, all-table content/sequence checksums, activation and stored-file checksums/access checks.
 
-Append to `/var/lib/kalillac-local-staging/settings.env` (root's, 0644). These are the boot verifier's
-synthetic test inputs, the same ones a fresh `setup` writes. They are not owner decisions (A-1, A-2):
+Database verification hashes sorted complete JSON representations of every row in every non-system table,
+including duplicate rows. Existing columns, sequence positions and all activation fields are compared.
+Only Alembic's exact 0025->0026 revision change and the new BIGINT NOT NULL DEFAULT 0 provider_attempts
+column are allowed; every new counter must be zero. Existing email/password/session data, subscriptions,
+Space instructions, message content and registration/activation records cannot silently change at equal counts.
+Filesystem verification includes file ids, metadata bytes, blob bytes, size and owner-account mapping; unexpired
+files are also read through FileStore.get. Expired files stay unavailable even when retained on disk.
 
-```
-# Added by the Premium corrections upgrade, 2026-11-19: SYNTHETIC TEST INPUTS, not owner decisions.
-KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE=100
-KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_PAID=1000
-KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS=0
-```
+## Correct fast-forward (only after the verified backup)
 
-**Do not change `KALILLAC_RELEASE_SHA`.** The V1 activation is bound to that value: the application's
-startup gate refuses any other (`authority_binding_mismatch`). It identifies the activation, not the code.
+The current remote feat/local-staging remains at afa247a. Do not merge that remote branch to obtain Premium.
+Keep the installed checkout on its existing branch and preserve its history. In PowerShell, after authorization:
 
-## 5. Migrate the database to 0026, as the deployment's migration login
+    $localRepo = 'C:/Kalillac/kalillac-ai-local'
+    git -C $localRepo status --porcelain=v1 --untracked-files=all
 
-The application must not start before this: its startup checks the schema version. PostgreSQL alone is
-started as the service user. The migration is then run by the code of the rehearsal
-(`deploy/local/rehearse_upgrade.py`), pointed at the live port 55433 instead of a copy. It runs `provision_deployment._migrate`'s upgrade step, with the login from
-`deployment/private/migration-login.json` and the role names from `deployment/deployment.env`. It prints only
-the versions and each table's row count, before and after, and fails if any count changes. Expect
-`0025_v1_row_lock_anchor` before and `0026_account_provider_attempts` after.
+Any output means STOP. Preserve uncommitted work separately with the owner; do not stash, reset, clean or
+force-checkout automatically. With a clean checkout, create a unique backup branch pointing at HEAD, then:
 
-Claude runs this step with the owner's approval, after first running `rehearse_upgrade.py` again on a fresh
-copy. The live-port variant of the script is prepared and reviewed at that point. The commands are not typed
-by hand.
+    git -C $localRepo fetch origin release/staging-v1
+    git -C $localRepo rev-parse FETCH_HEAD
+    git -C $localRepo merge-base --is-ancestor HEAD d8f45f71a8d6d4ec80512e7c770b9625293e34bb
+    git -C $localRepo merge --ff-only d8f45f71a8d6d4ec80512e7c770b9625293e34bb
 
-## 6. Start it and check it
+Require FETCH_HEAD to equal the approved full SHA and the ancestry command to succeed before merging.
+A newer remote release requires another review, not substitution. No branch switch or history rewrite is needed.
 
-```
-deploy\local\Kalillac-Local.cmd start        (also stops nothing it did not start; writes run/*.json)
-deploy\local\Kalillac-Local.cmd refresh-web  (serves the rebuilt site: the account page's "Your files")
-deploy\local\Kalillac-Local.cmd status
-```
+## Explicit migration and synthetic settings
 
-Then, in the browser at http://localhost:8010:
-* sign in with each demo account;
-* the Spaces and their saved conversations are there;
-* the files are listed under "Your files";
-* a chat reply works; a file request works for Premium.
+Run live_upgrade.py apply from the reviewed tools checkout with destination identity, the installed checkout
+now at the exact approved full d8f45f7 SHA, --backup, --backup-sha256, --receipt, --receipt-sha256, and explicit
+--authorize-live-operation. It refuses an installation that changed since backup and refuses startup-cleanup
+candidates before doing any migration. It verifies the connected server's data directory, database name,
+PostgreSQL 16 and activation binding, migrates in one transaction, verifies content, then confirms PostgreSQL
+shutdown. It never starts the application, touches Git, or restores/downgrades on a failure.
 
-## Rollback
+Only after verified migration/shutdown does it append these labelled SYNTHETIC LOCAL TEST INPUTS:
 
-If anything is wrong, keep the backup and:
+    KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_FREE=100
+    KALILLAC_ACCOUNT_DAILY_PROVIDER_ATTEMPTS_PAID=1000
+    KALILLAC_FILES_DELETE_AFTER_EXPIRY_DAYS=3650
 
-1. `Kalillac-Local.cmd stop` with the new code. It either confirms every stop or reports a failure. If it
-   reports one, stop by hand and go no further.
-2. Downgrade the database in place, `0026` to `0025`, which drops only the new counter (verified on disposable
-   PostgreSQL with data: every account and usage row kept). Use the same procedure as step 5, with the target
-   `0025_v1_row_lock_anchor`.
-3. `git -C C:\Kalillac\kalillac-ai-local checkout afa247a` (the previous tip), then `npm run build` in `site`
-   and `Kalillac-Local.cmd start`. The older code ignores the three added settings.
+These are not commercial limits or owner policy decisions. The long retention period protects local test
+records while evaluation continues; it is not unlimited retention. Zero days permits deletion at expiry plus
+one hour. Independently of that period, orphan blobs and upload temporaries older than one hour can be removed.
+A fresh dry-run must find no expiry/orphan/temporary candidates before authorizing application startup.
+The tools reject configured real provider keys or real Stripe settings and preserve simulated payments.
+KALILLAC_RELEASE_SHA stays 198dbb84...: changing it would break the existing V1 activation binding.
 
-Restore from the backup only if the data itself is damaged. Restore the **contents** into the existing root
-folder: do not replace the folder. The ownership marker names the folder's inode, and a copied or moved-in
-folder would be refused:
+With separate authorization, build site assets, start through Kalillac-Local.cmd, refresh the web assets and
+perform browser acceptance of existing accounts, subscriptions, Spaces, saved messages and documents. First
+inspect simulated provider/payment status. This is not permission to send real provider or Stripe requests.
 
-```
-L mkdir /root/kalillac-local-staging-failed-upgrade
-L sh -c "mv /var/lib/kalillac-local-staging/* /var/lib/kalillac-local-staging/.[!.]* /root/kalillac-local-staging-failed-upgrade/"
-L cp -a /root/kalillac-local-staging-backup-20261119/. /var/lib/kalillac-local-staging/
-```
+## Rollback and recovery (separate manual authorization)
 
-Nothing is deleted: the failed state is moved aside and the backup copied back. The marker in the backup is
-the original's, so it still matches the original folder.
+Keep the application unavailable until verification and acceptance finish. Failed migration rolls back its
+transaction. A process interruption may leave the cluster running: verify/stop it before any recovery copy.
+After partial committed work or a startup failure, the verified PRE-UPGRADE COLD BACKUP is the recovery source.
+Do not automatically downgrade or restore; preserve the failed state first in another verified cold backup.
+
+**Restoring the pre-upgrade backup DISCARDS EVERY WRITE MADE AFTER THAT BACKUP** (accounts, messages, Spaces,
+files, subscription changes, provider attempt counts). Those writes survive only in the failed state the restore
+preserves. Decide it explicitly.
+
+### Disk capacity and temporary storage
+
+Plan the space before any live step. Run `df -h /var/lib /root` and `df -i /var/lib /root`.
+* The backup is a full copy of the root (`du -sh /var/lib/kalillac-local-staging`).
+* The rehearsal makes two more full copies, one after the other, under `TMPDIR`. WSL's `/tmp` is a small tmpfs
+  (3.8 GB here), so set `TMPDIR` to a new private folder on disk that the service identity can pass through but
+  not list: `install -d -m 0711 /var/tmp/kalillac-upgrade-tmp` (or 0710 with the service's group). The copy's
+  PostgreSQL runs as the service identity. A root-only 0700 `TMPDIR` is refused at the start, before anything is
+  copied, with that reason (this guide said 0700 before; that was wrong). The copy's socket is in its own short
+  folder under `/tmp` (the system limit is 107 bytes), so a deep `TMPDIR` is fine. A failed rehearsal keeps its
+  copy for inspection: leave room for it, and never clear other people's temporary files to make room.
+* A restore copies the backup back. The failed state is moved by rename, not copied, but stays on the root's
+  filesystem. The restore checks free space and inodes before changing anything, and refuses if there are fewer
+  than the backup's size plus 256 MB.
+* Every failed state is kept until the owner decides about it: each holds private data.
+
+### Destinations: the backup, the installation and the failed state are kept apart
+
+Before anything changes, the restore refuses a failed-state folder, or its `.manifest.json` or `.restore.json`
+evidence, that:
+* already exists;
+* is inside the backup (it would change it) or inside the installation;
+* is reached through a symlink, or through any alias of the backup or installation, or of any folder inside
+  them. Every folder on its path is compared by device and inode with every folder inside the installation, the
+  backup and earlier failed states, so a bind mount cannot hide it;
+* is on a different mount from the installation (it must be moved there by rename);
+* has an untrusted parent.
+
+It also refuses a backup inside the installation and an installation inside the backup, including through a
+bind-mount alias: the backup folder's device and inode are compared with every folder inside the installation. Use for example:
+backup `/root/kalillac-backup-YYYYMMDD`, failed state `/root/kalillac-local-staging-failed-YYYYMMDD-1`, numbering
+each new attempt.
+
+### The restore
+
+After a separate authorization, it is one command, run in WSL as root from the reviewed tools checkout. Re-read
+every value and paste it; never default one:
+
+    wsl -u root -- /home/kalillac/kf15/bin/python -B TOOLS/deploy/local/live_upgrade.py restore \
+        --root /var/lib/kalillac-local-staging --device DEVICE --inode INODE \
+        --activation-release 198dbb84de5669d33588f9e253323386211a0a4b \
+        --checkout /mnt/c/Kalillac/kalillac-ai-local --checkout-sha CURRENT_CHECKOUT_SHA \
+        --pg-bin /home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin \
+        --backup /root/BACKUP --backup-sha256 MANIFEST_SHA256_RECORDED_AT_BACKUP \
+        --failed-state /root/kalillac-local-staging-failed-YYYYMMDD-1 --authorize-live-operation
+
+What it does, in order, refusing at the first failure:
+1. Verifies the backup against the recorded manifest checksum and every file's checksum, owner and mode. Checks
+   that it belongs to this root's path, device and inode.
+2. Requires no process of the service identity, and PostgreSQL **confirmed stopped**: `pg_ctl status` exactly 3.
+   Any other answer (0 running, 1, 4, …) establishes nothing and refuses, with nothing changed.
+3. Checks the destinations and the free space (above).
+4. Creates the new failed-state folder (0700), and beside it the **recovery journal**
+   (`FAILED.restore.json`, root's, 0600). The journal records the root's path, device and inode, the activation,
+   the backup path and checksum, and the failed-state folder's own identity, with the phase: `prepared`, then
+   `moving`, `copying`, `verifying` and `complete`; an interruption leaves `interrupted-<phase>`.
+
+   A journal appears only complete. It is written in full to a temporary file of its own and flushed to disk, then
+   renamed into place, and its folder is flushed. Each update is written the same way and replaces the previous
+   version with one rename. These are several steps, not one atomic act: after a crash there is either no journal
+   under that name (at most a partial `.new-…` temporary, kept as evidence) or a complete one. Never a partial
+   journal.
+5. Moves every entry of the root into the failed state, dotfiles and the marker included, by rename: nothing is
+   copied or deleted. It records the failed state's manifest (`FAILED.manifest.json`).
+6. Copies the backup's contents into the SAME root folder (`cp -a payload/. root/`), keeping the root's inode,
+   which is what the F1 ownership marker names.
+7. Verifies the restored tree against the backup manifest. It then checks, as the service identity, every
+   startup resource at the path the application will actually use. That means the effective
+   `CREDENTIALS_DIRECTORY` (by default `ROOT/credentials`; `deployment.env` or `settings.env` may move it) and
+   `KALILLAC_FILES_ROOT`, the protected registration files and the state folders. Configured paths must be
+   canonical and inside the installation: a `//`, `.` or `..` is refused.
+
+   Settings are read with the launcher's own parser (`local_staging.read_env`, which strips spaces around names
+   and values), so the values checked are the values the application gets. A file the launcher would read
+   differently from how it is written is refused rather than reinterpreted: a line that is not a setting, an
+   invalid name, or one name twice.
+
+It never starts anything, never deletes or rewrites a failed state, and never writes to the backup.
+
+### An interrupted restore: resume-restore
+
+If the restore stops part-way (a crash, a full disk, a killed process), the root may be empty or half-copied, and
+its ownership marker may be in the failed state. The ordinary commands then refuse the root, and that is correct:
+they need its marker. Do not create a marker, and do not rerun `restore`. Complete the restore with the separate,
+explicitly authorized `resume-restore`:
+
+    wsl -u root -- /home/kalillac/kf15/bin/python -B TOOLS/deploy/local/live_upgrade.py resume-restore \
+        --root /var/lib/kalillac-local-staging --device DEVICE --inode INODE \
+        --activation-release 198dbb84de5669d33588f9e253323386211a0a4b \
+        --checkout /mnt/c/Kalillac/kalillac-ai-local --checkout-sha CURRENT_CHECKOUT_SHA \
+        --pg-bin /home/kalillac/pg16tools/lib/python3.12/site-packages/pgserver/pginstall/bin \
+        --backup /root/BACKUP --backup-sha256 MANIFEST_SHA256_RECORDED_AT_BACKUP \
+        --journal /root/kalillac-local-staging-failed-YYYYMMDD-1.restore.json \
+        --failed-state /root/kalillac-local-staging-failed-YYYYMMDD-2 --authorize-live-operation
+
+It does not rely on the root's marker or settings. Its evidence:
+* the backup, verified against the checksum recorded when it was made, which names this root's path, device and
+  inode. The rehearsal command shows the reason for a known refusal (for example a `TMPDIR` the service cannot
+  traverse); an unexpected error shows only its class;
+* the journal chain: the given journal and every earlier one it names. Each must be root's own 0600 file, name
+  this root, backup, checksum and activation, and its failed state must still be the folder it recorded. The given
+  journal must be the **current** transaction: not `complete`, and not superseded. A resume first publishes its
+  own complete journal (`prepared`), then writes `superseded_by` (that journal's path) into the journal it
+  continues, and only then moves anything. Where it stops decides which journal to use:
+  * before its journal is published: the older journal is still the current one;
+  * after publication but before the older journal is marked: the new journal is complete and resumable, and
+    resuming from it first records the missing link. Resuming from the older one instead leaves the new journal's
+    chain inconsistent, so it is refused afterwards. Only one chain can proceed;
+  * after that: only the new journal.
+
+  An older or completed journal can never be replayed. A journal that exists but cannot be read is damage: it is
+  refused for review, never ignored;
+* the original marker, found in the root or a recorded failed state, equal byte for byte to the backup's, with no
+  different marker among them. Another installation, another backup, a forged journal or a foreign marker is
+  refused.
+
+It also requires the path and its ancestors to pass the F1 path checks, and the destination and space checks
+above. It requires PostgreSQL confirmed stopped (status 3), with one exception: a half-copied data folder with no
+`PG_VERSION` and no `postmaster.pid` cannot run at all, answers 4, and is accepted once no service process exists. It moves the partial state into the NEW failed-state folder (earlier ones are never touched),
+copies the backup into the same root inode, and verifies as above. If it is itself interrupted, run it again with
+the newest journal and another new failed-state folder. Each attempt preserves its own state and evidence.
+
+### What the disposable tests prove, and what they do not
+
+Proven on disposable installations, with real PostgreSQL 16 and the real F1 ownership checks:
+* a restore after a real upgrade and post-backup writes (`test_restore_after_a_failed_upgrade…`);
+* refusal of overlapping, nested, symlinked, bind-mounted and colliding destinations, and of insufficient
+  space, with the backup and installation unchanged and no folder created (`test_r1_…`);
+* interruptions at the first rename, a later rename, before the copy, part-way through the copy and on a full
+  disk; then four interruptions in a row, completed through the `resume-restore` command (`test_r2_…`). The
+  result: the same root inode, the backup unchanged, every failed state kept, the restored tree equal to the
+  manifest, the database and activation exactly as backed up, files and runtime resources usable by the service,
+  and the restored release's own V1 startup gate (`afa247a`) accepting the database.
+
+A startup gate passing is **not** application acceptance. Before reopening ingress after any real restore, start
+the previous application under a separate authorization, and check sign-in, sessions, subscriptions, Spaces,
+messages and documents in the browser.
+
+Return application code using the saved pre-upgrade Git branch in a clean checkout, retaining the new branch
+history. Do not force a checkout over work. Rebuild the old site. Start PostgreSQL alone and verify exact 0025
+schema/content, original activation and restored file checksums; confirm it stopped again. Only then authorize
+the previous application start and browser checks.
+
+Immediate offline 0026->0025 downgrade was tested but drops provider_attempts. It cannot preserve that column
+or undo customer writes after upgrade. Full backup restoration also discards ALL writes after backup. Keep the
+maintenance window closed; if any post-upgrade customer writes exist, stop for a reviewed reconciliation plan.
+Our recovery tests exercise migration failures before work, within its transaction, after committed work, and
+an injected application-startup failure. They verify PostgreSQL restart and original database/file/activation
+contents. Browser acceptance and a real old/new application startup on the actual installation remain pending.
