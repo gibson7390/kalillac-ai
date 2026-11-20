@@ -13,7 +13,7 @@ Run in WSL as root, from this worktree's candidate/, with the repository's Pytho
                                              Python changes), the local panel and API proxy; Ctrl-C stops all
     python3 -B tools/dev_preview.py status
 
-and on Windows, in site/:  npm run dev:preview   (http://localhost:8020, hot reload for the site, live reload
+and on Windows, in site/:  npx vite --config vite.preview.config.ts   (http://localhost:8020, hot reload for the site, live reload
 for the chat at /app/; /api and /__local__ go to the preview's application)
 
 Setup is the only step that creates or migrates anything, and only in the new, empty preview root. run never
@@ -100,7 +100,7 @@ def setup(args):
     else:
         ls.setup(args)             # Provision, activate, build the web root, start, seed the demo accounts.
     ls.stop(None)                  # run starts it again in development mode.
-    ls.say("preview ready: run `python3 -B tools/dev_preview.py run` here and `npm run dev:preview` in site/")
+    ls.say("preview ready: run `python3 -B tools/dev_preview.py run` here and `npx vite --config vite.preview.config.ts` in site/")
 
 
 def _snapshot(paths):
@@ -146,7 +146,7 @@ def run(args):
     watched = [TOOLS.parent]                               # candidate/: every backend module, tests excluded.
     before = _snapshot([w for w in watched if w.is_dir()])
     ls.say(f"DEVELOPMENT preview running: application 127.0.0.1:{APP_PORT}, panel/API 127.0.0.1:{PANEL_PORT}; "
-           f"open http://localhost:{SITE_PORT} after `npm run dev:preview`. Log: {p['state'] / 'dev-preview.log'}")
+           f"open http://localhost:{SITE_PORT} after `npx vite --config vite.preview.config.ts` in site/. Log: {p['state'] / 'dev-preview.log'}")
     stopping = []
     signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
     try:

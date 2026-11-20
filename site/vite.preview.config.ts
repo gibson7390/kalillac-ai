@@ -1,4 +1,4 @@
-// DEVELOPMENT PREVIEW ONLY (npm run dev:preview): never used by `npm run build` or any deployment.
+// DEVELOPMENT PREVIEW ONLY (npx vite --config vite.preview.config.ts): never used by `npm run build` or any deployment.
 //
 // http://localhost:8020 serves the site from source with hot module replacement, and the chat workspace from
 // ../frontend at /app/ with a full reload whenever one of its files changes. Every page carries the marks a
@@ -23,9 +23,16 @@ const TYPES: Record<string, string> = {
 
 const BANNER = `<div id="kalillac-development-banner" role="status" style="position:fixed;z-index:2147483647;left:0;right:0;bottom:0;padding:4px 10px;background:#7c2d12;color:#fff;font:600 12px/1.4 system-ui,sans-serif;text-align:center;letter-spacing:.04em;pointer-events:none">DEVELOPMENT PREVIEW &middot; synthetic data &middot; simulated providers and payments &middot; not Kalillac production</div>`;
 
+// The footer's YouTube and X profile addresses, only when the owner supplies verified ones:
+//   KALILLAC_PREVIEW_YOUTUBE=https://www.youtube.com/@... KALILLAC_PREVIEW_X=https://x.com/... npx vite --config vite.preview.config.ts
+// None is guessed; without them the footer shows no profile links (src/social-links.tsx checks the hosts).
+const PROFILES = ([['youtube', process.env.KALILLAC_PREVIEW_YOUTUBE], ['x', process.env.KALILLAC_PREVIEW_X]] as const)
+  .filter(([, url]) => url && /^https:\/\/[^\s"<>&]+$/.test(url))
+  .map(([key, url]) => ` data-kalillac-${key}="${url}"`).join('');
+
 function marked(html: string, marks: string[]): string {
   if (html.split(HTML).length !== 2) throw new Error('a page\'s <html> element is not the expected one');
-  return html.replace(HTML, `<html lang="en"${marks.map((m) => ` data-kalillac-${m}="on"`).join('')} data-kalillac-development="on">`)
+  return html.replace(HTML, `<html lang="en"${marks.map((m) => ` data-kalillac-${m}="on"`).join('')}${PROFILES} data-kalillac-development="on">`)
     .replace('</body>', `${BANNER}</body>`);
 }
 

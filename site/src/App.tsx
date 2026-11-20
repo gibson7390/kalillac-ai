@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import { type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { ArrowRight, ArrowUp, CircleSlash, Clock, Code2, FileText, Lightbulb, Menu, MessageSquare, PenLine, Search, ShieldCheck, Smartphone, Sparkles, UserRound, X, type LucideIcon } from 'lucide-react';
 import { type AroundNavHandler, Link, Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
@@ -6,6 +6,8 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import NotFound from '@/pages/not-found';
 import { updatePublicMetadata } from '@/public-identity';
 import { ACCOUNT_PATHS, isAccountPath, updateAccountMetadata } from '@/account/account-routes';
+import { SPACES_HREF, chatHref, signOut, useCustomerSession } from '@/customer-session';
+import { SocialLinks } from '@/social-links';
 
 // Account pages load only on /account routes: the homepage, Privacy and Terms
 // never request their code or styles.
@@ -31,12 +33,38 @@ const IS_FRAMED = (() => {
 })();
 
 
+/* A signed-in customer's way around (known only after an account page asked: customer-session.ts). Billing on
+   the account page itself scrolls there; from anywhere else it opens the account at Billing. */
+function useCustomerNav(close: () => void) {
+  const [location, navigate] = useLocation();
+  const { presence, returnTarget } = useCustomerSession();
+  const [signingOut, setSigningOut] = useState(false);
+  const signedIn = ACCOUNTS_OFFERED && presence === 'signed-in';
+  const billing = (event: ReactMouseEvent) => {
+    close();
+    const heading = location === ACCOUNT_PATHS.overview ? document.getElementById('acct-billing-heading') : null;
+    if (!heading) return;
+    event.preventDefault();
+    heading.scrollIntoView({ block: 'start' });
+  };
+  const leave = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    const ok = await signOut();
+    setSigningOut(false);
+    close();
+    if (ok) navigate(ACCOUNT_PATHS.signIn);
+  };
+  return { signedIn, chat: chatHref(returnTarget), billing, leave, signingOut };
+}
+
 function SiteHeader() {
   const [open, setOpen] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
   // Styling hook only: the header marks the current page's own link.
   const [location] = useLocation();
   const close = () => setOpen(false);
+  const customer = useCustomerNav(close);
   useEffect(() => {
     if (!open) return;
     const escape = (event: KeyboardEvent) => {
@@ -49,18 +77,26 @@ function SiteHeader() {
     return () => document.removeEventListener('keydown', escape);
   }, [open]);
   return (
-    <header className="site-header" data-route={location.slice(1) || 'home'}>
+    <header className="site-header" data-route={location.slice(1) || 'home'} data-customer={customer.signedIn ? 'signed-in' : undefined}>
       <div className="container-wide site-header-inner">
         <Link href="/" className="brand" data-testid="link-home-brand" onClick={close} aria-label="Kalillac AI home">
           <img className="brand-logo" src={brandLogoUrl} alt="Kalillac AI" />
         </Link>
         <nav className="site-nav" aria-label="Site navigation">
+          {customer.signedIn ? <>
+            <a href={customer.chat} className="nav-link nav-chat" data-testid="link-chat-nav">Chat</a>
+            <a href={SPACES_HREF} className="nav-link" data-testid="link-spaces-nav">My Spaces</a>
+            <Link href={ACCOUNT_PATHS.overview} className="nav-link" data-testid="link-account-nav" aria-current={location === ACCOUNT_PATHS.overview ? 'page' : undefined}>Account</Link>
+            <a href={`${ACCOUNT_PATHS.overview}?show=billing`} onClick={customer.billing} className="nav-link" data-testid="link-billing-nav">Billing</a>
+            <button type="button" className="nav-link nav-sign-out" onClick={() => void customer.leave()} aria-disabled={customer.signingOut || undefined} data-testid="button-sign-out-nav">{customer.signingOut ? 'Signing out…' : 'Sign out'}</button>
+          </> : <>
           <a href="/#product" className="nav-link" data-testid="link-product-nav">Product</a>
           <Link href="/privacy" className="nav-link" data-testid="link-privacy-nav">Privacy</Link>
           <a href="/#how-it-works" className="nav-link" data-testid="link-how-nav">How it works</a>
+          </>}
           {ACCOUNTS_OFFERED && <>
-            <Link href={ACCOUNT_PATHS.signIn} className="nav-link nav-sign-in" data-testid="link-sign-in-nav">Sign in</Link>
-            <Link href={ACCOUNT_PATHS.create} className="nav-account" data-testid="link-create-account-nav">Create account</Link>
+            {!customer.signedIn && <Link href={ACCOUNT_PATHS.signIn} className="nav-link nav-sign-in" data-testid="link-sign-in-nav">Sign in</Link>}
+            {!customer.signedIn && <Link href={ACCOUNT_PATHS.create} className="nav-account" data-testid="link-create-account-nav">Create account</Link>}
           </>}
           <button ref={toggle} type="button" className="mobile-nav-toggle" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="mobile-site-menu" aria-label={open ? 'Close navigation menu' : 'Open navigation menu'} data-testid="button-mobile-menu">
             {open ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
@@ -69,12 +105,20 @@ function SiteHeader() {
       </div>
       {open && (
         <nav id="mobile-site-menu" className="mobile-site-menu" aria-label="Mobile navigation">
+          {customer.signedIn ? <>
+            <a href={customer.chat} onClick={close} data-testid="link-mobile-chat">Chat</a>
+            <a href={SPACES_HREF} onClick={close} data-testid="link-mobile-spaces">My Spaces</a>
+            <Link href={ACCOUNT_PATHS.overview} onClick={close} data-testid="link-mobile-account">Account</Link>
+            <a href={`${ACCOUNT_PATHS.overview}?show=billing`} onClick={customer.billing} data-testid="link-mobile-billing">Billing</a>
+            <button type="button" className="mobile-menu-account" onClick={() => void customer.leave()} aria-disabled={customer.signingOut || undefined} data-testid="button-mobile-sign-out">{customer.signingOut ? 'Signing out…' : 'Sign out'}</button>
+          </> : <>
           <a href="/#product" onClick={close} data-testid="link-mobile-product">Product</a>
           <Link href="/privacy" onClick={close} data-testid="link-mobile-privacy">Privacy</Link>
           <a href="/#how-it-works" onClick={close} data-testid="link-mobile-how">How it works</a>
+          </>}
           {ACCOUNTS_OFFERED && <>
-            <Link href={ACCOUNT_PATHS.signIn} onClick={close} className="mobile-menu-account" data-testid="link-mobile-sign-in">Sign in</Link>
-            <Link href={ACCOUNT_PATHS.create} onClick={close} data-testid="link-mobile-create-account">Create account</Link>
+            {!customer.signedIn && <Link href={ACCOUNT_PATHS.signIn} onClick={close} className="mobile-menu-account" data-testid="link-mobile-sign-in">Sign in</Link>}
+            {!customer.signedIn && <Link href={ACCOUNT_PATHS.create} onClick={close} data-testid="link-mobile-create-account">Create account</Link>}
           </>}
         </nav>
       )}
@@ -93,6 +137,7 @@ function SiteFooter() {
           <a href="/#how-it-works" data-testid="link-footer-how">How it works</a>
           <Link href="/terms" data-testid="link-footer-terms">Terms</Link>
         </nav>
+        <SocialLinks />
       </div>
       <div className="container-wide footer-bottom"><span>&copy; 2026 Kalillac AI &middot; Adults 18+</span><span>Kalillac can make mistakes. Verify important information.</span></div>
     </footer>

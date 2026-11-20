@@ -18,6 +18,7 @@ import NotFound from '@/pages/not-found';
 import * as api from './account-api';
 import * as registrationApi from './registration-api';
 import { ACCOUNT_PATHS } from './account-routes';
+import { chatHref, registerSignOut, setPresence, takeArrival, useCustomerSession } from '@/customer-session';
 import './account.css';
 
 /* --- page-lifetime memory ---------------------------------------------------- */
@@ -36,6 +37,18 @@ function takeNotice(): NoticeData | null {
 const SESSION_ENDED: NoticeData = {
   tone: 'info', title: 'Your session has ended', body: 'Sign in again to continue.',
 };
+
+const SIGNED_OUT: NoticeData = {
+  tone: 'info', title: 'You’re signed out',
+  body: 'Temporary chat works the same whether or not you’re signed in.',
+};
+
+/* The header's Sign out (customer-session.ts) signs out through this page's own client. */
+registerSignOut(async () => {
+  const result = await api.logout();
+  if (result.ok) carryNotice(SIGNED_OUT);
+  return result.ok;
+});
 
 /* --- small helpers ------------------------------------------------------------------ */
 
@@ -140,6 +153,8 @@ function useSession() {
   const load = useCallback(async () => {
     setSession({ state: 'loading' });
     const result = await api.getSession();
+    // The header learns the answer too (memory only), so it offers a signed-in customer the way around.
+    setPresence(result.state === 'signed-in' ? 'signed-in' : 'signed-out');
     if (alive.current) setSession(result);
   }, []);
   useEffect(() => {
@@ -855,6 +870,8 @@ function AccountOverviewPage() {
   // Read once, without side effects; the query is then removed so a reload or a shared address
   // does not repeat the notice.
   const [checkoutReturn] = useState(() => checkoutReturnFrom(window.location.search));
+  // From the chat: the Space and conversation to return to, and whether Billing was asked for.
+  const [showBilling] = useState(() => takeArrival(window.location.search).billing);
   useEffect(() => {
     // Through the router (same path, so the page stays mounted); the only raw history change on these
     // pages remains the token-fragment scrub.
@@ -865,6 +882,7 @@ function AccountOverviewPage() {
   const [security, setSecurity] = useState<Loadable<api.AccountSecurity>>({ state: 'loading' });
 
   const sessionEnded = useCallback(() => {
+    setPresence('signed-out');
     carryNotice(SESSION_ENDED);
     navigate(ACCOUNT_PATHS.signIn, { replace: true });
   }, [navigate]);
@@ -910,7 +928,7 @@ function AccountOverviewPage() {
                      security={security.state === 'ready' ? security.value : null}
                      onRetryPlan={() => void loadPlan()}
                      onRetryBilling={() => void loadBilling()} onSessionEnded={sessionEnded}
-                     checkoutReturn={checkoutReturn}
+                     checkoutReturn={checkoutReturn} showBilling={showBilling}
                      onRefreshPlan={() => { void loadPlan(); void loadBilling(); }} />;
   }
 
@@ -922,13 +940,23 @@ function AccountOverviewPage() {
 }
 
 function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, onSessionEnded, checkoutReturn,
-                   onRefreshPlan }: {
+                   showBilling = false, onRefreshPlan }: {
   user: api.AccountUser; plan: Loadable<api.Entitlements>; billing: Loadable<api.BillingStatus>;
   security: api.AccountSecurity | null;
   onRetryPlan: () => void; onRetryBilling: () => void; onSessionEnded: () => void;
-  checkoutReturn: CheckoutReturn; onRefreshPlan: () => void;
+  checkoutReturn: CheckoutReturn; showBilling?: boolean; onRefreshPlan: () => void;
 }) {
   const [, navigate] = useLocation();
+  const { returnTarget } = useCustomerSession();
+  // Asked for Billing (the header's Billing, or the chat's): brought into view once it has loaded.
+  const billingShown = useRef(!showBilling);
+  const billingReady = billing.state !== 'loading' && plan.state !== 'loading';
+  useEffect(() => {
+    if (billingShown.current || !billingReady) return;
+    billingShown.current = true;
+    const heading = document.getElementById('acct-billing-heading');
+    if (heading) heading.scrollIntoView({ block: 'start' });
+  }, [billingReady]);
   const memberSince = formatDate(user.created_at, false);
   const [verification, setVerification] = useState<NoticeData | null>(null);
   const [verificationRef, focusVerification] = useFocusOn<HTMLDivElement>();
@@ -953,8 +981,8 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
   const doSignOut = () => void signOut.run(async () => {
     const result = await api.logout();
     if (result.ok) {
-      carryNotice({ tone: 'info', title: 'You’re signed out',
-        body: 'Temporary chat works the same whether or not you’re signed in.' });
+      setPresence('signed-out');
+      carryNotice(SIGNED_OUT);
       navigate(ACCOUNT_PATHS.signIn);
       return;
     }
@@ -964,6 +992,12 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
 
   return (
     <div className="acct-overview">
+      {returnTarget && (
+        <a className="acct-return" href={chatHref(returnTarget)} data-testid="link-return-to-space">
+          <span aria-hidden="true">←</span>
+          {returnTarget.conversation ? 'Back to your Space and conversation' : 'Back to your Space'}
+        </a>
+      )}
       <section className="acct-identity" aria-labelledby="acct-details-heading" data-tier={tier ?? undefined}>
         <h2 id="acct-details-heading" className="sr-only">Account details</h2>
         <div className="acct-identity-main">
@@ -1462,6 +1496,12 @@ function CreateEmailFirstPage({ verifyContract }: { verifyContract: () => Promis
   const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
   const [doneRef, focusDone] = useFocusOn<HTMLDivElement>();
   const { pending, run } = usePendingGuard();
+  // Signed in already (asked here, on a fresh load too): the account, not registration.
+  const { session } = useSession();
+  const [, navigate] = useLocation();
+  useEffect(() => {
+    if (session.state === 'signed-in') navigate(ACCOUNT_PATHS.overview, { replace: true });
+  }, [session, navigate]);
   const send = (resend: boolean) => {
     void run(async () => {
       const email = resend ? submitted.current : normalizedEmail(emailRef.current?.value ?? '');
@@ -1630,6 +1670,9 @@ function RegistrationAuthorityState({ loading, retry }: { loading: boolean; retr
 
 function AuthoritativeRegistrationPage() {
   const authority = useRegistrationContract();
+  // A customer already known to be signed in is never shown registration.
+  const { presence } = useCustomerSession();
+  if (presence === 'signed-in') return <Redirect to={ACCOUNT_PATHS.overview} replace />;
   if (!authority.contract) return <RegistrationAuthorityState loading={authority.loading} retry={authority.reload} />;
   return authority.contract === 'legacy-v1'
     ? <CreateAccountPage verifyContract={authority.verify} />

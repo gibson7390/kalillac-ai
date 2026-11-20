@@ -245,3 +245,9 @@
 .acct-file[data-available='false'] .acct-file-name { color: var(--acct-soft); }
 .acct-file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .acct-file-confirm { color: var(--acct-soft); font-size: 13px; }
+
+/* From the chat: the way straight back to the Space and conversation the customer came from. */
+.acct-return { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; margin: 0 0 14px; padding: 0 16px;
+  border: 1px solid #b9cdec; border-radius: 10px; background: #f3f8ff; color: #0047b3; font-weight: 650; text-decoration: none; }
+.acct-return:hover { background: #e7f0ff; border-color: #8faad6; }
+

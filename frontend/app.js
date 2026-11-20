@@ -1408,10 +1408,11 @@
      where the plan is shown. */
   var ACCOUNTS_OFFERED = document.documentElement.getAttribute("data-kalillac-accounts") === "on";
   var accountTemplate = document.getElementById("account-link-template");
+  var accountLink = null;
   if (ACCOUNTS_OFFERED && accountTemplate && accountTemplate.content &&
       accountTemplate.content.firstElementChild) {
-    accountTemplate.parentNode.insertBefore(
-      accountTemplate.content.firstElementChild.cloneNode(true), accountTemplate);
+    accountLink = accountTemplate.content.firstElementChild.cloneNode(true);
+    accountTemplate.parentNode.insertBefore(accountLink, accountTemplate);
   }
   if (ACCOUNTS_OFFERED) {
     ERROR_OUTCOMES.reasoning_mode_not_allowed = {
@@ -1858,6 +1859,8 @@
   var spaceBarName = document.getElementById("space-bar-name");
   var spaceBarTitle = document.getElementById("space-bar-title");
   var spaceLeave = document.getElementById("space-leave");
+  var spaceConversations = document.getElementById("space-conversations");
+  var spaceNew = document.getElementById("space-new");
   var sessionStatus = document.getElementById("session-status");
   var spacesView = null;       // {kind: "spaces"} or {kind: "space", space}; replaced on every change
 
@@ -1923,6 +1926,17 @@
     button.addEventListener("click", onChoose);
     item.appendChild(button);
     spacesList.appendChild(item);
+    return button;
+  }
+
+  // The Space or conversation open on screen now: marked in the lists, so it is easy to find again.
+  function markOpen(button) {
+    button.classList.add("is-open");
+    button.setAttribute("aria-current", "true");
+    var badge = document.createElement("span");
+    badge.className = "spaces-item-open";
+    badge.textContent = "Open now";
+    button.insertBefore(badge, button.children[1] || null);
   }
 
   function countLabel(count, one, many) {
@@ -1950,8 +1964,9 @@
       r.data.spaces.forEach(function (space) {
         if (!space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) return;
         shown += 1;
-        addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
+        var item = addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
           function () { showSpace({ id: space.id, name: space.name }); });
+        if (SPACE && SPACE.space.id === space.id) markOpen(item);
       });
       setSpacesStatus(shown ? "" : COPY_SPACES_EMPTY);
     }, function () {
@@ -2040,8 +2055,11 @@
     clearSpacesList();
     view.conversations.forEach(function (c) {
       if (!view.editing) {
-        addSpacesItem(c.title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
-          function () { openSpaceConversation(view.space, { id: c.id, title: c.title }, true); });
+        var open = SPACE && SPACE.space.id === view.space.id && SPACE.conversation.id === c.id;
+        // The conversation already on screen: choosing it goes back to it as it is (an unsent draft stays).
+        var item = addSpacesItem(c.title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
+          open ? closeSpacesDialog : function () { openSpaceConversation(view.space, { id: c.id, title: c.title }, true); });
+        if (open) markOpen(item);
         return;
       }
       var item = document.createElement("li");
@@ -2330,11 +2348,166 @@
     }
   }
 
-  function openSpacesDialog() {
+  function openSpacesDialog(space) {
     if (inFlight) return;
     if (typeof spacesDialog.showModal === "function") spacesDialog.showModal();
     else spacesDialog.setAttribute("open", "");
-    showSpacesList();
+    if (space && space.id) showSpace(space);
+    else showSpacesList();
+  }
+
+  /* A new conversation in the open Space, in one step (the Space bar's New conversation). It has no
+     title yet; the Space's conversation list can name it. A failure opens the Space's list and says so. */
+  function newConversationInSpace() {
+    var open = SPACE;
+    if (!open || inFlight || spaceNew.disabled) return;
+    spaceNew.disabled = true;
+    spacesRequest("POST", spaceUrl(open.space.id, "/conversations"), {}).then(function (r) {
+      spaceNew.disabled = false;
+      if (SPACE !== open || inFlight) return;
+      var c = r.data && r.data.conversation;
+      if (r.status !== 201 || !c || !SPACE_ID_RE.test(c.id)) {
+        openSpacesDialog(open.space);
+        setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+        return;
+      }
+      enterSpace(open.space, { id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null }, []);
+    }, function () {
+      spaceNew.disabled = false;
+      if (SPACE === open) {
+        openSpacesDialog(open.space);
+        setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+      }
+    });
+  }
+
+  /* ---- coming back from the account pages -------------------------------------------------------------
+     On a Spaces deployment only. The account pages' way back opens /app/?space=<id>&conversation=<id>, and
+     their My Spaces opens /app/?spaces=open. This page only reads those, once, as exact ids (anything else
+     is ignored); it never writes the address or the history, and nothing is stored in the browser. A reload
+     still starts a new temporary session, as it always has: the Space is reopened only when the page was
+     opened by following such a link. */
+  function addressValue(name) {
+    var found = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
+    return found ? found[1] : null;
+  }
+
+  var START = (function () {
+    var none = { space: null, conversation: null, spaces: false };
+    var entry = window.performance && typeof window.performance.getEntriesByType === "function"
+      ? window.performance.getEntriesByType("navigation")[0] : null;
+    if (entry && entry.type === "reload") return none;
+    var space = addressValue("space");
+    var conversation = addressValue("conversation");
+    var valid = !!space && SPACE_ID_RE.test(space) && (!conversation || SPACE_ID_RE.test(conversation));
+    return {
+      space: valid ? space : null,
+      conversation: valid && conversation ? conversation : null,
+      spaces: addressValue("spaces") === "open"
+    };
+  })();
+
+  // Reopens the Space (and conversation) named by the link once this account's Spaces are known. Anything
+  // the server does not confirm, or anything the visitor started meanwhile, leaves the temporary conversation.
+  function restoreFromAddress() {
+    var sid = START.space;
+    var cid = START.conversation;
+    var untouched = function () { return !SPACE && !inFlight && TURNS.length === 0 && input.value === ""; };
+    var giveUp = function () { /* the temporary conversation stays */ };
+    spacesRequest("GET", spaceUrl(sid)).then(function (r) {
+      var s = r.data && r.data.space;
+      if (r.status !== 200 || !s || s.id !== sid || !validName(s.name, SPACE_NAME_MAX)) { giveUp(); return; }
+      var space = { id: s.id, name: s.name };
+      if (!cid) {
+        if (untouched()) openSpacesDialog(space);
+        return;
+      }
+      return spacesRequest("GET", spaceUrl(sid, "/conversations/" + cid + "?limit=" + SPACE_MESSAGES_MAX))
+        .then(function (c) {
+          var conv = c.data && c.data.conversation;
+          if (c.status !== 200 || !conv || conv.id !== cid || !Array.isArray(c.data.messages) || !untouched()) {
+            giveUp();
+            return;
+          }
+          enterSpace(space, { id: cid, title: validName(conv.title, SPACE_TITLE_MAX) ? conv.title : null },
+                     c.data.messages, earlierCursor(c.data.next_before_seq));
+        });
+    }).then(null, giveUp);
+  }
+
+  /* ---- the signed-in customer's account menu ---------------------------------------------------------
+     The Spaces question already tells this page whether the browser is signed in (any answer but "not
+     signed in" comes from an account); no other request is made for it. Then the Account link becomes a
+     small menu: the account (with the way back to this Space), Billing, and Sign out. */
+  var accountMenuTemplate = document.getElementById("account-menu-template");
+  var accountMenu = null;
+
+  // The account pages' address, with the open Space and conversation (two checked ids, nothing else).
+  function accountHref(show) {
+    var parts = [];
+    if (show) parts.push("show=" + show);
+    if (SPACE && SPACE_ID_RE.test(SPACE.space.id) && SPACE_ID_RE.test(SPACE.conversation.id)) {
+      parts.push("space=" + SPACE.space.id, "conversation=" + SPACE.conversation.id);
+    }
+    return "/account" + (parts.length ? "?" + parts.join("&") : "");
+  }
+
+  function syncAccountLinks() {
+    if (accountLink) accountLink.setAttribute("href", accountHref(null));
+    if (accountMenu) {
+      accountMenu.querySelector("#account-menu-account").setAttribute("href", accountHref(null));
+      accountMenu.querySelector("#account-menu-billing").setAttribute("href", accountHref("billing"));
+    }
+  }
+
+  function signedInAnswer(r) {
+    if (r.status === 200) return true;
+    var code = r.data && r.data.error;
+    return (r.status === 403 && code === "email_verification_required") || (r.status === 404 && code === "not_found");
+  }
+
+  function showAccountMenu() {
+    if (!ACCOUNTS_OFFERED || accountMenu || !accountLink || !accountMenuTemplate || !accountMenuTemplate.content ||
+        !accountMenuTemplate.content.firstElementChild) return;
+    accountMenu = accountMenuTemplate.content.firstElementChild.cloneNode(true);
+    accountLink.parentNode.replaceChild(accountMenu, accountLink);
+    accountLink = null;
+    var button = accountMenu.querySelector("#account-menu-btn");
+    var list = accountMenu.querySelector("#account-menu-list");
+    var signOutBtn = accountMenu.querySelector("#account-menu-sign-out");
+    var setOpen = function (open) {
+      list.hidden = !open;
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    button.addEventListener("click", function () { setOpen(list.hidden); });
+    accountMenu.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || list.hidden) return;
+      event.preventDefault();
+      setOpen(false);
+      button.focus();
+    });
+    document.addEventListener("click", function (event) {
+      if (!list.hidden && !accountMenu.contains(event.target)) setOpen(false);
+    });
+    accountMenu.addEventListener("focusout", function (event) {
+      if (!list.hidden && event.relatedTarget && !accountMenu.contains(event.relatedTarget)) setOpen(false);
+    });
+    signOutBtn.addEventListener("click", function () {
+      if (signOutBtn.getAttribute("aria-disabled") === "true") return;
+      signOutBtn.setAttribute("aria-disabled", "true");
+      signOutBtn.textContent = "Signing out…";
+      fetch("/api/account/logout", {
+        method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Accept: "application/json" }
+      }).then(function (res) {
+        if (!res.ok) throw new Error("sign-out refused");
+        window.location.assign("/account/sign-in");
+      }).then(null, function () {
+        signOutBtn.removeAttribute("aria-disabled");
+        signOutBtn.textContent = "Couldn’t sign out. Try again";
+      });
+    });
+    syncAccountLinks();
   }
 
   // A server cursor for the page before the shown messages: a positive whole number, else none.
@@ -2426,6 +2599,7 @@
     renderSaved(messages);
     showEarlierControl();
     closeSpacesDialog();
+    syncAccountLinks();
     stickToBottom = true;
     scrollToBottom(true);
     input.focus();
@@ -2443,6 +2617,7 @@
     if (modePicker && restore.picker !== null) modePicker.hidden = restore.picker;
     if (attachBtn && restore.attach !== null) attachBtn.hidden = restore.attach;
     startNewConversation();
+    syncAccountLinks();
   }
 
   function requestSpaceReply(exchange) {
@@ -2513,12 +2688,20 @@
       if (spacesBtn) spacesBtn.focus();
     });
     spaceLeave.addEventListener("click", leaveSpace);
-    // The one question asked on load: may this account use Spaces? Anything but a list is "no".
+    if (spaceConversations) {
+      spaceConversations.addEventListener("click", function () { if (SPACE) openSpacesDialog(SPACE.space); });
+    }
+    if (spaceNew) spaceNew.addEventListener("click", newConversationInSpace);
+    // The one question asked on load: may this account use Spaces? Anything but a list is "no". Its answer
+    // also says whether this browser is signed in, for the account menu.
     spacesRequest("GET", "/api/spaces?limit=1").then(function (r) {
-      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return;
+      if (signedInAnswer(r)) showAccountMenu();
+      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return;   // Nothing to reopen.
       spacesBtn = spacesTemplate.content.firstElementChild.cloneNode(true);
       spacesTemplate.parentNode.insertBefore(spacesBtn, spacesTemplate);
-      spacesBtn.addEventListener("click", openSpacesDialog);
+      spacesBtn.addEventListener("click", function () { openSpacesDialog(); });
+      if (START.space) restoreFromAddress();
+      else if (START.spaces && !inFlight && TURNS.length === 0) openSpacesDialog();
     }, function () { /* not offered */ });
   }
 

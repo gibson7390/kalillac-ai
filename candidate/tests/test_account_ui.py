@@ -348,6 +348,7 @@ class AccountSite(Site):
     # deploy/staging/build_webroot.py does; off by default, as in production today.
     accounts_mark = False
     files_mark = False         # A files deployment marks the site's pages too (data-kalillac-files).
+    profile_marks = b""        # Verified profile addresses a deployment supplies for the footer.
 
     def route(self, raw_path):
         path = raw_path.split("?", 1)[0]
@@ -359,6 +360,8 @@ class AccountSite(Site):
             body = body.replace(b'<html lang="en">', b'<html lang="en" data-kalillac-accounts="on">', 1)
         if self.files_mark and ctype.startswith("text/html") and not path.startswith("/app/"):
             body = body.replace(b'<html lang="en"', b'<html lang="en" data-kalillac-files="on"', 1)
+        if self.profile_marks and ctype.startswith("text/html") and not path.startswith("/app/"):
+            body = body.replace(b'<html lang="en"', b'<html lang="en"' + self.profile_marks, 1)
         return status, ctype, body
 
     def __enter__(self):
@@ -475,6 +478,7 @@ def page(browser_site):
     browser_site.site.api.reset()
     browser_site.site.accounts_mark = False
     browser_site.site.files_mark = False
+    browser_site.site.profile_marks = b""
     browser_site.resize(DESKTOP, False)
     browser_site.dt.call("Emulation.setEmulatedMedia", {"features": [
         {"name": "prefers-reduced-motion", "value": "no-preference"}]}, browser_site.session)
@@ -548,6 +552,8 @@ def test_the_sites_account_entry_points_exist_only_where_the_deployment_offers_a
         guarded = sum(block.count("<Link href={ACCOUNT_PATHS.") for block in
                       re.findall(r"\{ACCOUNTS_OFFERED && (<>.*?</>|<p .*?</p>)\}", part, re.S))
         assert guarded == expected
+    # A signed-in customer's header exists only on an accounts deployment, once an account page has asked.
+    assert "const signedIn = ACCOUNTS_OFFERED && presence === 'signed-in';" in app
     assert "lazy(() => import('@/account/account-pages'))" in app
 
 
@@ -1763,3 +1769,134 @@ def test_the_files_list_fits_a_phone(page, size):
     assert page.eval("return document.documentElement.scrollWidth <= window.innerWidth;")
     assert page.eval("""return [...document.querySelectorAll('[data-testid="file-row"] button, [data-testid="file-row"] a')]
         .every(e => { const r = e.getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; });""")
+
+
+# --- a signed-in customer's way around (customer-session.ts) -----------------------------------------------
+
+SPACE_ID = "11111111-1111-4111-8111-111111111111"
+CONVERSATION_ID = "33333333-3333-4333-8333-333333333333"
+CUSTOMER_NAV = ["Chat", "My Spaces", "Account", "Billing", "Sign out"]
+OVERVIEW_READY = "document.querySelector('[data-testid=\"account-email\"]')"
+
+
+def header_items(page, selector=".site-nav"):
+    return page.eval(f"""return [...document.querySelectorAll('{selector} a, {selector} button:not(.mobile-nav-toggle)')]
+      .map(e => [e.textContent.trim(), e.getAttribute('href')]);""")
+
+
+@pytest.mark.parametrize("size,mobile", [(DESKTOP, False), (PHONE, True)])
+def test_a_signed_in_customer_gets_the_customer_header_instead_of_sign_in(page, size, mobile):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.resize(size, mobile)
+    page.open("/account", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('.site-header[data-customer=\"signed-in\"]')")
+    assert [t for t in ENTRY_IDS if page.eval(f"return !!document.querySelector('[data-testid=\"{t}\"]');")] == []
+    expected = [["Chat", "/app/"], ["My Spaces", "/app/?spaces=open"], ["Account", "/account"],
+                ["Billing", "/account?show=billing"], ["Sign out", None]]
+    if mobile:
+        page.click_selector("[data-testid='button-mobile-menu']")
+        page.wait_for("document.querySelector('#mobile-site-menu')")
+        # Measured after the menu's opening animation (it starts slightly scaled down).
+        page.eval("await Promise.all(document.querySelector('#mobile-site-menu').getAnimations().map(a => a.finished));")
+        assert header_items(page, "#mobile-site-menu") == expected
+        heights = page.eval("return [...document.querySelectorAll('#mobile-site-menu a, #mobile-site-menu button')]"
+                            ".map(e => e.getBoundingClientRect().height);")
+        assert all(h >= 44 for h in heights), heights
+    else:
+        assert header_items(page) == expected
+        assert all(shown(page, t) for t in ("link-chat-nav", "link-spaces-nav", "link-account-nav",
+                                             "link-billing-nav", "button-sign-out-nav"))
+    assert no_overflow(page)
+    # Learned from the session request the account page already makes: nothing more was asked for it.
+    assert len(api_calls(page, "/api/account/me")) == 1
+
+
+def test_the_header_sign_out_ends_the_session_and_offers_sign_in_again(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open("/account", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"button-sign-out-nav\"]')")
+    page.click_selector("[data-testid='button-sign-out-nav']")
+    page.wait_for("location.pathname === '/account/sign-in' && document.querySelector('[data-testid=\"link-sign-in-nav\"]')")
+    assert len(api_calls(page, "/api/account/logout")) == 1
+    assert page.text("[data-testid='account-notice']").startswith("You’re signed out")
+    assert page.eval("return !!document.querySelector('[data-testid=\"link-chat-nav\"]');") is False
+
+
+def test_opened_from_a_space_the_account_offers_the_way_straight_back(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open(f"/account?space={SPACE_ID}&conversation={CONVERSATION_ID}", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"link-return-to-space\"]')")
+    back = f"/app/?space={SPACE_ID}&conversation={CONVERSATION_ID}"
+    assert page.eval("return document.querySelector('[data-testid=\"link-return-to-space\"]').getAttribute('href');") == back
+    assert page.text("[data-testid='link-return-to-space']").endswith("Back to your Space and conversation")
+    assert page.eval("return document.querySelector('[data-testid=\"link-chat-nav\"]').getAttribute('href');") == back
+    page.wait_for("location.search === ''")            # The address is cleaned, as for every overview query.
+
+
+@pytest.mark.parametrize("query", ["space=../../api/chat", f"space={SPACE_ID}&conversation=javascript:x",
+                                   "space=AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", "conversation=" + CONVERSATION_ID])
+def test_only_a_pair_of_ids_becomes_a_way_back(page, query):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open(f"/account?{query}", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"link-chat-nav\"]')")
+    assert page.eval("return !!document.querySelector('[data-testid=\"link-return-to-space\"]');") is False
+    assert page.eval("return document.querySelector('[data-testid=\"link-chat-nav\"]').getAttribute('href');") == "/app/"
+
+
+def test_billing_opens_the_account_at_billing(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True, billing=dict(FREE_BILLING))
+    page.resize((1280, 600), False)
+    page.open("/account?show=billing", ready="document.querySelector('[data-testid=\"billing-section\"]')")
+    page.wait_for("Math.abs(document.getElementById('acct-billing-heading').getBoundingClientRect().top) < 120")
+    # On the account page itself, the header's Billing scrolls there without leaving the page.
+    page.eval("window.scrollTo(0, 0);")
+    page.wait_for("document.getElementById('acct-billing-heading').getBoundingClientRect().top > 120")
+    page.click_selector("[data-testid='link-billing-nav']")
+    page.wait_for("Math.abs(document.getElementById('acct-billing-heading').getBoundingClientRect().top) < 120")
+    assert page.eval("return location.pathname + location.search;") == "/account"
+
+
+def test_a_customer_known_to_be_signed_in_is_never_shown_registration(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open("/account", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"link-chat-nav\"]')")
+    page.eval("history.pushState(null, '', '/account/create'); dispatchEvent(new PopStateEvent('popstate'));")
+    page.wait_for("location.pathname === '/account' && " + OVERVIEW_READY)
+    assert page.eval("return document.querySelectorAll('main form #email').length;") == 0
+
+
+# --- the footer's verified YouTube and X profiles (social-links.tsx) ----------------------------------------------------
+
+def test_the_footer_shows_only_verified_profile_addresses(page):
+    page.open("/", ready=HERO)
+    assert page.eval("return document.querySelector('.footer-social');") is None        # None supplied: none shown.
+    page.site.profile_marks = (b' data-kalillac-youtube="https://www.youtube.com/@verified-example"'
+                               b' data-kalillac-x="https://x.com/verified_example"')
+    page.open("/", ready=HERO)
+    links = page.eval("""return [...document.querySelectorAll('.footer-social a')].map(a => ({href: a.getAttribute('href'),
+      label: a.getAttribute('aria-label'), target: a.target, rel: a.rel, svg: !!a.querySelector('svg[aria-hidden=true]'),
+      size: [a.getBoundingClientRect().width, a.getBoundingClientRect().height]}));""")
+    assert [(l["href"], l["label"]) for l in links] == [
+        ("https://www.youtube.com/@verified-example", "YouTube channel"),
+        ("https://x.com/verified_example", "X profile")]
+    assert all(l["target"] == "_blank" and l["rel"] == "noopener noreferrer" and l["svg"] for l in links)
+    assert all(w >= 44 and h >= 44 for l in links for w, h in [l["size"]])
+
+
+@pytest.mark.parametrize("marks", [
+    b' data-kalillac-youtube="http://www.youtube.com/@x" data-kalillac-x="http://x.com/x"',
+    b' data-kalillac-youtube="https://youtube.com.example.net/@x" data-kalillac-x="https://example.com/x"',
+    b' data-kalillac-youtube="https://www.youtube.com/" data-kalillac-x="https://x.com"',
+    b' data-kalillac-youtube="javascript:alert(1)" data-kalillac-x="https://user:pw@x.com/x"',
+])
+def test_the_footer_refuses_any_other_profile_address(page, marks):
+    page.site.profile_marks = marks
+    page.open("/", ready=HERO)
+    assert page.eval("return document.querySelector('.footer-social');") is None
+

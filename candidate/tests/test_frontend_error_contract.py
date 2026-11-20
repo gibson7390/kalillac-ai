@@ -219,7 +219,8 @@ SCENARIOS = (
     + list(REASONING_SCENARIOS)
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
        "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes",
-       "spaces_conversations_edit", "spaces_manage_360x640"]
+       "spaces_conversations_edit", "spaces_manage_360x640", "spaces_account_menu", "spaces_restore_from_address",
+       "spaces_restore_refused", "spaces_list_from_address"]
 )
 
 
@@ -475,6 +476,8 @@ def test_no_request_left_the_page(browser_results):
                 continue                      # An images deployment's upload and preview (tested below).
             if name.startswith("spaces_") and request["url"].startswith("/api/spaces"):
                 continue                      # A Spaces deployment's requests (tested below).
+            if name == "spaces_account_menu" and (request["url"], request["method"]) == ("/api/account/logout", "POST"):
+                continue                      # The account menu's Sign out (tested below).
             assert request["url"] == "/api/chat" and request["method"] == "POST", name
 
 
@@ -1173,7 +1176,7 @@ def spaces_requests(result):
 def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results):
     result = scenario(browser_results, "spaces_open_send_leave")
     loaded = step(result, "loaded")
-    assert loaded["button"] == ["Spaces"] and loaded["requestCount"] == 1 and not loaded["barShown"]
+    assert loaded["button"] == ["My Spaces"] and loaded["requestCount"] == 1 and not loaded["barShown"]
     assert loaded["sessionStatusShown"] and loaded["eraseShown"]
     # Only well-formed ids are listed; a name is text, never markup.
     listed = step(result, "listed")
@@ -1185,7 +1188,7 @@ def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results)
     # controls are gone.
     opened = step(result, "opened")
     assert not opened["dialogOpen"] and opened["barShown"]
-    assert opened["barText"] == "Saved to your account in Research · Plan Leave Space"
+    assert opened["barText"] == "Saved to your account in Research · Plan Conversations New conversation Leave Space"
     assert not opened["sessionStatusShown"] and not opened["eraseShown"]
     snap = step(result, "opened")
     view = [s_ for s_ in result["steps"] if s_["label"] == "opened" and "users" in s_][0]
@@ -1209,7 +1212,7 @@ def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results)
     assert UUID_RE.match(body["client_request_id"])
     # Leaving: a new temporary conversation, and every temporary-session control back.
     left = step(result, "left")
-    assert not left["barShown"] and left["sessionStatusShown"] and left["eraseShown"] and left["button"] == ["Spaces"]
+    assert not left["barShown"] and left["sessionStatusShown"] and left["eraseShown"] and left["button"] == ["My Spaces"]
     after = [s_ for s_ in result["steps"] if s_["label"] == "left" and "users" in s_][0]
     assert after["users"] == [] and after["emptyShown"] and len(result["requests"]) == 5
 
@@ -1236,7 +1239,7 @@ def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_re
     assert created["title"] == "Trip" and created["status"] == "No conversations in this Space yet. Start one below."
     opened = step(result, "created-conversation")
     assert not opened["dialogOpen"] and opened["barShown"]
-    assert opened["barText"] == "Saved to your account in Trip Leave Space"
+    assert opened["barText"] == "Saved to your account in Trip Conversations New conversation Leave Space"
     assert spaces_requests(result) == [
         ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
         ("POST", "/api/spaces", {"name": "Trip", "instructions": ""}),
@@ -1336,6 +1339,75 @@ def test_the_phone_header_fits_the_logo_the_buttons_and_the_status(browser_resul
     # The words stay for assistive technology; the icon stays on screen.
     assert header["statusText"].startswith("Temporary session") and header["statusIconShown"]
 
+
+
+# --- customer navigation: the account menu and the open Space in the address --------------------------
+
+def test_a_signed_in_account_gets_the_account_menu_and_the_address_follows_the_open_space(browser_results):
+    result = scenario(browser_results, "spaces_account_menu")
+    loaded = step(result, "loaded")
+    # The Spaces answer (200) says the browser is signed in: no further request; the menu replaces the link.
+    assert loaded["requestCount"] == 1 and loaded["plainLinks"] == 0 and loaded["menuButton"] == "Account"
+    assert loaded["expanded"] == "false" and not loaded["listShown"] and loaded["address"] == ""
+    assert loaded["items"] == [["Account settings", "/account"], ["Billing", "/account?show=billing"],
+                               ["Sign out", None]]
+    assert step(result, "menu-open")["listShown"] and step(result, "menu-open")["expanded"] == "true"
+    assert not step(result, "menu-escaped")["listShown"]
+    # Open: the address names the Space and conversation (ids only), and the account links carry them back.
+    opened = step(result, "opened")
+    ids = f"space={SPACE_A}&conversation={CONV_A}"
+    # This page never writes the address or the history: the way back travels in the account links only.
+    assert opened["barShown"] and opened["address"] == ""
+    assert opened["items"][:2] == [["Account settings", f"/account?{ids}"],
+                                   ["Billing", f"/account?show=billing&{ids}"]]
+    # The lists mark what is open now; choosing the open conversation returns to it without a request.
+    assert step(result, "relisted")["open"] == [["ResearchOpen now1 conversation", "true"]]
+    space_view = step(result, "space-view")
+    assert space_view["open"] == [["PlanOpen now2 messages", "true"]]
+    returned = step(result, "returned")
+    assert not returned["dialogOpen"] and returned["barShown"]
+    assert returned["requestCount"] == space_view["requestCount"]
+    bar = step(result, "bar-conversations")
+    assert bar["dialogOpen"] and bar["title"] == "Research" and bar["back"]
+    assert bar["items"] == ["PlanOpen now2 messages"]
+    # New conversation: one request, then the new conversation is open and in the address.
+    new = step(result, "new-conversation")
+    assert new["barShown"] and new["address"] == ""
+    assert new["items"][0] == ["Account settings", f"/account?space={SPACE_A}&conversation={CONV_B}"]
+    calls = spaces_requests(result)
+    assert ("POST", f"/api/spaces/{SPACE_A}/conversations", {}) in calls
+    left = step(result, "left")
+    assert not left["barShown"] and left["address"] == "" and left["items"][0] == ["Account settings", "/account"]
+    refused = step(result, "sign-out-refused")
+    assert calls[-1] == ("POST", "/api/account/logout", None)
+    assert ["Couldn\u2019t sign out. Try again", None] in refused["items"] and refused["menuButton"] == "Account"
+
+
+def test_a_space_and_conversation_in_the_address_reopen_once_the_account_confirms_them(browser_results):
+    result = scenario(browser_results, "spaces_restore_from_address")
+    assert spaces_requests(result) == [
+        ("GET", "/api/spaces?limit=1", None), ("GET", f"/api/spaces/{SPACE_A}", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)]
+    restored = step(result, "restored")
+    assert restored["barShown"] and restored["address"] == f"&space={SPACE_A}&conversation={CONV_A}"
+    assert step(result, "restored-view")["users"] == ["Earlier question"]
+    assert step(result, "restored-bar")["barText"].startswith("Saved to your account in Research · Plan")
+
+
+def test_an_address_the_account_cannot_open_leaves_the_temporary_chat(browser_results):
+    result = scenario(browser_results, "spaces_restore_refused")
+    refused = step(result, "refused")
+    assert not refused["barShown"] and refused["requestCount"] == 2
+    view = step(result, "refused-view")
+    assert view["users"] == [] and view["emptyShown"]
+
+
+def test_my_spaces_from_the_account_pages_opens_the_spaces_list(browser_results):
+    result = scenario(browser_results, "spaces_list_from_address")
+    listed = step(result, "listed")
+    assert listed["dialogOpen"] and listed["address"] == "&spaces=open"      # Read, never rewritten.
+    dialog = step(result, "listed-dialog")
+    assert dialog["title"] == "Spaces" and dialog["items"] == ["Research1 conversation"]
 
 def test_without_the_spaces_mark_the_page_asks_nothing_about_spaces(browser_results):
     for name, result in browser_results["results"].items():

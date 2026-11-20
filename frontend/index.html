@@ -28,11 +28,14 @@
           <span class="brand-name" id="brand-name">Kalillac AI</span>
         </div>
         <div class="app-header-end">
+          <!-- Where Spaces are on and this browser's account may use them, the button that opens them. -->
+          <template id="spaces-button-template"><button type="button" class="account-link spaces-button" id="spaces-btn" aria-haspopup="dialog"><span><span class="spaces-button-my">My </span>Spaces</span></button></template>
           <!-- Where accounts are on, a plain link to the account pages (plan, billing, security).
                This page asks nothing about the visitor for it. -->
           <template id="account-link-template"><a class="account-link" href="/account">Account</a></template>
-          <!-- Where Spaces are on and this browser's account may use them, the button that opens them. -->
-          <template id="spaces-button-template"><button type="button" class="account-link spaces-button" id="spaces-btn" aria-haspopup="dialog">Spaces</button></template>
+          <!-- Once this page knows the visitor is signed in (the Spaces question's answer), the account link
+               becomes this menu: the account, Billing and Sign out. Its addresses are set by app.js. -->
+          <template id="account-menu-template"><div class="account-menu"><button type="button" class="account-link account-menu-button" id="account-menu-btn" aria-expanded="false" aria-controls="account-menu-list">Account<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg></button><div class="account-menu-list" id="account-menu-list" hidden><a class="account-menu-item" id="account-menu-account">Account settings</a><a class="account-menu-item" id="account-menu-billing">Billing</a><button type="button" class="account-menu-item" id="account-menu-sign-out">Sign out</button></div></div></template>
           <span class="session-status" id="session-status" title="This conversation uses temporary session memory. It is not saved to an account or a chat history, and reloading starts a new session.">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
             <span>Temporary session</span><span class="session-status-extra"><span class="sr-only">,</span><span aria-hidden="true">·</span><span>Not saved</span></span>
@@ -45,7 +48,11 @@
     <div class="space-bar" id="space-bar" hidden>
       <div class="space-bar-inner">
         <span class="space-bar-label">Saved to your account in <strong id="space-bar-name"></strong><span class="space-bar-title" id="space-bar-title"></span></span>
-        <button type="button" class="space-leave" id="space-leave">Leave Space</button>
+        <span class="space-bar-actions">
+          <button type="button" class="space-leave space-bar-action" id="space-conversations" aria-haspopup="dialog">Conversations</button>
+          <button type="button" class="space-leave space-bar-action" id="space-new">New conversation</button>
+          <button type="button" class="space-leave" id="space-leave">Leave Space</button>
+        </span>
       </div>
     </div>
 

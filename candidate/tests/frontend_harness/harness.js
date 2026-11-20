@@ -107,6 +107,20 @@
       : { status: 200, json: { spaces: [], next_cursor: null } });
   }
 
+  // Customer navigation: a signed-in account on an accounts and Spaces deployment, and pages opened with a
+  // Space and conversation (or ?spaces=open) in the address, as the account pages link back.
+  var ADDRESSES = {
+    spaces_restore_from_address: "&space=11111111-1111-4111-8111-111111111111&conversation=33333333-3333-4333-8333-333333333333",
+    spaces_restore_refused: "&space=11111111-1111-4111-8111-111111111111&conversation=33333333-3333-4333-8333-333333333333",
+    spaces_list_from_address: "&spaces=open"
+  };
+  if (scenarioName === "spaces_account_menu" || ADDRESSES[scenarioName]) {
+    document.documentElement.setAttribute("data-kalillac-accounts", "on");
+  }
+  if (ADDRESSES[scenarioName]) {
+    history.replaceState(null, "", location.pathname + location.search + ADDRESSES[scenarioName]);
+  }
+
   // Files scenarios: the page is marked as a files deployment before app.js runs, and the account
   // probe (GET /api/files) app.js then makes is answered first.
   if (scenarioName.indexOf("images_") === 0) {
@@ -1567,6 +1581,108 @@
         savedMessage(1, "user", "Earlier question"),
         savedMessage(2, "assistant", "Earlier **answer** <script>alert(1)</script>")] } });
   }
+
+  // Where the customer is and what the header offers: the address (beyond ?scenario=), the account menu,
+  // and which Spaces items are marked as open now.
+  function where(a, label) {
+    var menu = document.querySelector(".app-header .account-menu");
+    var list = $("account-menu-list");
+    var dialog = $("spaces-dialog");
+    a.push({
+      label: label,
+      address: location.search.replace(/^\?scenario=[a-z0-9_]+/, ""),
+      plainLinks: document.querySelectorAll(".app-header a.account-link").length,
+      menuButton: menu ? text($("account-menu-btn")) : null,
+      expanded: menu ? $("account-menu-btn").getAttribute("aria-expanded") : null,
+      listShown: !!list && !list.hidden,
+      items: list ? Array.prototype.map.call(list.querySelectorAll(".account-menu-item"), function (e) {
+        return [text(e), e.getAttribute("href")];
+      }) : [],
+      open: Array.prototype.map.call(document.querySelectorAll("#spaces-list .spaces-item.is-open"), function (b) {
+        return [b.textContent, b.getAttribute("aria-current")];
+      }),
+      dialogOpen: !!(dialog && dialog.open),
+      barShown: !$("space-bar").hidden,
+      requestCount: requests.length
+    });
+  }
+
+  SCENARIOS.spaces_account_menu = async function (a) {
+    await a.wait(60);
+    where(a, "loaded");
+    $("account-menu-btn").click();
+    await a.wait(20);
+    where(a, "menu-open");
+    $("account-menu-btn").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await a.wait(20);
+    where(a, "menu-escaped");
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);
+    where(a, "opened");
+    // The lists mark the open Space and conversation; choosing the open conversation goes back to it.
+    a.respondWith(spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT },
+                              { id: SPACE_B, name: "Trip", conversation_count: 0, updated_at: AT }]),
+                  conversationsList([{ id: CONV_A, title: "Plan", message_count: 2, last_message_at: AT, updated_at: AT },
+                                     { id: CONV_B, title: "Other", message_count: 0, last_message_at: AT, updated_at: AT }]));
+    await a.clickSpaces();
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 2; }, "relisted");
+    where(a, "relisted");
+    await a.clickSpacesItem(0);
+    await until(function () {
+      return text($("spaces-dialog-title")) === "Research" && document.querySelector("#spaces-list .spaces-item");
+    }, "space view");
+    where(a, "space-view");
+    await a.clickSpacesItem(0);
+    where(a, "returned");
+    // The Space bar's Conversations opens the open Space's own list directly.
+    a.respondWith(conversationsList([{ id: CONV_A, title: "Plan", message_count: 2, last_message_at: AT, updated_at: AT }]));
+    $("space-conversations").click();
+    await a.wait(80);
+    a.spaces("bar-conversations");
+    $("spaces-close").click();
+    await a.wait(20);
+    // New conversation: one step, in the same Space.
+    a.respondWith({ status: 201, json: { conversation: { id: CONV_B, title: null } } });
+    $("space-new").click();
+    await a.wait(80);
+    where(a, "new-conversation");
+    await a.leaveSpace();
+    where(a, "left");
+    // Sign out: one same-origin POST; a refusal says so and leaves the page as it is.
+    $("account-menu-btn").click();
+    a.respondWith({ status: 503, json: { error: "unavailable" } });
+    $("account-menu-sign-out").click();
+    await a.wait(80);
+    where(a, "sign-out-refused");
+    a.snap("idle");
+  };
+
+  SCENARIOS.spaces_restore_from_address = async function (a) {
+    a.respondWith(spaceRecord("Research", "", 1),
+      { status: 200, json: { conversation: { id: CONV_A, title: "Plan" }, next_before_seq: null, messages: [
+        savedMessage(1, "user", "Earlier question"), savedMessage(2, "assistant", "Earlier answer")] } });
+    await a.wait(120);
+    where(a, "restored");
+    a.spaces("restored-bar");
+    a.snap("restored-view");
+  };
+
+  SCENARIOS.spaces_restore_refused = async function (a) {
+    a.respondWith({ status: 404, json: { error: "not_found" } });
+    await a.wait(120);
+    where(a, "refused");
+    a.snap("refused-view");
+  };
+
+  SCENARIOS.spaces_list_from_address = async function (a) {
+    a.respondWith(spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT }]));
+    await a.wait(120);
+    where(a, "listed");
+    a.spaces("listed-dialog");
+    a.snap("idle");
+  };
 
   // The account may use Spaces: open a saved conversation, send in it, leave it.
   SCENARIOS.spaces_open_send_leave = async function (a) {
