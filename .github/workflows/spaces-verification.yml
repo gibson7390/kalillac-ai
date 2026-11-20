@@ -80,7 +80,7 @@ jobs:
           -q -rfE -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/spaces.xml"
 
-      # A green run must mean every test executed: exactly the expected number collected (1249,
+      # A green run must mean every test executed: exactly the expected number collected (1263,
       # from `pytest --collect-only` over the files above), none skipped, failed or errored.
       - name: Require every Spaces test to have run
         run: |
@@ -91,6 +91,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 1249, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 1263, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the Spaces verification did not run completely")
           PY
