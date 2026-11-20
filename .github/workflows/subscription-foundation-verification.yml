@@ -534,6 +534,8 @@ jobs:
           tests/test_data_lifecycle_postgres.py
           tests/test_account_attempts_postgres.py
           tests/test_local_staging.py
+          tests/test_dev_preview_isolation.py
+          tests/test_dev_preview_process_isolation.py
           tests/test_local_reset.py
           tests/test_independent_final_f1.py
           tests/test_spaces_v1_postgres.py
@@ -554,7 +556,8 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          assert totals == {"tests": 747, "skipped": 0, "failures": 0, "errors": 0}
+          # 747, plus the development preview's isolation (18: every preview process, mock services only).
+          assert totals == {"tests": 765, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       # Local staging's reset and stop as root, as the owner runs them: among them Codex's F1 scenario, an

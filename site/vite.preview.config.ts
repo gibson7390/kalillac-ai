@@ -10,6 +10,10 @@ import path from 'path';
 import type { Plugin, ViteDevServer } from 'vite';
 import { defineConfig, mergeConfig } from 'vite';
 import base from './vite.config';
+import { installPreviewFence } from './preview-fence.mjs';
+
+// This Vite process's own network fence: no connection to local staging's ports or off this machine.
+installPreviewFence();
 
 const FRONTEND = path.resolve(import.meta.dirname, '../frontend');
 const PANEL = 'http://127.0.0.1:8022';

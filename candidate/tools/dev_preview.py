@@ -18,6 +18,14 @@ for the chat at /app/; /api and /__local__ go to the preview's application)
 
 Setup is the only step that creates or migrates anything, and only in the new, empty preview root. run never
 migrates: if the code needs a newer schema than the preview's database, start again with a new preview.
+
+Network isolation, per process (tests/test_dev_preview_isolation.py, tests/test_dev_preview_process_isolation.py):
+  * this manager: tools/preview_guard.py, strict (this machine's loopback only, never 8010/8011/55433);
+  * the application (8021) and the panel (8022), separate processes: started through tools/preview_fenced.py, which
+    checks their settings (the database must be 127.0.0.1:55434) and installs the fence in the child itself:
+    Python sockets, asyncio's sock_connect and libpq (psycopg) never reach 8010, 8011 or 55433 under any host;
+  * Vite (Node, on Windows): site/preview-fence.mjs, installed by vite.preview.config.ts in that process;
+  * PostgreSQL (55434) only listens; the file workers are isolated interpreters with no network code.
 """
 from __future__ import annotations
 
@@ -122,6 +130,29 @@ def _snapshot(paths):
     return seen
 
 
+CHILDREN = ("local_staging_app.py", "local_staging_web.py")
+
+
+def child_environment(env):
+    """The application's and panel's environment: checked before either starts (no setting may name local
+    staging's ports, and the database must be the preview's own, on this machine, at PG_PORT), and carrying the
+    database port the fenced launcher checks again inside the child."""
+    env = {**env, "KALILLAC_PREVIEW_DATABASE_PORT": str(PG_PORT)}
+    try:
+        preview_guard.check_environment(env, database_port=PG_PORT)
+    except preview_guard.PreviewFenceError as refused:
+        ls.fail(f"refusing to start the preview: {refused}")
+    return env
+
+
+def child_command(script, *extra):
+    """Every preview child runs inside the network fence (tools/preview_fenced.py installs it in that process;
+    the manager's own fence does not reach a child)."""
+    if script not in CHILDREN:
+        raise ValueError(f"not a preview child: {script}")
+    return [sys.executable, "-B", str(TOOLS / "preview_fenced.py"), str(TOOLS / script), *extra]
+
+
 def run(args):
     configure()
     uid, gid, _group, home = ls.identity()
@@ -129,12 +160,12 @@ def run(args):
     if not (ls.ROOT / "local.json").exists():
         ls.fail("the preview is not set up: run setup first")
     ls.pg_start(p, ls.pg_bin(home), uid, gid)
-    env = ls.service_env(p, home)
+    env = child_environment(ls.service_env(p, home))
     log = open(p["state"] / "dev-preview.log", "ab")
     drop = {"user": uid, "group": gid, "extra_groups": []}
 
     def spawn(script, *extra):
-        return subprocess.Popen([sys.executable, "-B", str(TOOLS / script), *extra], cwd=str(TOOLS.parent), env=env,
+        return subprocess.Popen(child_command(script, *extra), cwd=str(TOOLS.parent), env=env,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True, **drop)
 
     def stop_child(child):
