@@ -187,6 +187,9 @@ def migrate(engine, deployment, target=NEW, *, after_sql=None):
                 os.environ[key] = value
 
 
+SOCKET_PATH_MAX = 107                   # sun_path holds 108 bytes on Linux, including the terminating NUL.
+
+
 class Cluster:
     """Explicit status and stop confirmation. Never removes a data directory."""
     def __init__(self, pg, bindir, uid, gid):
@@ -220,6 +223,8 @@ class Cluster:
         # All paths passed in -o must be shell-word safe (pg_ctl interprets this option).
         for p in (self.pg, socket, sandbox):
             require(p is None or all(ch.isalnum() or ch in "/._-" for ch in str(p)), "unsafe PostgreSQL path")
+        require(len(f"{socket}/.s.PGSQL.{int(port)}".encode()) <= SOCKET_PATH_MAX,
+                "the PostgreSQL socket path is too long for this system (107 bytes); use a shorter folder")
         options = f"-p {int(port)} -k {socket} -c listen_addresses=127.0.0.1"
         if sandbox:
             options += f" -c config_file={sandbox}"
@@ -275,18 +280,36 @@ def copied_cluster(backup, expected_hash, bindir, *, port):
     keeps the entire scratch directory, even if the database was stopped.
     """
     manifest = validate_backup(backup, expected_hash)
+    pg_entry = manifest["files"].get("pg") or {}
     work = Path(tempfile.mkdtemp(prefix="kalillac-upgrade-copy-"))
     os.chmod(work, 0o711)
     identity = (work.stat().st_dev, work.stat().st_ino)
     payload = work / "payload"
+    # The copy's PostgreSQL runs as the service identity: it must be able to reach the scratch folder. A TMPDIR
+    # root alone can enter (0700) is refused here, before copying anything, with the reason (UPGRADE.md: 0711).
+    if os.geteuid() == 0 and pg_entry.get("uid"):
+        probe = work / ".traversal-probe"             # Reading it needs exactly traversal of every folder above.
+        probe.write_text("probe")
+        os.chmod(probe, 0o644)
+        try:
+            seen = as_service(pg_entry["uid"], pg_entry["gid"], read=[probe])
+        except Refused:
+            seen = {"read": {}}
+        reachable = seen["read"].get(str(probe)) == file_hash(probe)
+        probe.unlink()
+        if not reachable:
+            shutil.rmtree(work)
+            raise Refused("the service identity cannot reach the scratch folder: TMPDIR must be traversable "
+                          "(for example mode 0711)")
+    # The socket in a short folder of its own: a deep TMPDIR would exceed the 107-byte socket path limit.
+    sock = Path(tempfile.mkdtemp(prefix="kus-", dir="/tmp"))
     cluster, success = None, False
     try:
         copy_tree(Path(backup) / "payload", payload)
         require(tree_manifest(payload) == manifest["files"], "clone differs from verified backup")
         pg_owner = payload.joinpath("pg").stat()
         cluster = Cluster(payload / "pg", bindir, pg_owner.st_uid, pg_owner.st_gid)
-        sock = work / "socket"
-        sock.mkdir(mode=0o700)
+        os.chmod(sock, 0o700)
         if os.geteuid() == 0:
             os.chown(sock, pg_owner.st_uid, pg_owner.st_gid)
         # Do not load the source's configuration, archive commands, replication or preload libraries.
@@ -307,8 +330,9 @@ def copied_cluster(backup, expected_hash, bindir, *, port):
         if success:
             require((work.stat().st_dev, work.stat().st_ino) == identity, "scratch root identity changed")
             shutil.rmtree(work)
+            shutil.rmtree(sock, ignore_errors=True)       # Only after a confirmed stop: the socket is gone.
         else:
-            print(f"rehearsal state preserved: {work}", file=sys.stderr)
+            print(f"rehearsal state preserved: {work} (socket folder {sock})", file=sys.stderr)
 
 
 # --- access as the application's service identity (Codex U3, and the runtime credentials) -------------------
@@ -366,11 +390,18 @@ def as_service(uid, gid, *, read=(), listing=(), write=()):
 
 
 def _inside(path, prefix, payload):
-    """An installed absolute path, as it is inside this payload (the backup or the root itself)."""
+    """An installed absolute path, as it is inside this payload (the backup or the root itself). The path must be
+    canonical (no "//", ".", ".." or trailing "/": a "root//elsewhere" would otherwise map to "/elsewhere"), and
+    the mapped path must still lie inside the payload."""
     path, prefix = str(path), str(prefix).rstrip("/")
-    require(path.startswith(prefix + "/") and ".." not in Path(path).parts,
+    require(path.startswith(prefix + "/") and os.path.normpath(path) == path and "\0" not in path,
             "a configured file lies outside the installation (and so outside its backup)")
-    return Path(payload) / path[len(prefix) + 1:]
+    relative = path[len(prefix) + 1:]
+    mapped = Path(payload) / relative
+    require(relative and not relative.startswith("/") and Path(payload) in mapped.parents
+            and os.path.normpath(str(mapped)) == str(mapped),
+            "a configured file lies outside the installation (and so outside its backup)")
+    return mapped
 
 
 # What the application's startup loaders read, derived from its configuration (Codex U3-R1). Registration
@@ -385,10 +416,12 @@ _TRUE = {"1", "true", "yes", "on"}            # kalillac_db.config, kalillac_bil
 _ACL = ("system.posix_acl_access", "system.posix_acl_default")
 
 
-def startup_environment(payload):
-    """The settings the application starts with: deployment.env, then settings.env (local_staging.service_env)."""
+def startup_environment(payload, installed_root):
+    """The settings the application starts with, as local_staging.service_env builds them: CREDENTIALS_DIRECTORY
+    defaults to the root's credentials/, then deployment.env, then settings.env (either may override it)."""
     payload = Path(payload)
-    return {**env_file(payload / "deployment/deployment.env"), **env_file(payload / "settings.env")}
+    return {"CREDENTIALS_DIRECTORY": f"{str(installed_root).rstrip('/')}/credentials",
+            **env_file(payload / "deployment/deployment.env"), **env_file(payload / "settings.env")}
 
 
 def _protected_policy(path, top, gid, ceiling, *, above_top=False):
@@ -423,7 +456,7 @@ def runtime_access(payload, installed_root, uid, gid, *, live=False):
       credentials; and every file in credentials/;
     * the state folders the application writes."""
     payload = Path(payload)
-    env = startup_environment(payload)
+    env = startup_environment(payload, installed_root)
     paths = []
     for key, value in env.items():
         if key.endswith("_FILE") and value:
@@ -436,7 +469,9 @@ def runtime_access(payload, installed_root, uid, gid, *, live=False):
             require(os.path.lexists(path), "a required protected registration file is missing")
             _protected_policy(path, payload, gid, ceiling, above_top=live)
             registration.append(path)
-    credentials = payload / "credentials"
+    # The directory the database and billing loaders actually read (Codex: a configured CREDENTIALS_DIRECTORY
+    # must be the one checked), inside the installation and so inside its backup.
+    credentials = _inside(env["CREDENTIALS_DIRECTORY"], installed_root, payload)
     required = []
     if env.get("KALILLAC_DB_ENABLED", "").strip().lower() in _TRUE:
         required.append("kalillac_db_password")
@@ -452,6 +487,10 @@ def runtime_access(payload, installed_root, uid, gid, *, live=False):
     for path in paths:
         require(path.is_file() and not path.is_symlink(), "a configured runtime file is missing")
     writable = [payload / d for d in ("state", "state/files", "state/locks", "state/outbox") if (payload / d).is_dir()]
+    if env.get("KALILLAC_FILES_ROOT"):                  # Where the application stores files, as configured.
+        files_root = _inside(env["KALILLAC_FILES_ROOT"], installed_root, payload)
+        require(files_root.is_dir() and not files_root.is_symlink(), "the configured file storage folder is missing")
+        writable = list(dict.fromkeys([*writable, files_root]))
     seen = as_service(uid, gid, read=paths, listing=listing, write=writable)
     for path in paths:
         require(seen["read"][str(path)] == file_hash(path),

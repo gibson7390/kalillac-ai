@@ -33,7 +33,9 @@ def pg():
     bindir = os.environ.get("KALILLAC_LOCAL_PG_BIN", "/usr/lib/postgresql/16/bin")
     if not Path(bindir, "initdb").exists():
         pytest.fail("explicit PostgreSQL 16 binaries required")
-    base = Path(tempfile.mkdtemp(prefix="ku-pg-"))
+    # A short, disk-backed base, whatever TMPDIR is: an installation's socket is ROOT/pgsock/.s.PGSQL.NNNNN and must
+    # fit in 107 bytes (sun_path) even for the deepest fixture root (BASE/recovery-xxxxxx/kalillac-local-staging).
+    base = Path(tempfile.mkdtemp(prefix="ku-pg-", dir="/var/tmp"))
     os.chmod(base, 0o711)
     data, sock = base / "pg", base / "sock"
     for path in (data, sock):
@@ -1299,3 +1301,245 @@ def test_round3_refusals_survive_python_optimization(registration_root, tmp_path
     finally:
         shutil.rmtree(base)
     assert result.returncode == 0 and result.stdout.strip() == "refused,refused,refused", result.stderr[-2000:]
+
+
+# --- Codex's verification of 30d11a5: recovery status, journal reuse, aliases, effective paths, TMPDIR ---------
+
+def status_mock(monkeypatch, code):
+    monkeypatch.setattr(u.Cluster, "command",
+                        lambda self, *args, **kwargs: subprocess.CompletedProcess(args, code, "", "synthetic status"))
+    monkeypatch.setattr(live_tool, "no_service_processes", lambda uid: None)
+
+
+@pytest.mark.parametrize("code,accepted", [(3, True), (0, False), (1, False), (4, False), (2, False), (127, False)])
+def test_round4_recovery_proceeds_only_on_a_confirmed_stop(tmp_path, monkeypatch, code, accepted):
+    (tmp_path / "pg").mkdir()
+    status_mock(monkeypatch, code)
+    if accepted:
+        live_tool._offline_for_recovery(tmp_path, "/unused", SERVICE, SERVICE)
+    else:
+        with pytest.raises(u.Refused, match="not confirmed stopped"):
+            live_tool._offline_for_recovery(tmp_path, "/unused", SERVICE, SERVICE)
+
+
+@pytest.mark.parametrize("present,code,accepted", [((), 4, True), (("PG_VERSION",), 4, False),
+                                                   (("postmaster.pid",), 4, False), ((), 1, False), ((), 0, False)])
+def test_round4_resume_accepts_only_a_half_copied_folder_that_cannot_be_a_cluster(tmp_path, monkeypatch, present,
+                                                                                  code, accepted):
+    (tmp_path / "pg").mkdir()
+    for name in present:
+        (tmp_path / "pg" / name).write_text("16\n")
+    status_mock(monkeypatch, code)
+    if accepted:
+        live_tool._offline_for_recovery(tmp_path, "/unused", SERVICE, SERVICE, partial=True)
+    else:
+        with pytest.raises(u.Refused, match="not confirmed stopped"):
+            live_tool._offline_for_recovery(tmp_path, "/unused", SERVICE, SERVICE, partial=True)
+
+
+def test_round4_codex_status_4_never_reaches_a_restore_mutation(marked_install, pg, monkeypatch):
+    m = marked_install
+    failed = m.parent / "status-4"
+    before = (u.tree_manifest(m.root), u.tree_manifest(m.backup))
+    real = u.Cluster.command
+
+    def command(cluster, *args, **kwargs):
+        if cluster.pg == m.root / "pg" and args[-1:] == ("status",):
+            return subprocess.CompletedProcess(args, 4, "", "synthetic")
+        return real(cluster, *args, **kwargs)
+    monkeypatch.setattr(u.Cluster, "command", command)
+    with offline(pg), pytest.raises(u.Refused, match="not confirmed stopped"):
+        live_tool.restore_install(m.root, m.backup, m.checksum, failed, m.prepared.bindir, SERVICE, SERVICE)
+    assert (u.tree_manifest(m.root), u.tree_manifest(m.backup)) == before and not os.path.lexists(failed)
+
+
+def test_round4_codex_an_older_journal_cannot_restart_a_completed_recovery(marked_install, pg, monkeypatch):
+    m = marked_install
+    old = interrupted(m, pg, monkeypatch, "rename", m.parent / "failed-1", after=2)
+    with offline(pg):
+        done = live_tool.resume_restore(m.root, m.backup, m.checksum, old, m.parent / "failed-2", m.prepared.bindir)
+    assert json.loads(Path(done["journal"]).read_text())["phase"] == "complete"
+    later = m.root / "state/files/written-after-the-recovery"
+    later.write_text("later customer data\n")
+    os.chown(later, SERVICE, SERVICE)
+    with offline(pg):
+        with pytest.raises(u.Refused, match="superseded"):
+            live_tool.resume_restore(m.root, m.backup, m.checksum, old, m.parent / "failed-3", m.prepared.bindir)
+        with pytest.raises(u.Refused, match="completed"):
+            live_tool.resume_restore(m.root, m.backup, m.checksum, Path(done["journal"]), m.parent / "failed-4",
+                                     m.prepared.bindir)
+    assert later.exists() and not any(os.path.lexists(m.parent / f) for f in ("failed-3", "failed-4"))
+    assert (m.parent / "failed-1").is_dir() and (m.parent / "failed-2").is_dir()        # Evidence kept.
+
+
+def test_round4_only_the_newest_interrupted_journal_resumes(marked_install, pg, monkeypatch):
+    m = marked_install
+    first = interrupted(m, pg, monkeypatch, "rename", m.parent / "failed-1", after=2)
+    second = interrupted(m, pg, monkeypatch, "partial", m.parent / "failed-2", journal=first)
+    assert json.loads(first.read_text())["superseded_by"] == str(second)
+    with offline(pg):
+        with pytest.raises(u.Refused, match="superseded"):
+            live_tool.resume_restore(m.root, m.backup, m.checksum, first, m.parent / "failed-x", m.prepared.bindir)
+        assert live_tool.resume_restore(m.root, m.backup, m.checksum, second, m.parent / "failed-3",
+                                        m.prepared.bindir)["restored"]
+    assert u.tree_manifest(m.root) == u.validate_backup(m.backup, m.checksum)["files"]
+
+
+def test_round4_a_crash_before_the_new_journal_existed_leaves_the_old_one_usable(marked_install, pg, monkeypatch):
+    m = marked_install
+    old = interrupted(m, pg, monkeypatch, "rename", m.parent / "failed-1", after=2)
+    record = json.loads(old.read_text())
+    record["superseded_by"] = str(m.parent / ("never-created" + live_tool.JOURNAL))    # Crashed right after it.
+    live_tool._write_journal(old, record)
+    (old.parent / (old.name + ".new-partial")).write_text("{partial")                # And a partial update.
+    with offline(pg):
+        assert live_tool.resume_restore(m.root, m.backup, m.checksum, old, m.parent / "failed-2",
+                                        m.prepared.bindir)["restored"]
+
+
+def test_round4_codex_a_bind_alias_cannot_hide_a_backup_inside_the_installation(marked_install, pg):
+    m = marked_install
+    inside = m.root / "state/backup-copy"
+    subprocess.run(["cp", "-a", "--", str(m.backup), str(inside)], check=True)
+    alias = m.parent / "alias"
+    alias.mkdir()
+    subprocess.run(["mount", "--bind", str(inside), str(alias)], check=True)
+    try:
+        u.validate_backup(alias, m.checksum)                          # A valid backup, reached through an alias.
+        before = u.tree_manifest(m.root)
+        with offline(pg), pytest.raises(u.Refused, match="backup is inside the installation"):
+            live_tool.restore_install(m.root, alias, m.checksum, m.parent / "failed", m.prepared.bindir,
+                                      SERVICE, SERVICE)
+        assert u.tree_manifest(m.root) == before and not os.path.lexists(m.parent / "failed")
+    finally:
+        subprocess.run(["umount", str(alias)], check=True)
+
+
+def test_round4_a_failed_state_under_an_alias_of_a_folder_inside_the_installation_is_refused(marked_install, pg):
+    m = marked_install
+    alias = m.parent / "alias"
+    alias.mkdir()
+    subprocess.run(["mount", "--bind", str(m.root / "deployment"), str(alias)], check=True)
+    try:
+        with offline(pg), pytest.raises(u.Refused, match="inside the installation"):
+            live_tool.restore_install(m.root, m.backup, m.checksum, alias / "failed", m.prepared.bindir,
+                                      SERVICE, SERVICE)
+        assert not os.path.lexists(m.root / "deployment/failed")
+    finally:
+        subprocess.run(["umount", str(alias)], check=True)
+
+
+@pytest.mark.parametrize("suffix", ["//etc/hostname", "/./credentials/x", "/credentials/../credentials/x",
+                                    "/credentials/x/", "/credentials//x"])
+def test_round4_a_non_canonical_configured_path_is_refused(runtime_root, suffix):
+    with pytest.raises(u.Refused, match="outside the installation"):
+        u._inside(str(runtime_root) + suffix, runtime_root, runtime_root)
+
+
+def test_round4_codex_a_double_slash_cannot_escape_the_payload(registration_root):
+    root = registration_root
+    outside = protected(root.parent / "external-keyring.json")
+    env = u.env_file(root / "deployment/deployment.env")
+    env["KALILLAC_ACCOUNT_REGISTRATION_KEYRING_FILE"] = f"{root}/{outside}"                # root//external…
+    (root / "deployment/deployment.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+    with pytest.raises(u.Refused, match="outside the installation"):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+def credentials_enabled(root, directory):
+    for name in ("stripe_secret_key", "stripe_webhook_secret"):
+        protected(root / "credentials" / name, owner=(SERVICE, SERVICE), mode=0o400)
+    with (root / "settings.env").open("a") as stream:
+        stream.write(f"KALILLAC_DB_ENABLED=true\nKALILLAC_BILLING_ENABLED=true\nCREDENTIALS_DIRECTORY={directory}\n")
+
+
+def test_round4_the_configured_credentials_directory_is_the_one_checked(runtime_root):
+    root = runtime_root
+    credentials_enabled(root, root / "credentials")
+    assert u.runtime_access(root, root, SERVICE, SERVICE)["runtime_files"] == 4
+
+
+@pytest.mark.parametrize("where", ["missing", "outside", "empty"])
+def test_round4_codex_a_configured_credentials_directory_the_loaders_cannot_use_is_refused(runtime_root, where):
+    root = runtime_root
+    directory = {"missing": root / "missing-credentials", "outside": root.parent / "elsewhere",
+                 "empty": root / "state/empty-credentials"}[where]
+    if where == "empty":
+        directory.mkdir()
+        os.chown(directory, SERVICE, SERVICE)
+    credentials_enabled(root, directory)
+    with pytest.raises(u.Refused):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+def test_round4_a_configured_file_storage_folder_must_exist_and_be_writable(runtime_root):
+    root = runtime_root
+    with (root / "settings.env").open("a") as stream:
+        stream.write(f"KALILLAC_FILES_ROOT={root}/state/elsewhere\n")
+    with pytest.raises(u.Refused, match="file storage"):
+        u.runtime_access(root, root, SERVICE, SERVICE)
+
+
+def test_round4_codex_a_rehearsal_with_a_missing_configured_credentials_directory_issues_no_receipt(prepared, pg,
+                                                                                                     tmp_path):
+    p = prepared
+    credentials = p.root / "credentials"
+    credentials.mkdir(exist_ok=True)
+    for name in ("kalillac_db_password", "stripe_secret_key", "stripe_webhook_secret"):
+        protected(credentials / name, "synthetic-test-only\n", owner=(SERVICE, SERVICE), mode=0o400)
+    with (p.root / "settings.env").open("a") as stream:
+        stream.write("KALILLAC_DB_ENABLED=true\nKALILLAC_BILLING_ENABLED=true\n"
+                     f"CREDENTIALS_DIRECTORY={p.root}/missing-configured-credentials\n")
+    backup = pg.base / ("creds-" + uuid.uuid4().hex[:6])
+    with offline(pg):
+        checksum = live_tool.backup_install(p.root, backup, "a" * 40, p.bindir, SERVICE, SERVICE)
+    receipt = tmp_path / "receipt.json"
+    with pytest.raises(u.Refused, match="credential"):
+        rehearsal.rehearse(backup, checksum, p.bindir, receipt)
+    assert not receipt.exists()
+    shutil.rmtree(backup)
+
+
+@pytest.mark.parametrize("mode,group,ok", [(0o711, 0, True), (0o710, SERVICE, True), (0o700, 0, False)])
+def test_round4_tmpdir_must_be_traversable_by_the_service(prepared, pg, tmp_path, mode, group, ok):
+    p = prepared
+    temp = pg.base / f"tmp-{mode:o}"
+    temp.mkdir()
+    os.chown(temp, 0, group)
+    os.chmod(temp, mode)
+    receipt = tmp_path / "receipt.json"
+    result = subprocess.run([sys.executable, "-B", str(Path(rehearsal.__file__)), "--backup", str(p.backup),
+                             "--backup-sha256", p.checksum, "--pg-bin", p.bindir, "--receipt", str(receipt)],
+                            env={**os.environ, "TMPDIR": str(temp)}, capture_output=True, text=True, timeout=300)
+    assert (result.returncode == 0) is ok and receipt.exists() is ok, result.stderr[-1500:]
+    assert not list(temp.iterdir())                                    # Nothing left behind either way.
+
+
+def test_round4_a_deep_tmpdir_still_rehearses_and_a_too_long_socket_is_refused_clearly(prepared, pg, tmp_path):
+    p = prepared
+    deep = pg.base / ("d" * 60) / ("e" * 60)
+    deep.mkdir(parents=True)
+    for folder in (deep.parent, deep):
+        os.chmod(folder, 0o711)
+    receipt = tmp_path / "receipt.json"
+    result = subprocess.run([sys.executable, "-B", str(Path(rehearsal.__file__)), "--backup", str(p.backup),
+                             "--backup-sha256", p.checksum, "--pg-bin", p.bindir, "--receipt", str(receipt)],
+                            env={**os.environ, "TMPDIR": str(deep)}, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0 and receipt.exists(), result.stderr[-1500:]      # The socket lives in /tmp.
+    cluster = u.Cluster(deep / "pg", p.bindir, SERVICE, SERVICE)
+    cluster.stopped = lambda: None
+    with pytest.raises(u.Refused, match="socket path is too long"):
+        cluster.start(deep / "socket", 65535)
+
+
+def test_round4_refusals_survive_python_optimization(runtime_root):
+    script = (f"import sys;sys.path[:0]=[{str(Path(u.__file__).parent)!r}]\n"
+              "import upgrade_support as u\nfrom pathlib import Path\n"
+              f"r=Path({str(runtime_root)!r});out=[]\n"
+              "for call in (lambda: u._inside(str(r)+'//etc/hostname', r, r),):\n"
+              "    try:\n        call(); out.append('ACCEPTED')\n"
+              "    except u.Refused:\n        out.append('refused')\n"
+              "    except Exception as e:\n        out.append(type(e).__name__)\n"
+              "print(','.join(out))")
+    result = subprocess.run([sys.executable, "-O", "-c", script], capture_output=True, text=True)
+    assert result.stdout.strip() == "refused", result.stderr[-1500:]

@@ -127,9 +127,12 @@ preserves. Decide it explicitly.
 Plan the space before any live step. Run `df -h /var/lib /root` and `df -i /var/lib /root`.
 * The backup is a full copy of the root (`du -sh /var/lib/kalillac-local-staging`).
 * The rehearsal makes two more full copies, one after the other, under `TMPDIR`. WSL's `/tmp` is a small tmpfs
-  (3.8 GB here), so set `TMPDIR` to a new private, root-only folder on disk, for example
-  `install -d -m 0700 /var/tmp/kalillac-upgrade-tmp`. A failed rehearsal keeps its copy for inspection: leave
-  room for it, and never clear other people's temporary files to make room.
+  (3.8 GB here), so set `TMPDIR` to a new private folder on disk that the service identity can pass through but
+  not list: `install -d -m 0711 /var/tmp/kalillac-upgrade-tmp` (or 0710 with the service's group). The copy's
+  PostgreSQL runs as the service identity. A root-only 0700 `TMPDIR` is refused at the start, before anything is
+  copied, with that reason (this guide said 0700 before; that was wrong). The copy's socket is in its own short
+  folder under `/tmp` (the system limit is 107 bytes), so a deep `TMPDIR` is fine. A failed rehearsal keeps its
+  copy for inspection: leave room for it, and never clear other people's temporary files to make room.
 * A restore copies the backup back. The failed state is moved by rename, not copied, but stays on the root's
   filesystem. The restore checks free space and inodes before changing anything, and refuses if there are fewer
   than the backup's size plus 256 MB.
@@ -141,12 +144,14 @@ Before anything changes, the restore refuses a failed-state folder, or its `.man
 evidence, that:
 * already exists;
 * is inside the backup (it would change it) or inside the installation;
-* is reached through a symlink, or through any alias of the backup or installation: every folder on its path is
-  also compared by device and inode, so a bind mount cannot hide it;
+* is reached through a symlink, or through any alias of the backup or installation, or of any folder inside
+  them. Every folder on its path is compared by device and inode with every folder inside the installation, the
+  backup and earlier failed states, so a bind mount cannot hide it;
 * is on a different mount from the installation (it must be moved there by rename);
 * has an untrusted parent.
 
-It also refuses a backup inside the installation, and an installation inside the backup. Use for example:
+It also refuses a backup inside the installation and an installation inside the backup, including through a
+bind-mount alias: the backup folder's device and inode are compared with every folder inside the installation. Use for example:
 backup `/root/kalillac-backup-YYYYMMDD`, failed state `/root/kalillac-local-staging-failed-YYYYMMDD-1`, numbering
 each new attempt.
 
@@ -166,7 +171,8 @@ every value and paste it; never default one:
 What it does, in order, refusing at the first failure:
 1. Verifies the backup against the recorded manifest checksum and every file's checksum, owner and mode. Checks
    that it belongs to this root's path, device and inode.
-2. Requires no process of the service identity, and no running PostgreSQL.
+2. Requires no process of the service identity, and PostgreSQL **confirmed stopped**: `pg_ctl status` exactly 3.
+   Any other answer (0 running, 1, 4, …) establishes nothing and refuses, with nothing changed.
 3. Checks the destinations and the free space (above).
 4. Creates the new failed-state folder (0700), and beside it the **recovery journal**
    (`FAILED.restore.json`, root's, 0600). The journal records the root's path, device and inode, the activation,
@@ -177,7 +183,10 @@ What it does, in order, refusing at the first failure:
 6. Copies the backup's contents into the SAME root folder (`cp -a payload/. root/`), keeping the root's inode,
    which is what the F1 ownership marker names.
 7. Verifies the restored tree against the backup manifest. It then checks, as the service identity, every
-   startup resource: protected registration files, credentials, state folders.
+   startup resource at the path the application will actually use. That means the effective
+   `CREDENTIALS_DIRECTORY` (by default `ROOT/credentials`; `deployment.env` or `settings.env` may move it) and
+   `KALILLAC_FILES_ROOT`, the protected registration files and the state folders. Configured paths must be
+   canonical and inside the installation: a `//`, `.` or `..` is refused.
 
 It never starts anything, never deletes or rewrites a failed state, and never writes to the backup.
 
@@ -201,13 +210,18 @@ It does not rely on the root's marker or settings. Its evidence:
 * the backup, verified against the checksum recorded when it was made, which names this root's path, device and
   inode;
 * the journal chain: the given journal and every earlier one it names. Each must be root's own 0600 file, name
-  this root, backup, checksum and activation, and its failed state must still be the folder it recorded;
+  this root, backup, checksum and activation, and its failed state must still be the folder it recorded. The given
+  journal must be the **current** transaction: not `complete`, and not superseded. Before a resume changes
+  anything, it writes `superseded_by` (the new journal's path) into the journal it continues. An older journal
+  can therefore never be replayed once a later recovery exists, completed or not. If a crash happens between
+  those two writes, the older journal stays usable: the journal it names does not exist;
 * the original marker, found in the root or a recorded failed state, equal byte for byte to the backup's, with no
   different marker among them. Another installation, another backup, a forged journal or a foreign marker is
   refused.
 
-It also requires the path and its ancestors to pass the F1 path checks, nothing running, and the destination and
-space checks above. It moves the partial state into the NEW failed-state folder (earlier ones are never touched),
+It also requires the path and its ancestors to pass the F1 path checks, and the destination and space checks
+above. It requires PostgreSQL confirmed stopped (status 3), with one exception: a half-copied data folder with no
+`PG_VERSION` and no `postmaster.pid` cannot run at all, answers 4, and is accepted once no service process exists. It moves the partial state into the NEW failed-state folder (earlier ones are never touched),
 copies the backup into the same root inode, and verifies as above. If it is itself interrupted, run it again with
 the newest journal and another new failed-state folder. Each attempt preserves its own state and evidence.
 

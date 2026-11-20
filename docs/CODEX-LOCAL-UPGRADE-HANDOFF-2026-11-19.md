@@ -247,3 +247,71 @@ New regressions:
 restore or upgrade was run. Production, `release/staging-v1` and every other worktree are unchanged. PR #40 stays
 in draft. Disposable resources lived under `/var/tmp/ku-r3`.
 
+## Corrections after the verification of 30d11a5: another focused review requested
+
+Codex's final response was blocked by the platform, but its disposable evidence survived at
+`/var/tmp/kalillac-pr40-final-audit.AMGCsb0u` (WSL). It was read and not modified: logs, fixtures and two test
+files, `test_pr40_final_independent.py` (sha256 `c3e53a18…`) and `test_pr40_receipt_independent.py`
+(`630016f4…`). Copied unchanged into a new disposable snapshot of `30d11a5` (base `/var/tmp/k4`, kept short), they
+reproduced **9 failed, 8 passed**: the four findings named by the owner and two more in the same log. U1 and U2,
+U4 (within its maintenance-window rule) and F1 to F6 are not reopened. Nothing here is marked verified.
+
+| Finding | Reproduced on 30d11a5 | Correction |
+|---|---|---|
+| 1. Recovery accepted pg_ctl status 1 and 4 as stopped | status 4 restored the root; statuses 1 and 4 passed `_offline_for_recovery` | Only status 3 authorizes a restore; 0, 1, 4 and anything else refuse with nothing changed. One exception, for `resume-restore` only: a half-copied data folder with neither `PG_VERSION` nor `postmaster.pid` answers 4 and cannot run, so it is accepted once no service process exists. A non-folder or link `pg` refuses |
+| 2. An older journal restarted a completed recovery | the interrupted ancestor journal was accepted after a later resume completed, and moved later data into a new failed state | Before changing anything, a resume writes `superseded_by` (the new journal's path) into the journal it continues, atomically. A journal whose `superseded_by` names an existing journal is refused; the chain must be consistent. A crash between the two writes leaves the older journal usable (its successor does not exist). Each journal update now uses its own unique temporary, so a partial temporary left by an interrupted update (Codex's journal-fault tests) never blocks the next one |
+| 3. A bind-mount alias hid a backup inside the installation | restore accepted it and moved the backup into the failed state | The device and inode of every folder inside the installation, the backup and earlier failed states (links not followed) are compared with the backup, its payload, the installation, and every folder above the failed state |
+| 4. The rehearsal checked the default credentials folder, not the configured one | a receipt was issued while the real database and billing loaders found no secret | `startup_environment` builds what `local_staging.service_env` gives the application: `CREDENTIALS_DIRECTORY` = `ROOT/credentials`, overridden by `deployment.env` and then `settings.env`. That effective folder is the one checked (inside the installation, with the files the enabled features require). `KALILLAC_FILES_ROOT`, when set, must exist and be writable by the service |
+| 5. `ROOT//elsewhere` escaped the payload | a keyring outside the root was read and accepted | `_inside` refuses non-canonical paths (`//`, `.`, `..`, trailing `/`) and any mapped path that leaves the payload |
+| 6. `TMPDIR` mode 0700, which UPGRADE.md recommended, fails every rehearsal | exit 2 after copying; Codex's 0710 case failed only because its deep path made the socket exceed 107 bytes (0710 passes with a short base) | Before copying anything, a probe file in the scratch folder is read as the service identity; a `TMPDIR` the service cannot traverse is refused with that reason. UPGRADE.md now says 0711 (or 0710 with the service's group). The copy's socket now lives in its own short folder under `/tmp`, and `Cluster.start` refuses a socket path longer than 107 bytes with a clear message rather than a PostgreSQL start failure |
+
+Socket length in the fixtures: Codex's rerun of `test_r2_repeated_interruptions…` failed with "PostgreSQL startup
+failed". Its PostgreSQL log shows the Unix socket path exceeded 107 bytes under a deep `TMPDIR`. That was an
+environmental fixture failure, not an application defect. The PostgreSQL fixture's base is now always
+`/var/tmp/ku-pg-*` (on disk and short), and the tools refuse an over-long socket clearly.
+
+**Codex's files against the correction** (in a disposable snapshot): **15 passed, 2 failed**, both by design:
+* `test_double_slash…` first asserts that `_inside` maps the bad path outside the payload, which describes the
+  defect. `_inside` now refuses it at that line; `runtime_access` refuses it (permanent test below).
+* `test_documented_tmpdir…[0o700]` expects the old 0700 advice to work. It is now refused up front with the
+  reason, and the documented 0711 and 0710 cases pass.
+
+**Tests.** `test_local_upgrade.py`: the earlier 123 unchanged, plus 34 new ones, 157 in total; the workflow pins
+157. The fixture change is only the short `/var/tmp` base. Locally, as root in WSL: **166 passed, 0 skipped**
+(157 + 9 Windows). The 34 new tests on `30d11a5`'s tools: **28 failed, 6 passed**. The 6 are accept-side
+controls, plus the alias-of-a-folder-inside case, which the old code also refused but by its mount check (it
+failed only on the message).
+
+New regressions:
+* **Status:** 3 accepted; 0, 1, 2, 4 and 127 refused. In resume mode, a half-copied folder is accepted, and
+  `PG_VERSION` or `postmaster.pid` present, 1 or 0 refused. Codex's status-4 restore is refused with nothing
+  changed.
+* **Journals:** a completed recovery cannot be restarted by the older journal, nor by the completed one, with
+  the later data untouched and earlier failed states kept. Only the newest interrupted journal resumes. The
+  crash window and a leftover partial temporary do not block.
+* **Aliases:** Codex's bind-aliased backup inside the installation, and a failed state under an alias of a folder
+  inside it.
+* **Paths:** five non-canonical forms; Codex's double slash through `runtime_access`.
+* **Credentials:** the configured folder valid passes; missing, outside or empty refuses; a missing configured
+  files root refuses; a complete PostgreSQL rehearsal with a missing configured credentials folder issues no
+  receipt.
+* **TMPDIR:** 0711 and 0710 rehearse; 0700 refuses and leaves nothing behind; a 120-character-deep `TMPDIR`
+  rehearses; an over-long socket is refused clearly.
+* **Python -O:** a non-canonical path is still refused.
+
+**Known limitations.**
+* The status-4 exception for resume relies on the absence of `PG_VERSION` and `postmaster.pid` together with no
+  service process. A cluster started by another user against a half-copied folder is outside the offline
+  assumption.
+* `superseded_by` is written into the earlier journal: the only change ever made to an earlier recovery
+  artifact, and it adds a field without removing anything.
+* `startup_environment` mirrors `local_staging.service_env`'s precedence by reading its code, not by importing it.
+  If the launcher's precedence changes, both must change together.
+* The bind-mount tests need root and `mount`: available in WSL and on GitHub's runners.
+* Everything Codex listed before still stands: a startup gate is not acceptance, no decryption of the protected
+  files, and the maintenance window as the settings serialization.
+
+**Preservation.** The owner's installation was not accessed. No live operation was run. Production,
+`release/staging-v1` and the other worktrees are unchanged. PR #40 stays in draft. Codex's audit folder is kept
+as found; this round's resources were under `/var/tmp/k4` and `/var/tmp/ku-pg-*`.
+

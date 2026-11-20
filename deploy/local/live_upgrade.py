@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -243,6 +244,15 @@ def _identity(path):
     return st.st_dev, st.st_ino
 
 
+def _directories(tree):
+    """(device, inode) of every folder in a tree, the tree itself included, links not followed."""
+    found = set()
+    for folder, dirs, _files in os.walk(tree, followlinks=False):
+        found.add(_identity(folder))
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(folder, d))]
+    return found
+
+
 def _within(path, other):
     return path == other or other in path.parents
 
@@ -293,6 +303,16 @@ def restore_preflight(root, backup, failed, manifest, *, earlier=()):
     for ancestor in root.parents:
         require(_identity(ancestor) not in (_identity(backup), _identity(backup / "payload")),
                 "the installation is inside the backup")
+    # By identity inside the trees too: a bind-mount alias elsewhere of a folder INSIDE the installation or the
+    # backup has that folder's device and inode (Codex: a backup inside the root, reached through an alias).
+    root_dirs, backup_dirs = _directories(root), _directories(backup)
+    require(_identity(backup) not in root_dirs and _identity(backup / "payload") not in root_dirs,
+            "the backup is inside the installation")
+    require(_identity(root) not in backup_dirs, "the installation is inside the backup")
+    earlier_dirs = set().union(*(_directories(Path(e)) for e in earlier)) if earlier else set()
+    for ancestor in (failed.parent, *failed.parent.parents):
+        require(_identity(ancestor) not in root_dirs | backup_dirs | earlier_dirs,
+                "the failed state would be inside the installation, the backup or an earlier failed state")
     require(_mount_id(failed.parent) == _mount_id(root),
             "the failed state must be on the installation's own mount (it is moved there, not copied)")
     needed = sum(item.get("size", 0) for item in manifest["files"].values())
@@ -306,9 +326,16 @@ def _write_journal(path, value, *, create=False):
     if create:
         save_json(path, value)
         return
-    temporary = path.with_name(path.name + ".new")
+    # A fresh temporary each time: an earlier update interrupted part-way leaves its partial temporary, which is
+    # kept as evidence and never blocks the next update.
+    temporary = path.with_name(f"{path.name}.new-{secrets.token_hex(6)}")
     save_json(temporary, value)
     os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _restore_into(root, backup, manifest, failed, uid, gid, journal):
@@ -349,12 +376,22 @@ def _restore_into(root, backup, manifest, failed, uid, gid, journal):
     return {"restored": True, "failed_state": str(failed), "journal": str(journal_path), "runtime": runtime}
 
 
-def _offline_for_recovery(root, bindir, uid, gid):
-    """No process of the service identity (PostgreSQL runs as it), and no running PostgreSQL in the root."""
+def _offline_for_recovery(root, bindir, uid, gid, *, partial=False):
+    """No process of the service identity (PostgreSQL runs as it), and PostgreSQL confirmed stopped: pg_ctl status
+    3 only. 0 (running), 1, 4 and anything else establish nothing and refuse. One exception, for resume-restore
+    only (partial=True): a half-copied data folder that is not a cluster at all (no PG_VERSION, no
+    postmaster.pid) answers 4 and cannot run; with no service process, that is accepted."""
     no_service_processes(uid)
-    if (root / "pg").is_dir():
-        result = Cluster(root / "pg", bindir, uid, gid).command("-D", str(root / "pg"), "status")
-        require(result.returncode != 0, "PostgreSQL is running; stop it first")
+    pg = Path(root) / "pg"
+    if pg.is_dir() and not pg.is_symlink():
+        code = Cluster(pg, bindir, uid, gid).command("-D", str(pg), "status").returncode
+        incomplete = (partial and code == 4 and not os.path.lexists(pg / "PG_VERSION")
+                      and not os.path.lexists(pg / "postmaster.pid"))
+        require(code == 3 or incomplete,
+                f"PostgreSQL is not confirmed stopped (pg_ctl status {code}); nothing was changed")
+    else:
+        require(not os.path.lexists(pg) or partial, "the installation's database folder is not a plain folder")
+        require(not pg.is_symlink(), "the installation's database folder is a link")
     no_service_processes(uid)
 
 
@@ -400,6 +437,12 @@ def _journal_chain(journal_path, root, backup, backup_hash, manifest):
         chain.append((path, journal))
         path = Path(journal["resumes"]) if journal.get("resumes") else None
     require(chain[0][1]["phase"] != "complete", "that restore completed; nothing to resume")
+    superseded = chain[0][1].get("superseded_by")
+    require(not superseded or not os.path.lexists(superseded),
+            "that recovery journal was superseded by a later recovery; only the newest journal can be resumed")
+    for (later_path, _later), (_earlier_path, earlier) in zip(chain, chain[1:]):
+        require(earlier.get("superseded_by") in (None, str(later_path)),
+                "the recovery journal chain is inconsistent")
     return chain
 
 
@@ -436,11 +479,18 @@ def resume_restore(root, backup, backup_hash, journal_path, failed_state, bindir
     pg = manifest["files"].get("pg")
     require(pg is not None, "the backup has no database cluster")
     uid, gid = pg["uid"], pg["gid"]                     # The service identity, from the verified backup.
-    _offline_for_recovery(root, bindir, uid, gid)
+    _offline_for_recovery(root, bindir, uid, gid, partial=True)
     restore_preflight(root, backup, failed, manifest, earlier=earlier)
+    head_path, head = chain[0]
+    new_journal = failed.with_name(failed.name + JOURNAL)
+    # This transaction supersedes the one it resumes, before anything changes: the older journal can never be
+    # replayed once a later transaction exists (completed or not). A crash before the new journal exists leaves
+    # the older one usable: superseded_by then names a journal that does not exist.
+    head["superseded_by"] = str(new_journal)
+    _write_journal(head_path, head)
     journal = {"format": 1, "operation": "resume-restore", "root": str(root), "device": manifest["device"],
                "inode": manifest["inode"], "activation": manifest["activation"], "backup": str(backup),
-               "backup_sha256": backup_hash, "resumes": str(chain[0][0])}
+               "backup_sha256": backup_hash, "resumes": str(head_path)}
     return _restore_into(root, backup, manifest, failed, uid, gid, journal)
 
 
