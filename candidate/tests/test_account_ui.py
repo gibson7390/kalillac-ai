@@ -786,6 +786,40 @@ def test_unknown_email_and_wrong_password_share_one_message(page):
         "Check both and try again. If you’ve forgotten your password, you can reset it.")
 
 
+def test_a_mistyped_password_is_a_compact_notice_not_an_alarm(page):
+    """An ordinary mismatch: the same words and the same focus, in a compact notice with a small mark and no
+    red bar. A real problem (too many attempts) keeps the error presentation."""
+    shown = {}
+    for name, status, body, extra in (("mismatch", 401, {"error": "invalid_credentials"}, {}),
+                                      ("throttled", 429, {"error": "too_many_attempts"}, {"Retry-After": "130"})):
+        page.site.api.override("POST", "/api/account/login", status, body, extra)
+        sign_in_form(page)
+        page.type_into("#email", EMAIL)
+        page.type_into("#password", "not the right password")
+        page.click_selector("button[type=submit]")
+        page.wait_for("document.querySelector('[data-testid=\"account-notice\"]')")
+        shown[name] = page.eval("""
+            const n = document.querySelector('[data-testid="account-notice"]');
+            const style = getComputedStyle(n);
+            const icon = n.querySelector('svg');
+            return { classes: n.className, role: n.getAttribute('role'), labelled: !!n.getAttribute('aria-labelledby'),
+                     height: n.getBoundingClientRect().height, leftBar: parseFloat(style.borderLeftWidth),
+                     icon: icon ? [icon.getAttribute('aria-hidden'), icon.getBoundingClientRect().width] : null,
+                     focused: document.activeElement === n, width: n.getBoundingClientRect().width,
+                     formWidth: document.querySelector('form').getBoundingClientRect().width };""")
+    mismatch, throttled = shown["mismatch"], shown["throttled"]
+    assert mismatch["classes"] == "acct-notice acct-notice-caution"
+    assert throttled["classes"] == "acct-notice acct-notice-error"
+    assert mismatch["icon"] == ["true", 18] and throttled["icon"] is None
+    assert mismatch["leftBar"] == 1 and throttled["leftBar"] == 3
+    assert mismatch["height"] < throttled["height"] and mismatch["height"] <= 72       # Two short lines.
+    # Still announced and focused exactly as before, and no wider than the form it belongs to.
+    assert mismatch["role"] == "group" and mismatch["labelled"] and mismatch["focused"]
+    assert mismatch["width"] <= mismatch["formWidth"] + 0.5
+    # The password-reset way out is still right there.
+    assert page.text("[data-testid='link-forgot-password']") == "Forgot password?"
+
+
 def test_throttling_uses_retry_after_without_naming_the_account(page):
     page.site.api.override("POST", "/api/account/login", 429, {"error": "too_many_attempts"}, {"Retry-After": "130"})
     sign_in_form(page)
@@ -1913,15 +1947,43 @@ def test_a_free_account_sees_what_premium_adds_only_as_this_deployment_offers_it
     assert section.startswith("What Kalillac Premium adds")
     assert page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] li')]"
                      ".map(li => li.dataset.testid);") == ["premium-deep", "premium-files"]
-    # Calm: no price, no urgency, no second purchase button; the upgrade stays in Plan and billing below.
+    # Calm: no amount, no urgency, no second purchase button; the upgrade stays in Plan and billing below.
     lower = section.lower()
-    for word in ("$", "€", "£", "price", "now", "today", "limited", "don’t miss", "unlimited"):
+    for word in ("$", "€", "£", "price", "now", "today", "limited", "don’t miss", "unlimited", "best", "better",
+                 "guarantee"):
         assert word not in lower, word
-    assert page.eval("return document.querySelectorAll('[data-testid=\"premium-discovery\"] button, "
-                     "[data-testid=\"premium-discovery\"] a').length;") == 0
+    # Each capability is described by what it is for.
+    deep, files = (page.text(f"[data-testid='premium-{key}']") for key in ("deep", "files"))
+    assert deep.startswith("Deep reasoning") and all(
+        phrase in deep for phrase in ("complex programming", "mathematical reasoning", "multi-step analysis"))
+    assert files.startswith("Files") and "supported documents" in files and "download" in files
+    # One quiet way on: it is not a purchase, it only brings Plan and billing (below) into view and focus.
+    controls = page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] button, "
+                         "[data-testid=\"premium-discovery\"] a')].map(e => [e.tagName, e.type, "
+                         "e.innerText.trim(), e.className]);")
+    assert controls == [["BUTTON", "button", "Explore Kalillac Premium",
+                         "acct-button acct-button-secondary acct-button-compact"]]
     order = page.eval("return [...document.querySelectorAll('main section')].map(s => s.dataset.testid || '');")
     assert order.index("premium-discovery") < order.index("billing-section")
     assert page.text("[data-testid='button-upgrade']") == "Upgrade to Kalillac Premium"
+    page.resize((1280, 420), False)                    # A short window: Plan and billing starts off screen.
+    page.eval("window.scrollTo(0, 0);")
+    before = (len(page.site.api.calls), page.eval("return location.href;"))
+    assert page.eval("return document.getElementById('acct-billing-heading').getBoundingClientRect().top "
+                     "> window.innerHeight;")
+    page.click_selector("[data-testid='button-explore-premium']")
+    page.wait_for("document.activeElement && document.activeElement.id === 'acct-billing-heading'")
+    # In view, and clear of the fixed header (not scrolled underneath it).
+    page.wait_for("(() => { const r = document.getElementById('acct-billing-heading').getBoundingClientRect(); "
+                  "const h = document.querySelector('header').getBoundingClientRect(); "
+                  "return r.top >= h.bottom && r.bottom <= window.innerHeight; })()")
+    # Nothing was requested, bought or navigated to; the address is untouched.
+    assert (len(page.site.api.calls), page.eval("return location.href;")) == before
+    # Where the cost is found is said plainly, and no amount is invented anywhere on the page.
+    assert page.text("[data-testid='billing-upgrade-note']") == (
+        "Upgrading opens Stripe’s secure checkout, where you can review what Kalillac Premium costs before you "
+        "pay. Paid access is added after Stripe confirms the payment, which can take a few minutes.")
+    assert not re.search(r"[$€£]\s?\d|\d\s?(usd|eur|gbp)|per month|/month|/mo\b", page.text("main").lower())
 
 
 @pytest.mark.parametrize("modes,files,expected", [

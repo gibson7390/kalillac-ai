@@ -23,7 +23,8 @@ import './account.css';
 
 /* --- page-lifetime memory ---------------------------------------------------- */
 
-type NoticeData = { tone: 'error' | 'success' | 'info'; title: string; body?: ReactNode };
+// 'caution': an everyday slip the customer can simply correct (a mistyped password), shown compactly.
+type NoticeData = { tone: 'error' | 'success' | 'info' | 'caution'; title: string; body?: ReactNode };
 
 const memory: { email: string; notice: NoticeData | null } = { email: '', notice: null };
 
@@ -245,8 +246,16 @@ const Notice = ({ notice, focusRef }: { notice: NoticeData; focusRef?: RefObject
   return (
     <div className={`acct-notice acct-notice-${notice.tone}`} role="group" aria-labelledby={id}
          tabIndex={-1} ref={focusRef} data-testid="account-notice">
-      <p className="acct-notice-title" id={id}>{notice.title}</p>
-      {notice.body && <div className="acct-notice-body">{notice.body}</div>}
+      {notice.tone === 'caution' && (
+        <svg className="acct-notice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+             strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5v.01"/>
+        </svg>
+      )}
+      <div className="acct-notice-copy">
+        <p className="acct-notice-title" id={id}>{notice.title}</p>
+        {notice.body && <div className="acct-notice-body">{notice.body}</div>}
+      </div>
     </div>
   );
 };
@@ -403,7 +412,7 @@ function SignInPage() {
         return;
       }
       setNotice(result.status === 401 && result.code === 'invalid_credentials'
-        ? { tone: 'error', title: 'That email and password don’t match',
+        ? { tone: 'caution', title: 'That email and password don’t match',
             body: 'Check both and try again. If you’ve forgotten your password, you can reset it.' }
         : result.status === 429
           ? { tone: 'error', title: 'Too many sign-in attempts', body: waitPhrase(result.retryAfter) }
@@ -1067,8 +1076,10 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
 }
 
 /* --- Kalillac Premium, for a Free account ------------------------------------------------------------------------
-   What Premium adds here, and nothing this deployment does not offer (account-api getPremiumCapabilities).
-   No price and no urgency: the upgrade itself is in Plan and billing, just below. */
+   What Premium adds here, as practical benefits, and nothing this deployment does not offer (account-api
+   getPremiumCapabilities). No amount is stated (this page is not told one) and there is no urgency: Explore
+   Kalillac Premium only brings Plan and billing, just below, into view, where the upgrade and Stripe's checkout
+   (where the cost is shown before any payment) are. */
 
 type PremiumItem = { key: string; title: string; text: string; icon: ReactNode };
 
@@ -1088,15 +1099,22 @@ function PremiumDiscovery() {
   const items: PremiumItem[] = [];
   if (capabilities.deepReasoning) {
     items.push({ key: 'deep', title: 'Deep reasoning',
-      text: 'Choose Deep in the chat when a question deserves more careful, step-by-step thinking.',
+      text: 'Extra reasoning effort for demanding work: complex programming problems, mathematical reasoning and multi-step analysis. Choose Deep in the chat when a question calls for it.',
       icon: <svg {...PREMIUM_ICON_PROPS}><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg> });
   }
   if (capabilities.files) {
     items.push({ key: 'files', title: 'Files',
-      text: 'Attach documents and images to a message, and have Kalillac create Word, Excel, PowerPoint and PDF files.',
+      text: 'Attach supported documents to a message and ask Kalillac to summarize or work with them, and have it create Word, Excel, PowerPoint and PDF files you can download.',
       icon: <svg {...PREMIUM_ICON_PROPS}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h4"/></svg> });
   }
   if (!items.length) return null;
+  // Plan and billing, brought into view and focused (its heading), as the header's Billing link does.
+  const explore = () => {
+    const heading = document.getElementById('acct-billing-heading');
+    if (!heading) return;
+    heading.scrollIntoView({ block: 'start' });
+    heading.focus({ preventScroll: true });
+  };
   return (
     <section className="acct-section acct-premium" aria-labelledby="acct-premium-heading" data-testid="premium-discovery">
       <h2 id="acct-premium-heading" className="acct-section-title acct-premium-title">
@@ -1110,6 +1128,14 @@ function PremiumDiscovery() {
           </li>
         ))}
       </ul>
+      <div className="acct-premium-more">
+        <button type="button" className="acct-button acct-button-secondary acct-button-compact" onClick={explore}
+                data-testid="button-explore-premium">
+          Explore Kalillac Premium
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"
+               strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14"/><path d="m6 13 6 6 6-6"/></svg>
+        </button>
+      </div>
     </section>
   );
 }
@@ -1469,7 +1495,7 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutR
 
   return (
     <section className="acct-section" aria-labelledby="acct-billing-heading" data-testid="billing-section">
-      <h2 id="acct-billing-heading" className="acct-section-title">Plan and billing</h2>
+      <h2 id="acct-billing-heading" className="acct-section-title" tabIndex={-1}>Plan and billing</h2>
       {returned && !notice && (
         <div data-testid="checkout-return">
           <Notice notice={returned} />
@@ -1493,7 +1519,7 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutR
       )}
       {tier === 'free' && !awaitingConfirmation && (needsVerification
         ? <p className="acct-section-text" data-testid="billing-needs-verification">Verify your email address before starting a paid plan.</p>
-        : <p className="acct-section-text">Upgrading opens Stripe’s secure checkout. Paid access is added after Stripe confirms the payment, which can take a few minutes.</p>)}
+        : <p className="acct-section-text" data-testid="billing-upgrade-note">Upgrading opens Stripe’s secure checkout, where you can review what Kalillac Premium costs before you pay. Paid access is added after Stripe confirms the payment, which can take a few minutes.</p>)}
       {notice && <Notice notice={notice} focusRef={noticeRef} />}
       {/* Just back from a paid Checkout: no second purchase is offered while Stripe confirms the first. */}
       {(status.portal_available || (tier === 'free' && !needsVerification && !awaitingConfirmation)) && (

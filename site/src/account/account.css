@@ -125,6 +125,13 @@
 .acct-notice-error .acct-notice-title { color: #8f1d30; }
 .acct-notice-success { border-color: #c4e6e3; border-left-color: #008c8d; background: #f2fbfa; }
 .acct-notice-success .acct-notice-title { color: #035f60; }
+/* An everyday slip (a mistyped password): compact, a small mark, no red bar. The page is not in trouble. */
+.acct-notice-caution { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start;
+                       padding: 10px 14px 11px; border: 1px solid #eadfc8; border-radius: 10px; background: #fffbf3;
+                       font-size: 13.5px; line-height: 1.5; }
+.acct-notice-caution .acct-notice-title { color: #5c3d0c; font-size: 14px; font-weight: 700; }
+.acct-notice-caution .acct-notice-body { margin-top: 1px; color: #5a6781; }
+.acct-notice-icon { width: 18px; height: 18px; margin-top: 1px; color: #b07514; }
 .acct-section .acct-notice { margin: 16px 0 0; }
 /* The return from Stripe: its notice, then (while the payment is confirmed) one quiet re-check. */
 [data-testid='checkout-return'] { margin-bottom: 16px; }
@@ -266,5 +273,10 @@
 .acct-premium-icon svg { width: 19px; height: 19px; }
 .acct-premium-list strong { display: block; color: var(--acct-ink); font-size: 15px; }
 .acct-premium-text { display: block; margin-top: 2px; color: var(--acct-soft); font-size: 14px; line-height: 1.5; }
+/* Brought into view by Explore Kalillac Premium and by the header's Billing: clear of the fixed header. */
+#acct-billing-heading { scroll-margin-top: calc(var(--k-header-h, 72px) + 24px); }
+.acct-premium-more { margin-top: 16px; padding-top: 14px; border-top: 1px solid #dfe8f7; }
+.acct-premium-more .acct-button { gap: 8px; }
+.acct-premium-more .acct-button svg { width: 15px; height: 15px; flex: none; }
 
 .acct-identity + .acct-premium { margin-top: 18px; }
