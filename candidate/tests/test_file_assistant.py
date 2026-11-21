@@ -203,3 +203,100 @@ def test_the_real_worker_carries_the_assistant(store):
                   [say("A two-slide deck.")])
     result = run_file_assistant("Make a deck", [], FileRequest("account-a", store), model)
     assert result.files[0].filename == "plan.pptx"
+
+
+# --- refusal guidance (document-quality benchmark, 2026-11-21) ---------------------------------
+# A refused specification used to come back as a bare code for the commonest mistakes (an empty table
+# header cell answered only "invalid_table"), with nothing to say which part was wrong.
+
+SECRET = "ZX-CONFIDENTIAL-7731"
+
+
+def _refusal(store, file_format, raw):
+    return assistant.execute(request_for(store), "create_file", {"format": file_format, "spec": raw})
+
+
+def test_every_refusal_a_specification_can_meet_has_a_bounded_hint():
+    from pathlib import Path
+    import re
+    package = Path(assistant.__file__).resolve().parent
+    codes = set()
+    for name in ("spec.py", "deck.py", "generation.py"):
+        source = (package / name).read_text(encoding="utf-8")
+        codes |= set(re.findall(r'"((?:invalid|unknown)_[a-z_]+|[a-z]+_too_large|unsupported_format)"', source))
+    assert len(codes) >= 30 and codes <= set(assistant.HINTS), sorted(codes - set(assistant.HINTS))
+    for code, hint in assistant.HINTS.items():
+        # One line of fixed text, short enough to cost little and never a place for content to appear.
+        assert 20 <= len(hint) <= 420 and "\n" not in hint and "{" not in hint.replace('{"text"', ""), code
+
+
+def test_a_refusal_says_which_part_of_the_specification_was_refused(store):
+    document = {"title": SECRET, "blocks": [
+        {"type": "paragraph", "text": SECRET}, {"type": "heading", "level": 1, "text": SECRET},
+        {"type": "table", "header": ["", SECRET], "rows": [[SECRET, "1"]]}]}
+    refused = _refusal(store, "docx", document)
+    assert refused == {"status": "refused", "code": "invalid_table", "hint": assistant.HINTS["invalid_table"],
+                       "where": "blocks[2] (table)"}
+    deck = {"title": SECRET, "slides": [{"layout": "title", "title": SECRET},
+                                        {"layout": "points", "title": SECRET, "points": [SECRET] * 7}]}
+    assert _refusal(store, "pptx", deck)["where"] == "slides[1] (points)"
+    workbook = {"title": SECRET, "sheets": [
+        {"name": "Fine", "columns": [{"header": "Item", "format": "text"}], "rows": [["a"]]},
+        {"name": SECRET[:20], "columns": [{"header": "Item", "format": "text"}, {"header": "Amount", "format": "number"}],
+         "rows": [["a", 1], ["b", SECRET], ["c", 3]]}]}
+    refused = _refusal(store, "xlsx", workbook)
+    assert (refused["code"], refused["where"]) == ("invalid_cell", "sheets[1] cell B3")
+    workbook["sheets"][1]["rows"][1] = ["b", 2]
+    workbook["sheets"][1]["charts"] = [{"kind": "pie", "category": "Item", "series": ["No such column"]}]
+    assert _refusal(store, "xlsx", workbook)["where"] == "sheets[1]"
+    workbook["sheets"][1]["charts"] = []
+    workbook["sheets"][1]["rows"].append(["Total", {"formula": "=SUM(B2:B4)"}])
+    workbook["sheets"][1]["total_row"] = True
+    workbook["sheets"][1]["rows"][0] = ["a"]                      # A row one cell short.
+    assert _refusal(store, "xlsx", workbook)["where"] == "sheets[1] row 2"
+
+
+def test_a_refusal_never_repeats_what_the_specification_says(store):
+    cases = [
+        ("pdf", {"title": "T", "blocks": [{"type": SECRET, "text": SECRET}]}),
+        ("pdf", {"title": "T", "blocks": [{"type": "chart", "kind": SECRET, "categories": [SECRET], "series": []}]}),
+        ("pdf", {"title": "T", SECRET: 1, "blocks": [{"type": "paragraph", "text": "x"}]}),
+        ("pptx", {"title": "T", "slides": [{"layout": SECRET, "title": SECRET}]}),
+        ("xlsx", {"title": "T", "sheets": [{"name": SECRET, "columns": [{"header": SECRET, "format": SECRET}],
+                                            "rows": [[SECRET]]}]}),
+        ("xlsx", {"title": "T", "sheets": [{"name": "A", "columns": [{"header": "h", "format": "date"}],
+                                            "rows": [[SECRET]]}]}),
+    ]
+    for file_format, raw in cases:
+        refused = _refusal(store, file_format, raw)
+        assert refused["status"] == "refused" and refused["hint"] == assistant.HINTS[refused["code"]]
+        assert SECRET not in json.dumps(refused)
+        # A position is made of indices and the grammar's own words, nothing else.
+        import re
+        assert re.fullmatch(r"(blocks|slides|sheets)\[\d+\]( \([a-z_]+\))?( (cell [A-Z]+\d+|row \d+))?",
+                            refused.get("where", "blocks[0]")), refused
+    assert _refusal(store, "pdf", {"title": "T", "blocks": [{"type": SECRET, "text": "x"}]})["where"] == "blocks[0]"
+    # A refusal that is not about the specification's shape claims no position.
+    assert assistant._where({"title": "T", "blocks": []}, "pdf", "pdf_layout_failed") is None
+    assert assistant._where("not an object", "pdf", "invalid_structure") is None
+    assert assistant._where({"title": "T", "blocks": "x"}, "nonsense", "invalid_blocks") is None
+
+
+def test_the_instructions_state_the_options_and_limits_the_engine_enforces():
+    for stated in ('"align"?', '{"value","format","symbol"?}', '"y_title"', "Slide text limits", "(2-8)",
+                   "(2-3 columns)", "metric label 60, value 24, detail 80", "every header cell has text",
+                   "up green and down red", '"where"'):
+        assert stated in FILE_INSTRUCTIONS, stated
+    # What the instructions promise is what the validators accept.
+    table = {"type": "table", "header": ["Item", "Share"], "rows": [["A", "40%"]], "align": ["left", "center"]}
+    assert generate({"title": "T", "blocks": [table]}, "md").data
+    sheet = {"name": "Inputs", "columns": [{"header": "Name", "format": "text"}, {"header": "Value", "format": "number"}],
+             "rows": [["Rate", {"value": 0.05, "format": "percent"}], ["Fee", {"value": 12, "format": "currency", "symbol": "€"}]],
+             "charts": [{"kind": "column", "category": "Name", "series": ["Value"], "y_title": "Amount"}]}
+    assert generate({"title": "T", "sheets": [sheet]}, "xlsx").data
+    for field, limit in (("label", 60), ("value", 24), ("detail", 80)):
+        item = {"label": "L", "value": "V", "detail": "D", field: "x" * (limit + 1)}
+        with pytest.raises(SpecError):
+            generate({"title": "T", "blocks": [{"type": "metrics", "items": [item, item]}]}, "md")
+    # The guidance is kept compact: it is sent with every file request.
+    assert len(FILE_INSTRUCTIONS) < 9_000
