@@ -556,8 +556,9 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          # 747, plus the development preview's isolation (18: every preview process, mock services only).
-          assert totals == {"tests": 765, "skipped": 0, "failures": 0, "errors": 0}
+          # 747, plus the development preview's isolation (32: every preview process in every lifecycle, and libpq
+          # services; mock services only).
+          assert totals == {"tests": 779, "skipped": 0, "failures": 0, "errors": 0}
           PY
 
       # Local staging's reset and stop as root, as the owner runs them: among them Codex's F1 scenario, an

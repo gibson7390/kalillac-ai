@@ -276,7 +276,8 @@ def test_the_manager_starts_every_child_through_the_fence():
     assert f'f"http://127.0.0.1:{{APP_PORT}}"' in run_source
     sys.path.insert(0, str(TOOLS))
     command = source[source.index("def child_command"):source.index("def run(")]
-    assert '"preview_fenced.py"' in command and "CHILDREN" in command
+    assert "*FENCED_LAUNCHER" in command and "CHILDREN" in command
+    assert 'FENCED_LAUNCHER = (str(TOOLS / "preview_fenced.py"),)' in source
     environment = source[source.index("def child_environment"):source.index("def child_command")]
     assert "check_environment(env, database_port=PG_PORT)" in environment
     assert '"KALILLAC_PREVIEW_DATABASE_PORT": str(PG_PORT)' in environment
@@ -361,3 +362,308 @@ def test_the_children_keep_outbound_access_except_to_protected_ports():
     for host, port in (("api.example.com", 8010), ("192.168.1.20", 8011), ("localhost", 55433)):
         with pytest.raises(preview_guard.PreviewFenceError):
             preview_guard.check(host, port, strict=False)
+
+
+# ==== Review corrections: setup's processes are fenced too; a libpq service cannot go around the fence ====
+
+LINUX_ONLY = pytest.mark.skipif(os.name == "nt", reason="local staging's process tooling is Linux-only (WSL, CI)")
+
+
+def test_every_lifecycle_starts_its_python_processes_through_one_fenced_path():
+    """Statically: local staging's tooling has one way to start a Python process, the preview routes it through
+    the fenced launcher and the settings check, and it does so in configure(), which setup, a resumed setup,
+    run and status all call first."""
+    staging = (TOOLS / "local_staging.py").read_text(encoding="utf-8")
+    tree = ast.parse(staging)
+    # sys.executable appears once, in python_command; nothing else builds a `python ...` command.
+    assert staging.count("sys.executable") == 1
+    command = ast.get_source_segment(staging, next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "python_command"))
+    assert 'return [sys.executable, "-B", *LAUNCHER, script, *arguments]' in command
+    # The application and panel (_spawn) and the V1 transition take their command and environment from it.
+    assert staging.count("subprocess.Popen(") == 1
+    assert "subprocess.Popen(python_command(_script(name), *extra)" in staging
+    assert "env={**child_environment(env), INSTANCE: token}" in staging
+    assert 'as_user(python_command("tools/v1_security_transition.py"' in staging
+    assert "uid, gid, env=child_environment(env), cwd=CANDIDATE" in staging
+    assert "LAUNCHER: tuple = ()" in staging and "CHILD_ENVIRONMENT = None" in staging     # Off for local staging.
+
+    preview = (TOOLS / "dev_preview.py").read_text(encoding="utf-8")
+    functions = {n.name: ast.get_source_segment(preview, n) for n in ast.parse(preview).body
+                 if isinstance(n, ast.FunctionDef)}
+    assert "fence_children()" in functions["configure"]
+    assert "ls.LAUNCHER = FENCED_LAUNCHER" in functions["fence_children"]
+    assert "ls.CHILD_ENVIRONMENT = child_environment" in functions["fence_children"]
+    assert 'FENCED_LAUNCHER = (str(TOOLS / "preview_fenced.py"),)' in preview
+    for name in ("setup", "run", "status"):
+        assert functions[name].lstrip().split("\n")[1].strip().startswith("configure("), name
+    # setup starts children only through local staging's tooling (ls.start, ls.setup): no launch of its own.
+    assert "Popen" not in functions["setup"] and "sys.executable" not in functions["setup"]
+
+
+@pytest.fixture
+def preview_tools(monkeypatch):
+    """dev_preview and local_staging as the preview configures them, restored afterwards."""
+    monkeypatch.syspath_prepend(str(TOOLS))
+    monkeypatch.syspath_prepend(str(CANDIDATE))
+    import dev_preview as dev
+    monkeypatch.setattr(dev.ls, "LAUNCHER", dev.ls.LAUNCHER)
+    monkeypatch.setattr(dev.ls, "CHILD_ENVIRONMENT", dev.ls.CHILD_ENVIRONMENT)
+    return dev
+
+
+PREVIEW_SETTINGS = {"KALILLAC_DB_HOST": "127.0.0.1", "KALILLAC_DB_PORT": "55434",
+                    "KALILLAC_SITE_ORIGIN": "http://localhost:8020"}
+
+
+def mocked_setup(dev, monkeypatch, tmp_path, *, resumed, settings):
+    """dev_preview.setup with process creation, health checks and provisioning mocked: nothing is started and
+    nothing is contacted. Returns the commands and environments it would have launched."""
+    ls = dev.ls
+    root = tmp_path / "preview"
+    paths = {name: root / name for name in ("state", "run", "webroot")}
+    for path in paths.values():
+        path.mkdir(parents=True)
+    if resumed:
+        (root / "local.json").write_text("{}")
+        (root / "demo-accounts.txt").write_text("synthetic")
+    launched = []
+
+    class Process:
+        pid = 1234567
+
+    def popen(command, **kwargs):
+        launched.append((list(command), dict(kwargs.get("env") or {})))
+        return Process()
+
+    def configure(create=False):
+        dev.fence_children()                           # As the real configure() does, last.
+        return root
+
+    def provisioned(args):
+        # A first setup: provisioning (PostgreSQL, the deployment, the transition) is not run here; it ends by
+        # starting the application and panel through local staging's own start, as build_and_finish does.
+        (root / "local.json").write_text("{}")
+        ls.start(args)
+
+    for name, value in (("ROOT", root), ("APP_PORT", 8021), ("WEB_PORT", 8020), ("PG_PORT", 55434),
+                        ("ORIGIN", "http://localhost:8020")):
+        monkeypatch.setattr(ls, name, value)
+    monkeypatch.setattr(dev, "configure", configure)
+    monkeypatch.setattr(ls, "identity", lambda: (os.getuid(), os.getgid(), "synthetic", str(root)))
+    monkeypatch.setattr(ls, "paths", lambda: paths)
+    monkeypatch.setattr(ls, "pg_start", lambda *a, **k: None)
+    monkeypatch.setattr(ls, "pg_bin", lambda home: "/unused-mock")
+    monkeypatch.setattr(ls, "service_env", lambda p, home: dict(settings))
+    monkeypatch.setattr(ls, "_running", lambda *a, **k: False)
+    monkeypatch.setattr(ls, "_get", lambda *a, **k: (200, b""))
+    monkeypatch.setattr(ls, "_started", lambda pid: 1)
+    monkeypatch.setattr(ls, "_boot", lambda: "synthetic")
+    monkeypatch.setattr(ls, "status", lambda args: None)
+    monkeypatch.setattr(ls, "stop", lambda args: None)
+    monkeypatch.setattr(ls, "seed", lambda paths: None)
+    monkeypatch.setattr(ls, "setup", provisioned)
+    monkeypatch.setattr(ls.subprocess, "Popen", popen)
+    dev.setup(None)
+    return launched
+
+
+@LINUX_ONLY
+@pytest.mark.parametrize("resumed", [False, True], ids=["first-setup", "resumed-setup"])
+def test_setup_starts_the_application_and_panel_through_the_fenced_launcher(preview_tools, monkeypatch, tmp_path,
+                                                                           resumed):
+    launched = mocked_setup(preview_tools, monkeypatch, tmp_path, resumed=resumed, settings=PREVIEW_SETTINGS)
+    fenced = str(TOOLS / "preview_fenced.py")
+    assert len(launched) == 2
+    for (command, env), script, port in zip(launched, ("local_staging_app.py", "local_staging_web.py"), ("8021", "8020")):
+        # python -B preview_fenced.py <the script> ...: the fence is installed in that process before its code runs.
+        assert command[1:3] == ["-B", fenced] and command[3].endswith(os.sep + script), command
+        assert command[command.index("--port") + 1] == port
+        # Its settings were checked, and carry the database port the launcher checks again inside the child.
+        assert env["KALILLAC_PREVIEW_DATABASE_PORT"] == "55434" and env["KALILLAC_DB_PORT"] == "55434"
+        assert "KALILLAC_LOCAL_INSTANCE" in env
+    # run uses the same launcher for the same scripts.
+    assert preview_tools.child_command("local_staging_app.py")[1:3] == ["-B", fenced]
+
+
+@LINUX_ONLY
+@pytest.mark.parametrize("resumed", [False, True], ids=["first-setup", "resumed-setup"])
+@pytest.mark.parametrize("override", [{"KALILLAC_DB_PORT": "55433"}, {"KALILLAC_SITE_ORIGIN": "http://localhost:8010"},
+                                      {"PGSERVICE": "staging"}])
+def test_setup_refuses_to_start_a_process_whose_settings_name_staging(preview_tools, monkeypatch, tmp_path,
+                                                                      resumed, override):
+    with pytest.raises(SystemExit):
+        launched = mocked_setup(preview_tools, monkeypatch, tmp_path, resumed=resumed,
+                                settings={**PREVIEW_SETTINGS, **override})
+        assert launched == []                              # Not reached: the refusal comes before any launch.
+    # Nothing was started: the refusal is the first thing that happens.
+    assert not (tmp_path / "preview" / "run").exists() or list((tmp_path / "preview" / "run").iterdir()) == []
+
+
+LIFECYCLE_STAND_IN = textwrap.dedent(r"""
+    import json, os, socket, sys, time
+    import psycopg
+    import preview_guard
+    P, A = int(os.environ["STAND_IN_PROTECTED"]), int(os.environ["STAND_IN_ALLOWED"])
+    out = {"argv": sys.argv[1:]}
+    def attempt(name, fn):
+        try:
+            fn()
+            out[name] = "reached"
+        except preview_guard.PreviewFenceError:
+            out[name] = "fenced"
+        except Exception as error:
+            out[name] = "error:" + type(error).__name__
+    attempt("socket", lambda: socket.create_connection(("127.0.0.1", P), timeout=3))
+    attempt("libpq", lambda: psycopg.connect(host="127.0.0.1", port=P, user="x", dbname="x", connect_timeout=3))
+    attempt("allowed", lambda: socket.create_connection(("127.0.0.1", A), timeout=3).close())
+    with open(os.environ["STAND_IN_RESULT"] + ".tmp", "w") as handle:
+        json.dump(out, handle)
+    os.replace(os.environ["STAND_IN_RESULT"] + ".tmp", os.environ["STAND_IN_RESULT"])
+    time.sleep(60)
+""")
+
+
+@LINUX_ONLY
+def test_a_process_started_by_local_stagings_own_launcher_runs_inside_the_fence(preview_tools, monkeypatch,
+                                                                              tmp_path, services):
+    """The real launch path setup uses (local_staging._spawn), with a stand-in for the application: the process
+    it starts cannot reach a protected stand-in by socket or libpq, still reaches an allowed service, is
+    recognised as local staging's own process and is stopped by its own stop."""
+    dev = preview_tools
+    ls = dev.ls
+    protected, allowed = services
+    script = tmp_path / "stand_in_app.py"
+    script.write_text(LIFECYCLE_STAND_IN, encoding="utf-8")
+    result = tmp_path / "result.json"
+    p = {"state": tmp_path / "state", "run": tmp_path / "run"}
+    for path in p.values():
+        path.mkdir()
+    monkeypatch.setattr(ls, "SCRIPTS", {"app": str(script)})
+    # run/ records are trusted only when root wrote them; this test's own user stands in for root here.
+    monkeypatch.setattr(ls, "_trusted_owners", lambda: {0, os.getuid()})
+    dev.fence_children()
+    env = fenced_env(protected[:1], **PREVIEW_SETTINGS, STAND_IN_PROTECTED=str(protected[0].port),
+                     STAND_IN_ALLOWED=str(allowed.port), STAND_IN_RESULT=str(result))
+    uid, gid = os.getuid(), os.getgid()
+    process = ls._spawn("app", ["--port", "8021"], p, uid, gid, env)
+    try:
+        deadline = time.monotonic() + 60
+        while not result.exists() and time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.1)
+        log = (p["state"] / "app.log").read_text(encoding="utf-8", errors="replace")
+        assert result.exists(), log[-2000:]
+        out = json.loads(result.read_text())
+        assert out == {"argv": ["--port", "8021"], "socket": "fenced", "libpq": "fenced", "allowed": "reached"}
+        assert protected[0].accepted == 0 and allowed.accepted == 1
+        assert "preview fence installed in stand_in_app.py" in log
+        # Local staging still recognises, and can stop, the process it started this way.
+        assert ls._running(p, "app", uid) == process.pid
+        assert ls._terminate(p, "app", uid) == "stopped"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(10)
+
+
+def test_the_v1_transition_tool_runs_under_the_fenced_launcher(tmp_path):
+    # The one other Python process setup starts. Its command line is unchanged by the launcher (here: its help).
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("KALILLAC_", "PG"))}
+    proc = subprocess.run([sys.executable, "-B", str(TOOLS / "preview_fenced.py"), "tools/v1_security_transition.py",
+                           "--help"], cwd=CANDIDATE, env=env, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "activate" in proc.stdout and "preview fence installed in v1_security_transition.py" in proc.stderr
+
+
+# ---- libpq services -------------------------------------------------------------------------------------------
+
+SERVICE_STAND_IN = textwrap.dedent(r"""
+    import asyncio, json, os
+    import psycopg, sqlalchemy
+    import preview_guard
+    A = int(os.environ["ALLOWED_PORT"])
+    out = {}
+    def attempt(name, fn):
+        try:
+            fn()
+            out[name] = "reached"
+        except preview_guard.PreviewFenceError:
+            out[name] = "fenced"
+        except Exception as error:
+            cause, seen = error, set()
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                if isinstance(cause, preview_guard.PreviewFenceError):
+                    out[name] = "fenced"
+                    return
+                cause = cause.__cause__ or cause.__context__
+            out[name] = "error:" + type(error).__name__
+    # What libpq itself would do with the service, read without connecting: it names the protected stand-in.
+    out["service-resolves-to"] = psycopg.pq.Conninfo.parse(b"service=stand_in") and [
+        (o.keyword.decode(), (o.val or b"").decode()) for o in psycopg.pq.Conninfo.parse(b"service=stand_in")
+        if o.keyword in (b"service",)]
+    attempt("service-dsn", lambda: psycopg.connect("service=stand_in"))
+    attempt("service-keyword", lambda: psycopg.connect(service="stand_in"))
+    attempt("service-uri", lambda: psycopg.connect("postgresql:///?service=stand_in"))
+    attempt("service-with-allowed-host", lambda: psycopg.connect(f"service=stand_in host=127.0.0.1 port={A}"))
+    attempt("service-async", lambda: asyncio.run(psycopg.AsyncConnection.connect("service=stand_in")))
+    attempt("service-sqlalchemy", lambda: sqlalchemy.create_engine(
+        "postgresql+psycopg://", connect_args={"service": "stand_in"}).connect())
+    os.environ["PGSERVICE"] = "stand_in"
+    attempt("service-environment", lambda: psycopg.connect(""))
+    attempt("service-environment-with-allowed-host", lambda: psycopg.connect(host="127.0.0.1", port=A, user="x"))
+    del os.environ["PGSERVICE"]
+    # Still allowed: a database named by host and port (the mock is not PostgreSQL: libpq fails after connecting).
+    attempt("allowed-host-and-port", lambda: psycopg.connect(host="127.0.0.1", port=A, user="x", dbname="x",
+                                                              connect_timeout=3))
+    print(json.dumps(out))
+""")
+
+
+def service_file(tmp_path, port):
+    path = tmp_path / "pg_service.conf"
+    path.write_text(f"[stand_in]\nhost=127.0.0.1\nport={port}\nuser=synthetic\ndbname=synthetic\n"
+                    "sslmode=disable\nconnect_timeout=2\n", encoding="utf-8")
+    return path
+
+
+def test_a_libpq_service_cannot_reach_a_protected_port(tmp_path, services):
+    """A synthetic service file that names a protected stand-in: every way of using it is refused before libpq
+    runs, and the stand-in receives nothing. A database named by host and port still connects."""
+    protected, allowed = services
+    env = fenced_env(protected, ALLOWED_PORT=str(allowed.port),
+                     PGSERVICEFILE=str(service_file(tmp_path, protected[0].port)))
+    proc = run_fenced(tmp_path, SERVICE_STAND_IN, env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    refused = {k: v for k, v in out.items() if k.startswith("service-") and k != "service-resolves-to"}
+    assert len(refused) == 8 and set(refused.values()) == {"fenced"}, refused
+    assert out["allowed-host-and-port"].startswith("error:")           # Attempted: libpq, not the fence, failed.
+    assert [s.accepted for s in protected] == [0, 0, 0] and allowed.accepted == 1
+
+
+def test_a_process_started_with_pgservice_never_starts(tmp_path, services):
+    protected, allowed = services
+    marker = tmp_path / "ran"
+    env = fenced_env(protected, PGSERVICE="stand_in", PGSERVICEFILE=str(service_file(tmp_path, protected[0].port)),
+                     KALILLAC_DB_HOST="127.0.0.1", KALILLAC_DB_PORT="55434", KALILLAC_PREVIEW_DATABASE_PORT="55434")
+    proc = run_fenced(tmp_path, f"open({str(marker)!r}, 'w').write('ran')\n", env)
+    assert proc.returncode != 0 and not marker.exists()
+    assert "PreviewFenceError" in proc.stderr and "PGSERVICE" in proc.stderr
+    assert [s.accepted for s in protected] == [0, 0, 0]
+
+
+def test_the_fence_refuses_a_service_wherever_it_is_named():
+    for conninfo, environ, keywords in (("service=x", {}, {}), ("", {"PGSERVICE": "x"}, {}), ("", {}, {"service": "x"}),
+                                        ("postgresql:///?service=x", {}, {}),
+                                        ("host=127.0.0.1 port=55434 service=x", {}, {})):
+        with pytest.raises(preview_guard.PreviewFenceError):
+            preview_guard.libpq_targets(conninfo, environ=environ, **keywords)
+    with pytest.raises(preview_guard.PreviewFenceError):
+        preview_guard.check_environment({"PGSERVICE": "x", "KALILLAC_DB_HOST": "127.0.0.1", "KALILLAC_DB_PORT": "55434"},
+                                        database_port=55434)
+    # A service file on its own names no destination: the preview's own database is unaffected.
+    assert preview_guard.libpq_targets("host=127.0.0.1 port=55434", environ={"PGSERVICEFILE": "/nowhere"}) == [
+        ("127.0.0.1", "55434")]
+    preview_guard.check_environment({"PGSERVICEFILE": "/nowhere", "KALILLAC_DB_HOST": "127.0.0.1",
+                                     "KALILLAC_DB_PORT": "55434"}, database_port=55434)

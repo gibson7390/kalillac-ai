@@ -11,6 +11,9 @@ It is enforced where connections are made, never only at urlopen:
     asyncio and every redirect any of them follows), checked before the connection is attempted;
   * libpq, which does not use Python sockets: psycopg's Connection.connect (and the async one) checks every
     host and port the connection string, its keywords and the PG* environment would use, before libpq runs.
+    A libpq service (service=NAME, or PGSERVICE) is refused outright: its host and port live in a service file
+    that only libpq reads, so they cannot be checked here, and the preview has no use for one (its database is
+    always named by host and port).
 
 A protected port is refused whatever the host is called (localhost, 127.0.0.2, 0.0.0.0, ::1, a LAN address, a
 decimal address, a Unix socket of that port). In strict mode (the manager, which only ever talks to the preview),
@@ -72,12 +75,21 @@ def check(host, port, *, strict=True) -> None:
         raise PreviewFenceError(f"the development preview refused a connection outside this machine: {host!r}")
 
 
+SERVICE_KEYS = ("PGSERVICE",)
+
+
 def libpq_targets(conninfo="", environ=None, **kwargs):
     """Every (host, port) libpq would try for this connection: the connection string and keywords, then the
-    PG* environment, then libpq's defaults. Several comma-separated hosts or ports are all returned."""
+    PG* environment, then libpq's defaults. Several comma-separated hosts or ports are all returned.
+
+    A connection that names a libpq service (service=NAME in the string or keywords, or PGSERVICE) is refused:
+    libpq would take its host and port from a service file, which this check cannot see."""
     environ = os.environ if environ is None else environ
     from psycopg.conninfo import conninfo_to_dict
     params = conninfo_to_dict(conninfo, **{k: v for k, v in kwargs.items() if v is not None})
+    if params.get("service") or any(environ.get(key) for key in SERVICE_KEYS):
+        raise PreviewFenceError("the development preview refused a PostgreSQL service connection: name the "
+                                "database by host and port")
     hosts = str(params.get("host") or params.get("hostaddr") or environ.get("PGHOST")
                 or environ.get("PGHOSTADDR") or "/var/run/postgresql").split(",")
     ports = str(params.get("port") or environ.get("PGPORT") or "5432").split(",")
@@ -190,6 +202,9 @@ def check_environment(environ, *, database_port=None) -> None:
     for key in ("PGPORT",):
         if environ.get(key, "").isdigit() and int(environ[key]) in ports:
             raise PreviewFenceError(f"{key} names local staging's port")
+    for key in SERVICE_KEYS:
+        if environ.get(key):
+            raise PreviewFenceError(f"{key} names a PostgreSQL service: the preview's database is named by host and port")
     for key, value in environ.items():
         if not any(key.endswith(suffix) for suffix in _ADDRESS_KEYS) and "://" not in str(value):
             continue

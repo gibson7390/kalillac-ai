@@ -3,9 +3,10 @@
     python3 -B tools/preview_fenced.py tools/local_staging_app.py --host 127.0.0.1 --port 8021
     python3 -B tools/preview_fenced.py tools/local_staging_web.py --webroot ... --upstream http://127.0.0.1:8021 ...
 
-tools/dev_preview.py starts the application and the panel this way: a socket patch made in the manager does not
-reach its child processes, so each child installs the fence itself (tools/preview_guard.py) before any of its
-own code runs. The script then runs exactly as `python3 tools/<script> ...` would, as __main__.
+tools/dev_preview.py starts the application and the panel this way in every lifecycle (a first setup, a resumed
+setup and run), and setup's V1 transition too: a socket patch made in the manager does not reach its child
+processes, so each child installs the fence itself (tools/preview_guard.py) before any of its own code runs. The
+script then runs exactly as `python3 tools/<script> ...` would, as __main__.
 
 Before anything runs, the environment is checked: a setting that names local staging's ports, or a database that
 is not this machine's preview database, stops the process.
