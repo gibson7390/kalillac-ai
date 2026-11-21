@@ -110,12 +110,14 @@
   // A callout written in the other direction from the document reads, and is marked, from its own side.
   let reversed = if opt(b, "dir") == "rtl" { not rtl-doc } else if opt(b, "dir") == "ltr" { rtl-doc } else { false }
   let from-right = rtl-doc != reversed
+  // A short callout is one piece. A long one may cross a page, but its title stays with its first lines.
   directed(opt(b, "dir"), block(width: 100%, above: 1.35em, below: 1.35em, fill: tone.soft,
+    breakable: not b.at("keep", default: false),
     radius: if from-right { (left: 5pt) } else { (right: 5pt) },
     stroke: if from-right { (right: 3pt + tone.accent) } else { (left: 3pt + tone.accent) },
     inset: (left: 14pt, right: 14pt, top: 11pt, bottom: 12pt), {
       if opt(b, "title") != none {
-        block(below: 0.7em, text(weight: "semibold", fill: tone.deep, b.title))
+        block(below: 0.7em, sticky: true, text(weight: "semibold", fill: tone.deep, b.title))
       }
       rich(b.runs)
     }))
@@ -154,15 +156,34 @@
 #let metrics(b) = block(width: 100%, above: 1.4em, below: 1.4em, breakable: false,
   card-row(b.items.map(m => m + (size: b.size)), 9pt, metric-card))
 
-#let data-table(b) = {
+// `mark` (data-table, chart, comparison): invisible content placed at the top of the block, inside it, so
+// that it travels with the block when the block moves to the next page. See `flowing` below.
+#let data-table(b, mark: none) = {
   // Quantities align on the physical right in either direction, so their digits line up.
   let aligns = b.align.map(a => if a == "right" { right } else if a == "center" { center } else { start })
   let dirs = opt(b, "dirs")
   let cell-dir(i, j) = if dirs == none or dirs.at(i).at(j) == "" { none } else { dirs.at(i).at(j) }
   let count = b.rows.len()
   let total = b.at("total", default: false)
-  // A short table stays on one page; a long one breaks between rows and repeats its header.
+  // A table of a few rows stays on one page. Any other breaks between rows and repeats its header,
+  // and never leaves fewer than three rows on either side of the break: typeset.table_flow names the
+  // runs of rows that stay together, and a zero-width leading column holds one unbreakable cell
+  // spanning each run (a row-spanning cell is the only way to bind rows; it draws nothing).
+  let groups = if b.at("keep", default: false) { none } else { opt(b, "groups") }
+  let guarded = groups != none
+  let shift = if guarded { 1 } else { 0 }
+  let guard-at = (:)
+  if guarded {
+    let row = 0
+    for g in groups {
+      guard-at.insert(str(row), g)
+      row += calc.max(g, 1)
+    }
+  }
+  let widths = b.widths.map(w => if w == "auto" { auto } else { w * 1fr })
+  let pad-x = if b.header.len() > 8 { 4.5pt } else { 8pt }
   block(width: 100%, above: 1.4em, below: 1.4em, breakable: not b.at("keep", default: false), {
+    mark
     if opt(b, "caption") != none {
       block(below: 0.75em, sticky: true, text(size: 8.5pt, fill: muted, weight: "medium", b.caption))
     }
@@ -170,27 +191,37 @@
     set par(justify: false, leading: 0.58em)
     // Tabular figures only where quantities line up: the feature also widens hyphens in prose.
     let figures(j, body) = if b.align.at(j) == "right" { text(number-width: "tabular", body) } else { body }
+    let guard(i) = {
+      let g = guard-at.at(str(i), default: none)
+      if g == none { () }
+      else if g == 0 { (table.cell(inset: 0pt, stroke: none)[],) }
+      else { (table.cell(rowspan: g, breakable: false, inset: 0pt, stroke: none)[],) }
+    }
     table(
-      columns: b.widths.map(w => if w == "auto" { auto } else { w * 1fr }),
-      inset: (x: if b.header.len() > 8 { 4.5pt } else { 8pt }, y: 6.6pt),
-      align: (x, y) => aligns.at(x) + top,
+      columns: if guarded { (0pt, ..widths) } else { widths },
+      inset: (x, y) => if guarded and x == 0 { 0pt } else { (x: pad-x, y: 6.6pt) },
+      align: (x, y) => if guarded and x == 0 { start + top } else { aligns.at(x - shift) + top },
       fill: (x, y) => if total and y == count { paper } else { none },
-      stroke: (x, y) => if y == 0 { (bottom: 1pt + navy) }
+      stroke: (x, y) => if guarded and x == 0 { none }
+        else if y == 0 { (bottom: 1pt + navy) }
         else if total and y == count { (top: 0.9pt + navy, bottom: 0.9pt + navy) }
         else if y == count { (bottom: 0.9pt + rule) }
         else { (bottom: 0.5pt + hairline) },
-      table.header(..b.header.map(h => text(size: b.size * 0.85pt, weight: "semibold", fill: navy,
+      table.header(..(if guarded { (table.cell(inset: 0pt, stroke: none)[],) } else { () }),
+        ..b.header.map(h => text(size: b.size * 0.85pt, weight: "semibold", fill: navy,
         tracking: 0.035em, upper(h)))),
-      ..b.rows.enumerate().map(((i, row)) => row.enumerate().map(((j, cell)) => directed(cell-dir(i, j),
+      ..b.rows.enumerate().map(((i, row)) => (..(if guarded { guard(i) } else { () }),
+        ..row.enumerate().map(((j, cell)) => directed(cell-dir(i, j),
         figures(j, if total and i == count - 1 { text(weight: "semibold", fill: ink, cell) }
-          else if j == 0 { text(fill: ink, cell) } else { cell })))).flatten(),
+          else if j == 0 { text(fill: ink, cell) } else { cell }))))).flatten(),
     )
   })
 }
 
-#let chart(b) = {
+#let chart(b, mark: none) = {
   let art = image(bytes(b.svg), format: "svg", width: 100%, alt: b.alt)
   block(width: 100%, above: 1.5em, below: 1.5em, breakable: false, {
+    mark
     if opt(b, "title") != none {
       block(below: 0.8em, text(font: display-fonts, size: 10.5pt, weight: "semibold", fill: navy, b.title))
     }
@@ -245,11 +276,13 @@
     })
   })
 
-#let comparison(b) = block(width: 100%, above: 1.4em, below: 1.4em, breakable: false,
+#let comparison(b, mark: none) = block(width: 100%, above: 1.4em, below: 1.4em, breakable: false, {
+  mark
   card-row(b.columns.enumerate().map(((i, c)) => (title: c.title, items: c.items, first: i == 0)), 10pt,
-    comparison-card))
+    comparison-card)
+})
 
-#let render(b) = {
+#let render(b, mark: none) = {
   let t = b.t
   if t == "heading" {
     // The running header reads its section name from this marker: the shortened heading.
@@ -262,15 +295,72 @@
     let items = b.items.map(item => directed(opt(item, "dir"), rich(item.runs)))
     if b.ordered { enum(..items) } else { list(..items) }
   }
-  else if t == "table" { data-table(b) }
+  else if t == "table" { data-table(b, mark: mark) }
   else if t == "callout" { callout(b) }
   else if t == "metrics" { metrics(b) }
-  else if t == "chart" { chart(b) }
+  else if t == "chart" { chart(b, mark: mark) }
   else if t == "quote" { pull-quote(b) }
   else if t == "code" { code-block(b) }
   else if t == "steps" { steps(b) }
-  else if t == "comparison" { comparison(b) }
+  else if t == "comparison" { comparison(b, mark: mark) }
   else if t == "pagebreak" { pagebreak(weak: true) }
+}
+
+// --- page flow ----------------------------------------------------------------------------
+// A chart, a small table or a comparison cannot be divided. When one does not fit in what is left of a
+// page it moves to the next, and the space it leaves stays empty. Where the document goes on with running
+// text (typeset.py marks the block with `ahead`: how many paragraphs or lists follow it directly), that
+// text is set first and fills the space, and the block follows it: the order a typesetter would choose.
+//
+// The decision needs to know where the block would have started, which only a finished layout can say,
+// so it reads the previous layout pass (Typst lays a document out repeatedly until it is stable):
+//   <flow-probe>   placed before the block and bound to the text before it: where the space begins;
+//   <flow-start>   placed inside the block: the page the block really started on;
+//   <flow-choice>  how many following blocks the previous pass set first.
+// Every outcome is a valid document. Text is only ever moved in front of the one block it followed, never
+// across a heading, so a decision made on an unsettled pass can cost white space but never order or content.
+#let page-height = if data.page == "letter" { 279.4mm } else { 297mm }
+#let page-width = if data.page == "letter" { 215.9mm } else { 210mm }
+#let page-bottom = page-height - 25mm
+#let text-width = page-width - 2 * margin-x
+#let flow-worthwhile = 80pt   // Less empty space than this at the foot of a page is not worth reordering for.
+
+#let flowing(id, b, followers) = {
+  place([#metadata(id) <flow-probe>])
+  context {
+    let probe = query(<flow-probe>).filter(m => m.value == id)
+    let start = query(<flow-start>).filter(m => m.value == id)
+    let prior = query(<flow-choice>).filter(m => m.value.id == id)
+    let take = 0
+    if probe.len() == 1 and start.len() == 1 and prior.len() == 1 {
+      let from = probe.first().location()
+      let y = from.position().y
+      let room = page-bottom - y
+      let height = measure(width: text-width, render(b)).height
+      let wanted = if prior.first().value.take == 0 {
+        // Set in place last time: it moved on if it did not fit, leaving `room` empty.
+        start.first().location().page() != from.page() and room >= flow-worthwhile
+      } else {
+        // Set after its text last time: back in place only when it clearly fits there now.
+        y + height + 4pt > page-bottom
+      }
+      // Absolute lengths: a length in em cannot be compared with one in points.
+      let gap = (1.1em).to-absolute()
+      let line = (2em).to-absolute()
+      if wanted {
+        let filled = 0pt
+        for f in followers {
+          if take > 0 and filled >= room - line { break }
+          filled += measure(width: text-width, render(f)).height + gap
+          take += 1
+        }
+      }
+    }
+    [#metadata((id: id, take: take)) <flow-choice>]
+    for f in followers.slice(0, take) { render(f) }
+    render(b, mark: place([#metadata(id) <flow-start>]))
+    for f in followers.slice(take) { render(f) }
+  }
 }
 
 // --- front matter -------------------------------------------------------------------------
@@ -382,4 +472,14 @@
   })
 }
 
-#for b in data.blocks { render(b) }
+#{
+  let skip = 0
+  for (i, b) in data.blocks.enumerate() {
+    if skip > 0 { skip -= 1; continue }
+    let ahead = b.at("ahead", default: 0)
+    if ahead > 0 {
+      flowing(i, b, data.blocks.slice(i + 1, i + 1 + ahead))
+      skip = ahead
+    } else { render(b) }
+  }
+}

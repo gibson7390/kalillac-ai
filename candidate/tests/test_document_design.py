@@ -733,3 +733,169 @@ def test_the_rounding_disclosure_is_printed_on_the_chart_and_only_when_needed():
         return chart_module.chart_svg(chart)
     assert chart_module.ROUNDING_NOTE in drawn([33333.4, 33333.4, 33333.2])
     assert chart_module.ROUNDING_NOTE not in drawn([10304000, 5520000, 2576000])
+
+
+# --- page flow, table pagination and chart labels (document-quality benchmark, 2026-11-21) ----
+# The benchmark report had pages left half empty because a table or chart was never divided or moved,
+# a callout whose title was stranded at the foot of a page, Word tables cut after a row or two, and
+# chart labels cut short where there was room to wrap. Each defect has its test here.
+
+FILLER = ("The practice has sensible foundations and a dependable support provider, and the weaknesses are in how "
+          "systems are accessed and recovered, not in the systems themselves. ") * 3
+FLOW_CHART = {"type": "chart", "kind": "column", "title": "Chart title", "caption": "Caption.",
+              "categories": ["A", "B", "C"], "series": [{"name": "S", "values": [1, 2, 3]}]}
+
+
+def _filler(count, tag="LEAD"):
+    return [{"type": "paragraph", "text": f"{tag}{index} {FILLER}"} for index in range(count)]
+
+
+def _page_of(pages, marker):
+    return next(index for index, text in enumerate(pages) if marker in text)
+
+
+def _foot_gap(data, page_index):
+    """Points of empty space between the lowest body text of a page and the foot of its text area."""
+    import pypdfium2 as pdfium
+    page = pdfium.PdfDocument(data)[page_index]
+    text = page.get_textpage()
+    content = text.get_text_range()
+    lowest = min(text.get_charbox(index)[1] for index in range(text.count_chars())
+                 if not content[index:index + 1].isspace() and text.get_charbox(index)[1] > quality.FOOTER_BAND)
+    return lowest - quality.FOOTER_BAND
+
+
+def test_table_flow_keeps_a_small_table_whole_and_binds_three_rows_at_each_end_of_any_other():
+    def rows(count, size=10, heavy=()):
+        return [["x" * (500 if index in heavy else size), "1"] for index in range(count)]
+    assert typeset.table_flow(rows(5)) == (True, None)
+    assert typeset.table_flow(rows(6)) == (False, [3, 3])
+    assert typeset.table_flow(rows(9)) == (False, [3, 1, 1, 1, 3])
+    # A row holding a great deal of text may itself break, and is never bound to its neighbours.
+    assert typeset.table_flow(rows(9, heavy=(4,))) == (False, [3, 1, 0, 1, 3])
+    assert typeset.table_flow(rows(8, heavy=(0,))) == (False, [0, 1, 1, 1, 1, 3])
+    assert typeset.table_flow(rows(4, size=400)) == (False, [0, 0, 0, 0])
+
+
+def test_a_table_begins_where_the_text_ends_and_never_leaves_a_fragment_on_either_page():
+    table = {"type": "table", "caption": "Register", "header": ["Finding", "Score"],
+             "rows": [[f"Row{index:02d} of the register", str(index)] for index in range(12)]}
+    divided = 0
+    for lead in range(2, 9):
+        data = pdf_of({"title": "Flow", "blocks": _filler(lead) + [table] + _filler(1, "TAIL")})
+        assert quality.inspect_pdf(data).sound
+        pages = text_pages(data)
+        counts = [sum(f"Row{index:02d}" in text for index in range(12)) for text in pages]
+        holding = [index for index, count in enumerate(counts) if count]
+        assert sum(counts) == 12 and all(counts[index] >= 3 for index in holding), (lead, counts)
+        if len(holding) == 2:
+            divided += 1
+            first, second = holding
+            assert "LEAD" in pages[first]                       # It started on the page the text was on,
+            assert _foot_gap(data, first) < 40                  # filled that page,
+            assert all("finding" in pages[index].lower() for index in holding)     # and repeats its header.
+            assert "Register" in pages[first] and "Register" not in pages[second]  # The caption is not repeated.
+    assert divided >= 2      # Before: never divided; the whole table moved on and left the page empty.
+
+
+def test_a_callout_is_never_parted_from_its_title():
+    def callout(length):
+        return {"type": "callout", "tone": "success", "title": "Recommended fix",
+                "text": "FIXBODY " + ("Add an encrypted backup and restore it as a test. " * 60)[:length] + " FIXEND"}
+    for length, whole in ((300, True), (2400, False)):
+        for words in range(0, 420, 30):               # Sweeps the callout across the foot of the page.
+            data = pdf_of({"title": "Flow", "blocks": _filler(6) + [
+                {"type": "paragraph", "text": "pad " * (words + 1)}, callout(length)]})
+            assert quality.inspect_pdf(data).sound
+            pages = text_pages(data)
+            title = _page_of(pages, "Recommended fix")
+            assert "FIXBODY" in pages[title], (length, words)   # The title always has its text under it.
+            if whole:
+                assert "FIXEND" in pages[title], (length, words)  # A short callout is one piece.
+
+
+def test_text_after_a_chart_fills_the_space_the_chart_could_not_use():
+    def build(lead, after):
+        return {"title": "Flow", "blocks": _filler(lead) + [FLOW_CHART] + _filler(after, "AFTER") + [
+            {"type": "heading", "level": 1, "text": "Next section"}] + _filler(1, "TAIL")}
+    # A chart that fits is set exactly where the document has it.
+    page = text_pages(pdf_of(build(2, 3)))[0]
+    assert page.index("Chart title") < page.index("AFTER0")
+    reordered = 0
+    for lead in range(4, 9):
+        data = pdf_of(build(lead, 3))
+        assert quality.inspect_pdf(data).sound
+        pages = text_pages(data)
+        whole = "\n".join(pages)
+        # Nothing is lost or repeated, the text keeps its own order, and the chart stays in its own section
+        # (TAIL0 is the first text of the next one; the heading's own words also appear in page headers).
+        assert [whole.count(f"AFTER{index}") for index in range(3)] == [1, 1, 1] and whole.count("Chart title") == 1
+        assert whole.index("AFTER0") < whole.index("AFTER1") < whole.index("AFTER2") < whole.index("TAIL0")
+        assert whole.index("Chart title") < whole.index("TAIL0")
+        chart_page = _page_of(pages, "Chart title")
+        if chart_page > _page_of(pages, f"LEAD{lead - 1}") or whole.index("AFTER0") < whole.index("Chart title"):
+            # The chart did not fit under the text before it: the page it left is full, not half empty.
+            assert _foot_gap(data, chart_page - 1) < 110, lead
+            reordered += whole.index("AFTER0") < whole.index("Chart title")
+    assert reordered >= 1
+
+
+def test_a_chart_is_never_set_after_text_that_belongs_to_the_next_section():
+    blocks = _filler(5) + [FLOW_CHART, {"type": "heading", "level": 1, "text": "Next section"}] + _filler(3, "AFTER")
+    marked = typeset.document_data(spec.validate_document({"title": "Flow", "blocks": blocks}))["blocks"]
+    assert all("ahead" not in block for block in marked)
+    # Straight after a heading the chart stays bound to it; after running text it may follow up to three blocks.
+    opening = [{"type": "heading", "level": 1, "text": "Section"}, FLOW_CHART] + _filler(5, "AFTER")
+    assert "ahead" not in typeset.document_data(spec.validate_document({"title": "F", "blocks": opening}))["blocks"][1]
+    running = _filler(1) + [FLOW_CHART] + _filler(5, "AFTER")
+    assert typeset.document_data(spec.validate_document({"title": "F", "blocks": running}))["blocks"][1]["ahead"] == 3
+
+
+def test_long_category_names_wrap_onto_a_second_line_before_they_are_ever_cut():
+    room = charts.text_width("Access and", charts.SMALL) + 2
+    assert charts.wrap("Access and passwords", room, charts.SMALL) == ["Access and", "passwords"]
+    assert charts.wrap("Short", room, charts.SMALL) == ["Short"]
+    one_word = charts.wrap(LONG_WORD, room, charts.SMALL)
+    assert len(one_word) == 1 and one_word[0].endswith("…")       # Wrapping cannot help a single long word.
+    many = charts.wrap("one two three four five six seven eight nine ten eleven twelve", room, charts.SMALL)
+    assert len(many) == 2 and many[1].endswith("…") and all(charts.text_width(line, charts.SMALL) <= room
+                                                             for line in many)
+    names = ["Access and passwords", "Backup and recovery", "Devices and updates", "Email and web",
+             "Staff awareness", "Network and vendors"]
+
+    def column(categories):
+        return spec.validate_document({"title": "T", "blocks": [{
+            "type": "chart", "kind": "column", "categories": categories,
+            "series": [{"name": "Today", "values": [2, 1, 3, 2, 1, 2]},
+                       {"name": "After the plan", "values": [6, 4, 5, 4, 4, 4]}]}]}).blocks[0]
+    svg = charts.chart_svg(column(names))
+    assert "…" not in svg and ">Access and<" in svg and ">passwords<" in svg      # Before: "Access and passwo…".
+    assert not charts.check_bounds(column(names))
+    height = lambda text: float(re.search(r'viewBox="0 0 \d+ (\d+)"', text).group(1))  # noqa: E731
+    # The second line lengthens the canvas; the plot itself is not squeezed.
+    assert height(svg) == height(charts.chart_svg(column(list("ABCDEF")))) + charts.LINE
+    bars = spec.validate_document({"title": "T", "blocks": [{
+        "type": "chart", "kind": "bar", "categories": ["Two workstations run an operating system without updates",
+                                                       "Short name"],
+        "series": [{"name": "Score", "values": [12, 4]}]}]}).blocks[0]
+    drawn = charts.chart_svg(bars)
+    assert "…" not in drawn and not charts.check_bounds(bars)
+    # Values are drawn from the data, untouched by the layout.
+    assert ">12<" in drawn and ">4<" in drawn
+
+
+def test_word_keeps_a_short_table_whole_and_three_rows_together_at_each_end_of_a_long_one():
+    def bound(count):
+        raw = {"title": "T", "blocks": [{"type": "table", "caption": "Schedule", "header": ["Milestone", "Share"],
+                                         "rows": [[f"Step {index}", f"{index}%"] for index in range(count)]}]}
+        document = docx.Document(io.BytesIO(generate(raw, "docx").data))
+        table = next(t for t in document.tables if t.rows[0].cells[0].text == "Milestone")
+        caption = next(p for p in document.paragraphs if p.text == "Schedule")
+        assert caption.paragraph_format.keep_with_next          # The caption stays with its table.
+        assert all("w:cantSplit" in row._tr.trPr.xml for row in table.rows)
+        return [all(bool(p.paragraph_format.keep_with_next) for cell in row.cells for p in cell.paragraphs)
+                for row in table.rows]
+    # Header and every row but the last are kept with the row after them: Word cannot divide the table.
+    assert bound(4) == [True, True, True, True, False]         # Before: divided after two rows.
+    # A longer table: the header with its first three rows, and the last three rows together.
+    assert bound(10) == [True, True, True, False, False, False, False, False, True, True, False]

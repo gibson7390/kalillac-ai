@@ -8,9 +8,10 @@ image.
 
 Layout is computed, not guessed: every label is measured with the real font
 metrics (Pillow reading the same Inter files the PDF embeds), so axis labels
-get exactly the room they need, long category names are shortened with an
-ellipsis instead of colliding, and nothing is placed outside the canvas.
-check_bounds() re-verifies that for every produced chart.
+get exactly the room they need, a long category name wraps onto a second line
+(and is shortened with an ellipsis only when two lines cannot hold it) instead
+of colliding, and nothing is placed outside the canvas. check_bounds()
+re-verifies that for every produced chart.
 
 Text in the SVG is escaped data. There is no script, link, external
 reference or embedded image.
@@ -47,6 +48,32 @@ def fit(text, width, size=LABEL, weight="regular"):
     while len(cut) > 1 and text_width(cut.rstrip() + "…", size, weight) > width:
         cut = cut[:-1]
     return cut.rstrip() + "…"
+
+
+LINE = 13.0  # Distance between the two lines of a wrapped label.
+
+
+def wrap(text, width, size=LABEL, weight="regular", lines=2):
+    """text as at most `lines` lines no wider than width.
+
+    Breaks fall between words. Whatever the lines cannot hold is shortened with an ellipsis, so a
+    label is cut only when wrapping is not enough: one word wider than the room, or more words than
+    the lines take."""
+    if text_width(text, size, weight) <= width or lines <= 1:
+        return [fit(text, width, size, weight)]
+    words = text.split()
+    out = []
+    while words and len(out) < lines - 1:
+        count = 1
+        while count < len(words) and text_width(" ".join(words[:count + 1]), size, weight) <= width:
+            count += 1
+        if text_width(words[0], size, weight) > width:
+            break                     # A single word wider than the room: nothing to gain from a break.
+        out.append(" ".join(words[:count]))
+        words = words[count:]
+    if words:
+        out.append(fit(" ".join(words), width, size, weight))
+    return out
 
 
 def nice_scale(low, high, target=5, zero=True):
@@ -223,31 +250,46 @@ def _axis_width(chart, low, high, step):
                for i in range(ticks + 1)) + 14
 
 
-def _category_labels(canvas, chart, centers, slot, y):
-    """Category names under the plot: every label when they fit, otherwise every nth, shortened to its slot."""
+def _category_layout(chart, slot):
+    """(every, lines per category) for the names under a plot.
+
+    Every name is shown when each has room, otherwise every nth. A name wider than its room wraps
+    onto a second line before it is ever shortened."""
     every = 1
-    while every < len(centers) and min(slot * every - 6, 150) < min(
+    while every < len(chart.categories) and min(slot * every - 6, 150) < min(
             48, max(text_width(c, SMALL) for c in chart.categories)):
         every += 1
     room = max(24.0, slot * every - 6)
-    for index, (center, name) in enumerate(zip(centers, chart.categories)):
-        if index % every == 0:
-            label = fit(name, room, SMALL)
+    return every, [wrap(name, room, SMALL) if index % every == 0 else []
+                   for index, name in enumerate(chart.categories)]
+
+
+def _category_extra(chart, slot):
+    """Height the wrapped names need beyond a single line."""
+    return (max(len(lines) for lines in _category_layout(chart, slot)[1]) - 1) * LINE
+
+
+def _category_labels(canvas, chart, centers, slot, y):
+    """Category names under the plot, each centred on its mark and kept inside the canvas."""
+    for center, lines in zip(centers, _category_layout(chart, slot)[1]):
+        for row, label in enumerate(lines):
             half = text_width(label, SMALL) / 2
             x = min(max(center, half), canvas.width - half)
-            canvas.text(x, y, label, SMALL, anchor="middle")
+            canvas.text(x, y + row * LINE, label, SMALL, anchor="middle")
 
 
 def _columns(chart, stacked):
     multi = len(chart.series) > 1
-    height = 330 if multi else 300
+    low, high, step = _value_range(chart, stacked)
+    count = len(chart.categories)
+    left, right = _axis_width(chart, low, high, step), WIDTH - 6
+    slot = (right - left) / count
+    extra = _category_extra(chart, slot)       # A second line of category names lengthens the canvas;
+    height = (330 if multi else 300) + extra   # the plot itself keeps its height.
     canvas = _Canvas(WIDTH, height)
     top = _legend(canvas, [s.name for s in chart.series], 12) + 14 if multi else 22
-    low, high, step = _value_range(chart, stacked)
-    left, right, bottom = _axis_width(chart, low, high, step), WIDTH - 6, height - 30
+    bottom = height - 30 - extra
     y_of = _plot_axes(canvas, chart, low, high, step, top, bottom, left, right)
-    count = len(chart.categories)
-    slot = (right - left) / count
     groups = 1 if stacked else len(chart.series)
     bar = min(46.0, slot * 0.72 / groups)
     centers = [left + slot * (i + 0.5) for i in range(count)]
@@ -293,8 +335,12 @@ def _bars(chart):
     canvas = _Canvas(WIDTH, height)
     known = [v for v in series.values if v is not None]
     low, high, step = nice_scale(min(known), max(known))
-    labels = [fit(c, 230) for c in chart.categories]
-    left = max(text_width(label) for label in labels) + 14
+    labels = [wrap(c, 230) for c in chart.categories]
+    if any(len(lines) > 1 for lines in labels):
+        row = max(row, 32)             # Two lines of a name need a taller row.
+        height = count * row + 34
+        canvas = _Canvas(WIDTH, height)
+    left = max(text_width(line) for lines in labels for line in lines) + 14
     value_room = max(text_width(format_value(v, chart.prefix, chart.suffix), SMALL, "medium") for v in known) + 10
     right = WIDTH - value_room
 
@@ -310,9 +356,11 @@ def _bars(chart):
         tick = format_value(value, chart.prefix, chart.suffix, step)
         half = text_width(tick, SMALL) / 2
         canvas.text(min(max(x, half), WIDTH - half), height - 8, tick, SMALL, anchor="middle", tabular=True)
-    for index, (label, value) in enumerate(zip(labels, series.values)):
+    for index, (lines, value) in enumerate(zip(labels, series.values)):
         y = 10 + index * row
-        canvas.text(left - 10, y + row * 0.5 + 1, label, anchor="end", fill=INK)
+        first = y + row * 0.5 + 1 - (len(lines) - 1) * LINE / 2
+        for line_index, label in enumerate(lines):
+            canvas.text(left - 10, first + line_index * LINE, label, anchor="end", fill=INK)
         if value is None:
             continue
         x0, x1 = sorted((x_of(0.0), x_of(value)))
@@ -328,15 +376,17 @@ def _bars(chart):
 
 def _lines(chart, area):
     multi = len(chart.series) > 1
-    height = 330 if multi else 300
-    canvas = _Canvas(WIDTH, height)
-    top = _legend(canvas, [s.name for s in chart.series], 12) + 14 if multi else 22
     low, high, step = _value_range(chart)
-    left, right, bottom = _axis_width(chart, low, high, step), WIDTH - 14, height - 30
-    y_of = _plot_axes(canvas, chart, low, high, step, top, bottom, left, right)
     count = len(chart.categories)
+    left, right = _axis_width(chart, low, high, step), WIDTH - 14
     inset = 16.0  # The first and last points stand clear of the axis and the edge.
     slot = (right - left - 2 * inset) / (count - 1)
+    extra = _category_extra(chart, slot)
+    height = (330 if multi else 300) + extra
+    canvas = _Canvas(WIDTH, height)
+    top = _legend(canvas, [s.name for s in chart.series], 12) + 14 if multi else 22
+    bottom = height - 30 - extra
+    y_of = _plot_axes(canvas, chart, low, high, step, top, bottom, left, right)
     xs = [left + inset + slot * i for i in range(count)]
     for index, series in enumerate(chart.series):
         color = PALETTE[index % len(PALETTE)]

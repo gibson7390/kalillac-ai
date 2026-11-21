@@ -207,6 +207,65 @@ def _table_layout(table, available):
     return widths, size
 
 
+# How a table may cross a page (templates/document.typ, data-table). A table of a few short rows is one
+# unbreakable block: splitting it would leave a fragment. Any other table breaks between rows, with its
+# header repeated, and never leaves fewer than TABLE_EDGE_ROWS rows on either side of the break: the
+# first rows and the last rows are bound together. A row is never cut in two unless it holds so much
+# text that it could be taller than the space left on a page.
+TABLE_WHOLE_ROWS = 5
+TABLE_WHOLE_CHARS = 1_200
+TABLE_EDGE_ROWS = 3
+TABLE_LONG_ROW = 400
+# A callout this short is never taller than a fraction of a page, so it is kept in one piece; a longer
+# one may break, with its title bound to its first lines.
+CALLOUT_WHOLE_CHARS = 900
+
+
+def table_flow(rows):
+    """(keep, groups) for a table's body rows.
+
+    keep: the whole table is one unbreakable block. Otherwise groups lists consecutive runs of rows:
+    n > 0 is n rows that stay on one page, 0 is a single row that may itself break.
+    """
+    count = len(rows)
+    weights = [sum(len(cell) for cell in row) for row in rows]
+    if count <= TABLE_WHOLE_ROWS and sum(weights) <= TABLE_WHOLE_CHARS:
+        return True, None
+    solid = [weight <= TABLE_LONG_ROW for weight in weights]
+    groups = [1 if ok else 0 for ok in solid]
+    edge = TABLE_EDGE_ROWS
+    if count >= 2 * edge:
+        if all(solid[-edge:]):
+            groups[-edge:] = [edge]
+        if all(solid[:edge]):
+            groups[:edge] = [edge]
+    return False, groups
+
+
+# An indivisible block (a chart, a table kept whole, a comparison) followed directly by running text may
+# be set after up to this many of those paragraphs or lists when it would otherwise leave the foot of a
+# page empty (templates/document.typ, flowing). Never across a heading, and not straight after one: a
+# heading is bound to the block it introduces.
+FLOW_AHEAD = 3
+
+
+def _flow(blocks, data):
+    """Mark each indivisible block with how many flowing blocks directly follow it."""
+    for index, block in enumerate(blocks):
+        kind = type(block)
+        if not (kind in (Chart, Comparison) or kind is Table and data[index]["keep"]):
+            continue
+        if index == 0 or type(blocks[index - 1]) in (Heading, PageBreak):
+            continue
+        ahead = 0
+        while (ahead < FLOW_AHEAD and index + 1 + ahead < len(blocks)
+               and type(blocks[index + 1 + ahead]) in (Paragraph, ListBlock)):
+            ahead += 1
+        if ahead:
+            data[index]["ahead"] = ahead
+    return data
+
+
 def _texts(document):
     yield from (v for v in (document.title, document.subtitle, document.summary, document.author,
                             document.organization, document.date) if v)
@@ -262,6 +321,7 @@ def _block(block, rtl, available):
         dirs = [[_own_direction(cell, rtl, numeric=bool(cell.strip()) and _NUMERIC.fullmatch(cell) is not None)
                  for cell in row] for row in block.rows]
         widths, size = _table_layout(block, available)
+        keep, groups = table_flow(block.rows)
         # How many characters fit a line of each column: the break interval for unbreakable tokens.
         inset = 9.0 if len(widths) > 8 else 16.0
         share = sum(w for w in widths if w != "auto")
@@ -273,15 +333,14 @@ def _block(block, rtl, available):
         return {"t": "table", "header": [soften(cell, min(12, fits[i]), fits[i]) for i, cell in enumerate(block.header)],
                 "rows": [[soften(cell, min(14, fits[i]), fits[i]) for i, cell in enumerate(row)] for row in block.rows],
                 "align": list(block.align), "widths": widths, "size": size, "caption": soften(block.caption or "") or None,
-                "total": block.total_row,
-                # Kept on one page when it is short enough that it can never be taller than one.
-                "keep": len(block.rows) <= 15 and sum(len(cell) for row in block.rows for cell in row) <= 1_200,
+                "total": block.total_row, "keep": keep, "groups": groups,
                 "dirs": [[cell or "" for cell in row] for row in dirs] if any(any(row) for row in dirs) else None}
     if kind is PageBreak:
         return {"t": "pagebreak"}
     if kind is Callout:
         return {"t": "callout", "tone": block.tone, "title": soften(block.title or "") or None,
-                "runs": _runs(block.runs), "dir": _own_direction(plain(block.runs), rtl)}
+                "runs": _runs(block.runs), "dir": _own_direction(plain(block.runs), rtl),
+                "keep": len(plain(block.runs)) + len(block.title or "") <= CALLOUT_WHOLE_CHARS}
     if kind is Metrics:
         inner = (available - 9 * (len(block.items) - 1)) / len(block.items) - 27
         return {"t": "metrics", "size": _fit_size([m.value for m in block.items], inner, 21.0, 10.0, "semibold"),
@@ -340,7 +399,7 @@ def document_data(document):
         "cover": document.cover, "contents": document.contents,
         "fonts": font_stacks(document.language, document.theme),
         "labels": dict(zip(("contents", "page", "of", "summary"), labels)),
-        "blocks": [_block(block, primary in RTL, available) for block in document.blocks],
+        "blocks": _flow(document.blocks, [_block(block, primary in RTL, available) for block in document.blocks]),
     }
 
 
