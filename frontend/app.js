@@ -1536,13 +1536,18 @@
       o.tabIndex = on ? 0 : -1;
     });
     reasoningMode = mode;
+    if (modeNote && noteMode) modeNoteText.textContent = modeNoteFor(noteMode);   // "Your message will use ..."
     if (focus) chosen.focus();
   }
 
   /* Which modes this browser may use, from GET /api/chat/reasoning-modes: the server applies exactly the
      rule it uses for every request (paid modes only with a verified Premium plan). A mode outside the
      answer is shown, marked unavailable, and cannot be chosen; the selection is always a mode the next
-     request will run with. Without an answer every mode stays offered and the server still decides. */
+     request will run with. Without an answer every mode stays offered and the server still decides.
+
+     Why a mode is unavailable is said only as the server's answer establishes it: "premium" lists the modes
+     a Premium plan adds on this deployment. A mode in neither list is not offered here to anyone, and is
+     never described as something an upgrade would unlock. */
   var MODE_NAMES = { quick: "Quick", balanced: "Balanced", deep: "Deep" };
   var MODE_LOCK = '<svg class="mode-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
@@ -1557,14 +1562,50 @@
   var modesDialog = document.getElementById("modes-dialog");
   var modesClose = document.getElementById("modes-close");
   var modesExplore = document.getElementById("modes-explore");
+  var modesPlan = document.getElementById("modes-dialog-plan");
   var modeLearn = null;
+  var premiumModes = [];        // Modes the server says a Premium plan adds here.
+  var unavailableModes = [];    // Modes shown but not usable by this browser, in the picker's order.
+  var noteMode = null;          // The unavailable mode the note is about.
 
-  /* Learn more: what each mode is, in a small modal dialog (fixed copy in index.html). Escape and Close
-     both close it, and focus returns to Learn more. On an accounts deployment it also offers the way to
-     the plan and billing page, in a new tab so the conversation on this screen is not lost. */
+  function modeIsPremium(mode) {
+    return premiumModes.indexOf(mode) !== -1;
+  }
+
+  // "Deep", "Balanced and Deep".
+  function modeNamesOf(modes) {
+    var names = modes.map(function (m) { return MODE_NAMES[m]; });
+    return names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0] || "";
+  }
+
+  function modeNoteFor(mode) {
+    return MODE_NAMES[mode] + (modeIsPremium(mode) ? " reasoning is part of Kalillac Premium." :
+                                                    " reasoning isn’t available right now.") +
+           " Your message will use " + MODE_NAMES[reasoningMode] + ".";
+  }
+
+  /* Learn more: what each mode is, in a small modal dialog. Escape and Close both close it, and focus
+     returns to Learn more. Its descriptions are fixed copy (index.html); what it says about availability
+     follows the server: a mode Premium adds is marked Premium, with the way to the plan and billing page
+     (on an accounts deployment, in a new tab so the conversation on this screen is not lost); a mode this
+     deployment does not offer is marked unavailable, with no mention of an upgrade. */
   function openModesDialog() {
     if (!modesDialog) return;
-    if (modesExplore) modesExplore.hidden = !ACCOUNTS_OFFERED;
+    var locked = unavailableModes.filter(modeIsPremium);
+    var unoffered = unavailableModes.filter(function (m) { return !modeIsPremium(m); });
+    Array.prototype.forEach.call(modesDialog.querySelectorAll("[data-mode-tag]"), function (tag) {
+      var mode = tag.getAttribute("data-mode-tag");
+      var premium = locked.indexOf(mode) !== -1;
+      tag.hidden = !premium && unoffered.indexOf(mode) === -1;
+      tag.textContent = tag.hidden ? "" : premium ? " Premium" : " Unavailable";
+      tag.classList.toggle("is-unoffered", !tag.hidden && !premium);
+    });
+    if (modesPlan) {
+      modesPlan.textContent =
+        (locked.length ? modeNamesOf(locked) + " reasoning is available with Kalillac Premium. " : "") +
+        (unoffered.length ? modeNamesOf(unoffered) + " reasoning isn’t available right now. " : "");
+    }
+    if (modesExplore) modesExplore.hidden = !ACCOUNTS_OFFERED || !locked.length;
     if (typeof modesDialog.showModal === "function") modesDialog.showModal();
     else modesDialog.setAttribute("open", "");
   }
@@ -1575,7 +1616,12 @@
     else modesDialog.removeAttribute("open");
   }
 
-  function showModeNote(text) {
+  /* The note beside the picker: why a mode cannot be chosen, and Learn more. Clicking an unavailable mode
+     shows it. So that the explanation never depends on reaching that mode (the arrow keys skip it), the note
+     and its Learn more are in the page, in the tab order right after the picker, from the moment the server
+     says a mode is unavailable: visually hidden until Learn more is focused, as a skip link is, so the
+     picker looks the same until then. */
+  function showModeNote(mode, quiet) {
     if (!modeNote) {
       modeNote = document.createElement("p");
       modeNote.className = "mode-note";
@@ -1592,36 +1638,49 @@
         modeLearn.setAttribute("aria-haspopup", "dialog");
         modeLearn.textContent = "Learn more";
         modeLearn.addEventListener("click", openModesDialog);
+        modeLearn.addEventListener("focus", function () { modeNote.classList.remove("is-quiet"); });
         modeNote.appendChild(modeLearn);
         if (modesClose) modesClose.addEventListener("click", closeModesDialog);
         modesDialog.addEventListener("close", function () { if (modeLearn && !modeNote.hidden) modeLearn.focus(); });
       }
       modePicker.parentNode.insertBefore(modeNote, modePicker.nextSibling);
     }
-    modeNoteText.textContent = text;
-    modeNote.hidden = !text;
+    noteMode = mode || null;
+    modeNoteText.textContent = noteMode ? modeNoteFor(noteMode) : "";
+    modeNote.hidden = !noteMode;
+    modeNote.classList.toggle("is-quiet", !!noteMode && !!quiet);
   }
 
   function applyAllowedModes(data) {
     if (!data || !Array.isArray(data.modes) || !data.modes.length) return;
-    var allowed = data.modes.filter(function (m) { return Object.prototype.hasOwnProperty.call(MODE_NAMES, m); });
+    var known = function (m) { return Object.prototype.hasOwnProperty.call(MODE_NAMES, m); };
+    var allowed = data.modes.filter(known);
     if (!allowed.length) return;
+    premiumModes = Array.isArray(data.premium) ? data.premium.filter(known) : [];
     modeOptions().forEach(function (option) {
       var mode = option.getAttribute("data-mode");
       if (allowed.indexOf(mode) !== -1) return;
+      unavailableModes.push(mode);
       option.setAttribute("aria-disabled", "true");
       option.classList.add("is-unavailable");
-      option.title = MODE_NAMES[mode] + " reasoning is part of Kalillac Premium";
-      option.insertAdjacentHTML("beforeend", MODE_LOCK);
       var hint = document.createElement("span");
       hint.className = "sr-only";
-      hint.textContent = ", available with Kalillac Premium";
+      if (modeIsPremium(mode)) {
+        option.title = MODE_NAMES[mode] + " reasoning is part of Kalillac Premium";
+        option.insertAdjacentHTML("beforeend", MODE_LOCK);
+        hint.textContent = ", available with Kalillac Premium";
+      } else {
+        // Not offered on this deployment, to any plan: no lock, and no word of Premium.
+        option.title = MODE_NAMES[mode] + " reasoning isn’t available right now";
+        hint.textContent = ", not available right now";
+      }
       option.appendChild(hint);
     });
     if (allowed.indexOf(reasoningMode) === -1) {
       var fallback = allowed.indexOf(data.default) !== -1 ? data.default : allowed[0];
       selectMode(fallback, false);
     }
+    if (unavailableModes.length) showModeNote(unavailableModes[0], true);
   }
 
   if (REASONING_OFFERED && modePicker) {
@@ -1630,12 +1689,11 @@
     modeOptions().forEach(function (option, index, all) {
       option.addEventListener("click", function () {
         if (!modeAvailable(option)) {
-          showModeNote(MODE_NAMES[option.getAttribute("data-mode")] + " reasoning is part of Kalillac Premium. " +
-                       "Your message will use " + MODE_NAMES[reasoningMode] + ".");
+          showModeNote(option.getAttribute("data-mode"), false);
           return;
         }
-        showModeNote("");
         selectMode(option.getAttribute("data-mode"), false);
+        showModeNote(unavailableModes[0] || null, true);     // Out of sight again; still reachable by Tab.
       });
       option.addEventListener("keydown", function (event) {
         var step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 :
@@ -2104,11 +2162,33 @@
     return !!user && !!reply && SPACE_ID_RE.test(user.id) && SPACE_ID_RE.test(reply.id);
   }
 
-  /* A refusal the server names (a fixed error code) is decided before anything is written, so nothing was
-     saved. The one exception is 404: a database failure during the save itself is also answered that way,
-     and then the page cannot know. */
+  /* Whether an error answer establishes that this attempt stored nothing.
+
+     It does when the server refused the request, under a fixed code, before or instead of the save: every
+     4xx refusal is raised before the save's commit and rolls it back (404 and idempotency_conflict are left
+     out: they speak of what exists, not of this attempt), and so are the three 5xx codes below, which mean
+     no answer was produced or the time ran out before the commit.
+
+     It does not for anything else. In particular 503 database_unavailable is what a database failure during
+     the save answers, whether the commit failed or completed with its acknowledgement lost: the exchange
+     may be durably stored. An unknown or missing code is treated the same way. */
+  var NOT_SAVED_5XX = { model_provider_unavailable: true, service_unavailable: true, request_timeout: true };
+
   function refusedBeforeSaving(status, data) {
-    return status !== 404 && !!data && typeof data.error === "string";
+    var code = data && typeof data.error === "string" ? data.error : null;
+    if (!code) return false;
+    if (status >= 400 && status < 500) return status !== 404 && code !== "idempotency_conflict";
+    return status >= 500 && NOT_SAVED_5XX[code] === true;
+  }
+
+  /* The status after an attempt that did not end in a confirmed save. Once any attempt of a message has an
+     unknown outcome (stopped, lost, an ambiguous answer), a later refusal of its retry settles nothing: the
+     earlier attempt may still be running, or may have saved (a retry answered 409 conversation_busy is
+     exactly that). It stays "not confirmed" until the same key returns the stored exchange. */
+  function unconfirmedSaveState(exchange, status, data) {
+    if (!exchange.saveUnknown && status !== null && refusedBeforeSaving(status, data)) return "unsaved";
+    exchange.saveUnknown = true;
+    return "unknown";
   }
 
   function newRequestId() {
@@ -2704,7 +2784,10 @@
         return c.message_count === 0 && (!c.title || c.title === DEFAULT_TITLE);
       })[0];
       if (empty) {
-        openSpaceConversation(view.space, { id: empty.id, title: empty.title }, false);
+        // It was empty when this list was read. It may not be now (another tab, another device): it is
+        // opened like any existing conversation, with what the server holds. Only a conversation this page
+        // has just created is entered without a read.
+        openSpaceConversation(view.space, { id: empty.id, title: empty.title }, true);
         return;
       }
     }
@@ -2738,6 +2821,11 @@
         if (r.status !== 200 || !r.data || !Array.isArray(r.data.messages)) {
           setSpacesStatus(COPY_SPACES_FAILED);
           return;
+        }
+        // The title as the server has it now (the list this came from may be older than its automatic title).
+        var current = r.data.conversation;
+        if (current && current.id === conversation.id && validName(current.title, SPACE_TITLE_MAX)) {
+          conversation = { id: conversation.id, title: current.title };
         }
         enterSpace(space, conversation, r.data.messages, earlierCursor(r.data.next_before_seq));
       }, function () {
@@ -3103,7 +3191,7 @@
           if (stale()) return;
           var data = parseJson(body);
           if (!res.ok) {
-            setSaveState(refusedBeforeSaving(res.status, data) ? "unsaved" : "unknown");
+            setSaveState(unconfirmedSaveState(exchange, res.status, data));
             failExchange(exchange, outcomeForResponse(res.status, data));
             return;
           }
@@ -3117,27 +3205,32 @@
             spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
           }
           if ((data && typeof data.error === "string") || !reply.trim()) {
-            setSaveState("unknown");
+            setSaveState(unconfirmedSaveState(exchange, null, null));
             failExchange(exchange, OUTCOME_INCOMPLETE);
             return;
           }
           completeExchange(exchange, reply, null, null, []);
           // Saved only as the server confirmed it: both stored rows came back, and the answer is on screen.
-          setSaveState(exchangeStored(data) && failedExchange !== exchange ? "saved" : "unknown");
+          if (exchangeStored(data) && failedExchange !== exchange) {
+            exchange.saveUnknown = false;
+            setSaveState("saved");
+          } else {
+            setSaveState(unconfirmedSaveState(exchange, null, null));
+          }
         }, function (err) {
           if (stale()) return;
-          setSaveState("unknown");
+          setSaveState(unconfirmedSaveState(exchange, null, null));
           failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
         });
       }, function (err) {
         // Stopping does not stop the server from saving; a retry with the same key shows what it saved.
         if (stale()) return;
-        setSaveState("unknown");
+        setSaveState(unconfirmedSaveState(exchange, null, null));
         failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
       })
       .then(null, function () {
         if (stale()) return;
-        setSaveState("unknown");
+        setSaveState(unconfirmedSaveState(exchange, null, null));
         failExchange(exchange, OUTCOME_INCOMPLETE);
       })
       .then(function () {

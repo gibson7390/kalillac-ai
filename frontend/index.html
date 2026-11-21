@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261121-spaces6">
+  <link rel="stylesheet" href="app.css?v=20261121-spaces7">
 </head>
 <body>
   <!-- The chat workspace at /app/: reached directly, or from the homepage's
@@ -253,26 +253,28 @@
       </div>
     </div>
   </dialog>
-  <!-- What the reasoning modes are (opened by Learn more, beside the note that a mode is part of Premium).
-       Fixed copy: it describes effort and speed only, and promises no result. -->
+  <!-- What the reasoning modes are (opened by Learn more, beside the note that a mode is unavailable).
+       The descriptions are fixed copy: effort and speed only, no promised result. Whether a mode is part of
+       Premium or simply not offered here is filled in by app.js from the server's answer; the page itself
+       claims neither. -->
   <dialog class="modes-dialog" id="modes-dialog" aria-labelledby="modes-dialog-title">
     <div class="modes-dialog-panel">
       <h2 class="modes-dialog-title" id="modes-dialog-title">Understanding reasoning modes</h2>
       <dl class="modes-list">
         <div class="modes-row">
-          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 8h5"/><path d="M3 12h7"/><path d="M4 16h5"/><path d="M14 6l6 6-6 6"/></svg>Quick</dt>
+          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 8h5"/><path d="M3 12h7"/><path d="M4 16h5"/><path d="M14 6l6 6-6 6"/></svg>Quick<span class="modes-tag" data-mode-tag="quick" hidden></span></dt>
           <dd>Prioritizes speed for straightforward questions and everyday tasks.</dd>
         </div>
         <div class="modes-row">
-          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12h4"/><path d="M17 12h4"/><path d="M12 7l5 5-5 5-5-5z"/></svg>Balanced</dt>
+          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12h4"/><path d="M17 12h4"/><path d="M12 7l5 5-5 5-5-5z"/></svg>Balanced<span class="modes-tag" data-mode-tag="balanced" hidden></span></dt>
           <dd>Provides a practical balance between response speed and reasoning effort.</dd>
         </div>
         <div class="modes-row">
-          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg>Deep <span class="modes-tag">Premium</span></dt>
+          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg>Deep<span class="modes-tag" data-mode-tag="deep" hidden></span></dt>
           <dd>Uses additional reasoning effort for demanding tasks involving multiple steps, complex programming, mathematical reasoning, and detailed analysis.</dd>
         </div>
       </dl>
-      <p class="modes-dialog-note" id="modes-dialog-note">Deep reasoning is available with Kalillac Premium. Choosing a mode never changes your plan: your message always uses the mode shown as selected.</p>
+      <p class="modes-dialog-note" id="modes-dialog-note"><span id="modes-dialog-plan"></span>Choosing a mode never changes your plan: your message always uses the mode shown as selected.</p>
       <div class="modes-dialog-actions">
         <a class="modes-explore" id="modes-explore" href="/account?show=billing" target="_blank" rel="noopener" hidden>Explore Kalillac Premium</a>
         <button type="button" class="modes-close" id="modes-close" autofocus>Close</button>
@@ -285,6 +287,6 @@
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261121-spaces6"></script>
+  <script src="app.js?v=20261121-spaces7"></script>
 </body>
 </html>

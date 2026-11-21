@@ -93,7 +93,7 @@
   if (scenarioName.indexOf("reasoning_") === 0 || scenarioName === "spaces_with_modes") {
     document.documentElement.setAttribute("data-kalillac-reasoning", "on");
   }
-  if (scenarioName === "reasoning_learn_more_accounts") {
+  if (scenarioName === "reasoning_learn_more_accounts" || scenarioName === "reasoning_unoffered") {
     document.documentElement.setAttribute("data-kalillac-accounts", "on");
   }
 
@@ -261,9 +261,18 @@
   // GET /api/chat/reasoning-modes (a reasoning deployment's one question on load) is answered here, outside
   // the scripted queue, and recorded on its own: every mode by default, Quick and Balanced for a Free account.
   var modeRequests = [];
-  var MODES_ANSWER = scenarioName === "reasoning_free_account" || scenarioName.indexOf("reasoning_learn_more") === 0
-    ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced" } }
-    : { status: 200, json: { modes: ["quick", "balanced", "deep"], default: "balanced" } };
+  var FREE_MODES = scenarioName === "reasoning_free_account" || scenarioName.indexOf("reasoning_learn_more") === 0 ||
+                   scenarioName.indexOf("reasoning_keyboard") === 0;
+  var MODES_ANSWER = scenarioName === "reasoning_unoffered"
+    // A deployment that offers Deep to no plan: it is in neither list.
+    ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced", premium: [] } }
+    : scenarioName === "reasoning_premium_unstated"
+      // An answer without the premium list: nothing may be called Premium on the strength of it.
+      ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced" } }
+      : FREE_MODES
+        ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced", premium: ["deep"] } }
+        // An account that has every mode (Premium, with Deep enabled): the server lists nothing more to add.
+        : { status: 200, json: { modes: ["quick", "balanced", "deep"], default: "balanced", premium: [] } };
 
   // GET /api/account/entitlements (asked once the Spaces answer shows an account) is answered here too:
   // Premium for the account-menu scenario, Free otherwise.
@@ -715,7 +724,16 @@
         labels: picker ? Array.prototype.map.call(picker.querySelectorAll(".mode-option"), function (o) {
           return [text(o.querySelector(".mode-label")), !!o.querySelector("svg.mode-icon")];
         }) : null,
-        note: $("mode-note") && !$("mode-note").hidden ? text($("mode-note")) : null,
+        note: $("mode-note") && !$("mode-note").hidden && !$("mode-note").classList.contains("is-quiet")
+          ? text($("mode-note")) : null,
+        // In the page and the tab order, but out of sight until its Learn more is focused.
+        quietNote: $("mode-note") && !$("mode-note").hidden && $("mode-note").classList.contains("is-quiet")
+          ? [text($("mode-note")), Math.round($("mode-note").getBoundingClientRect().width),
+             $("mode-learn").tabIndex, getComputedStyle($("mode-learn")).visibility] : null,
+        titles: picker ? Array.prototype.map.call(picker.querySelectorAll('[aria-disabled="true"]'), function (o) {
+          return [o.getAttribute("data-mode"), o.title, o.querySelectorAll("svg.mode-lock").length,
+                  text(o.querySelector(".sr-only"))];
+        }) : null,
         learn: $("mode-learn") && !$("mode-note").hidden
           ? [$("mode-learn").tagName, $("mode-learn").type, text($("mode-learn")), $("mode-learn").getAttribute("aria-haspopup")]
           : null
@@ -1645,6 +1663,9 @@
       label: label, open: dialog.open, modal: modal,
       labelledBy: dialog.getAttribute("aria-labelledby"), title: text($("modes-dialog-title")),
       terms: Array.prototype.map.call(dialog.querySelectorAll("dt"), function (e) { return text(e); }),
+      tags: Array.prototype.map.call(dialog.querySelectorAll("[data-mode-tag]"), function (e) {
+        return [e.getAttribute("data-mode-tag"), e.hidden ? null : text(e).trim(), e.classList.contains("is-unoffered")];
+      }),
       descriptions: Array.prototype.map.call(dialog.querySelectorAll("dd"), function (e) { return text(e); }),
       note: text($("modes-dialog-note")),
       explore: explore && !explore.hidden && explore.offsetParent !== null
@@ -1847,7 +1868,10 @@
     await until(function () { return document.querySelector("#spaces-list .spaces-item"); }, "conversations");
     a.push({ label: "space-view", submit: text($("spaces-new-submit")), hintShown: !$("spaces-dialog-hint").hidden,
              placeholder: $("spaces-new-name").placeholder, requestCount: requests.length });
+    a.respondWith({ status: 200, json: { conversation: { id: CONV_A, title: "New conversation" },
+                                         next_before_seq: null, messages: [] } });
     await a.createInSpaces("");
+    await until(function () { return !$("space-bar").hidden; }, "reused conversation opened");
     a.spaces("reused");
     var before = requests.length;
     $("space-new").click();
@@ -2374,6 +2398,155 @@
     await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 3; }, "second page");
     state("second-page");
     a.snap("idle");
+  };
+
+  // ---- review corrections ---------------------------------------------------------------------------------
+
+  // Ambiguous answers never read as "not saved". A database failure during the save (503 database_unavailable)
+  // may have stored the exchange; a retry refused as busy says nothing about the attempt still running. Only
+  // the same key returning the stored exchange settles either.
+  SCENARIOS.spaces_save_ambiguous = async function (a) {
+    await a.wait(60);
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);
+    a.respondWith({ status: 503, json: { error: "database_unavailable" } });
+    await a.send("Committed, acknowledgement lost");
+    await a.wait(60);
+    a.spaces("commit-acknowledgement-lost");
+    a.snap("commit-acknowledgement-lost-page");
+    a.respondWith(savedExchange("Recovered committed answer."));
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("commit-recovered");
+    a.respondWith({ hang: true });
+    await a.send("Still running on the server");
+    await a.stop();
+    await a.wait(60);
+    a.spaces("stopped");
+    a.respondWith({ status: 409, json: { error: "conversation_busy" } });
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("retry-while-original-runs");
+    a.respondWith({ status: 429, json: { error: "busy" } });
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("retry-refused-still-open");
+    a.respondWith(savedExchange("The original did save."));
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("reconciled");
+    // First attempts (nothing unknown before them): a named refusal does establish that nothing was stored;
+    // an answer that speaks of something else, or an unknown code, does not.
+    a.respondWith({ status: 409, json: { error: "conversation_busy" } });
+    await a.send("Refused while another send holds the conversation");
+    await a.wait(60);
+    a.spaces("first-attempt-busy");
+    a.respondWith({ status: 504, json: { error: "request_timeout" } });
+    await a.send("Timed out before the save");
+    await a.wait(60);
+    a.spaces("first-attempt-timeout");
+    a.respondWith({ status: 500, json: { error: "internal_error" } });
+    await a.send("An unexpected failure");
+    await a.wait(60);
+    a.spaces("first-attempt-internal-error");
+    a.respondWith({ status: 503, json: { error: "account_unavailable" } });
+    await a.send("An account lookup failure");
+    await a.wait(60);
+    a.spaces("first-attempt-account-unavailable");
+    a.respondWith({ status: 409, json: { error: "idempotency_conflict" } });
+    await a.send("A key the server already holds");
+    await a.wait(60);
+    a.spaces("first-attempt-idempotency-conflict");
+    a.respondWith({ status: 503, json: { error: "a_code_added_later" } });
+    await a.send("A code this page does not know");
+    await a.wait(60);
+    a.spaces("first-attempt-unknown-code");
+    a.respondWith({ status: 502, body: "<html>Bad gateway</html>", contentType: "text/html" });
+    await a.send("An answer from something in between");
+    await a.wait(60);
+    a.spaces("first-attempt-gateway");
+    a.snap("end");
+  };
+
+  // Start without a title reuses a conversation the list showed as empty. Another tab has since saved an
+  // exchange in it: it is read from the server (once) and shown, with its current title, not assumed empty.
+  SCENARIOS.spaces_reuse_reads_history = async function (a) {
+    await a.wait(60);
+    a.respondWith(
+      spacesList([{ id: SPACE_A, name: "Research", conversation_count: 1, updated_at: AT }]),
+      conversationsList([{ id: CONV_A, title: "New conversation", message_count: 0, last_message_at: null,
+                           updated_at: AT }]));
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await until(function () { return document.querySelector("#spaces-list .spaces-item"); }, "conversations");
+    a.type("An unsent draft");
+    a.respondWith({ status: 200, json: {
+      conversation: { id: CONV_A, title: "Question from the other tab" }, next_before_seq: 7,
+      messages: [savedMessage(7, "user", "Question from the other tab"), savedMessage(8, "assistant", "Saved answer")] } });
+    await a.createInSpaces("");
+    await until(function () { return !$("space-bar").hidden; }, "reused conversation opened");
+    a.spaces("reused-existing");
+    a.push({ label: "reused-thread", earlier: document.querySelectorAll(".spaces-earlier").length,
+             draft: $("composer-input").value, requestCount: requests.length });
+    a.snap("reused-page");
+    // A conversation this page has just created is still entered without a read.
+    a.respondWith(conversationsList([{ id: CONV_A, title: "Question from the other tab", message_count: 2,
+                                       last_message_at: AT, updated_at: AT }]),
+                  { status: 201, json: { conversation: { id: CONV_B, title: "New conversation" } } });
+    $("space-conversations").click();
+    await until(function () { return document.querySelector("#spaces-list .spaces-item"); }, "conversations again");
+    var before = requests.length;
+    await a.createInSpaces("");
+    await until(function () { return text($("space-bar-title")) === " · New conversation"; }, "new conversation");
+    a.spaces("created-new");
+    a.push({ label: "created-requests", added: requests.slice(before).map(function (r) {
+      return (r.method || "GET") + " " + r.url; }) });
+  };
+
+  // A mode no plan has on this deployment: unavailable, and never described as part of Premium.
+  async function unoffered(a) {
+    await a.wait(60);
+    a.modes("start");
+    await a.clickMode("deep");
+    a.modes("deep-clicked");
+    $("mode-learn").click();
+    await a.wait(40);
+    modesDialogState("opened");
+    $("modes-close").click();
+    await a.wait(40);
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.snap("sent");
+  }
+  SCENARIOS.reasoning_unoffered = unoffered;
+  SCENARIOS.reasoning_premium_unstated = unoffered;
+
+  // The keyboard's own route to the explanation: the arrow keys move among the usable modes and skip the
+  // unavailable one, yet Learn more is in the page and the tab order (out of sight until focused) from the
+  // moment the server's answer arrives, with no click on the unavailable mode. The real key presses are in
+  // test_frontend_error_contract.py (this page only waits, for a browser driven by its keyboard).
+  SCENARIOS.reasoning_keyboard = async function (a) {
+    await a.wait(60);
+    a.modes("start");
+    var reached = [];
+    document.querySelector('.mode-option[aria-checked="true"]').focus();
+    for (var i = 0; i < 4; i++) {
+      document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+      reached.push(document.activeElement.getAttribute("data-mode"));
+    }
+    a.modes("after-arrows");
+    a.push({ label: "arrow-path", reached: reached });
+    $("mode-learn").focus();                       // What Tab does next; the real key is pressed in the test.
+    a.modes("learn-focused");
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.snap("sent");
+  };
+  SCENARIOS.reasoning_keyboard_live = async function (a) {
+    a.snap("idle");
+    await a.wait(600000);                          // Left open for the test's real key presses.
   };
 
   // ---- run ---------------------------------------------------------------------

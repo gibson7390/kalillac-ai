@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -35,8 +36,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261121-spaces6"
-CSS_CACHE_KEY = "20261121-spaces6"
+CACHE_KEY = "20261121-spaces7"
+CSS_CACHE_KEY = "20261121-spaces7"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -223,7 +224,8 @@ SCENARIOS = (
        "spaces_restore_refused", "spaces_list_from_address", "spaces_no_empty_pile", "spaces_signed_out_accounts",
        "spaces_save_status", "spaces_search_1280x800", "spaces_long_list_360x640", "spaces_long_list_1280x800",
        "spaces_more_conversations", "reasoning_learn_more", "reasoning_learn_more_accounts",
-       "reasoning_learn_more_360x640"]
+       "reasoning_learn_more_360x640", "spaces_save_ambiguous", "spaces_reuse_reads_history",
+       "reasoning_unoffered", "reasoning_premium_unstated", "reasoning_keyboard"]
 )
 
 
@@ -1460,6 +1462,9 @@ def test_untitled_conversations_are_reused_instead_of_piling_up_and_titles_reach
     assert reused["barShown"] and not reused["dialogOpen"]
     calls = spaces_requests(result)
     assert not any(method == "POST" and url.endswith("/conversations") for method, url, _ in calls)
+    # The reused conversation is read from the server (once), like any existing one; here it is still empty.
+    assert calls[3] == ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)
+    assert reused["save"] == ["auto", "Saves automatically", "status", True] and reused["requestCount"] == 4
     assert step(result, "new-on-empty") == {"label": "new-on-empty", "added": 0, "focused": "composer-input"}
     titled = step(result, "titled")
     assert titled["barText"].startswith("Space: Research · Plan the product launch Saved to your account")
@@ -1884,6 +1889,12 @@ def test_reasoning_modes_are_chosen_with_the_mouse_and_keyboard_and_sent(browser
     result = scenario(browser_results, "reasoning_offered")
     start = step(result, "start")
     assert start["pickerShown"] is True and start["checked"] == ["balanced"]
+    # Premium with Deep enabled (the server lists it for this account): nothing is unavailable, so there is no
+    # note, no Learn more and no lock anywhere.
+    for label in ("start", "deep-clicked", "arrow-right", "arrow-left"):
+        snap = step(result, label)
+        assert (snap["unavailable"], snap["titles"], snap["note"], snap["quietNote"], snap["learn"]) == \
+            ([], [], None, None, None), label
     assert step(result, "deep-clicked")["checked"] == ["deep"]
     right = step(result, "arrow-right")
     assert right["checked"] == ["quick"] and right["focused"] == "quick"
@@ -1899,6 +1910,9 @@ def test_a_free_account_sees_deep_as_premium_and_can_never_select_or_send_it(bro
     result = scenario(browser_results, "reasoning_free_account")
     start = step(result, "start")
     assert start["unavailable"] == ["deep"] and start["checked"] == ["balanced"] and start["note"] is None
+    # Free, with Deep available through Premium (the server says so): the lock and the Premium wording.
+    assert start["titles"] == [["deep", "Deep reasoning is part of Kalillac Premium", 1,
+                                ", available with Kalillac Premium"]]
     clicked = step(result, "deep-clicked")
     assert clicked["checked"] == ["balanced"]
     assert clicked["note"] == "Deep reasoning is part of Kalillac Premium. Your message will use Balanced. Learn more"
@@ -1943,7 +1957,8 @@ def test_the_save_status_is_set_from_server_answers_only():
     """Statically: "saved" is written in exactly two places, each behind what the server returned."""
     source = APP_JS.read_text(encoding="utf-8")
     assert source.count('setSaveState(TURNS.length ? "saved" : "auto")') == 1      # Rows the server returned.
-    assert source.count('setSaveState(exchangeStored(data) && failedExchange !== exchange ? "saved" : "unknown")') == 1
+    assert source.count('if (exchangeStored(data) && failedExchange !== exchange) {') == 1
+    assert source.count('setSaveState("saved")') == 1
     assert len(re.findall(r'setSaveState\(.*"saved"', source)) == 2
     # Nothing about a Space or a saved conversation is kept in the browser: the Spaces code touches no storage.
     spaces = source[source.index("// ---- Spaces (saved conversations)"):source.index("// ---- End & erase")]
@@ -2044,6 +2059,8 @@ def test_learn_more_explains_the_modes_without_changing_anything(browser_results
     assert opened["open"] and opened["modal"] is True and opened["labelledBy"] == "modes-dialog-title"
     assert opened["title"] == "Understanding reasoning modes"
     assert opened["terms"] == ["Quick", "Balanced", "Deep Premium"] and opened["descriptions"] == MODE_COPY
+    # The server said Deep is what Premium adds: only Deep is marked, and only as Premium.
+    assert opened["tags"] == [["quick", None, False], ["balanced", None, False], ["deep", "Premium", False]]
     assert opened["note"] == ("Deep reasoning is available with Kalillac Premium. Choosing a mode never changes "
                               "your plan: your message always uses the mode shown as selected.")
     assert opened["focused"] == "modes-close" and opened["inView"] and opened["overflow"] <= 0
@@ -2070,3 +2087,215 @@ def test_the_reasoning_dialog_promises_no_result():
     for word in ("better", "best", "smarter", "accura", "guarantee", "always right", "%", "benchmark",
                  "upgrade now", "$", "unlimited"):
         assert word not in lower, word
+
+
+# --- review corrections (independent review of 441dd12) -------------------------------------------------------------
+
+def test_an_ambiguous_answer_is_never_reported_as_not_saved(browser_results):
+    result = scenario(browser_results, "spaces_save_ambiguous")
+    save = {s_["label"]: s_["save"] for s_ in result["steps"] if "save" in s_}
+    # A database failure during the save: the exchange may be durably stored (the backend test
+    # test_a_lost_commit_acknowledgement_... stores it and gets this very answer). Never "not saved".
+    assert save["commit-acknowledgement-lost"] == NOT_CONFIRMED
+    lost = step(result, "commit-acknowledgement-lost-page")
+    assert lost["assistants"][-1]["actions"] == ["Retry"]            # The way to settle it is offered.
+    assert save["commit-recovered"] == SAVED                         # The same key returned the stored exchange.
+    # Stopped, then retried while the original still runs: busy says nothing about the original's outcome.
+    assert save["stopped"] == NOT_CONFIRMED
+    assert save["retry-while-original-runs"] == NOT_CONFIRMED
+    # Nor does any later refusal of the retry: only the stored exchange coming back settles it.
+    assert save["retry-refused-still-open"] == NOT_CONFIRMED
+    assert save["reconciled"] == SAVED
+    # A first attempt the server refuses by name stored nothing, and says so.
+    assert save["first-attempt-busy"] == NOT_SAVED and save["first-attempt-timeout"] == NOT_SAVED
+    # Anything else establishes nothing either way.
+    for label in ("first-attempt-internal-error", "first-attempt-account-unavailable",
+                  "first-attempt-idempotency-conflict", "first-attempt-unknown-code", "first-attempt-gateway"):
+        assert save[label] == NOT_CONFIRMED, label
+    # Every retry reused its message's key; no message was sent under two keys.
+    posts = [b for m, u, b in spaces_requests(result) if m == "POST" and u.endswith("/messages")]
+    by_message = {}
+    for body in posts:
+        by_message.setdefault(body["message"], set()).add(body["client_request_id"])
+    assert all(len(keys) == 1 for keys in by_message.values()) and len(by_message) == 9
+    assert [b["message"] for b in posts].count("Still running on the server") == 4
+    assert [b["message"] for b in posts].count("Committed, acknowledgement lost") == 2
+
+
+def test_not_saved_is_claimed_only_for_refusals_that_precede_the_save():
+    """Statically: the one place "not saved" comes from, and the codes that are never taken as proof."""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert source.count('return "unsaved";') == 1 and source.count('"unsaved"') == 1
+    assert 'if (!exchange.saveUnknown && status !== null && refusedBeforeSaving(status, data)) return "unsaved";' in source
+    assert ('var NOT_SAVED_5XX = { model_provider_unavailable: true, service_unavailable: true, '
+            'request_timeout: true };') in source
+    refused = source[source.index("function refusedBeforeSaving"):source.index("function unconfirmedSaveState")]
+    assert "database_unavailable" not in refused and "status !== 404" in refused
+    assert 'code !== "idempotency_conflict"' in refused
+    # The status is set from unconfirmedSaveState on every path that is not a confirmed save.
+    send = source[source.index("function requestSpaceReply"):source.index("// ---- End & erase")]
+    assert send.count("setSaveState(unconfirmedSaveState(exchange") == 6 and send.count('setSaveState("saved")') == 1
+    assert 'setSaveState("unsaved")' not in source and 'setSaveState("unknown")' not in source
+
+
+def test_a_reused_conversation_shows_what_the_server_holds_now(browser_results):
+    result = scenario(browser_results, "spaces_reuse_reads_history")
+    reused = step(result, "reused-existing")
+    # Read once from the server, with its messages and its current title; not entered as empty.
+    calls = spaces_requests(result)
+    assert calls[:4] == [
+        ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations?limit=50", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)]
+    assert reused["save"] == SAVED
+    assert reused["barText"].startswith("Space: Research · Question from the other tab Saved to your account")
+    page = step(result, "reused-page")
+    assert page["users"] == ["Question from the other tab"]
+    assert page["assistants"][0]["text"].strip() == "Saved answer" and page["assistants"][0]["actions"] == ["Copy"]
+    thread = step(result, "reused-thread")
+    # The earlier-messages cursor is kept, the unsent draft is kept, and nothing was read twice.
+    assert thread == {"label": "reused-thread", "earlier": 1, "draft": "An unsent draft", "requestCount": 4}
+    # A conversation this page has just created is entered without a read: one POST, no GET of it.
+    created = step(result, "created-new")
+    assert created["save"] == ["auto", "Saves automatically", "status", True]
+    assert step(result, "created-requests")["added"] == [f"POST /api/spaces/{SPACE_A}/conversations"]
+
+
+def test_reuse_is_the_only_empty_fast_path_left_for_created_conversations():
+    source = APP_JS.read_text(encoding="utf-8")
+    create = source[source.index("function createInSpaces"):source.index("function openSpaceConversation")]
+    assert create.count("openSpaceConversation(") == 2
+    assert "openSpaceConversation(view.space, { id: empty.id, title: empty.title }, true);" in create
+    # The only entry without a read follows a 201 for a conversation this page created.
+    assert create.count(", false);") == 1 and create.index("r.status !== 201") < create.index(", false);")
+
+
+@pytest.mark.parametrize("name", ["reasoning_unoffered", "reasoning_premium_unstated"])
+def test_a_mode_no_plan_offers_is_never_called_premium(browser_results, name):
+    """The server lists Deep neither for this account nor as something Premium adds (or does not say what
+    Premium adds at all): it is unavailable, and nothing on the page says an upgrade would unlock it."""
+    result = scenario(browser_results, name)
+    start, clicked, opened = step(result, "start"), step(result, "deep-clicked"), step(result, "opened")
+    assert start["unavailable"] == ["deep"] and start["checked"] == ["balanced"]
+    assert start["titles"] == [["deep", "Deep reasoning isn’t available right now", 0, ", not available right now"]]
+    assert clicked["checked"] == ["balanced"]
+    assert clicked["note"] == "Deep reasoning isn’t available right now. Your message will use Balanced. Learn more"
+    assert opened["tags"] == [["quick", None, False], ["balanced", None, False], ["deep", "Unavailable", True]]
+    assert opened["note"] == ("Deep reasoning isn’t available right now. Choosing a mode never changes your plan: "
+                              "your message always uses the mode shown as selected.")
+    assert opened["explore"] is None                     # No way to "the plan" for something no plan has.
+    shown = json.dumps([start, clicked, opened], ensure_ascii=False).lower()
+    assert "premium" not in shown and "upgrade" not in shown
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
+
+
+def test_the_page_itself_makes_no_premium_claim_about_a_mode():
+    """The static page says nothing about which mode is part of Premium: only the server's answer does."""
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    start = index.index('<dialog class="modes-dialog"')
+    dialog = index[start:index.index("</dialog>", start)]
+    assert "available with Kalillac Premium" not in dialog and ">Premium<" not in dialog
+    assert dialog.count('class="modes-tag" data-mode-tag="') == 3 and dialog.count("hidden></span>") == 3
+    assert '<span id="modes-dialog-plan"></span>' in dialog
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "premiumModes = Array.isArray(data.premium) ? data.premium.filter(known) : [];" in source
+
+
+def test_the_explanation_is_in_the_tab_order_without_touching_the_unavailable_mode(browser_results):
+    result = scenario(browser_results, "reasoning_keyboard")
+    start = step(result, "start")
+    # No click has happened: the note is not on screen, yet it and Learn more are in the page, focusable.
+    assert start["note"] is None and start["learn"] == ["BUTTON", "button", "Learn more", "dialog"]
+    text_, width, tab_index, visibility = start["quietNote"]
+    assert text_ == "Deep reasoning is part of Kalillac Premium. Your message will use Balanced. Learn more"
+    assert width <= 1 and tab_index == 0 and visibility == "visible"
+    # The arrow keys still skip the unavailable mode, and its sentence follows the selection.
+    assert step(result, "arrow-path")["reached"] == ["quick", "balanced", "quick", "balanced"]
+    assert step(result, "after-arrows")["checked"] == ["balanced"]
+    focused = step(result, "learn-focused")
+    assert focused["note"] == start["quietNote"][0] and focused["quietNote"] is None      # Now on screen.
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
+
+
+def test_a_keyboard_alone_opens_and_closes_the_reasoning_explanation(tmp_path):
+    """Real key presses in a real browser, from the page as it loads: no click, no script-set focus. Shift+Tab
+    walks back from the message box to Learn more, Enter opens the explanation, Escape closes it and focus
+    returns; then on from the picker: an arrow key (which skips Deep) and Tab reach it again."""
+    from test_homepage_handoff import browser_page
+    browser = find_browser()
+    if browser is None:
+        if os.name == "nt":
+            pytest.fail(f"Microsoft Edge is required on Windows and was not found at {EDGE_WINDOWS}")
+        pytest.skip("no supported Chromium-family browser is installed")
+
+    def state(dt, session):
+        result = dt.call("Runtime.evaluate", {"returnByValue": True, "expression": """(() => {
+            const e = document.activeElement, d = document.getElementById('modes-dialog'),
+                  n = document.getElementById('mode-note');
+            return {focus: e ? (e.id || e.getAttribute('data-mode') || e.tagName) : null,
+                    open: !!d && d.open, modal: !!d && d.open && d.matches(':modal'),
+                    noteOnScreen: !!n && !n.hidden && !n.classList.contains('is-quiet') &&
+                                  n.getBoundingClientRect().width > 100,
+                    checked: [...document.querySelectorAll('.mode-option[aria-checked="true"]')].map(o => o.dataset.mode),
+                    deep: document.querySelector('.mode-option[data-mode="deep"]').getAttribute('aria-disabled')};
+        })()"""}, session)
+        return result["result"]["value"]
+
+    def press(dt, session, key, code, vk, shift=False):
+        for kind in ("keyDown", "keyUp"):
+            params = {"type": kind, "key": key, "code": code, "windowsVirtualKeyCode": vk,
+                      "nativeVirtualKeyCode": vk, "modifiers": 8 if shift else 0}
+            if key == "Enter" and kind == "keyDown":
+                params["text"] = "\r"
+            dt.call("Input.dispatchKeyEvent", params, session)
+        time.sleep(0.15)
+
+    with Harness() as harness, browser_page(browser, tmp_path, (1280, 800), False) as (dt, session):
+        dt.call("Page.enable", {}, session)
+        dt.call("Page.navigate", {"url": f"{harness.origin}/app/?scenario=reasoning_keyboard_live"}, session)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                ready = state(dt, session)
+            except (KeyError, RuntimeError):
+                ready = None
+            if ready and ready["deep"] == "true" and ready["focus"] == "composer-input":
+                break
+            time.sleep(0.1)
+        start = state(dt, session)
+        # As the page loads: the message box has focus, Deep is unavailable, nothing has been clicked.
+        assert start == {"focus": "composer-input", "open": False, "modal": False, "noteOnScreen": False,
+                         "checked": ["balanced"], "deep": "true"}
+        back = []
+        for _ in range(8):
+            press(dt, session, "Tab", "Tab", 9, shift=True)
+            back.append(state(dt, session)["focus"])
+            if back[-1] == "mode-learn":
+                break
+        assert back[-1] == "mode-learn", back                 # Reached by the keyboard alone,
+        assert "deep" not in back                             # and not by way of the unavailable mode.
+        assert state(dt, session)["noteOnScreen"] is True     # Focused, it is on screen with its sentence.
+        press(dt, session, "Enter", "Enter", 13)
+        opened = state(dt, session)
+        assert opened["open"] and opened["modal"] and opened["focus"] == "modes-close"
+        press(dt, session, "Escape", "Escape", 27)
+        closed = state(dt, session)
+        assert not closed["open"] and closed["focus"] == "mode-learn" and closed["checked"] == ["balanced"]
+        # From the picker: Shift+Tab to the selected mode, an arrow key (Deep is skipped), Tab to Learn more.
+        press(dt, session, "Tab", "Tab", 9, shift=True)
+        assert state(dt, session)["focus"] == "balanced"
+        press(dt, session, "ArrowRight", "ArrowRight", 39)
+        moved = state(dt, session)
+        assert moved["focus"] == "quick" and moved["checked"] == ["quick"]
+        press(dt, session, "Tab", "Tab", 9)
+        assert state(dt, session)["focus"] == "mode-learn"
+        press(dt, session, "Enter", "Enter", 13)
+        assert state(dt, session)["open"] is True
+        press(dt, session, "Tab", "Tab", 9)                   # Inside the modal dialog, Tab stays inside it.
+        assert state(dt, session)["focus"] in ("modes-close", "modes-explore", "BODY", "modes-dialog")
+        press(dt, session, "Escape", "Escape", 27)
+        end = state(dt, session)
+        assert not end["open"] and end["focus"] == "mode-learn" and end["checked"] == ["quick"]
+        assert harness.unexpected == []

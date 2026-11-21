@@ -2173,6 +2173,20 @@ button.account-menu-button { gap: 4px; cursor: pointer; font-family: inherit; }
   cursor: pointer;
 }
 .mode-learn:hover { color: var(--blue); }
+/* In the tab order from the moment a mode is unavailable, out of sight until Learn more is focused (as a skip
+   link is): a keyboard reaches the explanation without passing through the mode it cannot choose. */
+.mode-note.is-quiet {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 .mode-learn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .modes-dialog {
   width: min(440px, calc(100vw - 2 * var(--rail)));
@@ -2206,6 +2220,8 @@ button.account-menu-button { gap: 4px; cursor: pointer; font-family: inherit; }
   font-weight: 700;
   letter-spacing: 0.02em;
 }
+.modes-tag[hidden] { display: none; }
+.modes-tag.is-unoffered { background: var(--panel-2); color: var(--muted); }
 .modes-dialog-note {
   margin: 16px 0 0;
   padding-top: 12px;
