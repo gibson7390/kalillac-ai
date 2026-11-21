@@ -1367,6 +1367,53 @@
     shell.bubble.appendChild(list);
   }
 
+  // The kind of an attached file, from its name only (the server checked its contents when it was added).
+  var ATTACH_KINDS = { pdf: "PDF", docx: "Word", xlsx: "Excel", pptx: "PowerPoint", txt: "Text", md: "Markdown",
+                       csv: "CSV", json: "JSON", png: "Image", jpg: "Image", jpeg: "Image", webp: "Image",
+                       gif: "Image" };
+  var ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+    '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
+  var ICON_REMOVE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+    'stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M7 7l10 10M17 7L7 17"/></svg>';
+  var attachHint = null;
+
+  function attachKind(filename) {
+    var dot = filename.lastIndexOf(".");
+    var ext = dot === -1 ? "" : filename.slice(dot + 1).toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ATTACH_KINDS, ext) ? ATTACH_KINDS[ext] : "File";
+  }
+
+  /* What to do next, under the attached files: ask Kalillac, or summarize them in one explicit step.
+     Choosing a file never sends anything; only Send or Summarize does. */
+  function renderAttachHint() {
+    if (!attachmentList) return;
+    if (!attachHint) {
+      attachHint = document.createElement("div");
+      attachHint.className = "attach-hint";
+      attachHint.id = "attach-hint";
+      var text = document.createElement("span");
+      text.className = "attach-hint-text";
+      attachHint.appendChild(text);
+      var summarize = document.createElement("button");
+      summarize.type = "button";
+      summarize.className = "attach-summarize";
+      summarize.id = "attach-summarize";
+      summarize.textContent = "Summarize";
+      summarize.addEventListener("click", function () {
+        if (!ATTACHED.length || inFlight) return;
+        sendFixed(ATTACHED.length === 1 ? "Summarize the attached file." : "Summarize the attached files.");
+      });
+      attachHint.appendChild(summarize);
+      attachmentList.parentNode.insertBefore(attachHint, attachmentList.nextSibling);
+    }
+    attachHint.firstChild.textContent = ATTACHED.length === 1
+      ? "Ask Kalillac what to do with this file, or"
+      : "Ask Kalillac what to do with these files, or";
+    attachHint.lastChild.textContent = ATTACHED.length === 1 ? "Summarize file" : "Summarize files";
+    attachHint.hidden = ATTACHED.length === 0;
+  }
+
   function renderAttachments() {
     if (!attachmentList) return;
     while (attachmentList.firstChild) attachmentList.removeChild(attachmentList.firstChild);
@@ -1379,24 +1426,40 @@
         preview.src = f.thumb;
         preview.alt = "";                 // The name beside it says what it is.
         item.appendChild(preview);
+      } else {
+        var icon = document.createElement("span");
+        icon.className = "attachment-icon";
+        icon.innerHTML = ICON_FILE;       // Fixed markup; nothing from the file.
+        item.appendChild(icon);
       }
+      var text = document.createElement("span");
+      text.className = "attachment-text";
       var name = document.createElement("span");
+      name.className = "attachment-name";
       name.textContent = f.filename;
+      name.title = f.filename;
+      var state = document.createElement("span");
+      state.className = "attachment-state";
+      state.textContent = attachKind(f.filename) + " · Ready";
+      text.appendChild(name);
+      text.appendChild(state);
       var remove = document.createElement("button");
       remove.type = "button";
       remove.className = "attachment-remove";
       remove.setAttribute("aria-label", "Remove " + f.filename);
-      remove.textContent = "×";
+      remove.innerHTML = ICON_REMOVE;
       remove.addEventListener("click", function () {
         var removed = ATTACHED.splice(index, 1)[0];
         if (removed && removed.thumb) URL.revokeObjectURL(removed.thumb);
         renderAttachments();
+        input.focus();
       });
-      item.appendChild(name);
+      item.appendChild(text);
       item.appendChild(remove);
       attachmentList.appendChild(item);
     });
     attachmentList.hidden = ATTACHED.length === 0;
+    renderAttachHint();
   }
 
   /* --- Account link ------------------------------------------------------
@@ -1408,11 +1471,36 @@
      where the plan is shown. */
   var ACCOUNTS_OFFERED = document.documentElement.getAttribute("data-kalillac-accounts") === "on";
   var accountTemplate = document.getElementById("account-link-template");
+  var accountLink = null;
   if (ACCOUNTS_OFFERED && accountTemplate && accountTemplate.content &&
       accountTemplate.content.firstElementChild) {
-    accountTemplate.parentNode.insertBefore(
-      accountTemplate.content.firstElementChild.cloneNode(true), accountTemplate);
+    accountLink = accountTemplate.content.firstElementChild.cloneNode(true);
+    accountTemplate.parentNode.insertBefore(accountLink, accountTemplate);
   }
+  /* The footer's plan. Without accounts every visitor uses Kalillac free, as the page says. With accounts
+     the page states no plan until the server has said which one applies: Free for a visitor it reports as
+     not signed in, and for a signed-in account its authoritative entitlement (GET /api/account/entitlements,
+     asked only once the Spaces answer shows an account). */
+  var appPlan = document.getElementById("app-plan");
+  var PLAN_LABELS = { free: "Free · adults 18+", paid: "Kalillac Premium · adults 18+" };
+  if (ACCOUNTS_OFFERED && appPlan) appPlan.textContent = "Adults 18+";
+
+  function showPlan(tier) {
+    if (appPlan && Object.prototype.hasOwnProperty.call(PLAN_LABELS, tier)) appPlan.textContent = PLAN_LABELS[tier];
+  }
+
+  function loadAccountPlan() {
+    fetch("/api/account/entitlements", {
+      method: "GET", credentials: "same-origin", cache: "no-store", redirect: "error",
+      headers: { Accept: "application/json" }
+    }).then(function (res) {
+      return res.status === 200 ? res.json() : null;
+    }).then(function (data) {
+      var tier = data && data.entitlements && data.entitlements.tier;
+      if (tier === "free" || tier === "paid") showPlan(tier);
+    }, function () { /* no plan is stated */ });
+  }
+
   if (ACCOUNTS_OFFERED) {
     ERROR_OUTCOMES.reasoning_mode_not_allowed = {
       message: "That reasoning mode isn't part of this account's plan. Account shows your plan.",
@@ -1448,23 +1536,183 @@
       o.tabIndex = on ? 0 : -1;
     });
     reasoningMode = mode;
+    if (modeNote && noteMode) modeNoteText.textContent = modeNoteFor(noteMode);   // "Your message will use ..."
     if (focus) chosen.focus();
+  }
+
+  /* Which modes this browser may use, from GET /api/chat/reasoning-modes: the server applies exactly the
+     rule it uses for every request (paid modes only with a verified Premium plan). A mode outside the
+     answer is shown, marked unavailable, and cannot be chosen; the selection is always a mode the next
+     request will run with. Without an answer every mode stays offered and the server still decides.
+
+     Why a mode is unavailable is said only as the server's answer establishes it: "premium" lists the modes
+     a Premium plan adds on this deployment. A mode in neither list is not offered here to anyone, and is
+     never described as something an upgrade would unlock. */
+  var MODE_NAMES = { quick: "Quick", balanced: "Balanced", deep: "Deep" };
+  var MODE_LOCK = '<svg class="mode-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+    '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  var modeNote = null;
+
+  function modeAvailable(option) {
+    return option.getAttribute("aria-disabled") !== "true";
+  }
+
+  var modeNoteText = null;
+  var modesDialog = document.getElementById("modes-dialog");
+  var modesClose = document.getElementById("modes-close");
+  var modesExplore = document.getElementById("modes-explore");
+  var modesPlan = document.getElementById("modes-dialog-plan");
+  var modeLearn = null;
+  var premiumModes = [];        // Modes the server says a Premium plan adds here.
+  var unavailableModes = [];    // Modes shown but not usable by this browser, in the picker's order.
+  var noteMode = null;          // The unavailable mode the note is about.
+
+  function modeIsPremium(mode) {
+    return premiumModes.indexOf(mode) !== -1;
+  }
+
+  // "Deep", "Balanced and Deep".
+  function modeNamesOf(modes) {
+    var names = modes.map(function (m) { return MODE_NAMES[m]; });
+    return names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0] || "";
+  }
+
+  function modeNoteFor(mode) {
+    return MODE_NAMES[mode] + (modeIsPremium(mode) ? " reasoning is part of Kalillac Premium." :
+                                                    " reasoning isn’t available right now.") +
+           " Your message will use " + MODE_NAMES[reasoningMode] + ".";
+  }
+
+  /* Learn more: what each mode is, in a small modal dialog. Escape and Close both close it, and focus
+     returns to Learn more. Its descriptions are fixed copy (index.html); what it says about availability
+     follows the server: a mode Premium adds is marked Premium, with the way to the plan and billing page
+     (on an accounts deployment, in a new tab so the conversation on this screen is not lost); a mode this
+     deployment does not offer is marked unavailable, with no mention of an upgrade. */
+  function openModesDialog() {
+    if (!modesDialog) return;
+    var locked = unavailableModes.filter(modeIsPremium);
+    var unoffered = unavailableModes.filter(function (m) { return !modeIsPremium(m); });
+    Array.prototype.forEach.call(modesDialog.querySelectorAll("[data-mode-tag]"), function (tag) {
+      var mode = tag.getAttribute("data-mode-tag");
+      var premium = locked.indexOf(mode) !== -1;
+      tag.hidden = !premium && unoffered.indexOf(mode) === -1;
+      tag.textContent = tag.hidden ? "" : premium ? " Premium" : " Unavailable";
+      tag.classList.toggle("is-unoffered", !tag.hidden && !premium);
+    });
+    if (modesPlan) {
+      modesPlan.textContent =
+        (locked.length ? modeNamesOf(locked) + " reasoning is available with Kalillac Premium. " : "") +
+        (unoffered.length ? modeNamesOf(unoffered) + " reasoning isn’t available right now. " : "");
+    }
+    if (modesExplore) modesExplore.hidden = !ACCOUNTS_OFFERED || !locked.length;
+    if (typeof modesDialog.showModal === "function") modesDialog.showModal();
+    else modesDialog.setAttribute("open", "");
+  }
+
+  function closeModesDialog() {
+    if (!modesDialog || !modesDialog.open) return;
+    if (typeof modesDialog.close === "function") modesDialog.close();
+    else modesDialog.removeAttribute("open");
+  }
+
+  /* The note beside the picker: why a mode cannot be chosen, and Learn more. Clicking an unavailable mode
+     shows it. So that the explanation never depends on reaching that mode (the arrow keys skip it), the note
+     and its Learn more are in the page, in the tab order right after the picker, from the moment the server
+     says a mode is unavailable: visually hidden until Learn more is focused, as a skip link is, so the
+     picker looks the same until then. */
+  function showModeNote(mode, quiet) {
+    if (!modeNote) {
+      modeNote = document.createElement("p");
+      modeNote.className = "mode-note";
+      modeNote.id = "mode-note";
+      modeNote.setAttribute("role", "status");
+      modeNoteText = document.createElement("span");
+      modeNote.appendChild(modeNoteText);
+      if (modesDialog) {
+        modeNote.appendChild(document.createTextNode(" "));
+        modeLearn = document.createElement("button");
+        modeLearn.type = "button";
+        modeLearn.className = "mode-learn";
+        modeLearn.id = "mode-learn";
+        modeLearn.setAttribute("aria-haspopup", "dialog");
+        modeLearn.textContent = "Learn more";
+        modeLearn.addEventListener("click", openModesDialog);
+        modeLearn.addEventListener("focus", function () { modeNote.classList.remove("is-quiet"); });
+        modeNote.appendChild(modeLearn);
+        if (modesClose) modesClose.addEventListener("click", closeModesDialog);
+        modesDialog.addEventListener("close", function () { if (modeLearn && !modeNote.hidden) modeLearn.focus(); });
+      }
+      modePicker.parentNode.insertBefore(modeNote, modePicker.nextSibling);
+    }
+    noteMode = mode || null;
+    modeNoteText.textContent = noteMode ? modeNoteFor(noteMode) : "";
+    modeNote.hidden = !noteMode;
+    modeNote.classList.toggle("is-quiet", !!noteMode && !!quiet);
+  }
+
+  function applyAllowedModes(data) {
+    if (!data || !Array.isArray(data.modes) || !data.modes.length) return;
+    var known = function (m) { return Object.prototype.hasOwnProperty.call(MODE_NAMES, m); };
+    var allowed = data.modes.filter(known);
+    if (!allowed.length) return;
+    premiumModes = Array.isArray(data.premium) ? data.premium.filter(known) : [];
+    modeOptions().forEach(function (option) {
+      var mode = option.getAttribute("data-mode");
+      if (allowed.indexOf(mode) !== -1) return;
+      unavailableModes.push(mode);
+      option.setAttribute("aria-disabled", "true");
+      option.classList.add("is-unavailable");
+      var hint = document.createElement("span");
+      hint.className = "sr-only";
+      if (modeIsPremium(mode)) {
+        option.title = MODE_NAMES[mode] + " reasoning is part of Kalillac Premium";
+        option.insertAdjacentHTML("beforeend", MODE_LOCK);
+        hint.textContent = ", available with Kalillac Premium";
+      } else {
+        // Not offered on this deployment, to any plan: no lock, and no word of Premium.
+        option.title = MODE_NAMES[mode] + " reasoning isn’t available right now";
+        hint.textContent = ", not available right now";
+      }
+      option.appendChild(hint);
+    });
+    if (allowed.indexOf(reasoningMode) === -1) {
+      var fallback = allowed.indexOf(data.default) !== -1 ? data.default : allowed[0];
+      selectMode(fallback, false);
+    }
+    if (unavailableModes.length) showModeNote(unavailableModes[0], true);
   }
 
   if (REASONING_OFFERED && modePicker) {
     modePicker.hidden = false;
     selectMode("balanced", false);
     modeOptions().forEach(function (option, index, all) {
-      option.addEventListener("click", function () { selectMode(option.getAttribute("data-mode"), false); });
+      option.addEventListener("click", function () {
+        if (!modeAvailable(option)) {
+          showModeNote(option.getAttribute("data-mode"), false);
+          return;
+        }
+        selectMode(option.getAttribute("data-mode"), false);
+        showModeNote(unavailableModes[0] || null, true);     // Out of sight again; still reachable by Tab.
+      });
       option.addEventListener("keydown", function (event) {
         var step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 :
                    event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
         if (!step) return;
         event.preventDefault();
-        var next = all[(index + step + all.length) % all.length];
-        selectMode(next.getAttribute("data-mode"), true);
+        // Arrow keys move among the modes this browser may use; an unavailable one is skipped.
+        for (var hop = 1; hop < all.length; hop++) {
+          var next = all[(index + step * hop + all.length * hop) % all.length];
+          if (modeAvailable(next)) {
+            selectMode(next.getAttribute("data-mode"), true);
+            return;
+          }
+        }
       });
     });
+    fetch("/api/chat/reasoning-modes", { method: "GET" }).then(function (res) {
+      return res.status === 200 ? res.json() : null;
+    }).then(applyAllowedModes, function () { /* the server still decides each request */ });
   }
 
   function uploadFile(file) {
@@ -1490,6 +1738,8 @@
           var entry = { id: f.id, filename: typeof f.filename === "string" ? f.filename : file.name, thumb: null };
           ATTACHED.push(entry);
           renderAttachments();
+          input.focus();                    // Ready: the next step is the message.
+
           if (IMAGES_OFFERED && IMAGE_MEDIA[f.media_type]) loadThumb(entry);
           return;
         }
@@ -1833,6 +2083,7 @@
      twice. Leaving returns to a new temporary conversation. Names and messages from the server are
      only ever set as text, or rendered through the same sanitizer as any reply. */
   var SPACES_OFFERED = document.documentElement.getAttribute("data-kalillac-spaces") === "on";
+  var DEFAULT_TITLE = "New conversation";   // The server's title for a conversation not yet named.
   var SPACE = null;            // {space: {id, name}, conversation: {id, title}, restore} while one is open
   var SPACE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   var SPACE_NAME_MAX = 80;
@@ -1852,14 +2103,93 @@
   var spacesNew = document.getElementById("spaces-new");
   var spacesNewName = document.getElementById("spaces-new-name");
   var spacesNewLabel = document.getElementById("spaces-new-label");
+  var spacesNewSubmit = document.getElementById("spaces-new-submit");
+  var spacesHint = document.getElementById("spaces-dialog-hint");
   var spacesBack = document.getElementById("spaces-back");
   var spacesClose = document.getElementById("spaces-close");
   var spaceBar = document.getElementById("space-bar");
   var spaceBarName = document.getElementById("space-bar-name");
   var spaceBarTitle = document.getElementById("space-bar-title");
+  var spaceBarLabel = spaceBar ? spaceBar.querySelector(".space-bar-label") : null;   // Its tooltip: the full names.
   var spaceLeave = document.getElementById("space-leave");
+  var spaceConversations = document.getElementById("space-conversations");
+  var spaceNew = document.getElementById("space-new");
   var sessionStatus = document.getElementById("session-status");
   var spacesView = null;       // {kind: "spaces"} or {kind: "space", space}; replaced on every change
+  var spacesPanel = document.getElementById("spaces-dialog-panel");
+  var spacesSearch = document.getElementById("spaces-search");
+  var spacesSearchInput = document.getElementById("spaces-search-input");
+  var spacesManageGroup = document.getElementById("spaces-manage-group");
+  var spacesListHead = document.getElementById("spaces-list-head");
+  var spacesEditToggle = document.getElementById("spaces-edit-toggle");
+  var spacesNewHeading = document.getElementById("spaces-new-heading");
+  var SPACES_SEARCH_FROM = 5;  // The search is offered once an account has this many Spaces.
+  var SPACES_PAGES_MAX = 4;    // Pages of 50 read for the list; an account holds at most 50 Spaces (one page).
+  var CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;   // The server's opaque paging cursor (base64url).
+
+  /* The open conversation's save status, in the Space bar. Nothing is saved by hand: the server stores each
+     exchange when its answer is complete. The bar says "saved" only for what the server has confirmed: the
+     messages it returned when the conversation was opened, or an exchange whose stored rows came back with
+     a 200. A refusal the server names stores nothing, so it reads as not saved. Anything this page cannot
+     know (a stopped or lost request, an unreadable or unexpected answer) reads as not confirmed; Retry
+     settles it, and the message's key means it is never saved twice. */
+  var spaceSave = document.getElementById("space-save");
+  var spaceSaveText = document.getElementById("space-save-text");
+  var SAVE_STATES = {
+    auto: { text: "Saves automatically",
+            title: "Each exchange is saved to your account as soon as Kalillac answers. There is nothing to save by hand." },
+    working: { text: "Generating…",
+               title: "Kalillac is answering. The exchange is saved when the answer is complete." },
+    saved: { text: "Saved to your account",
+             title: "Every message shown here is saved to your account." },
+    unsaved: { text: "Last message not saved",
+               title: "Your last message wasn’t saved. Earlier messages are still saved to your account." },
+    unknown: { text: "Save not confirmed",
+               title: "Kalillac couldn’t confirm that your last message was saved. Retry to check: a message is never saved twice." }
+  };
+
+  function setSaveState(state) {
+    if (!spaceSave || !spaceSaveText || !Object.prototype.hasOwnProperty.call(SAVE_STATES, state)) return;
+    spaceSave.setAttribute("data-state", state);
+    spaceSaveText.textContent = SAVE_STATES[state].text;
+    spaceSave.title = SAVE_STATES[state].title;
+  }
+
+  // A 200 that carries both stored rows of the exchange, each with the server's id: confirmed as saved.
+  function exchangeStored(data) {
+    var user = data && data.user_message;
+    var reply = data && data.assistant_message;
+    return !!user && !!reply && SPACE_ID_RE.test(user.id) && SPACE_ID_RE.test(reply.id);
+  }
+
+  /* Whether an error answer establishes that this attempt stored nothing.
+
+     It does when the server refused the request, under a fixed code, before or instead of the save: every
+     4xx refusal is raised before the save's commit and rolls it back (404 and idempotency_conflict are left
+     out: they speak of what exists, not of this attempt), and so are the three 5xx codes below, which mean
+     no answer was produced or the time ran out before the commit.
+
+     It does not for anything else. In particular 503 database_unavailable is what a database failure during
+     the save answers, whether the commit failed or completed with its acknowledgement lost: the exchange
+     may be durably stored. An unknown or missing code is treated the same way. */
+  var NOT_SAVED_5XX = { model_provider_unavailable: true, service_unavailable: true, request_timeout: true };
+
+  function refusedBeforeSaving(status, data) {
+    var code = data && typeof data.error === "string" ? data.error : null;
+    if (!code) return false;
+    if (status >= 400 && status < 500) return status !== 404 && code !== "idempotency_conflict";
+    return status >= 500 && NOT_SAVED_5XX[code] === true;
+  }
+
+  /* The status after an attempt that did not end in a confirmed save. Once any attempt of a message has an
+     unknown outcome (stopped, lost, an ambiguous answer), a later refusal of its retry settles nothing: the
+     earlier attempt may still be running, or may have saved (a retry answered 409 conversation_busy is
+     exactly that). It stays "not confirmed" until the same key returns the stored exchange. */
+  function unconfirmedSaveState(exchange, status, data) {
+    if (!exchange.saveUnknown && status !== null && refusedBeforeSaving(status, data)) return "unsaved";
+    exchange.saveUnknown = true;
+    return "unknown";
+  }
 
   function newRequestId() {
     if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
@@ -1923,6 +2253,17 @@
     button.addEventListener("click", onChoose);
     item.appendChild(button);
     spacesList.appendChild(item);
+    return button;
+  }
+
+  // The Space or conversation open on screen now: marked in the lists, so it is easy to find again.
+  function markOpen(button) {
+    button.classList.add("is-open");
+    button.setAttribute("aria-current", "true");
+    var badge = document.createElement("span");
+    badge.className = "spaces-item-open";
+    badge.textContent = "Open now";
+    button.insertBefore(badge, button.children[1] || null);
   }
 
   function countLabel(count, one, many) {
@@ -1930,62 +2271,182 @@
     return count + " " + (count === 1 ? one : many);
   }
 
+  /* What the dialog is doing, for its layout: "list" (every Space), "space" (one Space's conversations),
+     "space-edit" (renaming the Space, its instructions, or confirming its deletion: the conversation list and
+     the new-conversation field step aside) and "conversations-edit" (renaming or deleting conversations). */
+  function setSpacesMode(mode) {
+    if (spacesPanel) spacesPanel.setAttribute("data-mode", mode);
+    holdSpacesHeight(false);
+  }
+
+  /* While a search narrows the list, the dialog keeps the height it had, so the search field does not move
+     under the customer's hands; the hold ends when the search is cleared or the view changes. */
+  function holdSpacesHeight(hold) {
+    if (!hold) spacesDialog.style.height = "";
+    else if (!spacesDialog.style.height) spacesDialog.style.height = spacesDialog.offsetHeight + "px";
+  }
+
+  /* Moving between the list of Spaces and one Space redraws the dialog, and the control that was focused
+     is gone or hidden: focus goes to the dialog's title (which names where the customer now is), never to
+     a text field, so a phone's keyboard does not open over the list. */
+  function focusSpacesTitle() {
+    if (spacesDialog.open && spacesTitle && typeof spacesTitle.focus === "function") spacesTitle.focus();
+  }
+
+  /* Every Space of the account, most recently active first (the server's order: a Space's updated_at moves
+     with each new conversation and saved exchange). A page holds 50 and an account at most 50 Spaces, so
+     the first page is all of them; any cursor the server still returns is followed, so the list, and the
+     search over it, is never a silent part of the whole. */
+  function loadSpaces(view, cursor, found, pages) {
+    return spacesRequest("GET", "/api/spaces?limit=" + SPACE_PAGE_MAX + (cursor ? "&cursor=" + cursor : ""))
+      .then(function (r) {
+        if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return null;
+        r.data.spaces.forEach(function (space) {
+          if (!space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) return;
+          found.push({ id: space.id, name: space.name, conversation_count: space.conversation_count });
+        });
+        var next = r.data.next_cursor;
+        if (typeof next !== "string" || !CURSOR_RE.test(next)) return found;
+        if (pages + 1 >= SPACES_PAGES_MAX) {
+          view.partial = true;            // More than the page can show: no search over a part.
+          return found;
+        }
+        return loadSpaces(view, next, found, pages + 1);
+      });
+  }
+
+  function spacesQuery() {
+    return spacesSearch && !spacesSearch.hidden && spacesSearchInput ? spacesSearchInput.value.trim() : "";
+  }
+
+  // The loaded Spaces, filtered by the search (a case-insensitive match anywhere in the name). No request.
+  function renderSpaces(view) {
+    if (spacesView !== view || !view.spaces) return;
+    var query = spacesQuery();
+    var needle = query.toLowerCase();
+    holdSpacesHeight(!!needle);
+    clearSpacesList();
+    var shown = 0;
+    view.spaces.forEach(function (space) {
+      if (needle && space.name.toLowerCase().indexOf(needle) === -1) return;
+      shown += 1;
+      var item = addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
+        function () { showSpace({ id: space.id, name: space.name }); });
+      if (SPACE && SPACE.space.id === space.id) markOpen(item);
+    });
+    if (!view.spaces.length) setSpacesStatus(COPY_SPACES_EMPTY);
+    else if (!shown) setSpacesStatus("No Spaces match “" + query + "”. Clear the search to see all your Spaces.");
+    else setSpacesStatus("");
+  }
+
   function showSpacesList() {
     var view = spacesView = { kind: "spaces" };
     spacesTitle.textContent = "Spaces";
     spacesBack.hidden = true;
-    clearManage();
-    spacesNewLabel.textContent = "New Space name";
-    spacesNewName.placeholder = "New Space name";
+    hideManage();
+    setSpacesMode("list");
+    if (spacesListHead) spacesListHead.hidden = true;
+    if (spacesNewHeading) spacesNewHeading.hidden = true;
+    if (spacesSearch) spacesSearch.hidden = true;
+    spacesNewLabel.textContent = "Name a new Space";
+    spacesNewName.placeholder = "Name a new Space";
     spacesNewName.maxLength = SPACE_NAME_MAX;
+    spacesNewSubmit.textContent = "Create";
+    // The introduction or the search, whichever this account needs, is shown once its Spaces are known
+    // (never one and then the other).
+    spacesHint.hidden = true;
     clearSpacesList();
+    focusSpacesTitle();
     setSpacesStatus("Loading…");
-    return spacesRequest("GET", "/api/spaces?limit=" + SPACE_PAGE_MAX).then(function (r) {
+    return loadSpaces(view, null, [], 0).then(function (found) {
       if (spacesView !== view) return;
-      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) {
+      if (!found) {
+        spacesHint.hidden = false;
         setSpacesStatus(COPY_SPACES_FAILED);
         return;
       }
-      var shown = 0;
-      r.data.spaces.forEach(function (space) {
-        if (!space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) return;
-        shown += 1;
-        addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
-          function () { showSpace({ id: space.id, name: space.name }); });
-      });
-      setSpacesStatus(shown ? "" : COPY_SPACES_EMPTY);
+      view.spaces = found;
+      if (spacesSearch) spacesSearch.hidden = !!view.partial || found.length < SPACES_SEARCH_FROM;
+      // With a search to explain itself, the introduction steps aside and the list starts higher.
+      spacesHint.hidden = !!spacesSearch && !spacesSearch.hidden;
+      renderSpaces(view);
     }, function () {
-      if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
+      if (spacesView !== view) return;
+      spacesHint.hidden = false;
+      setSpacesStatus(COPY_SPACES_FAILED);
     });
+  }
+
+  // One page of the open Space's conversations, added to the view; the cursor for the next, if any.
+  function readConversations(view, r) {
+    if (r.status !== 200 || !r.data || !Array.isArray(r.data.conversations)) return false;
+    if (!view.conversations) view.conversations = [];
+    r.data.conversations.forEach(function (c) {
+      if (!c || !SPACE_ID_RE.test(c.id)) return;
+      if (view.conversations.some(function (known) { return known.id === c.id; })) return;
+      view.conversations.push({ id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null,
+                                message_count: c.message_count });
+    });
+    var next = r.data.next_cursor;
+    view.nextCursor = typeof next === "string" && CURSOR_RE.test(next) ? next : null;
+    return true;
   }
 
   function showSpace(space) {
     var view = spacesView = { kind: "space", space: space };
     spacesTitle.textContent = space.name;
     spacesBack.hidden = false;
+    if (spacesSearch) spacesSearch.hidden = true;
+    if (spacesListHead) spacesListHead.hidden = false;
+    if (spacesNewHeading) spacesNewHeading.hidden = false;
+    if (spacesEditToggle) spacesEditToggle.hidden = true;        // Until there is a conversation to edit.
     spacesNewLabel.textContent = "New conversation title (optional)";
     spacesNewName.placeholder = "Conversation title (optional)";   // Fits a 360 px phone in full.
     spacesNewName.maxLength = SPACE_TITLE_MAX;
+    spacesNewSubmit.textContent = "Start";
+    spacesHint.hidden = true;
     spacesNewName.value = "";
     clearSpacesList();
     manageBar(view);
+    focusSpacesTitle();
     setSpacesStatus("Loading…");
     return spacesRequest("GET", spaceUrl(space.id, "/conversations?limit=" + SPACE_PAGE_MAX)).then(function (r) {
       if (spacesView !== view) return;
-      if (r.status !== 200 || !r.data || !Array.isArray(r.data.conversations)) {
+      if (!readConversations(view, r)) {
         setSpacesStatus(COPY_SPACES_FAILED);
         return;
       }
-      view.conversations = [];
-      r.data.conversations.forEach(function (c) {
-        if (!c || !SPACE_ID_RE.test(c.id)) return;
-        view.conversations.push({ id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null,
-                                  message_count: c.message_count });
-      });
       renderConversations(view);
     }, function () {
       if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
     });
+  }
+
+  /* A Space can hold more conversations than one page (50). The rest are never silently left out: the list
+     ends with Show more conversations while the server has more. */
+  function loadMoreConversations(view, button) {
+    if (spacesView !== view || !view.nextCursor) return;
+    button.disabled = true;
+    spacesRequest("GET", spaceUrl(view.space.id, "/conversations?limit=" + SPACE_PAGE_MAX + "&cursor=" + view.nextCursor))
+      .then(function (r) {
+        if (spacesView !== view) return;
+        var before = view.conversations.length;
+        if (!readConversations(view, r)) {
+          button.disabled = false;
+          setSpacesStatus(COPY_SPACES_FAILED);
+          return;
+        }
+        renderConversations(view);
+        // Focus follows to the first conversation just added (the button it was on is gone).
+        var items = spacesList.querySelectorAll(".spaces-item, .spaces-edit-row button");
+        var target = spacesList.children[before];
+        target = target ? target.querySelector("button") : items[items.length - 1];
+        if (target) target.focus();
+      }, function () {
+        if (spacesView !== view) return;
+        button.disabled = false;
+        setSpacesStatus(COPY_SPACES_FAILED);
+      });
   }
 
   /* Managing the open Space (in the dialog's Space view): rename it, set its instructions, delete it.
@@ -1994,7 +2455,7 @@
   var SPACE_INSTRUCTIONS_MAX = 8000;
   var COPY_SPACE_SAVE_FAILED = "Kalillac couldn't save that. Please try again.";
   var COPY_SPACE_CHANGED = "This Space was changed somewhere else. Open it again to see the latest.";
-  var spacesManage = null;
+  var spacesManage = document.getElementById("spaces-manage");
 
   function spacesButton(label, className, onClick) {
     var button = document.createElement("button");
@@ -2008,29 +2469,34 @@
   function clearManage() {
     if (!spacesManage) return;
     while (spacesManage.firstChild) spacesManage.removeChild(spacesManage.firstChild);
-    spacesManage.hidden = true;
   }
 
-  function manageBar(view) {
-    if (!spacesManage) {
-      spacesManage = document.createElement("div");
-      spacesManage.className = "spaces-manage";
-      spacesManage.id = "spaces-manage";
-      spacesList.parentNode.insertBefore(spacesManage, spacesList);
-    }
+  function hideManage() {
     clearManage();
-    spacesManage.hidden = false;
+    if (spacesManageGroup) spacesManageGroup.hidden = true;
+  }
+
+  /* The Space view's three parts, each under its own quiet label: Manage this Space (rename, instructions,
+     delete), Conversations (with Edit conversations beside the label) and Start a conversation. */
+  function manageBar(view) {
+    clearManage();
+    if (spacesManageGroup) spacesManageGroup.hidden = false;
+    setSpacesMode(view.editing ? "conversations-edit" : "space");
+    if (spacesEditToggle) spacesEditToggle.textContent = view.editing ? "Done" : "Edit conversations";
     spacesManage.appendChild(spacesButton("Rename", "spaces-manage-btn", function () { editSpace(view, "name"); }));
     spacesManage.appendChild(spacesButton("Instructions", "spaces-manage-btn",
       function () { editSpace(view, "instructions"); }));
     spacesManage.appendChild(spacesButton("Delete", "spaces-manage-btn spaces-danger",
       function () { confirmDeleteSpace(view); }));
-    spacesManage.appendChild(spacesButton(view.editing ? "Done" : "Edit conversations", "spaces-manage-btn",
-      function () {
-        view.editing = !view.editing;
-        manageBar(view);
-        renderConversations(view);
-      }));
+  }
+
+  function toggleConversationEditing() {
+    var view = spacesView;
+    if (!view || view.kind !== "space" || !view.conversations) return;
+    view.editing = !view.editing;
+    manageBar(view);
+    renderConversations(view);
+    if (spacesEditToggle) spacesEditToggle.focus();
   }
 
   /* The open Space's conversations: opened by a click, or, while editing, renamed or deleted in place.
@@ -2040,8 +2506,11 @@
     clearSpacesList();
     view.conversations.forEach(function (c) {
       if (!view.editing) {
-        addSpacesItem(c.title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
-          function () { openSpaceConversation(view.space, { id: c.id, title: c.title }, true); });
+        var open = SPACE && SPACE.space.id === view.space.id && SPACE.conversation.id === c.id;
+        // The conversation already on screen: choosing it goes back to it as it is (an unsent draft stays).
+        var item = addSpacesItem(c.title || "Untitled conversation", countLabel(c.message_count, "message", "messages"),
+          open ? closeSpacesDialog : function () { openSpaceConversation(view.space, { id: c.id, title: c.title }, true); });
+        if (open) markOpen(item);
         return;
       }
       var item = document.createElement("li");
@@ -2055,6 +2524,17 @@
         function () { confirmDeleteConversation(view, c, item); }));
       spacesList.appendChild(item);
     });
+    if (view.nextCursor) {
+      var more = document.createElement("li");
+      more.className = "spaces-more-row";
+      var moreButton = spacesButton("Show more conversations", "spaces-earlier", function () {
+        loadMoreConversations(view, moreButton);
+      });
+      more.appendChild(moreButton);
+      spacesList.appendChild(more);
+    }
+    // Nothing to edit in an empty Space; while editing, Done stays even after the last one is deleted.
+    if (spacesEditToggle) spacesEditToggle.hidden = !view.conversations.length && !view.editing;
     setSpacesStatus(view.conversations.length ? "" : COPY_CONVERSATIONS_EMPTY);
   }
 
@@ -2107,6 +2587,7 @@
           if (SPACE && SPACE.conversation.id === c.id) {
             SPACE.conversation.title = saved.title;
             spaceBarTitle.textContent = " · " + saved.title;
+            spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
           }
           renderConversations(view);
           setSpacesStatus("Renamed.");
@@ -2172,15 +2653,26 @@
       if (!s) { setSpacesStatus(COPY_SPACES_FAILED); return; }
       setSpacesStatus("");
       clearManage();
-      spacesManage.hidden = false;
+      setSpacesMode("space-edit");        // One thing at a time: the conversation controls step aside.
       var form = document.createElement("form");
       form.className = "spaces-edit";
       var label = document.createElement("label");
       label.className = "spaces-edit-label";
       label.htmlFor = "spaces-edit-field";
-      label.textContent = field === "name" ? "Space name" : "Instructions for every conversation in this Space";
+      label.textContent = field === "name" ? "Space name" : "Instructions for this Space";
       var box = document.createElement(field === "name" ? "input" : "textarea");
       box.id = "spaces-edit-field";
+      var help = null;
+      if (field !== "name") {
+        // What instructions do, plainly: they travel with every message in this Space and nowhere else.
+        help = document.createElement("p");
+        help.className = "spaces-edit-help";
+        help.id = "spaces-edit-help";
+        help.textContent = "Sent with every message in this Space, and only this Space: for example your role, " +
+          "the tone you prefer, or background to keep in mind. Leave empty for none.";
+        box.setAttribute("aria-describedby", "spaces-edit-help");
+        box.placeholder = "For example: I’m preparing a product launch. Keep answers short and practical.";
+      }
       box.className = "spaces-edit-field";
       box.maxLength = field === "name" ? SPACE_NAME_MAX : SPACE_INSTRUCTIONS_MAX;
       box.value = field === "name" ? s.name : s.instructions;
@@ -2190,10 +2682,12 @@
       var save = document.createElement("button");
       save.type = "submit";
       save.className = "spaces-manage-btn spaces-primary";
+      save.setAttribute("data-kind", "primary");
       save.textContent = "Save";
       actions.appendChild(save);
       actions.appendChild(spacesButton("Cancel", "spaces-manage-btn", function () { manageBar(view); }));
       form.appendChild(label);
+      if (help) form.appendChild(help);
       form.appendChild(box);
       form.appendChild(actions);
       form.addEventListener("submit", function (event) {
@@ -2235,7 +2729,7 @@
 
   function confirmDeleteSpace(view) {
     clearManage();
-    spacesManage.hidden = false;
+    setSpacesMode("space-edit");
     var note = document.createElement("p");
     note.className = "spaces-confirm";
     note.textContent = "Delete this Space and all its conversations? This can’t be undone.";
@@ -2285,6 +2779,18 @@
       });
       return;
     }
+    if (!value && view.conversations) {
+      var empty = view.conversations.filter(function (c) {
+        return c.message_count === 0 && (!c.title || c.title === DEFAULT_TITLE);
+      })[0];
+      if (empty) {
+        // It was empty when this list was read. It may not be now (another tab, another device): it is
+        // opened like any existing conversation, with what the server holds. Only a conversation this page
+        // has just created is entered without a read.
+        openSpaceConversation(view.space, { id: empty.id, title: empty.title }, true);
+        return;
+      }
+    }
     setSpacesStatus("Creating…");
     spacesRequest("POST", spaceUrl(view.space.id, "/conversations"), value ? { title: value } : {}).then(function (r) {
       if (spacesView !== view) return;
@@ -2316,6 +2822,11 @@
           setSpacesStatus(COPY_SPACES_FAILED);
           return;
         }
+        // The title as the server has it now (the list this came from may be older than its automatic title).
+        var current = r.data.conversation;
+        if (current && current.id === conversation.id && validName(current.title, SPACE_TITLE_MAX)) {
+          conversation = { id: conversation.id, title: current.title };
+        }
         enterSpace(space, conversation, r.data.messages, earlierCursor(r.data.next_before_seq));
       }, function () {
         if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
@@ -2330,11 +2841,211 @@
     }
   }
 
-  function openSpacesDialog() {
+  function openSpacesDialog(space) {
     if (inFlight) return;
+    if (spacesSearchInput) spacesSearchInput.value = "";     // Each opening starts with every Space listed.
     if (typeof spacesDialog.showModal === "function") spacesDialog.showModal();
     else spacesDialog.setAttribute("open", "");
-    showSpacesList();
+    if (space && space.id) showSpace(space);
+    else showSpacesList();
+  }
+
+  /* The search field: typing filters the list at once (no request). Escape clears a search before it closes
+     the dialog; Enter opens the first match; the Down arrow moves into the list. */
+  function onSpacesSearchKey(event) {
+    var view = spacesView;
+    if (!view || view.kind !== "spaces") return;
+    if (event.key === "Escape" && spacesSearchInput.value) {
+      event.preventDefault();
+      event.stopPropagation();
+      spacesSearchInput.value = "";
+      renderSpaces(view);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      var first = spacesQuery() ? spacesList.querySelector(".spaces-item") : null;
+      if (first) first.click();
+    } else if (event.key === "ArrowDown") {
+      var item = spacesList.querySelector(".spaces-item");
+      if (item) {
+        event.preventDefault();
+        item.focus();
+      }
+    }
+  }
+
+  // Up and Down (and Home, End) move through a list of Spaces or conversations; Tab still works as ever.
+  function onSpacesListKey(event) {
+    if (!event.target || !event.target.classList || !event.target.classList.contains("spaces-item")) return;
+    var items = Array.prototype.slice.call(spacesList.querySelectorAll(".spaces-item"));
+    var at = items.indexOf(event.target);
+    var to = event.key === "ArrowDown" ? at + 1 : event.key === "ArrowUp" ? at - 1 :
+             event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : null;
+    if (to === null) return;
+    event.preventDefault();
+    if (to < 0) {
+      if (spacesSearch && !spacesSearch.hidden) spacesSearchInput.focus();
+      return;
+    }
+    if (to < items.length) items[to].focus();
+  }
+
+  /* A new conversation in the open Space, in one step (the Space bar's New conversation). It has no
+     title yet; the Space's conversation list can name it. A failure opens the Space's list and says so. */
+  function newConversationInSpace() {
+    var open = SPACE;
+    if (!open || inFlight || spaceNew.disabled) return;
+    // The open conversation is still empty: it already is a new conversation.
+    if (TURNS.length === 0 && !failedExchange && !thread.querySelector(".msg")) {
+      input.focus();
+      return;
+    }
+    spaceNew.disabled = true;
+    spacesRequest("POST", spaceUrl(open.space.id, "/conversations"), {}).then(function (r) {
+      spaceNew.disabled = false;
+      if (SPACE !== open || inFlight) return;
+      var c = r.data && r.data.conversation;
+      if (r.status !== 201 || !c || !SPACE_ID_RE.test(c.id)) {
+        openSpacesDialog(open.space);
+        setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+        return;
+      }
+      enterSpace(open.space, { id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null }, []);
+    }, function () {
+      spaceNew.disabled = false;
+      if (SPACE === open) {
+        openSpacesDialog(open.space);
+        setSpacesStatus(COPY_SPACES_CREATE_FAILED);
+      }
+    });
+  }
+
+  /* ---- coming back from the account pages -------------------------------------------------------------
+     On a Spaces deployment only. The account pages' way back opens /app/?space=<id>&conversation=<id>, and
+     their My Spaces opens /app/?spaces=open. This page only reads those, once, as exact ids (anything else
+     is ignored); it never writes the address or the history, and nothing is stored in the browser. A reload
+     still starts a new temporary session, as it always has: the Space is reopened only when the page was
+     opened by following such a link. */
+  function addressValue(name) {
+    var found = new RegExp("[?&]" + name + "=([^&]*)").exec(window.location.search);
+    return found ? found[1] : null;
+  }
+
+  var START = (function () {
+    var none = { space: null, conversation: null, spaces: false };
+    var entry = window.performance && typeof window.performance.getEntriesByType === "function"
+      ? window.performance.getEntriesByType("navigation")[0] : null;
+    if (entry && entry.type === "reload") return none;
+    var space = addressValue("space");
+    var conversation = addressValue("conversation");
+    var valid = !!space && SPACE_ID_RE.test(space) && (!conversation || SPACE_ID_RE.test(conversation));
+    return {
+      space: valid ? space : null,
+      conversation: valid && conversation ? conversation : null,
+      spaces: addressValue("spaces") === "open"
+    };
+  })();
+
+  // Reopens the Space (and conversation) named by the link once this account's Spaces are known. Anything
+  // the server does not confirm, or anything the visitor started meanwhile, leaves the temporary conversation.
+  function restoreFromAddress() {
+    var sid = START.space;
+    var cid = START.conversation;
+    var untouched = function () { return !SPACE && !inFlight && TURNS.length === 0 && input.value === ""; };
+    var giveUp = function () { /* the temporary conversation stays */ };
+    spacesRequest("GET", spaceUrl(sid)).then(function (r) {
+      var s = r.data && r.data.space;
+      if (r.status !== 200 || !s || s.id !== sid || !validName(s.name, SPACE_NAME_MAX)) { giveUp(); return; }
+      var space = { id: s.id, name: s.name };
+      if (!cid) {
+        if (untouched()) openSpacesDialog(space);
+        return;
+      }
+      return spacesRequest("GET", spaceUrl(sid, "/conversations/" + cid + "?limit=" + SPACE_MESSAGES_MAX))
+        .then(function (c) {
+          var conv = c.data && c.data.conversation;
+          if (c.status !== 200 || !conv || conv.id !== cid || !Array.isArray(c.data.messages) || !untouched()) {
+            giveUp();
+            return;
+          }
+          enterSpace(space, { id: cid, title: validName(conv.title, SPACE_TITLE_MAX) ? conv.title : null },
+                     c.data.messages, earlierCursor(c.data.next_before_seq));
+        });
+    }).then(null, giveUp);
+  }
+
+  /* ---- the signed-in customer's account menu ---------------------------------------------------------
+     The Spaces question already tells this page whether the browser is signed in (any answer but "not
+     signed in" comes from an account); no other request is made for it. Then the Account link becomes a
+     small menu: the account (with the way back to this Space), Billing, and Sign out. */
+  var accountMenuTemplate = document.getElementById("account-menu-template");
+  var accountMenu = null;
+
+  // The account pages' address, with the open Space and conversation (two checked ids, nothing else).
+  function accountHref(show) {
+    var parts = [];
+    if (show) parts.push("show=" + show);
+    if (SPACE && SPACE_ID_RE.test(SPACE.space.id) && SPACE_ID_RE.test(SPACE.conversation.id)) {
+      parts.push("space=" + SPACE.space.id, "conversation=" + SPACE.conversation.id);
+    }
+    return "/account" + (parts.length ? "?" + parts.join("&") : "");
+  }
+
+  function syncAccountLinks() {
+    if (accountLink) accountLink.setAttribute("href", accountHref(null));
+    if (accountMenu) {
+      accountMenu.querySelector("#account-menu-account").setAttribute("href", accountHref(null));
+      accountMenu.querySelector("#account-menu-billing").setAttribute("href", accountHref("billing"));
+    }
+  }
+
+  function signedInAnswer(r) {
+    if (r.status === 200) return true;
+    var code = r.data && r.data.error;
+    return (r.status === 403 && code === "email_verification_required") || (r.status === 404 && code === "not_found");
+  }
+
+  function showAccountMenu() {
+    if (!ACCOUNTS_OFFERED || accountMenu || !accountLink || !accountMenuTemplate || !accountMenuTemplate.content ||
+        !accountMenuTemplate.content.firstElementChild) return;
+    accountMenu = accountMenuTemplate.content.firstElementChild.cloneNode(true);
+    accountLink.parentNode.replaceChild(accountMenu, accountLink);
+    accountLink = null;
+    var button = accountMenu.querySelector("#account-menu-btn");
+    var list = accountMenu.querySelector("#account-menu-list");
+    var signOutBtn = accountMenu.querySelector("#account-menu-sign-out");
+    var setOpen = function (open) {
+      list.hidden = !open;
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    button.addEventListener("click", function () { setOpen(list.hidden); });
+    accountMenu.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape" || list.hidden) return;
+      event.preventDefault();
+      setOpen(false);
+      button.focus();
+    });
+    document.addEventListener("click", function (event) {
+      if (!list.hidden && !accountMenu.contains(event.target)) setOpen(false);
+    });
+    accountMenu.addEventListener("focusout", function (event) {
+      if (!list.hidden && event.relatedTarget && !accountMenu.contains(event.relatedTarget)) setOpen(false);
+    });
+    signOutBtn.addEventListener("click", function () {
+      if (signOutBtn.getAttribute("aria-disabled") === "true") return;
+      signOutBtn.setAttribute("aria-disabled", "true");
+      signOutBtn.textContent = "Signing out…";
+      fetch("/api/account/logout", {
+        method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Accept: "application/json" }
+      }).then(function (res) {
+        if (!res.ok) throw new Error("sign-out refused");
+        window.location.assign("/account/sign-in");
+      }).then(null, function () {
+        signOutBtn.removeAttribute("aria-disabled");
+        signOutBtn.textContent = "Couldn’t sign out. Try again";
+      });
+    });
+    syncAccountLinks();
   }
 
   // A server cursor for the page before the shown messages: a positive whole number, else none.
@@ -2416,6 +3127,7 @@
     SPACE = { space: space, conversation: conversation, restore: restore, earlier: earlier || null };
     spaceBarName.textContent = space.name;
     spaceBarTitle.textContent = conversation.title ? " · " + conversation.title : "";
+    spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
     spaceBar.hidden = false;
     if (sessionStatus) sessionStatus.hidden = true;
     if (eraseBtn) eraseBtn.hidden = true;
@@ -2424,8 +3136,11 @@
     showAttachStatus("");
 
     renderSaved(messages);
+    // What is on screen came from the server: saved. An empty conversation has nothing to save yet.
+    setSaveState(TURNS.length ? "saved" : "auto");
     showEarlierControl();
     closeSpacesDialog();
+    syncAccountLinks();
     stickToBottom = true;
     scrollToBottom(true);
     input.focus();
@@ -2438,11 +3153,14 @@
     spaceBar.hidden = true;
     spaceBarName.textContent = "";
     spaceBarTitle.textContent = "";
+    spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
+    setSaveState("auto");
     if (sessionStatus) sessionStatus.hidden = false;
     if (eraseBtn) eraseBtn.hidden = false;
     if (modePicker && restore.picker !== null) modePicker.hidden = restore.picker;
     if (attachBtn && restore.attach !== null) attachBtn.hidden = restore.attach;
     startNewConversation();
+    syncAccountLinks();
   }
 
   function requestSpaceReply(exchange) {
@@ -2455,6 +3173,7 @@
     var spaceBody = { message: exchange.text, client_request_id: exchange.requestId };
     if (exchange.mode) spaceBody.reasoning_mode = exchange.mode;
     setBusy(true);
+    setSaveState("working");
     clearActions(exchange.shell);
     setThinking(exchange.shell);
     controller = new AbortController();
@@ -2472,25 +3191,47 @@
           if (stale()) return;
           var data = parseJson(body);
           if (!res.ok) {
+            setSaveState(unconfirmedSaveState(exchange, res.status, data));
             failExchange(exchange, outcomeForResponse(res.status, data));
             return;
           }
           var saved = data && data.assistant_message;
           var reply = saved && typeof saved.content === "string" ? saved.content : "";
+          var named = data && data.conversation;
+          if (named && named.id === open.conversation.id && validName(named.title, SPACE_TITLE_MAX) &&
+              named.title !== open.conversation.title) {
+            open.conversation.title = named.title;
+            spaceBarTitle.textContent = " · " + named.title;
+            spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
+          }
           if ((data && typeof data.error === "string") || !reply.trim()) {
+            setSaveState(unconfirmedSaveState(exchange, null, null));
             failExchange(exchange, OUTCOME_INCOMPLETE);
             return;
           }
           completeExchange(exchange, reply, null, null, []);
+          // Saved only as the server confirmed it: both stored rows came back, and the answer is on screen.
+          if (exchangeStored(data) && failedExchange !== exchange) {
+            exchange.saveUnknown = false;
+            setSaveState("saved");
+          } else {
+            setSaveState(unconfirmedSaveState(exchange, null, null));
+          }
         }, function (err) {
-          if (!stale()) failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
+          if (stale()) return;
+          setSaveState(unconfirmedSaveState(exchange, null, null));
+          failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
         });
       }, function (err) {
         // Stopping does not stop the server from saving; a retry with the same key shows what it saved.
-        if (!stale()) failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
+        if (stale()) return;
+        setSaveState(unconfirmedSaveState(exchange, null, null));
+        failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
       })
       .then(null, function () {
-        if (!stale()) failExchange(exchange, OUTCOME_INCOMPLETE);
+        if (stale()) return;
+        setSaveState(unconfirmedSaveState(exchange, null, null));
+        failExchange(exchange, OUTCOME_INCOMPLETE);
       })
       .then(function () {
         if (exchange.epoch !== conversationEpoch) return;
@@ -2504,6 +3245,15 @@
       spacesDialog && spaceBar) {
     spacesNew.addEventListener("submit", createInSpaces);
     spacesBack.addEventListener("click", function () { showSpacesList(); });
+    if (spacesSearchInput) {
+      spacesSearchInput.maxLength = SPACE_NAME_MAX;
+      spacesSearchInput.addEventListener("input", function () {
+        if (spacesView && spacesView.kind === "spaces") renderSpaces(spacesView);
+      });
+      spacesSearchInput.addEventListener("keydown", onSpacesSearchKey);
+    }
+    spacesList.addEventListener("keydown", onSpacesListKey);
+    if (spacesEditToggle) spacesEditToggle.addEventListener("click", toggleConversationEditing);
     spacesClose.addEventListener("click", closeSpacesDialog);
     spacesDialog.addEventListener("close", function () {
       // The close event arrives after the dialog closed; when it was opened again meanwhile, this late
@@ -2513,12 +3263,25 @@
       if (spacesBtn) spacesBtn.focus();
     });
     spaceLeave.addEventListener("click", leaveSpace);
-    // The one question asked on load: may this account use Spaces? Anything but a list is "no".
+    if (spaceConversations) {
+      spaceConversations.addEventListener("click", function () { if (SPACE) openSpacesDialog(SPACE.space); });
+    }
+    if (spaceNew) spaceNew.addEventListener("click", newConversationInSpace);
+    // The one question asked on load: may this account use Spaces? Anything but a list is "no". Its answer
+    // also says whether this browser is signed in, for the account menu.
     spacesRequest("GET", "/api/spaces?limit=1").then(function (r) {
-      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return;
+      if (signedInAnswer(r)) {
+        showAccountMenu();
+        if (ACCOUNTS_OFFERED) loadAccountPlan();
+      } else if (ACCOUNTS_OFFERED && r.status === 401) {
+        showPlan("free");                 // Not signed in: the free, temporary chat.
+      }
+      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return;   // Nothing to reopen.
       spacesBtn = spacesTemplate.content.firstElementChild.cloneNode(true);
       spacesTemplate.parentNode.insertBefore(spacesBtn, spacesTemplate);
-      spacesBtn.addEventListener("click", openSpacesDialog);
+      spacesBtn.addEventListener("click", function () { openSpacesDialog(); });
+      if (START.space) restoreFromAddress();
+      else if (START.spaces && !inFlight && TURNS.length === 0) openSpacesDialog();
     }, function () { /* not offered */ });
   }
 
@@ -2546,7 +3309,7 @@
   var RECEIPT_LIMITS = "Information already sent to AI or search providers, required allowance records, and operational or security logs are not erased by this action. Provider processing may not stop immediately.";
   var RECEIPT_FAILED = "Cleared from this device, but Kalillac could not confirm removal of its temporary server memory.";
   var RECEIPT_LOCAL = "Cleared from this device. No Kalillac session had been confirmed for this conversation.";
-  var ERASE_CONFIRM_FALLBACK = "End and erase this conversation? This clears it from this device " +
+  var ERASE_CONFIRM_FALLBACK = "End and erase this conversation? This clears it from this device, " +
                                "and asks Kalillac to remove its temporary memory of this session. " +
                                "This can’t be undone.";
 

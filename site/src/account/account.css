@@ -125,6 +125,13 @@
 .acct-notice-error .acct-notice-title { color: #8f1d30; }
 .acct-notice-success { border-color: #c4e6e3; border-left-color: #008c8d; background: #f2fbfa; }
 .acct-notice-success .acct-notice-title { color: #035f60; }
+/* An everyday slip (a mistyped password): compact, a small mark, no red bar. The page is not in trouble. */
+.acct-notice-caution { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start;
+                       padding: 10px 14px 11px; border: 1px solid #eadfc8; border-radius: 10px; background: #fffbf3;
+                       font-size: 13.5px; line-height: 1.5; }
+.acct-notice-caution .acct-notice-title { color: #5c3d0c; font-size: 14px; font-weight: 700; }
+.acct-notice-caution .acct-notice-body { margin-top: 1px; color: #5a6781; }
+.acct-notice-icon { width: 18px; height: 18px; margin-top: 1px; color: #b07514; }
 .acct-section .acct-notice { margin: 16px 0 0; }
 /* The return from Stripe: its notice, then (while the payment is confirmed) one quiet re-check. */
 [data-testid='checkout-return'] { margin-bottom: 16px; }
@@ -245,3 +252,31 @@
 .acct-file[data-available='false'] .acct-file-name { color: var(--acct-soft); }
 .acct-file-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .acct-file-confirm { color: var(--acct-soft); font-size: 13px; }
+
+/* From the chat: the way straight back to the Space and conversation the customer came from. */
+.acct-return { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; margin: 0 0 14px; padding: 0 16px;
+  border: 1px solid #b9cdec; border-radius: 10px; background: #f3f8ff; color: #0047b3; font-weight: 650; text-decoration: none; }
+.acct-return:hover { background: #e7f0ff; border-color: #8faad6; }
+
+/* Kalillac Premium: the plan's name with a small mark, never a generic "paid" label. */
+.acct-identity[data-tier='paid'] .acct-plan::before { display: none; }
+.acct-premium-mark { width: 14px; height: 14px; flex: none; color: var(--k-teal-bright); }
+.acct-identity[data-tier='paid'] .acct-plan { gap: 7px; letter-spacing: .01em; }
+
+/* What Premium adds, for a Free account: calm, informative, no price and no urgency. */
+.acct-premium { border: 1px solid #d6e2f5; border-radius: 14px; padding: 18px 20px; background: #f8fbff; }
+.acct-premium-title { display: flex; align-items: center; gap: 8px; }
+.acct-premium-title .acct-premium-mark { color: #0b1737; }
+.acct-premium-list { display: grid; gap: 14px; margin: 14px 0 0; padding: 0; list-style: none; }
+.acct-premium-list li { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; align-items: start; }
+.acct-premium-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #e8f0ff; color: #0047b3; }
+.acct-premium-icon svg { width: 19px; height: 19px; }
+.acct-premium-list strong { display: block; color: var(--acct-ink); font-size: 15px; }
+.acct-premium-text { display: block; margin-top: 2px; color: var(--acct-soft); font-size: 14px; line-height: 1.5; }
+/* Brought into view by Explore Kalillac Premium and by the header's Billing: clear of the fixed header. */
+#acct-billing-heading { scroll-margin-top: calc(var(--k-header-h, 72px) + 24px); }
+.acct-premium-more { margin-top: 16px; padding-top: 14px; border-top: 1px solid #dfe8f7; }
+.acct-premium-more .acct-button { gap: 8px; }
+.acct-premium-more .acct-button svg { width: 15px; height: 15px; flex: none; }
+
+.acct-identity + .acct-premium { margin-top: 18px; }

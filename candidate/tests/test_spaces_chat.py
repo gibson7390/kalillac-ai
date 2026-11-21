@@ -186,6 +186,80 @@ def test_a_space_remembers_its_conversation_across_a_fresh_application(world, tm
         ("user", "Explain how encryption uses keys."), ("assistant", REPLY)]
 
 
+def test_the_customer_persistence_contract_end_to_end(world, tmp_path, provider):
+    """What a customer may rely on, in one journey: a Space and a conversation are stored when created; an
+    exchange is stored only when it completes, and exactly once; a failed send stores nothing and reports
+    nothing as saved; switching conversations loses nothing; everything is there again after leaving; and
+    only this account sees it."""
+    from kalillac_db.models import Space
+    with client(make_app(world)) as api:
+        space_id = new_space(api, name="work stuff")
+        first, second = new_conversation(api, space_id), new_conversation(api, space_id)
+        assert (world.count(Space), world.count(Conversation), world.count(Message)) == (1, 2, 0)
+        # A failed request: an error, no saved exchange in the answer, nothing stored, the lease released.
+        provider.fail = True
+        key = new_request_id()
+        failed = send(api, space_id, first, "Explain how DNS works", request_id=key)
+        assert failed.status_code == 503 and set(failed.json()) == {"error"}
+        assert world.count(Message) == 0 and lease_of(world, first) == (None, None)
+        assert conversation_of(api, space_id, first)["message_count"] == 0
+        # The retry (same key) is saved once; asking again with that key returns the stored exchange.
+        provider.fail = False
+        saved = send(api, space_id, first, "Explain how DNS works", request_id=key)
+        assert saved.status_code == 200 and saved.json()["conversation"]["message_count"] == 2
+        again = send(api, space_id, first, "Explain how DNS works", request_id=key)
+        assert again.status_code == 200
+        assert again.json()["assistant_message"]["id"] == saved.json()["assistant_message"]["id"]
+        assert world.count(Message) == 2 and len(provider.payloads) == 2      # The failure, then one answer.
+        # Switching between conversations: each keeps its own messages, in order.
+        assert send(api, space_id, second, "Help me debug this Python script").status_code == 200
+        assert send(api, space_id, first, "And what is a resolver?").status_code == 200
+        ids = (saved.json()["conversation"]["id"], first)
+        assert ids[0] == ids[1]
+    # Leaving and coming back (a fresh application on the same database): all of it is there.
+    engine = make_sqlite_file_engine(str(tmp_path))
+    fresh = World(engine=engine, factory=make_session_factory(engine), users=world.users, now=world.now)
+    with client(make_app(fresh)) as api:
+        spaces = api.get("/api/spaces", headers=headers("a")).json()["spaces"]
+        listed = api.get(f"/api/spaces/{space_id}/conversations", headers=headers("a")).json()["conversations"]
+        one = api.get(f"/api/spaces/{space_id}/conversations/{first}", headers=headers("a")).json()
+        two = api.get(f"/api/spaces/{space_id}/conversations/{second}", headers=headers("a")).json()
+        # Another account, even one with Spaces of its own, finds none of it.
+        assert api.get("/api/spaces", headers=headers("b")).json()["spaces"] == []
+        assert api.get(f"/api/spaces/{space_id}/conversations/{first}", headers=headers("b")).status_code == 404
+    engine.dispose()
+    assert [(s_["name"], s_["conversation_count"]) for s_ in spaces] == [("work stuff", 2)]
+    assert {c["id"]: (c["title"], c["message_count"]) for c in listed} == {
+        first: ("Explain how DNS works", 4), second: ("Help me debug this Python script", 2)}
+    assert [(m["seq"], m["role"], m["content"]) for m in one["messages"]] == [
+        (1, "user", "Explain how DNS works"), (2, "assistant", REPLY),
+        (3, "user", "And what is a resolver?"), (4, "assistant", REPLY)]
+    assert [(m["seq"], m["content"]) for m in two["messages"]] == [
+        (1, "Help me debug this Python script"), (2, REPLY)]
+
+
+def test_spaces_are_listed_most_recently_active_first(world, api, provider):
+    # The list's order is the Space's own updated_at, which a new conversation and a saved exchange move:
+    # the Space worked in last comes first. No other activity record exists or is needed.
+    older, newer = new_space(api, name="Older"), None
+    world.advance(60)
+    newer = new_space(api, name="Newer")
+    names = lambda: [s_["name"] for s_ in api.get("/api/spaces", headers=headers("a")).json()["spaces"]]
+    assert names() == ["Newer", "Older"]
+    world.advance(60)
+    conversation_id = new_conversation(api, older)
+    assert names() == ["Older", "Newer"]
+    world.advance(60)
+    assert send(api, newer, new_conversation(api, newer), "Explain how DNS works").status_code == 200
+    assert names() == ["Newer", "Older"]
+    world.advance(60)
+    assert send(api, older, conversation_id, "Explain how DNS works").status_code == 200
+    assert names() == ["Older", "Newer"]
+    # Reading a Space or a conversation is not activity: the order stays.
+    assert api.get(f"/api/spaces/{newer}", headers=headers("a")).status_code == 200
+    assert names() == ["Older", "Newer"]
+
+
 def test_a_space_send_counts_against_the_account_quota(world, api, monkeypatch):
     from kalillac_accounts.quota import UsageQuota
     monkeypatch.setattr(app, "_usage_quota", UsageQuota(
@@ -510,6 +584,72 @@ def test_database_failure_while_saving_keeps_no_partial_exchange(world, api, pro
     assert lease_of(world, conversation_id) == (None, None)       # released by the cleanup
 
 
+def test_a_lost_commit_acknowledgement_answers_503_for_a_saved_exchange_and_the_same_key_reconciles(
+        world, api, provider, monkeypatch):
+    """The same answer (503 database_unavailable) as the failure above, where nothing was stored: here the
+    commit completed and only its acknowledgement was lost, so both rows are durable. The answer alone cannot
+    tell a client which happened (the page shows "Save not confirmed" for it, never "not saved"); the request's
+    own key settles it, without another provider call and without a second copy."""
+    from sqlalchemy.orm import SessionTransaction
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    key = new_request_id()
+    real_commit, real_complete, fired = SessionTransaction.commit, repo.complete_exchange, []
+
+    def mark(session, *args, **kwargs):
+        result = real_complete(session, *args, **kwargs)
+        session.info["completes_exchange"] = True
+        return result
+
+    def lost_acknowledgement(transaction, *args, **kwargs):
+        # Only the outer transaction that completes the exchange: not authorization, the lease or cleanup.
+        completing = transaction.parent is None and transaction.session.info.pop("completes_exchange", False)
+        real_commit(transaction, *args, **kwargs)
+        if completing and not fired:
+            fired.append(True)
+            raise OperationalError("COMMIT", {}, ConnectionError("synthetic lost commit acknowledgement"))
+
+    monkeypatch.setattr(repo, "complete_exchange", mark)
+    monkeypatch.setattr(SessionTransaction, "commit", lost_acknowledgement)
+    response = send(api, space_id, conversation_id, "Explain how DNS works", request_id=key)
+    assert fired
+    assert (response.status_code, response.json()) == (503, {"error": "database_unavailable"})
+    # Saved all the same: both rows, the count and the title.
+    assert world.count(Message) == 2
+    saved = conversation_of(api, space_id, conversation_id)
+    assert saved["message_count"] == 2 and saved["title"] == "Explain how DNS works"
+    # The same key returns the stored exchange: no second generation, no second copy.
+    replay = send(api, space_id, conversation_id, "Explain how DNS works", request_id=key)
+    assert replay.status_code == 200 and replay.json()["assistant_message"]["content"] == REPLY
+    assert (replay.json()["user_message"]["seq"], replay.json()["assistant_message"]["seq"]) == (1, 2)
+    assert world.count(Message) == 2 and len(provider.payloads) == 1
+
+
+def test_a_retry_while_the_original_still_runs_is_busy_and_the_same_key_then_reconciles(world, provider):
+    """A customer stops a send and retries at once. The original is still running on the server, so the retry
+    is refused as busy: that refusal says nothing about whether the original will save (it does, here). Once it
+    has, the same key returns what was stored, exactly once."""
+    application = make_app(world)
+    with client(application) as api:
+        space_id = new_space(api)
+        conversation_id = new_conversation(api, space_id)
+    provider.hold = threading.Event()
+    key = new_request_id()
+
+    async def retry_at_once(http):
+        return await post_send(space_id, conversation_id, "Explain how DNS works", key)(http)
+
+    original, busy = asyncio.run(concurrently(
+        application, post_send(space_id, conversation_id, "Explain how DNS works", key), retry_at_once, provider))
+    assert (busy.status_code, busy.json()) == (409, {"error": "conversation_busy"})
+    assert original.status_code == 200                              # The "unknown" attempt did save.
+    with client(application) as api:
+        replay = send(api, space_id, conversation_id, "Explain how DNS works", request_id=key)
+    assert replay.status_code == 200
+    assert replay.json()["assistant_message"]["id"] == original.json()["assistant_message"]["id"]
+    assert world.count(Message) == 2 and len(provider.payloads) == 1
+
+
 def test_a_lease_that_cannot_be_released_expires(world, api, provider, monkeypatch):
     space_id = new_space(api)
     conversation_id = new_conversation(api, space_id)
@@ -682,3 +822,165 @@ def test_a_space_answers_retention_questions_truthfully_end_to_end(world, api, p
     assert response.json()["assistant_message"]["content"] == SPACE_RETENTION_REPLY
     assert provider.payloads == []                                 # a fixed reply, no model call
     assert world.count(Message) == 2                               # and it is itself saved
+
+
+# --- automatic conversation titles (repository.automatic_title, applied in complete_exchange) -------------
+
+def conversation_of(api, space_id, conversation_id, key="a"):
+    response = api.get(f"/api/spaces/{space_id}/conversations/{conversation_id}", headers=headers(key))
+    assert response.status_code == 200, response.text
+    return response.json()["conversation"]
+
+
+@pytest.mark.parametrize("message,title", [
+    ("How do I plan a product launch?", "How do I plan a product launch?"),
+    ("  ## Draft   a cover letter\nfor the role", "Draft a cover letter"),
+    ("```python\nprint('hi')\n```\nWhy does this fail?", "print('hi')"),
+    ("Summarize the main causes of the 2008 financial crisis and how regulators responded afterwards",
+     "Summarize the main causes of the 2008 financial crisis and…"),
+    ("hi", None), ("?!", None), ("   \n\n", None),
+])
+def test_automatic_titles_are_local_and_deterministic(message, title):
+    assert repo.automatic_title(message) == title
+    if title:
+        assert 1 <= len(title) <= 60
+
+
+def test_a_default_titled_conversation_is_named_by_its_first_meaningful_message(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    assert conversation_of(api, space_id, conversation_id)["title"] == "New conversation"
+    # A greeting is too short to name it: the next message does.
+    assert send(api, space_id, conversation_id, "hi").status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "New conversation"
+    reply = send(api, space_id, conversation_id, "Explain how encryption uses keys.")
+    assert reply.status_code == 200 and reply.json()["conversation"]["title"] == "Explain how encryption uses keys."
+    # Once named, later messages never rename it.
+    assert send(api, space_id, conversation_id, "And what about hashing?").status_code == 200
+    named = conversation_of(api, space_id, conversation_id)
+    assert named["title"] == "Explain how encryption uses keys." and named["version"] == 1
+
+
+def test_a_conversation_saved_before_automatic_titles_is_named_by_its_first_message_on_its_next_save(
+        world, api, provider):
+    # As the development preview held one: an exchange saved while the title was still the default (before
+    # automatic titles existed). Nothing renames it on its own; its next saved exchange names it, from the
+    # first meaningful message it holds, not from the newest.
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    with world.factory() as session, session.begin():
+        row = session.get(Conversation, uuid.UUID(conversation_id))
+        session.add_all([
+            Message(conversation_id=row.id, user_id=row.user_id, seq=1, role="user", content="work car",
+                    client_request_id=uuid.uuid4(), created_at=world.clock()),
+            Message(conversation_id=row.id, user_id=row.user_id, seq=2, role="assistant", content="An answer.",
+                    client_request_id=None, created_at=world.clock())])
+        row.message_count = 2
+    legacy = conversation_of(api, space_id, conversation_id)
+    assert legacy["title"] == "New conversation" and legacy["version"] == 1 and legacy["message_count"] == 2
+    # Reading, listing and opening it never rename it.
+    assert api.get(f"/api/spaces/{space_id}/conversations", headers=headers("a")).status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "New conversation"
+    reply = send(api, space_id, conversation_id, "And how much does insurance cost?")
+    assert reply.status_code == 200 and reply.json()["conversation"]["title"] == "work car"
+    named = conversation_of(api, space_id, conversation_id)
+    assert named["id"] == conversation_id and named["version"] == 1 and named["message_count"] == 4
+    assert world.count(Message, conversation_id=uuid.UUID(conversation_id)) == 4      # Nothing lost.
+
+
+def test_the_first_meaningful_message_names_it_even_after_several_greetings(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    for greeting in ("hi", "ok", "?"):
+        assert send(api, space_id, conversation_id, greeting).status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "New conversation"
+    reply = send(api, space_id, conversation_id, "Help me debug this Python script")
+    assert reply.json()["conversation"]["title"] == "Help me debug this Python script"
+
+
+@pytest.mark.parametrize("message", ["How do I calculate derivatives?", "Help me debug this Python script",
+                                     "Explain how DNS works"])
+def test_a_plain_first_question_is_the_title(api, provider, message):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    reply = send(api, space_id, conversation_id, message)
+    assert reply.status_code == 200 and reply.json()["conversation"]["title"] == message
+    assert len(provider.payloads) == 1                              # The answer's own call: none for the title.
+
+
+def test_a_title_the_customer_chose_is_never_replaced(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    renamed = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                        json={"title": "Launch checklist", "expected_version": 1}, headers=headers("a"))
+    assert renamed.status_code == 200
+    assert send(api, space_id, conversation_id, "Explain how encryption uses keys.").status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "Launch checklist"
+    created = api.post(f"/api/spaces/{space_id}/conversations", json={"title": "Budget"}, headers=headers("a"))
+    other = created.json()["conversation"]["id"]
+    assert send(api, space_id, other, "Explain how encryption uses keys.").status_code == 200
+    assert conversation_of(api, space_id, other)["title"] == "Budget"
+
+
+def test_an_automatic_title_does_not_block_a_rename_made_from_the_version_read_before_it(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    assert send(api, space_id, conversation_id, "Explain how encryption uses keys.").status_code == 200
+    renamed = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                        json={"title": "Crypto notes", "expected_version": 1}, headers=headers("a"))
+    assert renamed.status_code == 200 and renamed.json()["conversation"]["title"] == "Crypto notes"
+
+
+def test_edited_instructions_apply_to_the_next_send_in_that_space_only(api, provider):
+    x = new_space(api, "SENTINEL-FIRST-INSTRUCTIONS", name="X")
+    y = new_space(api, "SENTINEL-Y-INSTRUCTIONS", name="Y")
+    x_conversation, y_conversation = new_conversation(api, x), new_conversation(api, y)
+    assert send(api, x, x_conversation, "Explain how encryption uses keys.").status_code == 200
+    edited = api.put(f"/api/spaces/{x}/instructions",
+                     json={"instructions": "SENTINEL-EDITED-INSTRUCTIONS", "expected_version": 1}, headers=headers("a"))
+    assert edited.status_code == 200, edited.text
+    assert send(api, x, x_conversation, "And how are keys exchanged?").status_code == 200
+    assert send(api, y, y_conversation, "Explain how encryption uses keys.").status_code == 200
+    before, after, other = (json.dumps(p) for p in provider.payloads)
+    assert "SENTINEL-FIRST-INSTRUCTIONS" in before
+    # The effective request is assembled from what is saved now: the edit, and nothing of the earlier text.
+    assert "SENTINEL-EDITED-INSTRUCTIONS" in after and "SENTINEL-FIRST-INSTRUCTIONS" not in after
+    assert "SENTINEL-Y-INSTRUCTIONS" in other
+    assert "SENTINEL-EDITED-INSTRUCTIONS" not in other and "SENTINEL-FIRST-INSTRUCTIONS" not in other
+
+
+@pytest.mark.parametrize("how", ["renamed", "created"])
+def test_a_customer_who_chooses_exactly_new_conversation_keeps_it(api, provider, world, how):
+    space_id = new_space(api)
+    if how == "created":
+        created = api.post(f"/api/spaces/{space_id}/conversations", json={"title": "  New conversation "},
+                           headers=headers("a"))
+        assert created.status_code == 201
+        conversation_id = created.json()["conversation"]["id"]
+    else:
+        conversation_id = new_conversation(api, space_id)
+        assert send(api, space_id, conversation_id, "hi").status_code == 200        # Not named by a greeting.
+        renamed = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                            json={"title": "New conversation", "expected_version": 1}, headers=headers("a"))
+        assert renamed.status_code == 200
+    before = conversation_of(api, space_id, conversation_id)
+    assert before["title"] == "New conversation" and before["version"] == 2
+    reply = send(api, space_id, conversation_id, "Explain how encryption uses keys.")
+    assert reply.status_code == 200 and reply.json()["conversation"]["title"] == "New conversation"
+    after = conversation_of(api, space_id, conversation_id)
+    assert after["id"] == conversation_id and after["title"] == "New conversation" and after["version"] == 2
+    # Its messages are all kept, and a later rename with the version read still succeeds.
+    with world.factory() as session:
+        assert session.query(Message).filter(Message.conversation_id == uuid.UUID(conversation_id)).count() == \
+            (4 if how == "renamed" else 2)
+    later = api.patch(f"/api/spaces/{space_id}/conversations/{conversation_id}",
+                      json={"title": "Encryption", "expected_version": 2}, headers=headers("a"))
+    assert later.status_code == 200 and later.json()["conversation"]["title"] == "Encryption"
+
+
+def test_an_untitled_conversation_still_starts_at_version_one_and_is_named(api, provider):
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    assert conversation_of(api, space_id, conversation_id)["version"] == 1
+    assert send(api, space_id, conversation_id, "Explain how encryption uses keys.").status_code == 200
+    assert conversation_of(api, space_id, conversation_id)["title"] == "Explain how encryption uses keys."

@@ -421,8 +421,8 @@ def setup(args):
     env = service_env(p, home)
     env.update({"KALILLAC_V1_TRANSITION_ADMIN_URL_FILE": str(p["deployment"] / "protected" / "transition-admin-url"),
                 "KALILLAC_V1_OPERATOR_RECORD_FILE": str(p["state"] / "operator-record.jsonl")})
-    result = as_user([sys.executable, "-B", "tools/v1_security_transition.py", "activate", "--release-sha", sha, "--apply"],
-                     uid, gid, env=env, cwd=CANDIDATE, capture_output=True, text=True, timeout=300)
+    result = as_user(python_command("tools/v1_security_transition.py", "activate", "--release-sha", sha, "--apply"),
+                     uid, gid, env=child_environment(env), cwd=CANDIDATE, capture_output=True, text=True, timeout=300)
     (p["deployment"] / "protected" / "transition-admin-url").unlink()
     if result.returncode != 0 or '"to": "active"' not in result.stdout:
         fail("the operator transition did not activate:\n" + (result.stdout + result.stderr)[-1500:])
@@ -545,6 +545,22 @@ def service_env(p, home):
 SCRIPTS = {"app": "tools/local_staging_app.py", "web": "tools/local_staging_web.py"}
 INSTANCE = "KALILLAC_LOCAL_INSTANCE"
 
+# Every Python process this module starts (the application, the panel, the V1 transition) is launched through
+# python_command and child_environment. Local staging itself sets neither hook: its processes start exactly as
+# `python -B SCRIPT ...` with the environment given. The development preview (tools/dev_preview.py) sets both,
+# so that its setup, like its run, starts each process inside the preview's network fence
+# (tools/preview_fenced.py) and only with settings that name the preview's own database.
+LAUNCHER: tuple = ()               # Arguments placed between `python -B` and the script.
+CHILD_ENVIRONMENT = None           # callable(environment) -> environment, or a refusal (it does not return).
+
+
+def python_command(script, *arguments):
+    return [sys.executable, "-B", *LAUNCHER, script, *arguments]
+
+
+def child_environment(env):
+    return env if CHILD_ENVIRONMENT is None else CHILD_ENVIRONMENT(env)
+
 
 def _checkout():
     return os.path.realpath(CANDIDATE)
@@ -632,7 +648,9 @@ def _identity(record, name, uid):
             return "ours" if matches else "other"
         token = record.get("token")
         environ = (proc / "environ").read_bytes().split(b"\0")
-        matches = (record.get("script") == _script(name) and _script(name) in argv[1:3]
+        # The script follows `python -B` and, when one is set, the launcher's own arguments.
+        matches = (record.get("script") == _script(name) and _script(name) in argv[1:3 + len(LAUNCHER)]
+                   and all(part in argv[1:3 + len(LAUNCHER)] for part in LAUNCHER)
                    and record.get("boot") == _boot() and record.get("started") == _started(pid)
                    and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
                    and f"{INSTANCE}={token}".encode() in environ)
@@ -806,9 +824,9 @@ def _spawn(name, extra, p, uid, gid, env):
     os.chown(p["state"] / f"{name}.log", uid, gid)
     token = secrets.token_hex(16)
     drop = {} if os.geteuid() == uid else {"user": uid, "group": gid, "extra_groups": []}
-    process = subprocess.Popen([sys.executable, "-B", _script(name), *extra], cwd=_checkout(),
-                               env={**env, INSTANCE: token}, stdout=log, stderr=subprocess.STDOUT,
-                               start_new_session=True, **drop)
+    process = subprocess.Popen(python_command(_script(name), *extra), cwd=_checkout(),
+                               env={**child_environment(env), INSTANCE: token}, stdout=log,
+                               stderr=subprocess.STDOUT, start_new_session=True, **drop)
     try:
         started = _started(process.pid)
     except OSError:

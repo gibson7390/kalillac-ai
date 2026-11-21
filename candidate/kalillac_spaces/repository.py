@@ -293,9 +293,13 @@ def create_conversation(session, user_id, space_id, title, now) -> Conversation:
     )
     if count >= MAX_CONVERSATIONS_PER_SPACE:
         raise LimitReached("conversation_limit_reached")
+    # The version also records who chose the title, without another column: a conversation the customer
+    # created as exactly "New conversation" starts at version 2, as one they renamed (any rename adds one)
+    # would be. Only a version-1 conversation with the default title is named automatically.
+    chosen_default = bool(title) and title == DEFAULT_CONVERSATION_TITLE
     conversation = Conversation(
         space_id=space.id, user_id=user_id, title=title or DEFAULT_CONVERSATION_TITLE,
-        message_count=0, version=1, created_at=now, updated_at=now,
+        message_count=0, version=2 if chosen_default else 1, created_at=now, updated_at=now,
     )
     session.add(conversation)
     space.updated_at = now
@@ -486,9 +490,69 @@ def insert_exchange(session, conversation: Conversation, user_id, request_id: uu
     return user_row, reply_row
 
 
+AUTO_TITLE_MAX = 60
+_TITLE_LEAD = "#>*-+`~_=|•·:;,. \t"
+
+
+def automatic_title(message: str) -> str | None:
+    """A conversation title from a user message, deterministically and locally (no model call): its first
+    non-empty line, without leading Markdown marks, whitespace collapsed, cut at a word boundary to
+    AUTO_TITLE_MAX characters with an ellipsis. None when the message has fewer than three letters or
+    digits (a greeting such as "hi"): the next message is tried instead."""
+    for line in message.splitlines():
+        raw = " ".join(line.split())
+        if raw.startswith("```"):                     # A code fence line is not a title.
+            continue
+        text = raw.lstrip(_TITLE_LEAD).strip()
+        if not text:
+            continue
+        if sum(ch.isalnum() for ch in text) < 3:
+            return None
+        if len(text) <= AUTO_TITLE_MAX:
+            return text
+        cut = text[:AUTO_TITLE_MAX - 1]
+        space_at = cut.rfind(" ")
+        if space_at >= AUTO_TITLE_MAX // 2:
+            cut = cut[:space_at]
+        return cut.rstrip(" ,.;:-") + "…"
+    return None
+
+
+AUTO_TITLE_LOOKBACK = 5
+
+
+def first_meaningful_title(session, conversation: Conversation, user_row: Message) -> str | None:
+    """The title the conversation's first meaningful user message gives: the user messages saved before this
+    exchange, oldest first (at most AUTO_TITLE_LOOKBACK: a conversation that began with a greeting, or one
+    saved before automatic titles existed), then this exchange's own. One small indexed read, and only for a
+    conversation that already holds messages; no model call."""
+    if user_row.seq > 1:
+        earlier = session.scalars(
+            select(Message.content).where(
+                Message.conversation_id == conversation.id, Message.user_id == conversation.user_id,
+                Message.role == "user", Message.seq < user_row.seq,
+            ).order_by(Message.seq).limit(AUTO_TITLE_LOOKBACK))
+        for content in earlier:
+            title = automatic_title(content)
+            if title:
+                return title
+    return automatic_title(user_row.content)
+
+
 def complete_exchange(session, conversation: Conversation, space: Space, rows, now: datetime) -> Replay:
-    """Advance the conversation, clear its lease, touch the Space; flush."""
+    """Advance the conversation, clear its lease, touch the Space; flush.
+
+    A conversation still carrying the default title it was created with (version 1: never renamed, and not
+    created with that title by choice) takes one from its first meaningful user message
+    (first_meaningful_title). A title the customer set, including exactly "New conversation", is never
+    replaced, and the version is left alone, so a rename made with the version the customer last read still
+    succeeds. Titles change only here, when an exchange is saved: no stored conversation is renamed on its
+    own."""
     user_row, reply_row = rows
+    if conversation.title == DEFAULT_CONVERSATION_TITLE and conversation.version == 1:
+        title = first_meaningful_title(session, conversation, user_row)
+        if title:
+            conversation.title = title
     conversation.message_count = reply_row.seq
     conversation.last_message_at = now
     conversation.updated_at = now

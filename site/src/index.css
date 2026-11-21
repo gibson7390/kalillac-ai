@@ -165,6 +165,24 @@ h1,h2,h3,p { overflow-wrap: break-word; }
 .hero-account a { display: inline-flex; align-items: center; min-height: 44px; color: var(--k-blue-ink); font-weight: 650; text-decoration: underline; text-decoration-color: #0057d545; text-underline-offset: 4px; transition: text-decoration-color var(--k-dur) var(--k-ease); }
 .hero-account a:hover { text-decoration-color: currentColor; }
 .hero-account span { color: #9aa7bd; }
+/* A signed-in customer's header (customer-session.ts): Chat is the way back to work, the rest read as links. */
+.site-nav .nav-sign-out { position: relative; display: inline-flex; align-items: center; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; border-radius: 4px; transition: color var(--k-dur) var(--k-ease); }
+.site-nav .nav-sign-out:hover { color: var(--k-focus); }
+.site-nav .nav-sign-out[aria-disabled] { cursor: progress; color: #6b7891; }
+.site-nav a.nav-chat { gap: 8px; min-height: 40px; padding: 0 16px; border: 1px solid var(--k-line-strong); border-radius: var(--k-radius-sm); background: white; color: #123063; box-shadow: var(--k-shadow-1); transition: border-color var(--k-dur) var(--k-ease), background-color var(--k-dur) var(--k-ease), color var(--k-dur) var(--k-ease); }
+.site-nav a.nav-chat svg { width: 16px; height: 16px; color: var(--k-blue); }
+.site-nav a.nav-chat::after { display: none; }
+.site-nav a.nav-chat:hover { border-color: #8faad6; background: #f7faff; color: var(--k-focus); }
+.site-nav a.nav-chat:active { background: #edf3ff; box-shadow: none; }
+@media (max-width: 720px) { .site-nav a.nav-chat { display: none; } }
+.site-nav a[aria-current="page"] { color: var(--k-ink); }
+.site-nav a[aria-current="page"]::after { transform: scaleX(1); }
+.mobile-site-menu button { display: flex; align-items: center; width: 100%; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 9px; background: none; color: var(--k-ink-2); font: inherit; font-size: 15px; font-weight: 600; text-align: left; cursor: pointer; }
+.mobile-site-menu button:hover { background: #eef5ff; color: var(--k-ink); }
+/* The footer's verified YouTube and X profiles (social-links.tsx): shown only when a deployment supplies them. */
+.footer-social { display: flex; align-items: center; gap: 8px; }
+.footer-social a { display: inline-grid; place-items: center; width: 44px; height: 44px; border-radius: 10px; color: var(--k-ink-2); transition: color var(--k-dur) var(--k-ease), background-color var(--k-dur) var(--k-ease); }
+.footer-social a:hover { color: var(--k-focus); background: #eef5ff; }
 /* Phones: the header keeps the logo and the menu; Sign in and Create account are in the menu and the hero. */
 @media (max-width: 720px) { .site-nav a.nav-account { display: none; } }
 @media (prefers-reduced-motion: no-preference) { .mobile-site-menu { animation: k-menu-in var(--k-dur-slow) var(--k-ease) both; } @keyframes k-menu-in { from { opacity: 0; transform: translateY(-4px) scale(.985); } } }

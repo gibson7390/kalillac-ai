@@ -18,11 +18,13 @@ import NotFound from '@/pages/not-found';
 import * as api from './account-api';
 import * as registrationApi from './registration-api';
 import { ACCOUNT_PATHS } from './account-routes';
+import { chatHref, registerSignOut, setPresence, takeArrival, useCustomerSession } from '@/customer-session';
 import './account.css';
 
 /* --- page-lifetime memory ---------------------------------------------------- */
 
-type NoticeData = { tone: 'error' | 'success' | 'info'; title: string; body?: ReactNode };
+// 'caution': an everyday slip the customer can simply correct (a mistyped password), shown compactly.
+type NoticeData = { tone: 'error' | 'success' | 'info' | 'caution'; title: string; body?: ReactNode };
 
 const memory: { email: string; notice: NoticeData | null } = { email: '', notice: null };
 
@@ -36,6 +38,18 @@ function takeNotice(): NoticeData | null {
 const SESSION_ENDED: NoticeData = {
   tone: 'info', title: 'Your session has ended', body: 'Sign in again to continue.',
 };
+
+const SIGNED_OUT: NoticeData = {
+  tone: 'info', title: 'You’re signed out',
+  body: 'Temporary chat works the same whether or not you’re signed in.',
+};
+
+/* The header's Sign out (customer-session.ts) signs out through this page's own client. */
+registerSignOut(async () => {
+  const result = await api.logout();
+  if (result.ok) carryNotice(SIGNED_OUT);
+  return result.ok;
+});
 
 /* --- small helpers ------------------------------------------------------------------ */
 
@@ -140,6 +154,8 @@ function useSession() {
   const load = useCallback(async () => {
     setSession({ state: 'loading' });
     const result = await api.getSession();
+    // The header learns the answer too (memory only), so it offers a signed-in customer the way around.
+    setPresence(result.state === 'signed-in' ? 'signed-in' : 'signed-out');
     if (alive.current) setSession(result);
   }, []);
   useEffect(() => {
@@ -230,8 +246,16 @@ const Notice = ({ notice, focusRef }: { notice: NoticeData; focusRef?: RefObject
   return (
     <div className={`acct-notice acct-notice-${notice.tone}`} role="group" aria-labelledby={id}
          tabIndex={-1} ref={focusRef} data-testid="account-notice">
-      <p className="acct-notice-title" id={id}>{notice.title}</p>
-      {notice.body && <div className="acct-notice-body">{notice.body}</div>}
+      {notice.tone === 'caution' && (
+        <svg className="acct-notice-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+             strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5"/><path d="M12 16.5v.01"/>
+        </svg>
+      )}
+      <div className="acct-notice-copy">
+        <p className="acct-notice-title" id={id}>{notice.title}</p>
+        {notice.body && <div className="acct-notice-body">{notice.body}</div>}
+      </div>
     </div>
   );
 };
@@ -388,7 +412,7 @@ function SignInPage() {
         return;
       }
       setNotice(result.status === 401 && result.code === 'invalid_credentials'
-        ? { tone: 'error', title: 'That email and password don’t match',
+        ? { tone: 'caution', title: 'That email and password don’t match',
             body: 'Check both and try again. If you’ve forgotten your password, you can reset it.' }
         : result.status === 429
           ? { tone: 'error', title: 'Too many sign-in attempts', body: waitPhrase(result.retryAfter) }
@@ -855,6 +879,8 @@ function AccountOverviewPage() {
   // Read once, without side effects; the query is then removed so a reload or a shared address
   // does not repeat the notice.
   const [checkoutReturn] = useState(() => checkoutReturnFrom(window.location.search));
+  // From the chat: the Space and conversation to return to, and whether Billing was asked for.
+  const [showBilling] = useState(() => takeArrival(window.location.search).billing);
   useEffect(() => {
     // Through the router (same path, so the page stays mounted); the only raw history change on these
     // pages remains the token-fragment scrub.
@@ -865,6 +891,7 @@ function AccountOverviewPage() {
   const [security, setSecurity] = useState<Loadable<api.AccountSecurity>>({ state: 'loading' });
 
   const sessionEnded = useCallback(() => {
+    setPresence('signed-out');
     carryNotice(SESSION_ENDED);
     navigate(ACCOUNT_PATHS.signIn, { replace: true });
   }, [navigate]);
@@ -910,7 +937,7 @@ function AccountOverviewPage() {
                      security={security.state === 'ready' ? security.value : null}
                      onRetryPlan={() => void loadPlan()}
                      onRetryBilling={() => void loadBilling()} onSessionEnded={sessionEnded}
-                     checkoutReturn={checkoutReturn}
+                     checkoutReturn={checkoutReturn} showBilling={showBilling}
                      onRefreshPlan={() => { void loadPlan(); void loadBilling(); }} />;
   }
 
@@ -922,13 +949,23 @@ function AccountOverviewPage() {
 }
 
 function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, onSessionEnded, checkoutReturn,
-                   onRefreshPlan }: {
+                   showBilling = false, onRefreshPlan }: {
   user: api.AccountUser; plan: Loadable<api.Entitlements>; billing: Loadable<api.BillingStatus>;
   security: api.AccountSecurity | null;
   onRetryPlan: () => void; onRetryBilling: () => void; onSessionEnded: () => void;
-  checkoutReturn: CheckoutReturn; onRefreshPlan: () => void;
+  checkoutReturn: CheckoutReturn; showBilling?: boolean; onRefreshPlan: () => void;
 }) {
   const [, navigate] = useLocation();
+  const { returnTarget } = useCustomerSession();
+  // Asked for Billing (the header's Billing, or the chat's): brought into view once it has loaded.
+  const billingShown = useRef(!showBilling);
+  const billingReady = billing.state !== 'loading' && plan.state !== 'loading';
+  useEffect(() => {
+    if (billingShown.current || !billingReady) return;
+    billingShown.current = true;
+    const heading = document.getElementById('acct-billing-heading');
+    if (heading) heading.scrollIntoView({ block: 'start' });
+  }, [billingReady]);
   const memberSince = formatDate(user.created_at, false);
   const [verification, setVerification] = useState<NoticeData | null>(null);
   const [verificationRef, focusVerification] = useFocusOn<HTMLDivElement>();
@@ -953,8 +990,8 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
   const doSignOut = () => void signOut.run(async () => {
     const result = await api.logout();
     if (result.ok) {
-      carryNotice({ tone: 'info', title: 'You’re signed out',
-        body: 'Temporary chat works the same whether or not you’re signed in.' });
+      setPresence('signed-out');
+      carryNotice(SIGNED_OUT);
       navigate(ACCOUNT_PATHS.signIn);
       return;
     }
@@ -964,6 +1001,12 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
 
   return (
     <div className="acct-overview">
+      {returnTarget && (
+        <a className="acct-return" href={chatHref(returnTarget)} data-testid="link-return-to-space">
+          <span aria-hidden="true">←</span>
+          {returnTarget.conversation ? 'Back to your Space and conversation' : 'Back to your Space'}
+        </a>
+      )}
       <section className="acct-identity" aria-labelledby="acct-details-heading" data-tier={tier ?? undefined}>
         <h2 id="acct-details-heading" className="sr-only">Account details</h2>
         <div className="acct-identity-main">
@@ -971,7 +1014,8 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
           {memberSince && <p className="acct-identity-meta">Member since <span data-testid="account-member-since">{memberSince}</span></p>}
         </div>
         <p className="acct-plan" data-testid="account-plan">
-          {plan.state === 'ready' ? (plan.value.tier === 'paid' ? 'Paid plan' : 'Free account')
+          {plan.state === 'ready' ? (plan.value.tier === 'paid'
+              ? <><svg className="acct-premium-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.5l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16.4l-5.6 3.3 1.5-6.3L3 9.2l6.4-.5z" fill="currentColor"/></svg><span>Kalillac Premium</span></> : 'Free account')
             : plan.state === 'loading' ? <span className="acct-quiet-inline">Loading…</span>
               : <span className="acct-inline-problem">Couldn’t load your plan. <button type="button" className="acct-text-button" onClick={onRetryPlan}>Try again</button></span>}
         </p>
@@ -997,6 +1041,8 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
           {verification && <Notice notice={verification} focusRef={verificationRef} />}
         </section>
       )}
+
+      {tier === 'free' && billing.state === 'ready' && <PremiumDiscovery />}
 
       {billing.state === 'error' && (
         <section className="acct-section" aria-labelledby="acct-billing-heading">
@@ -1026,6 +1072,71 @@ function Overview({ user, plan, billing, security, onRetryPlan, onRetryBilling, 
       {security?.password_change && <PasswordSection onSessionEnded={onSessionEnded} />}
       {security?.deletion_request && <DeletionSection paid={tier === 'paid'} onSessionEnded={onSessionEnded} />}
     </div>
+  );
+}
+
+/* --- Kalillac Premium, for a Free account ------------------------------------------------------------------------
+   What Premium adds here, as practical benefits, and nothing this deployment does not offer (account-api
+   getPremiumCapabilities). No amount is stated (this page is not told one) and there is no urgency: Explore
+   Kalillac Premium only brings Plan and billing, just below, into view, where the upgrade and Stripe's checkout
+   (where the cost is shown before any payment) are. */
+
+type PremiumItem = { key: string; title: string; text: string; icon: ReactNode };
+
+const PREMIUM_ICON_PROPS = {
+  viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const, 'aria-hidden': true, focusable: false,
+};
+
+function PremiumDiscovery() {
+  const [capabilities, setCapabilities] = useState<api.PremiumCapabilities | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void api.getPremiumCapabilities(FILES_OFFERED).then((found) => { if (alive) setCapabilities(found); });
+    return () => { alive = false; };
+  }, []);
+  if (!capabilities) return null;
+  const items: PremiumItem[] = [];
+  if (capabilities.deepReasoning) {
+    items.push({ key: 'deep', title: 'Deep reasoning',
+      text: 'Extra reasoning effort for demanding work: complex programming problems, mathematical reasoning and multi-step analysis. Choose Deep in the chat when a question calls for it.',
+      icon: <svg {...PREMIUM_ICON_PROPS}><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg> });
+  }
+  if (capabilities.files) {
+    items.push({ key: 'files', title: 'Files',
+      text: 'Attach supported documents to a message and ask Kalillac to summarize or work with them, and have it create Word, Excel, PowerPoint and PDF files you can download.',
+      icon: <svg {...PREMIUM_ICON_PROPS}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 14h6"/><path d="M9 17h4"/></svg> });
+  }
+  if (!items.length) return null;
+  // Plan and billing, brought into view and focused (its heading), as the header's Billing link does.
+  const explore = () => {
+    const heading = document.getElementById('acct-billing-heading');
+    if (!heading) return;
+    heading.scrollIntoView({ block: 'start' });
+    heading.focus({ preventScroll: true });
+  };
+  return (
+    <section className="acct-section acct-premium" aria-labelledby="acct-premium-heading" data-testid="premium-discovery">
+      <h2 id="acct-premium-heading" className="acct-section-title acct-premium-title">
+        <svg className="acct-premium-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2.5l2.6 6.2 6.4.5-4.9 4.2 1.5 6.3L12 16.4l-5.6 3.3 1.5-6.3L3 9.2l6.4-.5z" fill="currentColor"/></svg><span>What Kalillac Premium adds</span>
+      </h2>
+      <ul className="acct-premium-list">
+        {items.map((item) => (
+          <li key={item.key} data-testid={`premium-${item.key}`}>
+            <span className="acct-premium-icon">{item.icon}</span>
+            <span><strong>{item.title}</strong><span className="acct-premium-text">{item.text}</span></span>
+          </li>
+        ))}
+      </ul>
+      <div className="acct-premium-more">
+        <button type="button" className="acct-button acct-button-secondary acct-button-compact" onClick={explore}
+                data-testid="button-explore-premium">
+          Explore Kalillac Premium
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"
+               strokeLinejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14"/><path d="m6 13 6 6 6-6"/></svg>
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1384,7 +1495,7 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutR
 
   return (
     <section className="acct-section" aria-labelledby="acct-billing-heading" data-testid="billing-section">
-      <h2 id="acct-billing-heading" className="acct-section-title">Plan and billing</h2>
+      <h2 id="acct-billing-heading" className="acct-section-title" tabIndex={-1}>Plan and billing</h2>
       {returned && !notice && (
         <div data-testid="checkout-return">
           <Notice notice={returned} />
@@ -1408,7 +1519,7 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutR
       )}
       {tier === 'free' && !awaitingConfirmation && (needsVerification
         ? <p className="acct-section-text" data-testid="billing-needs-verification">Verify your email address before starting a paid plan.</p>
-        : <p className="acct-section-text">Upgrading opens Stripe’s secure checkout. Paid access is added after Stripe confirms the payment, which can take a few minutes.</p>)}
+        : <p className="acct-section-text" data-testid="billing-upgrade-note">Upgrading opens Stripe’s secure checkout, where you can review what Kalillac Premium costs before you pay. Paid access is added after Stripe confirms the payment, which can take a few minutes.</p>)}
       {notice && <Notice notice={notice} focusRef={noticeRef} />}
       {/* Just back from a paid Checkout: no second purchase is offered while Stripe confirms the first. */}
       {(status.portal_available || (tier === 'free' && !needsVerification && !awaitingConfirmation)) && (
@@ -1416,7 +1527,7 @@ function BillingSection({ status, tier, emailVerified, onSessionEnded, checkoutR
           {tier === 'free' && !needsVerification && !awaitingConfirmation && (
             <button type="button" className="acct-button acct-button-primary" aria-disabled={checkout.pending || undefined}
                     onClick={go(checkout, api.startCheckout)} data-testid="button-upgrade">
-              {checkout.pending && <Spinner />}{checkout.pending ? 'Opening checkout…' : 'Upgrade to the paid plan'}
+              {checkout.pending && <Spinner />}{checkout.pending ? 'Opening checkout…' : 'Upgrade to Kalillac Premium'}
             </button>
           )}
           {status.portal_available && (
@@ -1462,6 +1573,12 @@ function CreateEmailFirstPage({ verifyContract }: { verifyContract: () => Promis
   const [noticeRef, focusNotice] = useFocusOn<HTMLDivElement>();
   const [doneRef, focusDone] = useFocusOn<HTMLDivElement>();
   const { pending, run } = usePendingGuard();
+  // Signed in already (asked here, on a fresh load too): the account, not registration.
+  const { session } = useSession();
+  const [, navigate] = useLocation();
+  useEffect(() => {
+    if (session.state === 'signed-in') navigate(ACCOUNT_PATHS.overview, { replace: true });
+  }, [session, navigate]);
   const send = (resend: boolean) => {
     void run(async () => {
       const email = resend ? submitted.current : normalizedEmail(emailRef.current?.value ?? '');
@@ -1630,6 +1747,9 @@ function RegistrationAuthorityState({ loading, retry }: { loading: boolean; retr
 
 function AuthoritativeRegistrationPage() {
   const authority = useRegistrationContract();
+  // A customer already known to be signed in is never shown registration.
+  const { presence } = useCustomerSession();
+  if (presence === 'signed-in') return <Redirect to={ACCOUNT_PATHS.overview} replace />;
   if (!authority.contract) return <RegistrationAuthorityState loading={authority.loading} retry={authority.reload} />;
   return authority.contract === 'legacy-v1'
     ? <CreateAccountPage verifyContract={authority.verify} />

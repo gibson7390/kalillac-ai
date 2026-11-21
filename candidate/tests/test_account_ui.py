@@ -348,6 +348,7 @@ class AccountSite(Site):
     # deploy/staging/build_webroot.py does; off by default, as in production today.
     accounts_mark = False
     files_mark = False         # A files deployment marks the site's pages too (data-kalillac-files).
+    profile_marks = b""        # Verified profile addresses a deployment supplies for the footer.
 
     def route(self, raw_path):
         path = raw_path.split("?", 1)[0]
@@ -359,6 +360,8 @@ class AccountSite(Site):
             body = body.replace(b'<html lang="en">', b'<html lang="en" data-kalillac-accounts="on">', 1)
         if self.files_mark and ctype.startswith("text/html") and not path.startswith("/app/"):
             body = body.replace(b'<html lang="en"', b'<html lang="en" data-kalillac-files="on"', 1)
+        if self.profile_marks and ctype.startswith("text/html") and not path.startswith("/app/"):
+            body = body.replace(b'<html lang="en"', b'<html lang="en"' + self.profile_marks, 1)
         return status, ctype, body
 
     def __enter__(self):
@@ -475,6 +478,7 @@ def page(browser_site):
     browser_site.site.api.reset()
     browser_site.site.accounts_mark = False
     browser_site.site.files_mark = False
+    browser_site.site.profile_marks = b""
     browser_site.resize(DESKTOP, False)
     browser_site.dt.call("Emulation.setEmulatedMedia", {"features": [
         {"name": "prefers-reduced-motion", "value": "no-preference"}]}, browser_site.session)
@@ -514,6 +518,8 @@ def test_account_module_uses_only_fixed_same_origin_paths_and_safe_fetch_options
         "/api/account/billing", "/api/account/billing/checkout", "/api/account/billing/portal",
         # Account security (V1 mode): offered only when the server's /security route answers.
         "/api/account/security", "/api/account/sessions/revoke-others", "/api/account/sessions/revoke-all",
+        # What Premium would add for a Free account: the chat's own reasoning-modes answer.
+        "/api/chat/reasoning-modes",
         "/api/account/password", "/api/account/deletion-request",
         # The account's stored files (a files deployment): listed here, each deleted at /api/files/<id>.
         "/api/files",
@@ -548,6 +554,8 @@ def test_the_sites_account_entry_points_exist_only_where_the_deployment_offers_a
         guarded = sum(block.count("<Link href={ACCOUNT_PATHS.") for block in
                       re.findall(r"\{ACCOUNTS_OFFERED && (<>.*?</>|<p .*?</p>)\}", part, re.S))
         assert guarded == expected
+    # A signed-in customer's header exists only on an accounts deployment, once an account page has asked.
+    assert "const signedIn = ACCOUNTS_OFFERED && presence === 'signed-in';" in app
     assert "lazy(() => import('@/account/account-pages'))" in app
 
 
@@ -776,6 +784,40 @@ def test_unknown_email_and_wrong_password_share_one_message(page):
     assert messages[0] == messages[1] == (
         "That email and password don’t match\n"
         "Check both and try again. If you’ve forgotten your password, you can reset it.")
+
+
+def test_a_mistyped_password_is_a_compact_notice_not_an_alarm(page):
+    """An ordinary mismatch: the same words and the same focus, in a compact notice with a small mark and no
+    red bar. A real problem (too many attempts) keeps the error presentation."""
+    shown = {}
+    for name, status, body, extra in (("mismatch", 401, {"error": "invalid_credentials"}, {}),
+                                      ("throttled", 429, {"error": "too_many_attempts"}, {"Retry-After": "130"})):
+        page.site.api.override("POST", "/api/account/login", status, body, extra)
+        sign_in_form(page)
+        page.type_into("#email", EMAIL)
+        page.type_into("#password", "not the right password")
+        page.click_selector("button[type=submit]")
+        page.wait_for("document.querySelector('[data-testid=\"account-notice\"]')")
+        shown[name] = page.eval("""
+            const n = document.querySelector('[data-testid="account-notice"]');
+            const style = getComputedStyle(n);
+            const icon = n.querySelector('svg');
+            return { classes: n.className, role: n.getAttribute('role'), labelled: !!n.getAttribute('aria-labelledby'),
+                     height: n.getBoundingClientRect().height, leftBar: parseFloat(style.borderLeftWidth),
+                     icon: icon ? [icon.getAttribute('aria-hidden'), icon.getBoundingClientRect().width] : null,
+                     focused: document.activeElement === n, width: n.getBoundingClientRect().width,
+                     formWidth: document.querySelector('form').getBoundingClientRect().width };""")
+    mismatch, throttled = shown["mismatch"], shown["throttled"]
+    assert mismatch["classes"] == "acct-notice acct-notice-caution"
+    assert throttled["classes"] == "acct-notice acct-notice-error"
+    assert mismatch["icon"] == ["true", 18] and throttled["icon"] is None
+    assert mismatch["leftBar"] == 1 and throttled["leftBar"] == 3
+    assert mismatch["height"] < throttled["height"] and mismatch["height"] <= 72       # Two short lines.
+    # Still announced and focused exactly as before, and no wider than the form it belongs to.
+    assert mismatch["role"] == "group" and mismatch["labelled"] and mismatch["focused"]
+    assert mismatch["width"] <= mismatch["formWidth"] + 0.5
+    # The password-reset way out is still right there.
+    assert page.text("[data-testid='link-forgot-password']") == "Forgot password?"
 
 
 def test_throttling_uses_retry_after_without_naming_the_account(page):
@@ -1155,7 +1197,7 @@ def assert_only_current_functionality(page):
     assert "your account currently holds your sign-in email, verification status, plan and billing settings." in text
 
 
-@pytest.mark.parametrize("tier,label", [("paid", "Paid plan"), ("free", "Free account")])
+@pytest.mark.parametrize("tier,label", [("paid", "Kalillac Premium"), ("free", "Free account")])
 def test_plans_are_described_without_invented_features_or_prices(page, tier, label):
     billing = {"subscription_status": "active" if tier == "paid" else None, "cancel_at_period_end": False,
                "current_period_end": "2026-12-01T17:00:00+00:00" if tier == "paid" else None,
@@ -1309,7 +1351,7 @@ def test_return_from_checkout_explains_confirmation_and_rechecks_the_plan(page):
     with page.site.api.lock:
         page.site.api.tier, page.site.api.billing = "paid", dict(PAID_ACTIVE)
     page.click_selector("[data-testid='button-check-plan']")
-    page.wait_for("document.querySelector('[data-testid=\"account-plan\"]').textContent === 'Paid plan'"
+    page.wait_for("document.querySelector('[data-testid=\"account-plan\"]').textContent === 'Kalillac Premium'"
                   " && document.querySelector('[data-testid=\"checkout-return\"]')")
     assert page.text("[data-testid='checkout-return']") == "Your paid plan is active\nStripe has confirmed your payment."
     assert page.eval("return document.querySelector('[data-testid=\"button-check-plan\"]');") is None
@@ -1763,3 +1805,213 @@ def test_the_files_list_fits_a_phone(page, size):
     assert page.eval("return document.documentElement.scrollWidth <= window.innerWidth;")
     assert page.eval("""return [...document.querySelectorAll('[data-testid="file-row"] button, [data-testid="file-row"] a')]
         .every(e => { const r = e.getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; });""")
+
+
+# --- a signed-in customer's way around (customer-session.ts) -----------------------------------------------
+
+SPACE_ID = "11111111-1111-4111-8111-111111111111"
+CONVERSATION_ID = "33333333-3333-4333-8333-333333333333"
+CUSTOMER_NAV = ["Chat", "My Spaces", "Account", "Billing", "Sign out"]
+OVERVIEW_READY = "document.querySelector('[data-testid=\"account-email\"]')"
+
+
+def header_items(page, selector=".site-nav"):
+    return page.eval(f"""return [...document.querySelectorAll('{selector} a, {selector} button:not(.mobile-nav-toggle)')]
+      .map(e => [e.textContent.trim(), e.getAttribute('href')]);""")
+
+
+@pytest.mark.parametrize("size,mobile", [(DESKTOP, False), (PHONE, True)])
+def test_a_signed_in_customer_gets_the_customer_header_instead_of_sign_in(page, size, mobile):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.resize(size, mobile)
+    page.open("/account", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('.site-header[data-customer=\"signed-in\"]')")
+    assert [t for t in ENTRY_IDS if page.eval(f"return !!document.querySelector('[data-testid=\"{t}\"]');")] == []
+    # Billing is a section of the account page itself: the header does not repeat it.
+    expected = [["Chat", "/app/"], ["My Spaces", "/app/?spaces=open"], ["Account", "/account"], ["Sign out", None]]
+    if mobile:
+        page.click_selector("[data-testid='button-mobile-menu']")
+        page.wait_for("document.querySelector('#mobile-site-menu')")
+        # Measured after the menu's opening animation (it starts slightly scaled down).
+        page.eval("await Promise.all(document.querySelector('#mobile-site-menu').getAnimations().map(a => a.finished));")
+        assert header_items(page, "#mobile-site-menu") == expected
+        heights = page.eval("return [...document.querySelectorAll('#mobile-site-menu a, #mobile-site-menu button')]"
+                            ".map(e => e.getBoundingClientRect().height);")
+        assert all(h >= 44 for h in heights), heights
+    else:
+        assert header_items(page) == expected
+        assert all(shown(page, t) for t in ("link-chat-nav", "link-spaces-nav", "link-account-nav",
+                                             "button-sign-out-nav"))
+    assert no_overflow(page)
+    # Learned from the session request the account page already makes: nothing more was asked for it.
+    assert len(api_calls(page, "/api/account/me")) == 1
+
+
+def test_the_header_sign_out_ends_the_session_and_offers_sign_in_again(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open("/account", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"button-sign-out-nav\"]')")
+    page.click_selector("[data-testid='button-sign-out-nav']")
+    page.wait_for("location.pathname === '/account/sign-in' && document.querySelector('[data-testid=\"link-sign-in-nav\"]')")
+    assert len(api_calls(page, "/api/account/logout")) == 1
+    assert page.text("[data-testid='account-notice']").startswith("You’re signed out")
+    assert page.eval("return !!document.querySelector('[data-testid=\"link-chat-nav\"]');") is False
+
+
+def test_opened_from_a_space_the_account_offers_the_way_straight_back(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open(f"/account?space={SPACE_ID}&conversation={CONVERSATION_ID}", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"link-return-to-space\"]')")
+    back = f"/app/?space={SPACE_ID}&conversation={CONVERSATION_ID}"
+    assert page.eval("return document.querySelector('[data-testid=\"link-return-to-space\"]').getAttribute('href');") == back
+    assert page.text("[data-testid='link-return-to-space']").endswith("Back to your Space and conversation")
+    assert page.eval("return document.querySelector('[data-testid=\"link-chat-nav\"]').getAttribute('href');") == back
+    page.wait_for("location.search === ''")            # The address is cleaned, as for every overview query.
+
+
+@pytest.mark.parametrize("query", ["space=../../api/chat", f"space={SPACE_ID}&conversation=javascript:x",
+                                   "space=AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", "conversation=" + CONVERSATION_ID])
+def test_only_a_pair_of_ids_becomes_a_way_back(page, query):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open(f"/account?{query}", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"link-chat-nav\"]')")
+    assert page.eval("return !!document.querySelector('[data-testid=\"link-return-to-space\"]');") is False
+    assert page.eval("return document.querySelector('[data-testid=\"link-chat-nav\"]').getAttribute('href');") == "/app/"
+
+
+def test_billing_opens_the_account_at_billing(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True, billing=dict(FREE_BILLING))
+    page.resize((1280, 600), False)
+    page.open("/account?show=billing", ready="document.querySelector('[data-testid=\"billing-section\"]')")
+    page.wait_for("Math.abs(document.getElementById('acct-billing-heading').getBoundingClientRect().top) < 120")
+    assert page.eval("return location.pathname + location.search;") == "/account"
+    assert page.eval("return !!document.querySelector('[data-testid=\"link-billing-nav\"]');") is False
+
+
+def test_a_customer_known_to_be_signed_in_is_never_shown_registration(page):
+    page.site.accounts_mark = True
+    page.site.api.reset(signed_in=True)
+    page.open("/account", ready=OVERVIEW_READY)
+    page.wait_for("document.querySelector('[data-testid=\"link-chat-nav\"]')")
+    page.eval("history.pushState(null, '', '/account/create'); dispatchEvent(new PopStateEvent('popstate'));")
+    page.wait_for("location.pathname === '/account' && " + OVERVIEW_READY)
+    assert page.eval("return document.querySelectorAll('main form #email').length;") == 0
+
+
+# --- the footer's verified YouTube and X profiles (social-links.tsx) ----------------------------------------------------
+
+def test_the_footer_shows_only_verified_profile_addresses(page):
+    page.open("/", ready=HERO)
+    assert page.eval("return document.querySelector('.footer-social');") is None        # None supplied: none shown.
+    page.site.profile_marks = (b' data-kalillac-youtube="https://www.youtube.com/@verified-example"'
+                               b' data-kalillac-x="https://x.com/verified_example"')
+    page.open("/", ready=HERO)
+    links = page.eval("""return [...document.querySelectorAll('.footer-social a')].map(a => ({href: a.getAttribute('href'),
+      label: a.getAttribute('aria-label'), target: a.target, rel: a.rel, svg: !!a.querySelector('svg[aria-hidden=true]'),
+      size: [a.getBoundingClientRect().width, a.getBoundingClientRect().height]}));""")
+    assert [(l["href"], l["label"]) for l in links] == [
+        ("https://www.youtube.com/@verified-example", "YouTube channel"),
+        ("https://x.com/verified_example", "X profile")]
+    assert all(l["target"] == "_blank" and l["rel"] == "noopener noreferrer" and l["svg"] for l in links)
+    assert all(w >= 44 and h >= 44 for l in links for w, h in [l["size"]])
+
+
+@pytest.mark.parametrize("marks", [
+    b' data-kalillac-youtube="http://www.youtube.com/@x" data-kalillac-x="http://x.com/x"',
+    b' data-kalillac-youtube="https://youtube.com.example.net/@x" data-kalillac-x="https://example.com/x"',
+    b' data-kalillac-youtube="https://www.youtube.com/" data-kalillac-x="https://x.com"',
+    b' data-kalillac-youtube="javascript:alert(1)" data-kalillac-x="https://user:pw@x.com/x"',
+])
+def test_the_footer_refuses_any_other_profile_address(page, marks):
+    page.site.profile_marks = marks
+    page.open("/", ready=HERO)
+    assert page.eval("return document.querySelector('.footer-social');") is None
+
+
+# --- Kalillac Premium, for a Free account (PremiumDiscovery) -----------------------------------------------
+
+MODES_WITH_PREMIUM = {"modes": ["quick", "balanced"], "default": "balanced", "premium": ["deep"]}
+
+
+def test_a_free_account_sees_what_premium_adds_only_as_this_deployment_offers_it(page):
+    page.site.files_mark = True
+    page.site.api.reset(signed_in=True, tier="free", verification=True, billing=dict(FREE_BILLING), files=[])
+    page.site.api.override("GET", "/api/chat/reasoning-modes", 200, MODES_WITH_PREMIUM)
+    page.open("/account", ready="document.querySelector('[data-testid=\"premium-discovery\"]')")
+    section = page.text("[data-testid='premium-discovery']")
+    assert section.startswith("What Kalillac Premium adds")
+    assert page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] li')]"
+                     ".map(li => li.dataset.testid);") == ["premium-deep", "premium-files"]
+    # Calm: no amount, no urgency, no second purchase button; the upgrade stays in Plan and billing below.
+    lower = section.lower()
+    for word in ("$", "€", "£", "price", "now", "today", "limited", "don’t miss", "unlimited", "best", "better",
+                 "guarantee"):
+        assert word not in lower, word
+    # Each capability is described by what it is for.
+    deep, files = (page.text(f"[data-testid='premium-{key}']") for key in ("deep", "files"))
+    assert deep.startswith("Deep reasoning") and all(
+        phrase in deep for phrase in ("complex programming", "mathematical reasoning", "multi-step analysis"))
+    assert files.startswith("Files") and "supported documents" in files and "download" in files
+    # One quiet way on: it is not a purchase, it only brings Plan and billing (below) into view and focus.
+    controls = page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] button, "
+                         "[data-testid=\"premium-discovery\"] a')].map(e => [e.tagName, e.type, "
+                         "e.innerText.trim(), e.className]);")
+    assert controls == [["BUTTON", "button", "Explore Kalillac Premium",
+                         "acct-button acct-button-secondary acct-button-compact"]]
+    order = page.eval("return [...document.querySelectorAll('main section')].map(s => s.dataset.testid || '');")
+    assert order.index("premium-discovery") < order.index("billing-section")
+    assert page.text("[data-testid='button-upgrade']") == "Upgrade to Kalillac Premium"
+    page.resize((1280, 420), False)                    # A short window: Plan and billing starts off screen.
+    page.eval("window.scrollTo(0, 0);")
+    before = (len(page.site.api.calls), page.eval("return location.href;"))
+    assert page.eval("return document.getElementById('acct-billing-heading').getBoundingClientRect().top "
+                     "> window.innerHeight;")
+    page.click_selector("[data-testid='button-explore-premium']")
+    page.wait_for("document.activeElement && document.activeElement.id === 'acct-billing-heading'")
+    # In view, and clear of the fixed header (not scrolled underneath it).
+    page.wait_for("(() => { const r = document.getElementById('acct-billing-heading').getBoundingClientRect(); "
+                  "const h = document.querySelector('header').getBoundingClientRect(); "
+                  "return r.top >= h.bottom && r.bottom <= window.innerHeight; })()")
+    # Nothing was requested, bought or navigated to; the address is untouched.
+    assert (len(page.site.api.calls), page.eval("return location.href;")) == before
+    # Where the cost is found is said plainly, and no amount is invented anywhere on the page.
+    assert page.text("[data-testid='billing-upgrade-note']") == (
+        "Upgrading opens Stripe’s secure checkout, where you can review what Kalillac Premium costs before you "
+        "pay. Paid access is added after Stripe confirms the payment, which can take a few minutes.")
+    assert not re.search(r"[$€£]\s?\d|\d\s?(usd|eur|gbp)|per month|/month|/mo\b", page.text("main").lower())
+
+
+@pytest.mark.parametrize("modes,files,expected", [
+    ({"modes": ["quick", "balanced", "deep"], "default": "balanced", "premium": []}, None, None),
+    (None, None, None),
+    (MODES_WITH_PREMIUM, None, ["premium-deep"]),
+])
+def test_premium_discovery_lists_only_what_the_server_confirms(page, modes, files, expected):
+    page.site.api.reset(signed_in=True, tier="free", verification=True, billing=dict(FREE_BILLING), files=files)
+    if modes is not None:
+        page.site.api.override("GET", "/api/chat/reasoning-modes", 200, modes)
+    page.open("/account", ready="document.querySelector('[data-testid=\"billing-section\"]')")
+    deadline = time.monotonic() + 10
+    while not api_calls(page, "/api/chat/reasoning-modes") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert api_calls(page, "/api/chat/reasoning-modes")        # Asked once the Free plan is known,
+    time.sleep(0.4)                                             # and its answer has been drawn.
+    found = page.eval("return [...document.querySelectorAll('[data-testid=\"premium-discovery\"] li')]"
+                      ".map(li => li.dataset.testid);")
+    assert (found or None) == expected
+
+
+def test_a_premium_account_sees_its_plan_and_no_discovery(page):
+    page.site.api.reset(signed_in=True, tier="paid", verification=True, billing=dict(PAID_ACTIVE))
+    page.site.api.override("GET", "/api/chat/reasoning-modes", 200, MODES_WITH_PREMIUM)
+    page.open("/account", ready="document.querySelector('[data-testid=\"billing-section\"]')")
+    assert page.text("[data-testid='account-plan']") == "Kalillac Premium"
+    assert page.eval("return !!document.querySelector('[data-testid=\"account-plan\"] svg[aria-hidden=true]');") is True
+    assert page.eval("return !!document.querySelector('[data-testid=\"premium-discovery\"]');") is False
+    assert api_calls(page, "/api/chat/reasoning-modes") == []
+

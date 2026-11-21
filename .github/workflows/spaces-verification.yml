@@ -17,6 +17,8 @@ on:
       - "candidate/tests/test_spaces_*.py"
       - "candidate/tests/spaces_test_support.py"
       - "candidate/tests/test_reasoning_modes.py"
+      - "candidate/tests/test_chat_reasoning_modes_endpoint.py"
+      - "candidate/tests/test_unsafe_request_guard.py"
       - ".github/workflows/spaces-verification.yml"
   # Also on pushes to feature branches: a workflow that is not yet on the default branch cannot be
   # dispatched by hand.
@@ -31,6 +33,8 @@ on:
       - "candidate/tests/test_spaces_*.py"
       - "candidate/tests/spaces_test_support.py"
       - "candidate/tests/test_reasoning_modes.py"
+      - "candidate/tests/test_chat_reasoning_modes_endpoint.py"
+      - "candidate/tests/test_unsafe_request_guard.py"
       - ".github/workflows/spaces-verification.yml"
   workflow_dispatch:
 
@@ -77,10 +81,11 @@ jobs:
           tests/test_spaces_request_isolation.py tests/test_spaces_search_grammar.py
           tests/test_spaces_search_routing.py tests/test_spaces_send_bounds.py tests/test_spaces_truthfulness.py
           tests/test_spaces_reasoning.py tests/test_reasoning_modes.py
+          tests/test_chat_reasoning_modes_endpoint.py
           -q -rfE -p no:cacheprovider
           --junitxml="$RUNNER_TEMP/spaces.xml"
 
-      # A green run must mean every test executed: exactly the expected number collected (1249,
+      # A green run must mean every test executed: exactly the expected number collected (1274,
       # from `pytest --collect-only` over the files above), none skipped, failed or errored.
       - name: Require every Spaces test to have run
         run: |
@@ -91,6 +96,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 1249, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 1274, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the Spaces verification did not run completely")
           PY

@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -35,8 +36,8 @@ HARNESS_JS = Path(__file__).resolve().parent / "frontend_harness" / "harness.js"
 BACKEND = REPO / "candidate" / "app_fastapi_candidate.py"
 
 EDGE_WINDOWS = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
-CACHE_KEY = "20261117-spaces5"
-CSS_CACHE_KEY = "20261117-spaces5"
+CACHE_KEY = "20261121-spaces7"
+CSS_CACHE_KEY = "20261121-spaces7"
 # The baseline the error-contract slice started from; only app.js, app.css
 # (the homepage handoff's embedded presentation) and index.html may differ
 # from it under frontend/.
@@ -156,8 +157,8 @@ DAILY_LIMIT_SCENARIOS = (
 
 # Files: download links in a reply, and the attach control of a files deployment.
 FILE_SCENARIOS = ("files_in_reply", "files_offered", "files_offered_no_access", "images_attach_send",
-                  "images_refused", "files_edit_confirm")
-REASONING_SCENARIOS = ("reasoning_offered",)
+                  "images_refused", "files_edit_confirm", "files_summarize")
+REASONING_SCENARIOS = ("reasoning_offered", "reasoning_free_account")
 
 # Syntax highlighting of rendered fenced code (frontend presentation only).
 CODE_SCENARIOS = ("syntax_highlighting", "syntax_highlighting_360x640")
@@ -219,7 +220,12 @@ SCENARIOS = (
     + list(REASONING_SCENARIOS)
     + ["spaces_open_send_leave", "spaces_retry_keeps_the_key", "spaces_create", "spaces_not_offered",
        "spaces_header_360x640", "spaces_manage", "spaces_earlier_messages", "spaces_with_modes",
-       "spaces_conversations_edit", "spaces_manage_360x640"]
+       "spaces_conversations_edit", "spaces_manage_360x640", "spaces_account_menu", "spaces_restore_from_address",
+       "spaces_restore_refused", "spaces_list_from_address", "spaces_no_empty_pile", "spaces_signed_out_accounts",
+       "spaces_save_status", "spaces_search_1280x800", "spaces_long_list_360x640", "spaces_long_list_1280x800",
+       "spaces_more_conversations", "reasoning_learn_more", "reasoning_learn_more_accounts",
+       "reasoning_learn_more_360x640", "spaces_save_ambiguous", "spaces_reuse_reads_history",
+       "reasoning_unoffered", "reasoning_premium_unstated", "reasoning_keyboard"]
 )
 
 
@@ -468,13 +474,15 @@ def test_every_scenario_completed(browser_results):
 def test_no_request_left_the_page(browser_results):
     for name, result in browser_results["results"].items():
         for request in result["requests"]:
-            if name.startswith(("files_offered", "files_edit_confirm")) and request["url"] == "/api/files":
+            if name.startswith(("files_offered", "files_edit_confirm", "files_summarize")) and request["url"] == "/api/files":
                 continue                      # A files deployment's account probe and upload (tested below).
             if name.startswith("images_") and (request["url"] == "/api/files" or (
                     request["url"].startswith("/api/files/") and request["method"] == "GET")):
                 continue                      # An images deployment's upload and preview (tested below).
             if name.startswith("spaces_") and request["url"].startswith("/api/spaces"):
                 continue                      # A Spaces deployment's requests (tested below).
+            if name == "spaces_account_menu" and (request["url"], request["method"]) == ("/api/account/logout", "POST"):
+                continue                      # The account menu's Sign out (tested below).
             assert request["url"] == "/api/chat" and request["method"] == "POST", name
 
 
@@ -955,9 +963,10 @@ def test_daily_limit_markup_is_fixed_accessible_copy():
     markup = daily_limit_markup()
     page = INDEX_HTML.read_text(encoding="utf-8")
 
-    # Exactly three native dialogs: this one, the End & erase confirmation and Spaces.
-    assert page.count("<dialog") == 3
+    # Exactly four native dialogs: this one, the End & erase confirmation, Spaces and the reasoning modes.
+    assert page.count("<dialog") == 4
     assert page.count('<dialog class="spaces-dialog" id="spaces-dialog"') == 1
+    assert page.count('<dialog class="modes-dialog" id="modes-dialog" aria-labelledby="modes-dialog-title">') == 1
     assert page.count('<dialog class="erase-dialog" id="erase-dialog"') == 1
     assert ('<dialog class="limit-dialog" id="limit-dialog" aria-labelledby="limit-dialog-title" '
             'aria-describedby="limit-dialog-text limit-dialog-reset">') in markup
@@ -1141,6 +1150,8 @@ def test_an_accounts_deployment_links_to_the_account_pages_without_any_request(b
     loaded = step(result, "loaded")
     assert loaded["links"] == [{"href": "/account", "text": "Account", "target": None}]
     assert loaded["requestCount"] == 0                       # Plain navigation: nothing is asked.
+    # No plan is claimed before the server has said which one applies.
+    assert loaded["plan"] == "Adults 18+" and result["planRequests"] == []
     # The two plan refusals say where the plan is shown; nothing from the response is shown.
     refused = step(result, "mode-refused")["assistants"][0]["notes"]
     assert [n["text"] for n in refused] == [
@@ -1151,7 +1162,7 @@ def test_an_accounts_deployment_links_to_the_account_pages_without_any_request(b
 
 def test_without_the_accounts_mark_the_page_has_no_account_link(browser_results):
     result = scenario(browser_results, "success_no_account_link")
-    assert step(result, "loaded") == {"label": "loaded", "links": [], "requestCount": 0}
+    assert step(result, "loaded") == {"label": "loaded", "plan": "Free · adults 18+", "links": [], "requestCount": 0}
     index = INDEX_HTML.read_text(encoding="utf-8")
     assert index.count('href="/account"') == 1 and '<template id="account-link-template">' in index
     assert "data-kalillac-accounts" not in index            # A release marks the page; the source never does.
@@ -1173,7 +1184,7 @@ def spaces_requests(result):
 def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results):
     result = scenario(browser_results, "spaces_open_send_leave")
     loaded = step(result, "loaded")
-    assert loaded["button"] == ["Spaces"] and loaded["requestCount"] == 1 and not loaded["barShown"]
+    assert loaded["button"] == ["My Spaces"] and loaded["requestCount"] == 1 and not loaded["barShown"]
     assert loaded["sessionStatusShown"] and loaded["eraseShown"]
     # Only well-formed ids are listed; a name is text, never markup.
     listed = step(result, "listed")
@@ -1185,7 +1196,8 @@ def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results)
     # controls are gone.
     opened = step(result, "opened")
     assert not opened["dialogOpen"] and opened["barShown"]
-    assert opened["barText"] == "Saved to your account in Research · Plan Leave Space"
+    assert opened["barText"] == "Space: Research · Plan Saved to your account Conversations New conversation Exit Space"
+    assert opened["save"] == ["saved", "Saved to your account", "status", True]      # What the server returned.
     assert not opened["sessionStatusShown"] and not opened["eraseShown"]
     snap = step(result, "opened")
     view = [s_ for s_ in result["steps"] if s_["label"] == "opened" and "users" in s_][0]
@@ -1209,7 +1221,7 @@ def test_a_saved_conversation_opens_sends_with_a_key_and_leaves(browser_results)
     assert UUID_RE.match(body["client_request_id"])
     # Leaving: a new temporary conversation, and every temporary-session control back.
     left = step(result, "left")
-    assert not left["barShown"] and left["sessionStatusShown"] and left["eraseShown"] and left["button"] == ["Spaces"]
+    assert not left["barShown"] and left["sessionStatusShown"] and left["eraseShown"] and left["button"] == ["My Spaces"]
     after = [s_ for s_ in result["steps"] if s_["label"] == "left" and "users" in s_][0]
     assert after["users"] == [] and after["emptyShown"] and len(result["requests"]) == 5
 
@@ -1236,7 +1248,9 @@ def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_re
     assert created["title"] == "Trip" and created["status"] == "No conversations in this Space yet. Start one below."
     opened = step(result, "created-conversation")
     assert not opened["dialogOpen"] and opened["barShown"]
-    assert opened["barText"] == "Saved to your account in Trip Leave Space"
+    # A new conversation holds nothing yet: the bar promises nothing is "saved", only that saving is automatic.
+    assert opened["barText"] == "Space: Trip Saves automatically Conversations New conversation Exit Space"
+    assert opened["save"] == ["auto", "Saves automatically", "status", True]
     assert spaces_requests(result) == [
         ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
         ("POST", "/api/spaces", {"name": "Trip", "instructions": ""}),
@@ -1246,7 +1260,10 @@ def test_creating_a_space_and_a_conversation_opens_it_without_loading(browser_re
 
 def test_a_conversation_is_renamed_with_its_version_and_deleting_the_open_one_leaves_it(browser_results):
     result = scenario(browser_results, "spaces_conversations_edit")
-    assert step(result, "editing")["rows"] == ["Plan", "Notes"]
+    editing = step(result, "editing")
+    assert editing["rows"] == ["Plan", "Notes"]
+    # Editing conversations: the toggle reads Done, and the new-conversation field steps aside.
+    assert (editing["mode"], editing["toggle"], editing["newShown"]) == ("conversations-edit", "Done", False)
     renamed = step(result, "renamed")
     assert renamed["rows"] == ["Launch plan", "Notes"] and renamed["bar"] == " · Launch plan"
     deleted = step(result, "deleted")
@@ -1259,9 +1276,21 @@ def test_a_conversation_is_renamed_with_its_version_and_deleting_the_open_one_le
 
 def test_a_space_is_renamed_given_instructions_and_deleted_with_its_version(browser_results):
     result = scenario(browser_results, "spaces_manage")
-    assert step(result, "space-view")["buttons"] == ["Rename", "Instructions", "Delete", "Edit conversations"]
+    view = step(result, "space-view")
+    assert view["buttons"] == ["Rename", "Instructions", "Delete"] and view["mode"] == "space"
+    # The Space has no conversations here: nothing to edit, so no Edit conversations; the other parts are labelled.
+    assert view["toggle"] is None and view["newShown"]
+    assert view["groups"] == ["Manage this Space", "Conversations", "Start a conversation"]
     renaming = step(result, "renaming")
     assert renaming["field"] == "Research" and renaming["buttons"] == ["Save", "Cancel"]
+    # While the Space itself is edited, the conversation list and the new-conversation field step aside.
+    for label in ("renaming", "instructions", "conflict", "confirm-delete"):
+        editing = step(result, label)
+        assert editing["mode"] == "space-edit" and not editing["newShown"] and not editing["listShown"], label
+        assert editing["groups"] == ["Manage this Space"], label
+    for label in ("renamed", "instructions-saved"):
+        back = step(result, label)
+        assert back["mode"] == "space" and back["newShown"] and back["listShown"], label
     renamed = step(result, "renamed")
     # The dialog, the open conversation's bar and the status follow the server's answer.
     assert (renamed["title"], renamed["barName"], renamed["status"]) == ("Research 2026", "Research 2026", "Renamed.")
@@ -1294,7 +1323,10 @@ def test_managing_a_space_on_a_phone_keeps_touch_targets_and_fits(browser_result
         assert snap["viewport"] == 360 and snap["overflow"] <= 0, label
         assert snap["small"] == [], (label, snap["small"])      # every control a 44 px target
         assert snap["placeholderFits"], label                 # "Conversation title (optional)" in full
+        assert snap["dialogInView"] and snap["closeInView"], label      # nothing is pushed off the screen
     assert step(result, "conflict")["tone"] == "problem"
+    # The field whose placeholder is measured is on screen wherever the Space itself is not being edited.
+    assert [step(result, label)["newShown"] for label in labels] == [True, False, True, False, False, True, False, True]
 
 
 def test_a_space_send_carries_the_chosen_mode_and_a_retry_keeps_it(browser_results):
@@ -1336,6 +1368,106 @@ def test_the_phone_header_fits_the_logo_the_buttons_and_the_status(browser_resul
     # The words stay for assistive technology; the icon stays on screen.
     assert header["statusText"].startswith("Temporary session") and header["statusIconShown"]
 
+
+
+# --- customer navigation: the account menu and the open Space in the address --------------------------
+
+def test_a_signed_in_account_gets_the_account_menu_and_the_address_follows_the_open_space(browser_results):
+    result = scenario(browser_results, "spaces_account_menu")
+    loaded = step(result, "loaded")
+    # The Spaces answer (200) says the browser is signed in: no further request; the menu replaces the link.
+    assert loaded["requestCount"] == 1 and loaded["plainLinks"] == 0 and loaded["menuButton"] == "Account"
+    assert loaded["expanded"] == "false" and not loaded["listShown"] and loaded["address"] == ""
+    assert loaded["items"] == [["Account settings", "/account"], ["Billing", "/account?show=billing"],
+                               ["Sign out", None]]
+    assert step(result, "menu-open")["listShown"] and step(result, "menu-open")["expanded"] == "true"
+    assert not step(result, "menu-escaped")["listShown"]
+    # Open: the address names the Space and conversation (ids only), and the account links carry them back.
+    opened = step(result, "opened")
+    ids = f"space={SPACE_A}&conversation={CONV_A}"
+    # This page never writes the address or the history: the way back travels in the account links only.
+    assert opened["barShown"] and opened["address"] == ""
+    assert opened["items"][:2] == [["Account settings", f"/account?{ids}"],
+                                   ["Billing", f"/account?show=billing&{ids}"]]
+    # The lists mark what is open now; choosing the open conversation returns to it without a request.
+    assert step(result, "relisted")["open"] == [["ResearchOpen now1 conversation", "true"]]
+    space_view = step(result, "space-view")
+    assert space_view["open"] == [["PlanOpen now2 messages", "true"]]
+    returned = step(result, "returned")
+    assert not returned["dialogOpen"] and returned["barShown"]
+    assert returned["requestCount"] == space_view["requestCount"]
+    bar = step(result, "bar-conversations")
+    assert bar["dialogOpen"] and bar["title"] == "Research" and bar["back"]
+    assert bar["items"] == ["PlanOpen now2 messages"]
+    # New conversation: one request, then the new conversation is open and in the address.
+    new = step(result, "new-conversation")
+    assert new["barShown"] and new["address"] == ""
+    assert new["items"][0] == ["Account settings", f"/account?space={SPACE_A}&conversation={CONV_B}"]
+    calls = spaces_requests(result)
+    assert ("POST", f"/api/spaces/{SPACE_A}/conversations", {}) in calls
+    left = step(result, "left")
+    assert not left["barShown"] and left["address"] == "" and left["items"][0] == ["Account settings", "/account"]
+    refused = step(result, "sign-out-refused")
+    assert calls[-1] == ("POST", "/api/account/logout", None)
+    assert ["Couldn\u2019t sign out. Try again", None] in refused["items"] and refused["menuButton"] == "Account"
+
+
+
+def test_the_footer_states_the_plan_the_server_confirms(browser_results):
+    # A signed-in Premium account: its authoritative entitlement, asked once, after the Spaces answer.
+    premium = scenario(browser_results, "spaces_account_menu")
+    assert step(premium, "loaded")["plan"] == "Kalillac Premium · adults 18+"
+    assert premium["planRequests"] == [{"url": "/api/account/entitlements", "method": "GET"}]
+    # A signed-in Free account.
+    free = scenario(browser_results, "spaces_restore_refused")
+    assert step(free, "refused")["plan"] == "Free · adults 18+" and len(free["planRequests"]) == 1
+    # Not signed in (the Spaces answer is 401): Free, and no entitlement is asked for.
+    signed_out = scenario(browser_results, "spaces_signed_out_accounts")
+    assert step(signed_out, "loaded")["plan"] == "Free · adults 18+" and signed_out["planRequests"] == []
+    assert step(signed_out, "loaded")["menuButton"] is None
+
+def test_a_space_and_conversation_in_the_address_reopen_once_the_account_confirms_them(browser_results):
+    result = scenario(browser_results, "spaces_restore_from_address")
+    assert spaces_requests(result) == [
+        ("GET", "/api/spaces?limit=1", None), ("GET", f"/api/spaces/{SPACE_A}", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)]
+    restored = step(result, "restored")
+    assert restored["barShown"] and restored["address"] == f"&space={SPACE_A}&conversation={CONV_A}"
+    assert step(result, "restored-view")["users"] == ["Earlier question"]
+    assert step(result, "restored-bar")["barText"].startswith("Space: Research · Plan Saved to your account")
+
+
+def test_an_address_the_account_cannot_open_leaves_the_temporary_chat(browser_results):
+    result = scenario(browser_results, "spaces_restore_refused")
+    refused = step(result, "refused")
+    assert not refused["barShown"] and refused["requestCount"] == 2
+    view = step(result, "refused-view")
+    assert view["users"] == [] and view["emptyShown"]
+
+
+def test_my_spaces_from_the_account_pages_opens_the_spaces_list(browser_results):
+    result = scenario(browser_results, "spaces_list_from_address")
+    listed = step(result, "listed")
+    assert listed["dialogOpen"] and listed["address"] == "&spaces=open"      # Read, never rewritten.
+    dialog = step(result, "listed-dialog")
+    assert dialog["title"] == "Spaces" and dialog["items"] == ["Research1 conversation"]
+
+
+def test_untitled_conversations_are_reused_instead_of_piling_up_and_titles_reach_the_bar(browser_results):
+    result = scenario(browser_results, "spaces_no_empty_pile")
+    view = step(result, "space-view")
+    assert view["submit"] == "Start" and view["hintShown"] is False
+    assert view["placeholder"] == "Conversation title (optional)"
+    reused = step(result, "reused")
+    assert reused["barShown"] and not reused["dialogOpen"]
+    calls = spaces_requests(result)
+    assert not any(method == "POST" and url.endswith("/conversations") for method, url, _ in calls)
+    # The reused conversation is read from the server (once), like any existing one; here it is still empty.
+    assert calls[3] == ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)
+    assert reused["save"] == ["auto", "Saves automatically", "status", True] and reused["requestCount"] == 4
+    assert step(result, "new-on-empty") == {"label": "new-on-empty", "added": 0, "focused": "composer-input"}
+    titled = step(result, "titled")
+    assert titled["barText"].startswith("Space: Research · Plan the product launch Saved to your account")
 
 def test_without_the_spaces_mark_the_page_asks_nothing_about_spaces(browser_results):
     for name, result in browser_results["results"].items():
@@ -1678,6 +1810,22 @@ def test_a_files_deployment_offers_attachments_to_an_account_with_access(browser
     assert [chip["name"] for chip in sent["chips"]] == ["launch-plan.pptx"]
 
 
+
+def test_a_ready_file_shows_its_card_and_next_step_and_summarize_is_one_explicit_request(browser_results):
+    result = scenario(browser_results, "files_summarize")
+    ready = step(result, "ready")
+    assert ready["cards"] == [{"name": "Q3 report.pdf", "state": "PDF · Ready", "icon": True,
+                               "remove": "Remove Q3 report.pdf"}]
+    assert ready["hint"] == ["Ask Kalillac what to do with this file, or", "Summarize file"]
+    # Focus is back in the composer, and choosing the file sent nothing to the chat.
+    assert ready["focused"] == "composer-input" and ready["requestCount"] == 2
+    assert [r["url"] for r in result["requests"][:2]] == ["/api/files", "/api/files"]
+    chat = result["requests"][2]
+    assert chat["url"] == "/api/chat" and chat["body"]["message"] == "Summarize the attached file."
+    assert chat["body"]["file_ids"] == ["CcCcCcCcCcCcCcCcCcCcCc"]
+    summarized = step(result, "summarized")
+    assert summarized["draft"] == "my unsent draft" and summarized["cards"] == [] and summarized["hint"] is None
+
 def test_an_attached_image_is_previewed_from_the_stored_copy_and_sent(browser_results):
     result = scenario(browser_results, "images_attach_send")
     offered = step(result, "offered")
@@ -1741,10 +1889,413 @@ def test_reasoning_modes_are_chosen_with_the_mouse_and_keyboard_and_sent(browser
     result = scenario(browser_results, "reasoning_offered")
     start = step(result, "start")
     assert start["pickerShown"] is True and start["checked"] == ["balanced"]
+    # Premium with Deep enabled (the server lists it for this account): nothing is unavailable, so there is no
+    # note, no Learn more and no lock anywhere.
+    for label in ("start", "deep-clicked", "arrow-right", "arrow-left"):
+        snap = step(result, label)
+        assert (snap["unavailable"], snap["titles"], snap["note"], snap["quietNote"], snap["learn"]) == \
+            ([], [], None, None, None), label
     assert step(result, "deep-clicked")["checked"] == ["deep"]
     right = step(result, "arrow-right")
     assert right["checked"] == ["quick"] and right["focused"] == "quick"
     assert step(result, "arrow-left")["checked"] == ["deep"]
     first, second = bodies(result)
     assert first["reasoning_mode"] == "balanced" and second["reasoning_mode"] == "deep"
+    # Every mode has its icon and visible label; the one question about modes was asked once, outside the chat.
+    assert start["labels"] == [["Quick", True], ["Balanced", True], ["Deep", True]] and start["unavailable"] == []
+    assert result["modeRequests"] == [{"url": "/api/chat/reasoning-modes", "method": "GET"}]
 
+
+def test_a_free_account_sees_deep_as_premium_and_can_never_select_or_send_it(browser_results):
+    result = scenario(browser_results, "reasoning_free_account")
+    start = step(result, "start")
+    assert start["unavailable"] == ["deep"] and start["checked"] == ["balanced"] and start["note"] is None
+    # Free, with Deep available through Premium (the server says so): the lock and the Premium wording.
+    assert start["titles"] == [["deep", "Deep reasoning is part of Kalillac Premium", 1,
+                                ", available with Kalillac Premium"]]
+    clicked = step(result, "deep-clicked")
+    assert clicked["checked"] == ["balanced"]
+    assert clicked["note"] == "Deep reasoning is part of Kalillac Premium. Your message will use Balanced. Learn more"
+    assert clicked["learn"] == ["BUTTON", "button", "Learn more", "dialog"]
+    assert step(result, "arrow-right")["checked"] == ["quick"] and step(result, "arrow-right")["focused"] == "quick"
+    assert step(result, "arrow-left")["checked"] == ["balanced"]
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
+
+
+
+# --- the refinement pass: save status, Spaces search and layout, more conversations, Learn more ---------------
+
+SAVED = ["saved", "Saved to your account", "status", True]
+NOT_SAVED = ["unsaved", "Last message not saved", "status", True]
+NOT_CONFIRMED = ["unknown", "Save not confirmed", "status", True]
+
+
+def test_the_save_status_only_ever_says_what_the_server_confirmed(browser_results):
+    result = scenario(browser_results, "spaces_save_status")
+    save = {s_["label"]: s_["save"] for s_ in result["steps"] if "save" in s_}
+    assert save["opened"] == SAVED                                  # The messages the server returned.
+    assert save["generating"] == ["working", "Generating…", "status", True]      # Not "saved" while in flight.
+    assert save["saved"] == SAVED                                   # A 200 carrying both stored rows.
+    # A refusal the server names stores nothing: it never reads as saved.
+    assert save["refused"] == NOT_SAVED and save["provider-failed"] == NOT_SAVED
+    # What the page cannot know is not claimed either way: a stopped or lost request, a 404 (which a failed
+    # save can also be), and a 200 that does not carry the stored rows.
+    assert [save[k] for k in ("stopped", "lost", "not-found", "no-rows")] == [NOT_CONFIRMED] * 4
+    assert save["retried"] == SAVED                                 # Retry (the same key) settles it.
+    assert save["new-empty"] == ["auto", "Saves automatically", "status", True]
+    assert save["left"][0] == "auto"
+    # No Save button anywhere, and the failure copy never shows server text.
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    assert ">Save<" not in index and "RAW-SECRET" not in str(step(result, "provider-failed-page"))
+    # Every retry of a message reuses its key; nothing was re-sent under a new one.
+    keys = [b["client_request_id"] for m, u, b in spaces_requests(result) if m == "POST" and u.endswith("/messages")]
+    assert keys[2] == keys[3] and keys[4] == keys[5] == keys[6] and len(set(keys)) == 5
+
+
+def test_the_save_status_is_set_from_server_answers_only():
+    """Statically: "saved" is written in exactly two places, each behind what the server returned."""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert source.count('setSaveState(TURNS.length ? "saved" : "auto")') == 1      # Rows the server returned.
+    assert source.count('if (exchangeStored(data) && failedExchange !== exchange) {') == 1
+    assert source.count('setSaveState("saved")') == 1
+    assert len(re.findall(r'setSaveState\(.*"saved"', source)) == 2
+    # Nothing about a Space or a saved conversation is kept in the browser: the Spaces code touches no storage.
+    spaces = source[source.index("// ---- Spaces (saved conversations)"):source.index("// ---- End & erase")]
+    assert "setSaveState" in spaces and "renderSpaces" in spaces
+    for forbidden in ("localStorage", "sessionStorage", "indexedDB", "document.cookie"):
+        assert forbidden not in spaces, forbidden
+
+
+def test_space_search_covers_every_space_and_filters_on_the_page(browser_results):
+    result = scenario(browser_results, "spaces_search_1280x800")
+    listed = step(result, "listed")
+    # Both pages were read (the server's cursor followed), so the search covers every Space of the account.
+    assert spaces_requests(result)[1:3] == [("GET", "/api/spaces?limit=50", None),
+                                            ("GET", "/api/spaces?limit=50&cursor=cursor-PAGE_2", None)]
+    assert listed["searchShown"] and listed["placeholder"] == "Search Spaces…" and listed["labelled"]
+    assert len(listed["items"]) == 8 and listed["items"][-1] == "<b>Markup</b>"       # A name is text.
+    typed = step(result, "typed")
+    assert typed["items"] == ["Research", "research notes", "Older research"]          # Case-insensitive.
+    assert step(result, "trimmed")["items"] == ["Work stuff", "<b>Markup</b>"]
+    none = step(result, "no-match")
+    assert none["items"] == [] and none["tone"] is None
+    assert none["status"] == "No Spaces match “zebra”. Clear the search to see all your Spaces."
+    # Escape clears the search first (and does not close the dialog); clearing restores the whole list.
+    cleared = step(result, "escape-clears")
+    assert cleared["value"] == "" and len(cleared["items"]) == 8 and cleared["dialogOpen"] and cleared["status"] == ""
+    assert step(result, "escape-default")["prevented"] is True
+    # While searching, the dialog keeps its height (the field does not move as the list narrows); the hold
+    # ends with the search.
+    assert typed["height"] == none["height"] == listed["height"] == cleared["height"] and listed["height"] > 300
+    assert step(result, "few")["height"] < listed["height"]
+    # Typing made no request at all.
+    assert {step(result, k)["requestCount"] for k in ("listed", "typed", "trimmed", "no-match", "escape-clears",
+                                                      "arrow-down", "arrow-up")} == {3}
+    # The keyboard: Down into the list, Up back to the field, Enter opens the first match.
+    assert step(result, "arrow-down")["focused"] == "Calculus3 conversations"
+    assert step(result, "arrow-up")["focused"] == "spaces-search-input"
+    opened = step(result, "enter-opens")
+    assert opened["title"] == "Calculus" and not opened["searchShown"] and opened["focused"] == "spaces-dialog-title"
+    back = step(result, "back")
+    assert back["searchShown"] and back["value"] == "calc" and back["items"] == ["Calculus"]
+    # A new opening lists everything again; with only a few Spaces there is no search, and the introduction stays.
+    few = step(result, "few")
+    assert not few["searchShown"] and few["value"] == "" and len(few["items"]) == 4 and few["hintShown"]
+
+
+@pytest.mark.parametrize("name,phone", [("spaces_long_list_360x640", True), ("spaces_long_list_1280x800", False)])
+def test_a_long_list_scrolls_inside_the_dialog_and_keeps_its_actions_in_view(browser_results, name, phone):
+    result = scenario(browser_results, name)
+    for label in ("listed", "arrow-down", "end", "up-to-search", "space"):
+        snap = step(result, label)
+        assert snap["viewport"] == ([360, 640] if phone else [1280, 800]), label
+        assert snap["items"] == (40 if label == "space" else 30), label
+        # The dialog fits the window; only the list between its head and foot scrolls (no nested scrolling).
+        assert snap["dialogInView"] and not snap["dialogScrolls"] and snap["bodyScrolls"], label
+        assert snap["scrollers"] == ["spaces-dialog-body"], (label, snap["scrollers"])
+        assert snap["titleInView"] and snap["newInView"] and snap["closeInView"], label
+        assert snap["overflow"] <= 0 and snap["bodyOverflowX"] <= 0, label
+        if label != "space":
+            assert snap["searchInView"], label
+        if phone:
+            assert snap["small"] == [], (label, snap["small"])                    # 44 px targets.
+    assert step(result, "arrow-down")["focused"] == "Recipes"
+    assert step(result, "end")["focused"] == "Space 30"
+    assert step(result, "up-to-search")["focused"] == "spaces-search-input"
+    parts = step(result, "space-parts")
+    assert parts["groups"] == ["Manage this Space", "Conversations", "Start a conversation"]
+    assert parts["buttons"] == ["Rename", "Instructions", "Delete"] and parts["toggle"] == "Edit conversations"
+    assert parts["dialogInView"] and parts["closeInView"] and parts["newShown"]
+
+
+def test_a_space_with_more_conversations_than_a_page_offers_the_rest(browser_results):
+    result = scenario(browser_results, "spaces_more_conversations")
+    first = step(result, "first-page")
+    assert first["items"] == ["Plan2 messages", "Notes4 messages"] and first["more"] == ["Show more conversations"]
+    second = step(result, "second-page")
+    # The next page is read with the server's own cursor; a conversation is never listed twice; then no more.
+    assert spaces_requests(result)[-1] == (
+        "GET", f"/api/spaces/{SPACE_A}/conversations?limit=50&cursor=cursor-NEXT_1", None)
+    assert second["items"] == ["Plan2 messages", "Notes4 messages", "Oldest6 messages"] and second["more"] == []
+    assert second["focused"] == "Oldest6 messages"                  # Focus follows to what was added.
+
+
+MODE_COPY = [
+    "Prioritizes speed for straightforward questions and everyday tasks.",
+    "Provides a practical balance between response speed and reasoning effort.",
+    "Uses additional reasoning effort for demanding tasks involving multiple steps, complex programming, "
+    "mathematical reasoning, and detailed analysis.",
+]
+
+
+@pytest.mark.parametrize("name", ["reasoning_learn_more", "reasoning_learn_more_accounts",
+                                  "reasoning_learn_more_360x640"])
+def test_learn_more_explains_the_modes_without_changing_anything(browser_results, name):
+    result = scenario(browser_results, name)
+    assert step(result, "deep-clicked")["learn"] == ["BUTTON", "button", "Learn more", "dialog"]
+    before, opened = step(result, "before"), step(result, "opened")
+    assert not before["open"]
+    assert opened["open"] and opened["modal"] is True and opened["labelledBy"] == "modes-dialog-title"
+    assert opened["title"] == "Understanding reasoning modes"
+    assert opened["terms"] == ["Quick", "Balanced", "Deep Premium"] and opened["descriptions"] == MODE_COPY
+    # The server said Deep is what Premium adds: only Deep is marked, and only as Premium.
+    assert opened["tags"] == [["quick", None, False], ["balanced", None, False], ["deep", "Premium", False]]
+    assert opened["note"] == ("Deep reasoning is available with Kalillac Premium. Choosing a mode never changes "
+                              "your plan: your message always uses the mode shown as selected.")
+    assert opened["focused"] == "modes-close" and opened["inView"] and opened["overflow"] <= 0
+    assert opened["small"] == []                                    # Close and the link are 44 px targets.
+    # The way to the plan is offered only where there are accounts, and in a new tab (the chat stays).
+    expected = (["Explore Kalillac Premium", "/account?show=billing", "_blank", "noopener"]
+                if name == "reasoning_learn_more_accounts" else None)
+    assert opened["explore"] == expected
+    # Escape and Close both close it, and focus returns to Learn more.
+    for label in ("escaped", "closed"):
+        closed = step(result, label)
+        assert not closed["open"] and closed["focused"] == "mode-learn", label
+    # Reading about the modes asked the server nothing and chose nothing: Balanced stays, and is what is sent.
+    assert {step(result, k)["requestCount"] for k in ("before", "opened", "escaped", "closed")} == {0}
+    assert all(step(result, k)["checked"] == ["balanced"] for k in ("opened", "escaped", "closed"))
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
+
+
+def test_the_reasoning_dialog_promises_no_result():
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    start = index.index('<dialog class="modes-dialog"')
+    lower = index[start:index.index("</dialog>", start)].lower()
+    for word in ("better", "best", "smarter", "accura", "guarantee", "always right", "%", "benchmark",
+                 "upgrade now", "$", "unlimited"):
+        assert word not in lower, word
+
+
+# --- review corrections (independent review of 441dd12) -------------------------------------------------------------
+
+def test_an_ambiguous_answer_is_never_reported_as_not_saved(browser_results):
+    result = scenario(browser_results, "spaces_save_ambiguous")
+    save = {s_["label"]: s_["save"] for s_ in result["steps"] if "save" in s_}
+    # A database failure during the save: the exchange may be durably stored (the backend test
+    # test_a_lost_commit_acknowledgement_... stores it and gets this very answer). Never "not saved".
+    assert save["commit-acknowledgement-lost"] == NOT_CONFIRMED
+    lost = step(result, "commit-acknowledgement-lost-page")
+    assert lost["assistants"][-1]["actions"] == ["Retry"]            # The way to settle it is offered.
+    assert save["commit-recovered"] == SAVED                         # The same key returned the stored exchange.
+    # Stopped, then retried while the original still runs: busy says nothing about the original's outcome.
+    assert save["stopped"] == NOT_CONFIRMED
+    assert save["retry-while-original-runs"] == NOT_CONFIRMED
+    # Nor does any later refusal of the retry: only the stored exchange coming back settles it.
+    assert save["retry-refused-still-open"] == NOT_CONFIRMED
+    assert save["reconciled"] == SAVED
+    # A first attempt the server refuses by name stored nothing, and says so.
+    assert save["first-attempt-busy"] == NOT_SAVED and save["first-attempt-timeout"] == NOT_SAVED
+    # Anything else establishes nothing either way.
+    for label in ("first-attempt-internal-error", "first-attempt-account-unavailable",
+                  "first-attempt-idempotency-conflict", "first-attempt-unknown-code", "first-attempt-gateway"):
+        assert save[label] == NOT_CONFIRMED, label
+    # Every retry reused its message's key; no message was sent under two keys.
+    posts = [b for m, u, b in spaces_requests(result) if m == "POST" and u.endswith("/messages")]
+    by_message = {}
+    for body in posts:
+        by_message.setdefault(body["message"], set()).add(body["client_request_id"])
+    assert all(len(keys) == 1 for keys in by_message.values()) and len(by_message) == 9
+    assert [b["message"] for b in posts].count("Still running on the server") == 4
+    assert [b["message"] for b in posts].count("Committed, acknowledgement lost") == 2
+
+
+def test_not_saved_is_claimed_only_for_refusals_that_precede_the_save():
+    """Statically: the one place "not saved" comes from, and the codes that are never taken as proof."""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert source.count('return "unsaved";') == 1 and source.count('"unsaved"') == 1
+    assert 'if (!exchange.saveUnknown && status !== null && refusedBeforeSaving(status, data)) return "unsaved";' in source
+    assert ('var NOT_SAVED_5XX = { model_provider_unavailable: true, service_unavailable: true, '
+            'request_timeout: true };') in source
+    refused = source[source.index("function refusedBeforeSaving"):source.index("function unconfirmedSaveState")]
+    assert "database_unavailable" not in refused and "status !== 404" in refused
+    assert 'code !== "idempotency_conflict"' in refused
+    # The status is set from unconfirmedSaveState on every path that is not a confirmed save.
+    send = source[source.index("function requestSpaceReply"):source.index("// ---- End & erase")]
+    assert send.count("setSaveState(unconfirmedSaveState(exchange") == 6 and send.count('setSaveState("saved")') == 1
+    assert 'setSaveState("unsaved")' not in source and 'setSaveState("unknown")' not in source
+
+
+def test_a_reused_conversation_shows_what_the_server_holds_now(browser_results):
+    result = scenario(browser_results, "spaces_reuse_reads_history")
+    reused = step(result, "reused-existing")
+    # Read once from the server, with its messages and its current title; not entered as empty.
+    calls = spaces_requests(result)
+    assert calls[:4] == [
+        ("GET", "/api/spaces?limit=1", None), ("GET", "/api/spaces?limit=50", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations?limit=50", None),
+        ("GET", f"/api/spaces/{SPACE_A}/conversations/{CONV_A}?limit=100", None)]
+    assert reused["save"] == SAVED
+    assert reused["barText"].startswith("Space: Research · Question from the other tab Saved to your account")
+    page = step(result, "reused-page")
+    assert page["users"] == ["Question from the other tab"]
+    assert page["assistants"][0]["text"].strip() == "Saved answer" and page["assistants"][0]["actions"] == ["Copy"]
+    thread = step(result, "reused-thread")
+    # The earlier-messages cursor is kept, the unsent draft is kept, and nothing was read twice.
+    assert thread == {"label": "reused-thread", "earlier": 1, "draft": "An unsent draft", "requestCount": 4}
+    # A conversation this page has just created is entered without a read: one POST, no GET of it.
+    created = step(result, "created-new")
+    assert created["save"] == ["auto", "Saves automatically", "status", True]
+    assert step(result, "created-requests")["added"] == [f"POST /api/spaces/{SPACE_A}/conversations"]
+
+
+def test_reuse_is_the_only_empty_fast_path_left_for_created_conversations():
+    source = APP_JS.read_text(encoding="utf-8")
+    create = source[source.index("function createInSpaces"):source.index("function openSpaceConversation")]
+    assert create.count("openSpaceConversation(") == 2
+    assert "openSpaceConversation(view.space, { id: empty.id, title: empty.title }, true);" in create
+    # The only entry without a read follows a 201 for a conversation this page created.
+    assert create.count(", false);") == 1 and create.index("r.status !== 201") < create.index(", false);")
+
+
+@pytest.mark.parametrize("name", ["reasoning_unoffered", "reasoning_premium_unstated"])
+def test_a_mode_no_plan_offers_is_never_called_premium(browser_results, name):
+    """The server lists Deep neither for this account nor as something Premium adds (or does not say what
+    Premium adds at all): it is unavailable, and nothing on the page says an upgrade would unlock it."""
+    result = scenario(browser_results, name)
+    start, clicked, opened = step(result, "start"), step(result, "deep-clicked"), step(result, "opened")
+    assert start["unavailable"] == ["deep"] and start["checked"] == ["balanced"]
+    assert start["titles"] == [["deep", "Deep reasoning isn’t available right now", 0, ", not available right now"]]
+    assert clicked["checked"] == ["balanced"]
+    assert clicked["note"] == "Deep reasoning isn’t available right now. Your message will use Balanced. Learn more"
+    assert opened["tags"] == [["quick", None, False], ["balanced", None, False], ["deep", "Unavailable", True]]
+    assert opened["note"] == ("Deep reasoning isn’t available right now. Choosing a mode never changes your plan: "
+                              "your message always uses the mode shown as selected.")
+    assert opened["explore"] is None                     # No way to "the plan" for something no plan has.
+    shown = json.dumps([start, clicked, opened], ensure_ascii=False).lower()
+    assert "premium" not in shown and "upgrade" not in shown
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
+
+
+def test_the_page_itself_makes_no_premium_claim_about_a_mode():
+    """The static page says nothing about which mode is part of Premium: only the server's answer does."""
+    index = INDEX_HTML.read_text(encoding="utf-8")
+    start = index.index('<dialog class="modes-dialog"')
+    dialog = index[start:index.index("</dialog>", start)]
+    assert "available with Kalillac Premium" not in dialog and ">Premium<" not in dialog
+    assert dialog.count('class="modes-tag" data-mode-tag="') == 3 and dialog.count("hidden></span>") == 3
+    assert '<span id="modes-dialog-plan"></span>' in dialog
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "premiumModes = Array.isArray(data.premium) ? data.premium.filter(known) : [];" in source
+
+
+def test_the_explanation_is_in_the_tab_order_without_touching_the_unavailable_mode(browser_results):
+    result = scenario(browser_results, "reasoning_keyboard")
+    start = step(result, "start")
+    # No click has happened: the note is not on screen, yet it and Learn more are in the page, focusable.
+    assert start["note"] is None and start["learn"] == ["BUTTON", "button", "Learn more", "dialog"]
+    text_, width, tab_index, visibility = start["quietNote"]
+    assert text_ == "Deep reasoning is part of Kalillac Premium. Your message will use Balanced. Learn more"
+    assert width <= 1 and tab_index == 0 and visibility == "visible"
+    # The arrow keys still skip the unavailable mode, and its sentence follows the selection.
+    assert step(result, "arrow-path")["reached"] == ["quick", "balanced", "quick", "balanced"]
+    assert step(result, "after-arrows")["checked"] == ["balanced"]
+    focused = step(result, "learn-focused")
+    assert focused["note"] == start["quietNote"][0] and focused["quietNote"] is None      # Now on screen.
+    (body,) = bodies(result)
+    assert body["reasoning_mode"] == "balanced"
+
+
+def test_a_keyboard_alone_opens_and_closes_the_reasoning_explanation(tmp_path):
+    """Real key presses in a real browser, from the page as it loads: no click, no script-set focus. Shift+Tab
+    walks back from the message box to Learn more, Enter opens the explanation, Escape closes it and focus
+    returns; then on from the picker: an arrow key (which skips Deep) and Tab reach it again."""
+    from test_homepage_handoff import browser_page
+    browser = find_browser()
+    if browser is None:
+        if os.name == "nt":
+            pytest.fail(f"Microsoft Edge is required on Windows and was not found at {EDGE_WINDOWS}")
+        pytest.skip("no supported Chromium-family browser is installed")
+
+    def state(dt, session):
+        result = dt.call("Runtime.evaluate", {"returnByValue": True, "expression": """(() => {
+            const e = document.activeElement, d = document.getElementById('modes-dialog'),
+                  n = document.getElementById('mode-note');
+            return {focus: e ? (e.id || e.getAttribute('data-mode') || e.tagName) : null,
+                    open: !!d && d.open, modal: !!d && d.open && d.matches(':modal'),
+                    noteOnScreen: !!n && !n.hidden && !n.classList.contains('is-quiet') &&
+                                  n.getBoundingClientRect().width > 100,
+                    checked: [...document.querySelectorAll('.mode-option[aria-checked="true"]')].map(o => o.dataset.mode),
+                    deep: document.querySelector('.mode-option[data-mode="deep"]').getAttribute('aria-disabled')};
+        })()"""}, session)
+        return result["result"]["value"]
+
+    def press(dt, session, key, code, vk, shift=False):
+        for kind in ("keyDown", "keyUp"):
+            params = {"type": kind, "key": key, "code": code, "windowsVirtualKeyCode": vk,
+                      "nativeVirtualKeyCode": vk, "modifiers": 8 if shift else 0}
+            if key == "Enter" and kind == "keyDown":
+                params["text"] = "\r"
+            dt.call("Input.dispatchKeyEvent", params, session)
+        time.sleep(0.15)
+
+    with Harness() as harness, browser_page(browser, tmp_path, (1280, 800), False) as (dt, session):
+        dt.call("Page.enable", {}, session)
+        dt.call("Page.navigate", {"url": f"{harness.origin}/app/?scenario=reasoning_keyboard_live"}, session)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                ready = state(dt, session)
+            except (KeyError, RuntimeError):
+                ready = None
+            if ready and ready["deep"] == "true" and ready["focus"] == "composer-input":
+                break
+            time.sleep(0.1)
+        start = state(dt, session)
+        # As the page loads: the message box has focus, Deep is unavailable, nothing has been clicked.
+        assert start == {"focus": "composer-input", "open": False, "modal": False, "noteOnScreen": False,
+                         "checked": ["balanced"], "deep": "true"}
+        back = []
+        for _ in range(8):
+            press(dt, session, "Tab", "Tab", 9, shift=True)
+            back.append(state(dt, session)["focus"])
+            if back[-1] == "mode-learn":
+                break
+        assert back[-1] == "mode-learn", back                 # Reached by the keyboard alone,
+        assert "deep" not in back                             # and not by way of the unavailable mode.
+        assert state(dt, session)["noteOnScreen"] is True     # Focused, it is on screen with its sentence.
+        press(dt, session, "Enter", "Enter", 13)
+        opened = state(dt, session)
+        assert opened["open"] and opened["modal"] and opened["focus"] == "modes-close"
+        press(dt, session, "Escape", "Escape", 27)
+        closed = state(dt, session)
+        assert not closed["open"] and closed["focus"] == "mode-learn" and closed["checked"] == ["balanced"]
+        # From the picker: Shift+Tab to the selected mode, an arrow key (Deep is skipped), Tab to Learn more.
+        press(dt, session, "Tab", "Tab", 9, shift=True)
+        assert state(dt, session)["focus"] == "balanced"
+        press(dt, session, "ArrowRight", "ArrowRight", 39)
+        moved = state(dt, session)
+        assert moved["focus"] == "quick" and moved["checked"] == ["quick"]
+        press(dt, session, "Tab", "Tab", 9)
+        assert state(dt, session)["focus"] == "mode-learn"
+        press(dt, session, "Enter", "Enter", 13)
+        assert state(dt, session)["open"] is True
+        press(dt, session, "Tab", "Tab", 9)                   # Inside the modal dialog, Tab stays inside it.
+        assert state(dt, session)["focus"] in ("modes-close", "modes-explore", "BODY", "modes-dialog")
+        press(dt, session, "Escape", "Escape", 27)
+        end = state(dt, session)
+        assert not end["open"] and end["focus"] == "mode-learn" and end["checked"] == ["quick"]
+        assert harness.unexpected == []

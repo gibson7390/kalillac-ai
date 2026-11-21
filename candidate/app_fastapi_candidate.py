@@ -14564,7 +14564,7 @@ import time
 
 from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # --------------------------- history boundaries ---------------------------
@@ -16086,6 +16086,31 @@ async def api_chat_session_end(request: _FastAPIRequest):
         return _budget_error(422, "invalid_request")
 
     return JSONResponse(content=end_chat_session(session_id), headers=_NO_STORE)
+
+
+@api.get("/api/chat/reasoning-modes")
+async def api_chat_reasoning_modes(request: _FastAPIRequest):
+    """The reasoning modes this browser's next chat request may use, decided by exactly the rule /api/chat
+    applies (paid modes only with the V1-verified paid entitlement), and the mode used when none is sent.
+    Read-only: the chat's picker shows what will run instead of offering a mode the request would be
+    refused. A bare 404 while reasoning modes are off (not a chat outcome: the picker is not shown then)."""
+    config = reasoning_modes.CONFIG
+    if config is None:
+        return Response(status_code=404, headers=_NO_STORE)
+    verified = None
+    if _v1_account_security is not None:
+        from kalillac_accounts.paid_access import verified_account as _verified_account
+        verified = await _verified_account(request, _v1_account_security, _account_settings.cookie_name)
+    allowed = config.allowed(verified is not None and verified.paid)
+    return JSONResponse(
+        content={
+            "modes": [mode for mode in reasoning_modes.MODES if mode in allowed],
+            "default": config.default,
+            # Modes a verified Premium plan would add for this browser (none once it has them all).
+            "premium": [mode for mode in reasoning_modes.MODES if mode in config.paid and mode not in allowed],
+        },
+        headers={**_NO_STORE, "Vary": "Cookie"},
+    )
 
 
 @api.post("/api/chat")
