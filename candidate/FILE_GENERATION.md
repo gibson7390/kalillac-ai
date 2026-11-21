@@ -46,8 +46,28 @@ mirrored and carry their own complex-script font, also embedded.
 
 **Charts** (`charts.py`) are drawn deterministically: round axis steps that include zero for bars
 and areas (a line whose values sit in a narrow band far from zero gets an axis fitted to the band,
-so its changes show; PowerPoint charts follow the same rule), compact values ("$4.2M"), labels measured with the real font so they are shortened rather than overlapping,
-and a bounds check that every mark stays on its canvas.
+so its changes show; PowerPoint charts follow the same rule), compact values ("$4.2M"), labels measured
+with the real font so that a long category name wraps onto a second line (and is shortened with an
+ellipsis only when two lines cannot hold it) rather than overlapping, and a bounds check that every mark
+stays on its canvas. A second line of names lengthens the chart; the plot keeps its height.
+
+**Page flow** (`typeset.table_flow`, `templates/document.typ`). A document should read as typeset, not
+as blocks dropped one under another:
+
+* A table of up to five short rows is one piece. Any other table breaks between rows with its header
+  repeated, and never leaves fewer than three rows on either side of the break; a row is cut only when
+  it holds so much text that it could be taller than the space left. Word follows the same rule ("keep
+  with next" on the bound rows; rows are never split), so a short table is never divided there either.
+* A callout of ordinary length is one piece; a long one may cross a page, its title bound to its text.
+* A chart, a small table or a comparison cannot be divided. When one does not fit in what is left of a
+  page and running text follows it, up to three of those paragraphs or lists are set first and fill the
+  space, and the block follows them. Text is never moved across a heading, and a block straight after
+  a heading stays with it. The decision reads the previous layout pass; every outcome is a valid
+  document in the document's own order of sections.
+* Headings stay with what they introduce, captions with their tables.
+
+Not done: a chart that follows a heading, a table or another chart directly still moves whole and can
+leave space above it; Word decides its own pagination for charts and cards.
 
 **Layout inspection** (`quality.py`) reads every generated PDF back with PDFium and refuses one with
 a visible glyph past a margin, a blank page in the middle or missing glyphs. In justified text,
@@ -76,8 +96,21 @@ formula:
   another sheet in green, editable inputs on a pale yellow fill, a bold total row between a rule and
   a double rule, negatives in red parentheses, whole amounts without cents, years without
   separators, readable dates.
-* **Usable sheets.** Widths measured from the content, frozen header and label column, filters,
-  print setup one page wide with the header repeated and "Page X of Y", gridlines on screen only.
+* **Usable sheets.** Widths measured from the content, frozen header and label column, filters whose
+  buttons never cover a heading (right-aligned headings are indented clear of the button and the column
+  is wide enough for both), "Page X of Y", gridlines on screen only.
+* **Printing that can be read.** A sheet turns to landscape when a portrait page would shrink it much,
+  and is fitted to one page across only while that keeps the type at 70% or more. A wider sheet prints
+  on as many pages across as that takes, each repeating the header row and the column that names the
+  rows. A chart beside a table prints with it when both fit a page at that scale; otherwise the table
+  is the print area. A dashboard prints at one fixed scale with a page break before any chart row that
+  the page cannot hold whole, so no chart is cut in two.
+* **Dashboards.** Charts stand on the tile grid, each exactly as wide as the columns under it and tied
+  to them, so two charts cannot overlap. A pie or doughnut gives each slice its own colour (twelve
+  before any repeats), labels only the slices with room for a percentage, in a colour that reads on
+  the slice, and lists every slice in a legend beside the ring. Value axes show large amounts in
+  thousands or millions ($20K) so neighbouring labels cannot collide; cells and data labels keep
+  full figures.
 * **Features.** Per-cell formats for mixed input sheets, conditional formatting (negatives, data
   bars, colour scales, thresholds, top and bottom), drop-down and range validation, native Excel
   charts linked to the cells (date axes for time series), dashboard sheets with metric tiles and
@@ -352,8 +385,15 @@ connect the cores to customers. The shape:
    formulas that compute, text that fits each slide), plus `consistency.py`: a table whose last row
    is labelled a total must add up, column by column, or the file is refused with
    `table_total_mismatch` and the table and column named. A refusal returns to the model as data
-   with its code and a hint; the model corrects the specification and tries again, within the
-   loop's bounds (6 tool rounds, 10 tool calls, 4 files per request).
+   with its code, a hint and, when it can be found, a position; the model corrects the specification
+   and tries again, within the loop's bounds (6 tool rounds, 10 tool calls, 4 files per request).
+   Every refusal a specification can meet has a hint: one fixed sentence stating the rule that was
+   broken, with its limits (`assistant.HINTS`). The position (`where`: `blocks[2] (table)`,
+   `slides[1] (points)`, `sheets[1] cell B3`) is found by validating the refused specification again
+   in the service, piece by piece, as `table_total_mismatch` is located. It is built from indices and
+   the grammar's own type names only: nothing a specification says is ever repeated in a refusal.
+   The model's instructions state the options the engine accepts (table alignment, typed cells,
+   chart axis titles) and the text limits that refuse a slide or a metric.
 4. **Storing.** `FileStore` keeps each file under a random 128-bit identifier in a directory named
    by a hash of the owning account; quotas (250 MB and 300 files per account by default) are
    checked before writing; files expire after 30 days and are purged at startup; writes are
@@ -411,6 +451,9 @@ Carlito faces in `fonts/metrics/` (OFL) only measure slide text; they are never 
 * The release items listed at the end of "The file assistant and delivery".
 
 ## Tests
+
+The counts below are the original record; the workflow's own comment holds the current numbers, and
+the 2026-11-21 renderer-quality pass added 18 regression tests (7 workbook, 7 document, 4 assistant).
 
 `tests/test_workbook_design.py` (178: the engine against Excel, the forecast benchmark, conventions,
 charts, refusals), `tests/test_file_generation.py` (166), `tests/test_file_intake.py` (65),

@@ -137,7 +137,10 @@ jobs:
       # 22 router (one added at the merge: confirmations under the allowance hook), 28 intent,
       # 2 chat-handoff, 19 image (I1), 4 allowance-hook and 24 file-retention tests, and 2 for the
       # file request's chat session and reasoning mode (F4, F5), and 13 for expired files and file
-      # access after Premium (F2, F6). The
+      # access after Premium (F2, F6). The renderer-quality pass (2026-11-21) added 18: 7 document-design
+      # (page flow, table pagination in PDF and Word, chart labels), 7 workbook (dashboard layout,
+      # doughnut, axis labels, headings under filter buttons, printing) and 4 assistant (refusal hints
+      # and positions). The
       # worker's memory-limit test runs only on POSIX, so it must run here.
       - name: Require every file test to have run
         run: |
@@ -148,6 +151,6 @@ jobs:
           suites = [root] if root.tag == "testsuite" else list(root)
           totals = {k: sum(int(s.get(k, 0)) for s in suites) for k in ("tests", "skipped", "failures", "errors")}
           print(totals)
-          if totals != {"tests": 1105, "skipped": 0, "failures": 0, "errors": 0}:
+          if totals != {"tests": 1123, "skipped": 0, "failures": 0, "errors": 0}:
               sys.exit("the file verification did not run completely")
           PY
