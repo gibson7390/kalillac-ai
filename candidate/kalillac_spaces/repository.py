@@ -518,16 +518,39 @@ def automatic_title(message: str) -> str | None:
     return None
 
 
+AUTO_TITLE_LOOKBACK = 5
+
+
+def first_meaningful_title(session, conversation: Conversation, user_row: Message) -> str | None:
+    """The title the conversation's first meaningful user message gives: the user messages saved before this
+    exchange, oldest first (at most AUTO_TITLE_LOOKBACK: a conversation that began with a greeting, or one
+    saved before automatic titles existed), then this exchange's own. One small indexed read, and only for a
+    conversation that already holds messages; no model call."""
+    if user_row.seq > 1:
+        earlier = session.scalars(
+            select(Message.content).where(
+                Message.conversation_id == conversation.id, Message.user_id == conversation.user_id,
+                Message.role == "user", Message.seq < user_row.seq,
+            ).order_by(Message.seq).limit(AUTO_TITLE_LOOKBACK))
+        for content in earlier:
+            title = automatic_title(content)
+            if title:
+                return title
+    return automatic_title(user_row.content)
+
+
 def complete_exchange(session, conversation: Conversation, space: Space, rows, now: datetime) -> Replay:
     """Advance the conversation, clear its lease, touch the Space; flush.
 
     A conversation still carrying the default title it was created with (version 1: never renamed, and not
-    created with that title by choice) takes one from this exchange's user message (automatic_title). A
-    title the customer set, including exactly "New conversation", is never replaced, and the version is
-    left alone, so a rename made with the version the customer last read still succeeds."""
+    created with that title by choice) takes one from its first meaningful user message
+    (first_meaningful_title). A title the customer set, including exactly "New conversation", is never
+    replaced, and the version is left alone, so a rename made with the version the customer last read still
+    succeeds. Titles change only here, when an exchange is saved: no stored conversation is renamed on its
+    own."""
     user_row, reply_row = rows
     if conversation.title == DEFAULT_CONVERSATION_TITLE and conversation.version == 1:
-        title = automatic_title(user_row.content)
+        title = first_meaningful_title(session, conversation, user_row)
         if title:
             conversation.title = title
     conversation.message_count = reply_row.seq
