@@ -584,6 +584,72 @@ def test_database_failure_while_saving_keeps_no_partial_exchange(world, api, pro
     assert lease_of(world, conversation_id) == (None, None)       # released by the cleanup
 
 
+def test_a_lost_commit_acknowledgement_answers_503_for_a_saved_exchange_and_the_same_key_reconciles(
+        world, api, provider, monkeypatch):
+    """The same answer (503 database_unavailable) as the failure above, where nothing was stored: here the
+    commit completed and only its acknowledgement was lost, so both rows are durable. The answer alone cannot
+    tell a client which happened (the page shows "Save not confirmed" for it, never "not saved"); the request's
+    own key settles it, without another provider call and without a second copy."""
+    from sqlalchemy.orm import SessionTransaction
+    space_id = new_space(api)
+    conversation_id = new_conversation(api, space_id)
+    key = new_request_id()
+    real_commit, real_complete, fired = SessionTransaction.commit, repo.complete_exchange, []
+
+    def mark(session, *args, **kwargs):
+        result = real_complete(session, *args, **kwargs)
+        session.info["completes_exchange"] = True
+        return result
+
+    def lost_acknowledgement(transaction, *args, **kwargs):
+        # Only the outer transaction that completes the exchange: not authorization, the lease or cleanup.
+        completing = transaction.parent is None and transaction.session.info.pop("completes_exchange", False)
+        real_commit(transaction, *args, **kwargs)
+        if completing and not fired:
+            fired.append(True)
+            raise OperationalError("COMMIT", {}, ConnectionError("synthetic lost commit acknowledgement"))
+
+    monkeypatch.setattr(repo, "complete_exchange", mark)
+    monkeypatch.setattr(SessionTransaction, "commit", lost_acknowledgement)
+    response = send(api, space_id, conversation_id, "Explain how DNS works", request_id=key)
+    assert fired
+    assert (response.status_code, response.json()) == (503, {"error": "database_unavailable"})
+    # Saved all the same: both rows, the count and the title.
+    assert world.count(Message) == 2
+    saved = conversation_of(api, space_id, conversation_id)
+    assert saved["message_count"] == 2 and saved["title"] == "Explain how DNS works"
+    # The same key returns the stored exchange: no second generation, no second copy.
+    replay = send(api, space_id, conversation_id, "Explain how DNS works", request_id=key)
+    assert replay.status_code == 200 and replay.json()["assistant_message"]["content"] == REPLY
+    assert (replay.json()["user_message"]["seq"], replay.json()["assistant_message"]["seq"]) == (1, 2)
+    assert world.count(Message) == 2 and len(provider.payloads) == 1
+
+
+def test_a_retry_while_the_original_still_runs_is_busy_and_the_same_key_then_reconciles(world, provider):
+    """A customer stops a send and retries at once. The original is still running on the server, so the retry
+    is refused as busy: that refusal says nothing about whether the original will save (it does, here). Once it
+    has, the same key returns what was stored, exactly once."""
+    application = make_app(world)
+    with client(application) as api:
+        space_id = new_space(api)
+        conversation_id = new_conversation(api, space_id)
+    provider.hold = threading.Event()
+    key = new_request_id()
+
+    async def retry_at_once(http):
+        return await post_send(space_id, conversation_id, "Explain how DNS works", key)(http)
+
+    original, busy = asyncio.run(concurrently(
+        application, post_send(space_id, conversation_id, "Explain how DNS works", key), retry_at_once, provider))
+    assert (busy.status_code, busy.json()) == (409, {"error": "conversation_busy"})
+    assert original.status_code == 200                              # The "unknown" attempt did save.
+    with client(application) as api:
+        replay = send(api, space_id, conversation_id, "Explain how DNS works", request_id=key)
+    assert replay.status_code == 200
+    assert replay.json()["assistant_message"]["id"] == original.json()["assistant_message"]["id"]
+    assert world.count(Message) == 2 and len(provider.payloads) == 1
+
+
 def test_a_lease_that_cannot_be_released_expires(world, api, provider, monkeypatch):
     space_id = new_space(api)
     conversation_id = new_conversation(api, space_id)
