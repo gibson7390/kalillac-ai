@@ -28,7 +28,7 @@ from . import charts
 from .package import application_record, drop_relationships, fixed_dates, own_record
 from .spec import (_NUMERIC, Callout, Chart, Code, Comparison, Heading, ListBlock, Metrics, PageBreak, Paragraph,
                    Quote, Steps, Table, plain)
-from .typeset import FONTS, LABELS, RTL, cover_art_png, direction, svg_png
+from .typeset import FONTS, LABELS, RTL, cover_art_png, direction, svg_png, table_flow
 
 NAVY, BLUE, BLUE_DEEP, BLUE_SOFT = "0B1737", "0069FF", "0053CF", "EAF3FF"
 INK, BODY, MUTED, HAIR, RULE, PAPER = "0E1526", "1D2538", "5C677E", "E2E9F4", "CDD8EA", "F6F8FC"
@@ -693,6 +693,16 @@ class _Writer:
         widths = self.column_widths(block)
         table = self.table(1 + len(block.rows), columns, widths)
         last = len(block.rows)
+        # Which rows Word keeps on the page of the row after them ("keep with next" on their paragraphs).
+        # The same rule as the PDF (typeset.table_flow): a table of a few rows is never divided; any other
+        # keeps its header with its first rows and never leaves fewer than three rows on either side of
+        # a page break. Rows themselves are never cut (cantSplit).
+        keep, groups = table_flow(block.rows)
+        bound = set(range(last)) if keep else {0}
+        position = 1
+        for group in groups or ():
+            bound.update(range(position, position + group - 1))
+            position += max(group, 1)
         for r_index, row in enumerate(table.rows):
             self.row_rules(row, header=r_index == 0)
             total = block.total_row and r_index == last
@@ -710,7 +720,7 @@ class _Writer:
                 else:
                     self.cell_borders(cell, bottom=(0.75 if r_index == last else 0.5, RULE if r_index == last else HAIR))
                 paragraph = cell.paragraphs[0]
-                self.spacing(paragraph, 0, 0, line=1.18,
+                self.spacing(paragraph, 0, 0, line=1.18, keep_next=r_index in bound,
                              align="right" if numeric else ("center" if block.align[c_index] == "center" else None))
                 value = values[c_index]
                 if r_index == 0:

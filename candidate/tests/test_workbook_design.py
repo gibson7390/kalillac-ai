@@ -318,3 +318,208 @@ def test_the_about_sheet_shows_its_colour_samples_as_numbers_not_text():
     looks_numeric = re.compile(r"[-+]?[0-9][0-9,]*(\.[0-9]+)?%?")
     assert not [cell.coordinate for row in about.iter_rows() for cell in row
                 if cell.data_type == "s" and looks_numeric.fullmatch(str(cell.value or "").strip())]
+
+
+# --- dashboard layout, headings and printing (document-quality benchmark, 2026-11-21) ---------
+# In Microsoft Excel the benchmark budget showed dashboard charts covering each other, a doughnut whose
+# colours repeated and whose labels collided, headings hidden under filter buttons, axis labels running
+# together, and a 19-column sheet printed too small to read. Each defect has its test here.
+
+_AMOUNTS = [185588, 140070, 15408, 38400, 7800, 21836, 14193, 4560, 3480, 3000, 3600]
+_WIDE = ["Month"] + [f"Operating cost line {index:02d}" for index in range(1, 19)]
+BUDGET = {
+    "title": "Budget",
+    "sheets": [
+        {"name": "Dashboard", "kind": "dashboard", "title": "Budget",
+         "metrics": [{"label": f"Tile {index}", "formula": "=Wide!B14", "format": "currency"} for index in range(5)],
+         "charts": [
+             {"kind": "line", "sheet": "Wide", "title": "By month", "category": "Month", "series": _WIDE[1:3]},
+             {"kind": "doughnut", "sheet": "Parts", "title": "Parts", "category": "Category", "series": ["Amount"]},
+             {"kind": "column", "sheet": "Wide", "title": "One line", "category": "Month", "series": _WIDE[1:2]},
+             {"kind": "area", "sheet": "Wide", "title": "Area", "category": "Month", "series": _WIDE[2:3]}]},
+        {"name": "Wide", "total_row": True,
+         "columns": [{"header": "Month", "format": "text"}] + [{"header": header, "format": "currency"}
+                                                               for header in _WIDE[1:]],
+         "rows": [[f"M{month:02d}"] + [40000 + 1000 * month + column for column in range(18)]
+                  for month in range(1, 13)]
+         + [["Total"] + [{"formula": f"=SUM({chr(66 + index)}2:{chr(66 + index)}13)"} for index in range(18)]]},
+        {"name": "Parts", "columns": [{"header": "Category", "format": "text"}, {"header": "Amount", "format": "currency"}],
+         "rows": [[f"Part {index:02d}", amount] for index, amount in enumerate(_AMOUNTS)],
+         "charts": [{"kind": "bar", "title": "Parts", "category": "Category", "series": ["Amount"]}]},
+        {"name": "Small", "columns": [{"header": "Item", "format": "text"}, {"header": "Unit price", "format": "currency"}],
+         "rows": [["A", 12.5], ["B", 8.25], ["C", 3]]},
+    ],
+}
+
+
+def _parts(raw):
+    data, book = book_of(raw)
+    archive = zipfile.ZipFile(io.BytesIO(data))
+    sheets = {name: archive.read(f"xl/worksheets/sheet{index}.xml").decode()
+              for index, name in enumerate(book.sheetnames, start=1)}
+    return book, archive, sheets
+
+
+def _width(sheet, index):
+    """Width of a column (1-based). XlsxWriter writes neighbours of one width as a single range."""
+    for dimension in sheet.column_dimensions.values():
+        if dimension.min <= index <= dimension.max:
+            return dimension.width
+    raise AssertionError(index)
+
+
+def _anchors(archive, charts):
+    """((from column, offset, row, offset), (to column, offset, row, offset)) of every chart on the drawing
+    that holds `charts` charts."""
+    for name in archive.namelist():
+        if re.fullmatch(r"xl/drawings/drawing\d+\.xml", name):
+            xml = archive.read(name).decode()
+            found = re.findall(r"<xdr:twoCellAnchor[^>]*>.*?</xdr:twoCellAnchor>", xml, re.S)
+            if len(found) == charts:
+                corner = r"<xdr:col>(\d+)</xdr:col><xdr:colOff>(-?\d+)</xdr:colOff><xdr:row>(\d+)</xdr:row>" \
+                         r"<xdr:rowOff>(-?\d+)</xdr:rowOff>"
+                return [tuple(tuple(int(v) for v in re.search(f"<xdr:{end}>{corner}</xdr:{end}>", anchor).groups())
+                              for end in ("from", "to")) for anchor in found], found
+    raise AssertionError("no drawing with that many charts")
+
+
+def test_dashboard_charts_stand_on_the_tile_grid_and_never_overlap():
+    _book, archive, _sheets = _parts(BUDGET)
+    anchors, raw = _anchors(archive, 4)
+    for index, (start, end) in enumerate(anchors):
+        left = index % 2 == 0
+        # Left charts span the first two tiles (columns B to F), right charts the last two (H to L); the gap
+        # column G lies between them. Before: a 560-pixel chart in 528 pixels of columns, 36 pixels under
+        # its neighbour.
+        assert start[0] == (1 if left else 7) and start[1] == 0, anchors
+        assert (end[0], end[1]) <= ((6, 0) if left else (12, 0)), anchors
+    for upper, lower in ((anchors[0], anchors[2]), (anchors[1], anchors[3])):
+        assert (lower[0][2], lower[0][3]) >= (upper[1][2], upper[1][3]), anchors     # No vertical overlap either.
+    # Tied to the cells they stand on, so they keep to their columns in any program and at any zoom.
+    assert all('editAs="oneCell"' not in anchor and 'editAs="absolute"' not in anchor for anchor in raw)
+    single = copy.deepcopy(BUDGET)
+    single["sheets"][0]["charts"] = single["sheets"][0]["charts"][:1]
+    (start, end), = _anchors(_parts(single)[1], 1)[0][:1]
+    assert start[0] == 1 and (end[0], end[1]) <= (12, 0) and end[0] >= 11          # One chart under all four tiles.
+    half = sum(xlsx_design._pixels(xlsx_design._dashboard_width(column)) for column in range(1, 6))
+    assert half == 4 * xlsx_design._pixels(16) + xlsx_design._pixels(3.5) < 528
+
+
+def _chart_xml(archive, title):
+    for name in archive.namelist():
+        if re.fullmatch(r"xl/charts/chart\d+\.xml", name):
+            xml = archive.read(name).decode()
+            if f"<a:t>{title}</a:t>" in xml:
+                return xml
+    raise AssertionError(title)
+
+
+def test_a_doughnut_gives_every_slice_its_own_colour_and_labels_only_slices_with_room():
+    _book, archive, _sheets = _parts(BUDGET)
+    xml = next(archive.read(name).decode() for name in archive.namelist()
+               if re.fullmatch(r"xl/charts/chart\d+\.xml", name) and "<c:doughnutChart>" in archive.read(name).decode())
+    points = re.findall(r"<c:dPt>.*?</c:dPt>", xml, re.S)
+    colours = [re.search(r'<a:srgbClr val="([0-9A-F]{6})"', point).group(1) for point in points]
+    assert len(points) == 11 and len(set(colours)) == 11        # Before: six colours for eleven slices.
+    small = sum(amount / sum(_AMOUNTS) < xlsx_design.SLICE_LABEL_SHARE for amount in _AMOUNTS)
+    labels = re.search(r"<c:dLbls>.*?</c:dLbls>", xml, re.S).group(0)
+    assert small == 7 and labels.count('<c:delete val="1"/>') == small   # Before: eleven labels in a heap.
+    assert '<c:legendPos val="r"/>' in xml and '<c:holeSize val="58"/>' in xml
+    # The chart still reads its cells: the layout decisions change no reference.
+    assert "<c:f>Parts!$B$2:$B$12</c:f>" in xml and "<c:f>Parts!$A$2:$A$12</c:f>" in xml
+    assert len(set(xlsx_design.SLICES)) == 12
+
+
+def test_axis_labels_of_large_amounts_are_compact_and_small_ones_are_exact():
+    _book, archive, _sheets = _parts(BUDGET)
+    bar = next(archive.read(name).decode() for name in archive.namelist()
+               if re.fullmatch(r"xl/charts/chart\d+\.xml", name) and 'barDir val="bar"' in archive.read(name).decode())
+    axis = re.search(r"<c:valAx>.*?</c:valAx>", bar, re.S).group(0)
+    assert "&quot;K&quot;" in axis                                   # $200K, not $200,000 run into $180,000.
+    assert "&quot;K&quot;" not in re.search(r"<c:dLbls>.*?</c:dLbls>", bar, re.S).group(0)   # Data labels: full figures.
+    column = spec.validate_workbook(copy.deepcopy(BUDGET)).sheets[3].columns[1]
+    assert xlsx_design._axis_format(column, 12.5) == xlsx_design._number_format("currency", "$", 0)
+    assert '"M"' in xlsx_design._axis_format(column, 25_000_000)
+    area = next(archive.read(name).decode() for name in archive.namelist()
+                if re.fullmatch(r"xl/charts/chart\d+\.xml", name) and "<c:areaChart>" in archive.read(name).decode())
+    assert "<c:dLbls>" not in area                                   # Before: twelve labels over the boundary line.
+
+
+def test_filter_buttons_never_cover_a_heading():
+    book, _archive, _sheets = _parts(BUDGET)
+    wide, small = book["Wide"], book["Small"]
+    assert wide.auto_filter.ref == "A1:S13" and not small.auto_filter.ref
+    for index, header in enumerate(_WIDE[1:], start=2):
+        cell = wide.cell(row=1, column=index)
+        # Right-aligned, indented clear of the button, in a column wide enough for both.
+        assert cell.alignment.horizontal == "right" and cell.alignment.indent == xlsx_design.FILTER_BUTTON - 1
+        assert _width(wide, index) >= min(len(header), 24) + 2 + xlsx_design.FILTER_BUTTON
+    assert wide["A1"].alignment.horizontal == "left" and wide["A1"].alignment.indent == 1
+    assert _width(wide, 1) >= len("Month") + 2 + xlsx_design.FILTER_BUTTON
+    assert small["B1"].alignment.indent == 0                      # No filter, nothing to clear.
+    assert wide["A2"].alignment.indent == 1 and wide["B2"].alignment.indent == 0
+    # An explicit width that is too narrow for the heading and its button is widened; a generous one is kept.
+    narrow = copy.deepcopy(BUDGET)
+    narrow["sheets"][1]["columns"][0]["width"] = 5
+    narrow["sheets"][1]["columns"][1]["width"] = 60
+    again = book_of(narrow)[1]["Wide"]
+    assert _width(again, 1) >= 10 and _width(again, 2) >= 60
+
+
+def test_a_wide_sheet_prints_readably_on_two_pages_instead_of_tiny_on_one():
+    book, archive, sheets = _parts(BUDGET)
+    workbook = archive.read("xl/workbook.xml").decode()
+    # Nineteen columns: several pages across in landscape, each repeating the header row and the Month
+    # column. Before: one page across, at a scale nobody could read.
+    assert 'fitToHeight="0"' in sheets["Wide"]
+    assert 'orientation="landscape"' in sheets["Wide"]
+    assert re.search(r"Print_Titles[^>]*>Wide!\$A:\$A,Wide!\$1:\$1<", workbook)
+    # A narrow sheet stays portrait on one page across, as before.
+    assert "fitToWidth" not in sheets["Small"] and 'fitToPage="1"' in sheets["Small"]
+    assert 'orientation="landscape"' not in sheets["Small"]
+    pixels = sum(xlsx_design._pixels(int(_width(book["Wide"], index))) for index in range(1, 20))
+    across = int(re.search(r'fitToWidth="(\d+)"', sheets["Wide"]).group(1))
+    scale = lambda pages: pages * xlsx_design.PRINT_LANDSCAPE / (pixels / 96)  # noqa: E731
+    # As few pages as keep the type at 70% or more: one fewer would shrink it below that.
+    assert across >= 2 and scale(across) >= xlsx_design.PRINT_MIN_SCALE > scale(across - 1)
+    # A chart beside a table prints with it while both fit a page at a readable scale (Parts); beside a
+    # table that needs the page to itself, the table is the print area and the chart stays on screen.
+    assert re.findall(r"Print_Area[^>]*>([^<!]+)!", workbook) == ["Dashboard"]
+    beside = copy.deepcopy(BUDGET)
+    beside["sheets"][1]["charts"] = [{"kind": "line", "category": "Month", "series": _WIDE[1:2]}]
+    assert re.search(r"Print_Area[^>]*>Wide!\$A\$1:\$S\$14<", _parts(beside)[1].read("xl/workbook.xml").decode())
+    # The forecast benchmark is unchanged: nine columns still fit one landscape page.
+    forecast = _parts(FORECAST_WORKBOOK)[2]["Forecast"]
+    assert "fitToWidth" not in forecast and 'orientation="landscape"' in forecast
+
+
+def test_a_printed_dashboard_never_cuts_a_chart_in_two():
+    _book, archive, sheets = _parts(BUDGET)
+    dashboard = sheets["Dashboard"]
+    scale = int(re.search(r'<pageSetup[^>]*scale="(\d+)"', dashboard).group(1))
+    assert 70 <= scale <= 100 and "fitToPage" not in dashboard and 'orientation="landscape"' in dashboard
+    width = sum(xlsx_design._pixels(xlsx_design._dashboard_width(column)) for column in range(13)) / 96
+    assert width * scale / 100 <= xlsx_design.PRINT_LANDSCAPE      # The whole grid fits across the page.
+    top = 4 + 4 * 2                                               # Five tiles: two rows of tiles.
+    breaks = re.search(r'<rowBreaks count="1" manualBreakCount="1"><brk id="(\d+)"', dashboard)
+    assert breaks and int(breaks.group(1)) == top + xlsx_design.CHART_ROWS   # A new page before the second chart row.
+    assert re.search(r"Print_Area[^>]*>Dashboard!\$A\$1:\$M\$\d+<", archive.read("xl/workbook.xml").decode())
+    assert xlsx_design._chart_breaks(12, 1, 40) == [] and xlsx_design._chart_breaks(12, 3, 40) == [30]
+    assert xlsx_design._chart_breaks(12, 3, 30) == [30, 48]       # A page that holds one chart row at a time.
+    assert xlsx_design._chart_breaks(12, 3, 60) == [48]           # Two chart rows share a page that holds them.
+    # Tall title and tile rows count against page one: when it cannot also hold a chart row, the charts
+    # start on page two.
+    assert xlsx_design._chart_breaks(12, 2, 36, extra=5) == [30]
+    assert xlsx_design._chart_breaks(12, 2, 34, extra=5) == [12, 30]
+
+
+def test_layout_changes_leave_every_formula_and_validation_as_it_was():
+    book, archive, sheets = _parts(BUDGET)
+    assert book["Wide"]["B14"].value == "=SUM(B2:B13)" and book["Wide"]["S14"].value == "=SUM(S2:S13)"
+    values = book_of(BUDGET, data_only=True)[1]
+    assert values["Wide"]["B14"].value == sum(40000 + 1000 * month for month in range(1, 13))
+    assert values["Dashboard"]["B6"].value == values["Wide"]["B14"].value
+    data, forecast = book_of(FORECAST_WORKBOOK)
+    assert '<dataValidation type="decimal" operator="greaterThanOrEqual"' in zipfile.ZipFile(
+        io.BytesIO(data)).read("xl/worksheets/sheet3.xml").decode()
+    assert forecast["Forecast"]["C2"].value == "=B2*Inputs!$B$4"

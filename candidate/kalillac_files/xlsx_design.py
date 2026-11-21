@@ -12,10 +12,13 @@ write_xlsx(workbook) builds the file with XlsxWriter:
     pale yellow fill, a bold total row between a rule and a double rule;
   * number formats per column (thousands separators, currency symbol,
     negatives in red parentheses, percentages, dates), widths measured from
-    the content, a frozen header row, filters, print setup that fits the page
-    width and repeats the header;
+    the content, a frozen header row, filters whose buttons never cover a
+    heading, and print setup that keeps the type readable: one page across
+    while that holds, otherwise several, each repeating the header row and
+    the column that names the rows;
   * conditional formatting, drop-down and range validation, native Excel
-    charts that stay linked to the cells, dashboard sheets with metric tiles,
+    charts that stay linked to the cells, dashboard sheets with metric tiles
+    and charts that stand on the tile grid and cannot overlap,
     and an optional About sheet that explains the workbook and its colours.
 
 Text is always written as text: no string is ever turned into a formula, a
@@ -31,8 +34,62 @@ NAVY, BLUE, BLUE_DEEP, INK, MUTED, HAIR, PAPER = "#0B1737", "#0069FF", "#0053CF"
     "#F6F8FC"
 INPUT_FONT, INPUT_FILL, LINK_FONT = "#0047B3", "#FFF7DB", "#0B7A44"
 SERIES = ("#0069FF", "#0B1737", "#12A15C", "#F59F00", "#7C5CFF", "#E8590C")
+# The slices of a pie or doughnut each need a colour of their own: twelve distinguishable ones, the six
+# series colours first. Only a chart with more slices than this repeats a colour.
+SLICES = SERIES + ("#00A3BF", "#D6336C", "#74B816", "#868E96", "#A61E4D", "#3B5BDB")
 FONT = "Calibri"
 CHART_ROWS = 18
+ROW_PIXELS = 20            # Excel's default row height (15 pt) on screen.
+# A slice smaller than this share has no room for its percentage: the label is left off (the legend
+# still names the slice) rather than drawn over its neighbours.
+SLICE_LABEL_SHARE = 0.04
+# A filter button covers the bottom-right corner of a header cell, about this many characters wide.
+FILTER_BUTTON = 3
+# Printing. Usable page widths in inches with the half-inch margins set below; the narrower of A4 and
+# US Letter in each orientation, so the result holds on either paper.
+PRINT_PORTRAIT, PRINT_LANDSCAPE, PRINT_LANDSCAPE_HEIGHT = 7.27, 10.0, 6.77
+# A sheet is never shrunk below this to fit one page across: 10 pt type at 70% is 7 pt, about the
+# smallest that reads comfortably on paper. A wider sheet prints on more pages across instead.
+PRINT_MIN_SCALE = 0.70
+# A sheet stays portrait while it fits a portrait page at this scale or more; wider, it turns.
+PRINT_TURN_SCALE = 0.85
+# Dashboard grid, in character widths: a margin column, then four tiles of two columns each with a
+# narrow gap column after every tile.
+DASH_MARGIN, DASH_TILE, DASH_GAP = 3, 16, 3.5
+
+
+def _pixels(width):
+    """Screen width of a column of `width` characters, as Excel and XlsxWriter compute it."""
+    return int(width * 7 + 0.5) + 5 if width >= 1 else int(width * 12 + 0.5)
+
+
+def _points_to_pixels(points):
+    return int(points * 4 / 3 + 0.5)
+
+
+def _dashboard_width(column):
+    return DASH_MARGIN if column == 0 else DASH_GAP if column % 3 == 0 else DASH_TILE
+
+
+def _readable_on(fill):
+    """Black or white, whichever reads on the fill colour."""
+    red, green, blue = (int(fill[i:i + 2], 16) for i in (1, 3, 5))
+    return "#FFFFFF" if 0.299 * red + 0.587 * green + 0.114 * blue < 150 else INK
+
+
+def _axis_format(column, largest):
+    """The number format of a value axis.
+
+    Large amounts are shown in thousands or millions ($20K, $1.5M) so that neighbouring tick labels
+    cannot run into each other. The cells and the data labels keep their full figures."""
+    if column.format not in ("currency", "number", "integer") or largest < 10_000:
+        return _number_format(column.format, column.symbol, 0)
+    symbol = ""
+    if column.format == "currency":
+        symbol = '"' + column.symbol + '"' if len(column.symbol) == 1 else '"' + column.symbol + ' "'
+    if largest >= 10_000_000:
+        return f'{symbol}#,##0.0,,"M";-{symbol}#,##0.0,,"M";{symbol}0'
+    return f'{symbol}#,##0,"K";-{symbol}#,##0,"K";{symbol}0'
 
 
 def _number_format(column_format, symbol="$", decimals=None):
@@ -92,6 +149,25 @@ def _display_width(value, number_format):
     if isinstance(value, (date, datetime)):
         return 11
     return max((len(line) for line in str(value).split("\n")), default=0)
+
+
+CHART_WIDTH = 620          # A chart beside a table, in screen pixels.
+
+
+def _chart_breaks(top, chart_rows, row_room, extra=0):
+    """Rows before which a printed dashboard starts a new page, so that no chart is cut in two.
+
+    top: the first row of the first chart row. row_room: how many sheet rows of ordinary height one
+    printed page holds. extra: how many more such rows the tall title and tile rows above the charts
+    amount to. The tiles and the first chart row share page one when they fit; after that as many
+    whole chart rows as a page holds go on each page."""
+    breaks, used = [], top + extra
+    for index in range(chart_rows):
+        if used + CHART_ROWS > row_room and used > 0:
+            breaks.append(top + index * CHART_ROWS)
+            used = 0
+        used += CHART_ROWS
+    return breaks
 
 
 class _Formats:
@@ -213,8 +289,7 @@ class _Writer:
         if has_inputs:
             page.set_tab_color("#F5C542")
         page.set_row(0, 30)
-        header = self.formats.get(bold=True, font_color="#FFFFFF", bg_color=NAVY, text_wrap=True, border=0,
-                                  bottom=2, bottom_color=BLUE)
+        filtered = count >= 5
         def plain(cell, r, i):
             if isinstance(cell, Formula):
                 return None if cell.format else self.value_of(sheet.name, r, i + 1)
@@ -237,17 +312,22 @@ class _Writer:
                 number_formats[i] = "0"
         widths = []
         for index, column in enumerate(columns):
+            right = column.format != "text"
+            # A filter button sits in the bottom-right corner of its header cell. A right-aligned
+            # heading is indented clear of it, and every filtered column is wide enough for both.
+            clear = FILTER_BUTTON if filtered else 0
             page.write_string(0, index, column.header, self.formats.get(
                 **{**dict(bold=True, font_color="#FFFFFF", bg_color=NAVY, text_wrap=True, bottom=2,
-                          bottom_color=BLUE), "align": "right" if column.format not in ("text",) else "left"}))
+                          bottom_color=BLUE), "align": "right" if right else "left",
+                   "indent": clear - 1 if right and filtered else 1 if not right else 0}))
             shown = [self.value_of(sheet.name, r, index + 1) if isinstance(row[index], Formula) else
                      (row[index].value if isinstance(row[index], Typed) else row[index])
                      for r, row in enumerate(sheet.rows, start=2)]
             longest = max([_display_width(v, number_formats[index]) for v in shown] + [0])
-            header_need = min(len(column.header), 24) + 2
-            widths.append(column.width or max(9, min(48, max(longest + 2, header_need))))
+            header_need = min(len(column.header), 24) + 2 + clear
+            widths.append(max(column.width, min(header_need, 30)) if column.width
+                          else max(9, min(48, max(longest + 2, header_need))))
             page.set_column(index, index, widths[-1])
-        del header
         for offset, row in enumerate(sheet.rows):
             row_index = offset + 1
             is_total = sheet.total_row and offset == count - 1
@@ -263,7 +343,8 @@ class _Writer:
                 if isinstance(value, Typed):
                     value = value.value
                 if column.format == "text":
-                    properties.update(text_wrap=True, valign="top")
+                    # Indented like its heading, so text never touches the figures of the column before it.
+                    properties.update(text_wrap=True, valign="top", indent=1)
                 if column.role == "input" and not is_total:
                     properties.update(bg_color=INPUT_FILL)
                 if isinstance(value, Formula):
@@ -291,15 +372,22 @@ class _Writer:
         self.validation(page, sheet, data_bottom)
         labels = columns[0].format in ("text", "date")   # The column that names each row.
         page.freeze_panes(1, 1 if labels and len(columns) > 5 else 0)
-        if count >= 5:
+        if filtered:
             page.autofilter(0, 0, data_bottom - 1, len(columns) - 1)
-        self.print_setup(page, len(columns), sheet.name)
         if sheet.description:
             page.write_comment(0, 0, sheet.description, {"author": "Kalillac AI", "x_scale": 2.2, "y_scale": 1.6})
         anchor_column = len(columns) + 1
         for index, chart in enumerate(sheet.charts):
             page.insert_chart(1 + index * CHART_ROWS, anchor_column, self.chart(chart, sheet), {"x_offset": 8,
                                                                                                "y_offset": 4})
+        table_pixels = sum(_pixels(width) for width in widths)
+        chart_pixels = _pixels(8.43) + 8 + CHART_WIDTH if sheet.charts else 0   # One default column, then the chart.
+        if chart_pixels and (table_pixels + chart_pixels) / 96.0 * PRINT_MIN_SCALE > PRINT_LANDSCAPE:
+            # Table and charts together would print too small to read, and a chart must not be cut by a
+            # page edge: the table is printed, readably, and its charts stay on screen.
+            page.print_area(0, 0, count, len(columns) - 1)
+            chart_pixels = 0
+        self.print_setup(page, table_pixels + chart_pixels, sheet.name, label_column=labels and len(columns) > 2)
 
     def conditional(self, page, sheet, data_bottom):
         if data_bottom < 2:
@@ -349,12 +437,24 @@ class _Writer:
             page.data_validation(*target, {"validate": kind, **criteria, "error_title": "Value out of range",
                                            "error_message": message})
 
-    def print_setup(self, page, columns, name):
-        if columns > 6:
+    def print_setup(self, page, pixels, name, label_column=False, header_row=True):
+        """Paper, orientation and scaling for a sheet whose content is `pixels` wide on screen.
+
+        The sheet turns to landscape when a portrait page would shrink it much. It is fitted to one page
+        across only while that keeps the type readable (PRINT_MIN_SCALE); a wider sheet is spread over
+        as many pages across as that takes, each repeating the column that names the rows."""
+        inches = pixels / 96.0
+        landscape = inches * PRINT_TURN_SCALE > PRINT_PORTRAIT
+        if landscape:
             page.set_landscape()
+        room = PRINT_LANDSCAPE if landscape else PRINT_PORTRAIT
+        across = max(1, -(-int(inches * PRINT_MIN_SCALE * 1000) // int(room * 1000)))
         page.set_paper(9)  # A4; fits Letter as well at fit-to-width.
-        page.fit_to_pages(1, 0)
-        page.repeat_rows(0)
+        page.fit_to_pages(across, 0)
+        if header_row:
+            page.repeat_rows(0)
+        if across > 1 and label_column:
+            page.repeat_columns(0)
         page.set_margins(left=0.5, right=0.5, top=0.75, bottom=0.75)
         title = self.spec.title.replace("&", "&&")[:60]
         page.set_header(f'&L&"{FONT},Bold"&9{title}&R&"{FONT},Regular"&9&A')
@@ -374,15 +474,35 @@ class _Writer:
         if last < 1:
             last = len(source.rows)
         pie = kind in ("pie", "doughnut")
+
+        def computed(column):
+            """The series' numbers as generated (charts stay linked to the cells; these only guide layout)."""
+            found = []
+            for offset, row in enumerate(source.rows[:last]):
+                cell = row[column]
+                if isinstance(cell, Typed):
+                    cell = cell.value
+                if isinstance(cell, Formula):
+                    cell = self.value_of(source.name, offset + 2, column + 1)
+                found.append(float(cell) if isinstance(cell, (int, float)) and not isinstance(cell, bool) else 0.0)
+            return found
+        largest = max([abs(value) for column in spec_chart.series for value in computed(column)] + [0.0])
         for position, column in enumerate(spec_chart.series):
             color = SERIES[position % len(SERIES)]
             series = {"name": [source.name, 0, column], "categories": [source.name, 1, spec_chart.category, last,
                                                                        spec_chart.category],
                       "values": [source.name, 1, column, last, column]}
             if pie:
-                series["points"] = [{"fill": {"color": SERIES[i % len(SERIES)]}, "border": {"color": "#FFFFFF"}}
-                                    for i in range(last)]
-                series["data_labels"] = {"percentage": True, "font": {"name": FONT, "size": 9}}
+                colors = [SLICES[i % len(SLICES)] for i in range(last)]
+                series["points"] = [{"fill": {"color": fill}, "border": {"color": "#FFFFFF"}} for fill in colors]
+                # A percentage inside each slice that has room for one, in a colour that reads on the slice.
+                values = [max(value, 0.0) for value in computed(column)]
+                total = sum(values) or 1.0
+                series["data_labels"] = {
+                    "percentage": True, "font": {"name": FONT, "size": 9},
+                    "custom": [{"font": {"name": FONT, "size": 9, "bold": True, "color": _readable_on(fill)}}
+                               if value / total >= SLICE_LABEL_SHARE else {"delete": True}
+                               for value, fill in zip(values, colors)]}
             elif kind in ("line", "area"):
                 series["line"] = {"color": color, "width": 2.25}
                 if kind == "area":
@@ -394,7 +514,9 @@ class _Writer:
                 series["fill"] = {"color": color}
                 series["border"] = {"none": True}
                 series["gap"] = 60
-            if not pie and len(spec_chart.series) == 1 and last <= 12:
+            # Values on the marks of a single short series. Not on an area: its labels would sit on the
+            # boundary line, over the fill and each other; the axis reads its values.
+            if not pie and kind != "area" and len(spec_chart.series) == 1 and last <= 12:
                 series["data_labels"] = {"value": True, "font": {"name": FONT, "size": 8, "color": INK},
                                          "num_format": _number_format(source.columns[column].format,
                                                                       source.columns[column].symbol, 0)}
@@ -405,11 +527,17 @@ class _Writer:
             chart.set_title({"name": title, "name_font": {"name": FONT, "size": 12, "bold": True, "color": NAVY}})
         else:
             chart.set_title({"none": True})
-        chart.set_legend({"position": "bottom", "font": {"name": FONT, "size": 9, "color": MUTED}}
-                         if pie or len(spec_chart.series) > 1 else {"none": True})
+        if pie:
+            # The legend beside the ring, one slice to a line, leaves the ring its full height.
+            chart.set_legend({"position": "right", "font": {"name": FONT, "size": 9, "color": MUTED}})
+            if kind == "doughnut":
+                chart.set_hole_size(58)
+        else:
+            chart.set_legend({"position": "bottom", "font": {"name": FONT, "size": 9, "color": MUTED}}
+                             if len(spec_chart.series) > 1 else {"none": True})
         if not pie:
             first = source.columns[spec_chart.series[0]]
-            value_axis = {"num_format": _number_format(first.format, first.symbol, 0),
+            value_axis = {"num_format": _axis_format(first, largest),
                           "num_font": {"name": FONT, "size": 9, "color": MUTED},
                           "major_gridlines": {"visible": True, "line": {"color": HAIR}},
                           "line": {"none": True}}
@@ -430,7 +558,7 @@ class _Writer:
                 chart.set_x_axis(category_axis)
         chart.set_chartarea({"border": {"color": HAIR}, "fill": {"color": "#FFFFFF"}})
         chart.set_plotarea({"fill": {"none": True}})
-        chart.set_size({"width": 620, "height": 330})
+        chart.set_size({"width": CHART_WIDTH, "height": 330})
         return chart
 
     # --- dashboards and the About sheet -----------------------------------------------------
@@ -439,9 +567,8 @@ class _Writer:
         page = self.book.add_worksheet(sheet.name)
         page.hide_gridlines(2)
         page.set_tab_color(BLUE)
-        page.set_column(0, 0, 3)
-        for column in range(1, 13):
-            page.set_column(column, column, 3.5 if column % 3 == 0 else 16)
+        for column in range(13):
+            page.set_column(column, column, _dashboard_width(column))
         page.set_row(1, 34)
         page.write_string(1, 1, sheet.title, self.formats.get(font_size=20, bold=True, font_color=NAVY))
         if sheet.description:
@@ -462,14 +589,35 @@ class _Writer:
             page.write_formula(value_row, column - 1, metric.formula.text, value_format,
                                _cached(self.value_of(sheet.name, row, column)))
         top = 4 + 4 * ((len(sheet.metrics) + 3) // 4) if sheet.metrics else 4
+        # Charts stand on the tile grid: one under the first two tiles, one under the last two, or a
+        # single chart under all four. Each is exactly as wide as the columns it stands on and is tied to
+        # them, so two charts can never overlap, whatever width a program gives a column.
+        half = sum(_pixels(_dashboard_width(column)) for column in range(1, 6))
+        full = sum(_pixels(_dashboard_width(column)) for column in range(1, 12))
         for index, spec_chart in enumerate(sheet.charts):
             row = top + (index // 2) * CHART_ROWS
             column = 1 if index % 2 == 0 else 7
             chart = self.chart(spec_chart, None)
-            chart.set_size({"width": 560 if len(sheet.charts) > 1 else 760, "height": 320})
-            page.insert_chart(row, column, chart, {"x_offset": 4, "y_offset": 6})
-        self.print_setup(page, 12, sheet.name)
+            chart.set_size({"width": half if len(sheet.charts) > 1 else full, "height": 320})
+            page.insert_chart(row, column, chart, {"y_offset": 6, "object_position": 1})
+        chart_rows = (len(sheet.charts) + 1) // 2
+        bottom = top + chart_rows * CHART_ROWS if chart_rows else top
+        # Printed at one fixed scale that fits the grid across a landscape page (fit-to-page scaling
+        # would ignore the page breaks), with a break before every chart row a page cannot hold whole.
+        pixels = sum(_pixels(_dashboard_width(column)) for column in range(13))
         page.set_landscape()
+        page.set_paper(9)
+        scale = min(100, int(PRINT_LANDSCAPE / (pixels / 96.0) * 100) - 2)
+        page.set_print_scale(scale)
+        page.print_area(0, 0, max(bottom - 1, 8), 12)
+        row_room = int(PRINT_LANDSCAPE_HEIGHT * 96 / (scale / 100.0)) // ROW_PIXELS
+        tile_rows = (len(sheet.metrics) + 3) // 4
+        tall = (_points_to_pixels(34) - ROW_PIXELS) + tile_rows * (_points_to_pixels(36) - ROW_PIXELS)
+        page.set_h_pagebreaks(_chart_breaks(top, chart_rows, row_room, extra=-(-tall // ROW_PIXELS)))
+        page.set_margins(left=0.5, right=0.5, top=0.75, bottom=0.75)
+        title = self.spec.title.replace("&", "&&")[:60]
+        page.set_header(f'&L&"{FONT},Bold"&9{title}&R&"{FONT},Regular"&9&A')
+        page.set_footer(f'&L&"{FONT},Regular"&8Kalillac AI&R&"{FONT},Regular"&8Page &P of &N')
 
     def about(self):
         names = {sheet.name.lower() for sheet in self.spec.sheets}
@@ -511,7 +659,7 @@ class _Writer:
             row += 1
             page.write_number(row, 1, sample, cell_format)
             page.write_string(row, 2, meaning, self.formats.get(font_color=INK))
-        self.print_setup(page, 3, name)
+        self.print_setup(page, _pixels(3) + _pixels(26) + _pixels(72), name, header_row=False)
         page.activate()
 
     def build(self):
