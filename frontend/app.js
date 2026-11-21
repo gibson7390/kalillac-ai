@@ -1553,15 +1553,52 @@
     return option.getAttribute("aria-disabled") !== "true";
   }
 
+  var modeNoteText = null;
+  var modesDialog = document.getElementById("modes-dialog");
+  var modesClose = document.getElementById("modes-close");
+  var modesExplore = document.getElementById("modes-explore");
+  var modeLearn = null;
+
+  /* Learn more: what each mode is, in a small modal dialog (fixed copy in index.html). Escape and Close
+     both close it, and focus returns to Learn more. On an accounts deployment it also offers the way to
+     the plan and billing page, in a new tab so the conversation on this screen is not lost. */
+  function openModesDialog() {
+    if (!modesDialog) return;
+    if (modesExplore) modesExplore.hidden = !ACCOUNTS_OFFERED;
+    if (typeof modesDialog.showModal === "function") modesDialog.showModal();
+    else modesDialog.setAttribute("open", "");
+  }
+
+  function closeModesDialog() {
+    if (!modesDialog || !modesDialog.open) return;
+    if (typeof modesDialog.close === "function") modesDialog.close();
+    else modesDialog.removeAttribute("open");
+  }
+
   function showModeNote(text) {
     if (!modeNote) {
       modeNote = document.createElement("p");
       modeNote.className = "mode-note";
       modeNote.id = "mode-note";
       modeNote.setAttribute("role", "status");
+      modeNoteText = document.createElement("span");
+      modeNote.appendChild(modeNoteText);
+      if (modesDialog) {
+        modeNote.appendChild(document.createTextNode(" "));
+        modeLearn = document.createElement("button");
+        modeLearn.type = "button";
+        modeLearn.className = "mode-learn";
+        modeLearn.id = "mode-learn";
+        modeLearn.setAttribute("aria-haspopup", "dialog");
+        modeLearn.textContent = "Learn more";
+        modeLearn.addEventListener("click", openModesDialog);
+        modeNote.appendChild(modeLearn);
+        if (modesClose) modesClose.addEventListener("click", closeModesDialog);
+        modesDialog.addEventListener("close", function () { if (modeLearn && !modeNote.hidden) modeLearn.focus(); });
+      }
       modePicker.parentNode.insertBefore(modeNote, modePicker.nextSibling);
     }
-    modeNote.textContent = text;
+    modeNoteText.textContent = text;
     modeNote.hidden = !text;
   }
 
@@ -2021,6 +2058,58 @@
   var spaceNew = document.getElementById("space-new");
   var sessionStatus = document.getElementById("session-status");
   var spacesView = null;       // {kind: "spaces"} or {kind: "space", space}; replaced on every change
+  var spacesPanel = document.getElementById("spaces-dialog-panel");
+  var spacesSearch = document.getElementById("spaces-search");
+  var spacesSearchInput = document.getElementById("spaces-search-input");
+  var spacesManageGroup = document.getElementById("spaces-manage-group");
+  var spacesListHead = document.getElementById("spaces-list-head");
+  var spacesEditToggle = document.getElementById("spaces-edit-toggle");
+  var spacesNewHeading = document.getElementById("spaces-new-heading");
+  var SPACES_SEARCH_FROM = 5;  // The search is offered once an account has this many Spaces.
+  var SPACES_PAGES_MAX = 4;    // Pages of 50 read for the list; an account holds at most 50 Spaces (one page).
+  var CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;   // The server's opaque paging cursor (base64url).
+
+  /* The open conversation's save status, in the Space bar. Nothing is saved by hand: the server stores each
+     exchange when its answer is complete. The bar says "saved" only for what the server has confirmed: the
+     messages it returned when the conversation was opened, or an exchange whose stored rows came back with
+     a 200. A refusal the server names stores nothing, so it reads as not saved. Anything this page cannot
+     know (a stopped or lost request, an unreadable or unexpected answer) reads as not confirmed; Retry
+     settles it, and the message's key means it is never saved twice. */
+  var spaceSave = document.getElementById("space-save");
+  var spaceSaveText = document.getElementById("space-save-text");
+  var SAVE_STATES = {
+    auto: { text: "Saves automatically",
+            title: "Each exchange is saved to your account as soon as Kalillac answers. There is nothing to save by hand." },
+    working: { text: "Generating…",
+               title: "Kalillac is answering. The exchange is saved when the answer is complete." },
+    saved: { text: "Saved to your account",
+             title: "Every message shown here is saved to your account." },
+    unsaved: { text: "Last message not saved",
+               title: "Your last message wasn’t saved. Earlier messages are still saved to your account." },
+    unknown: { text: "Save not confirmed",
+               title: "Kalillac couldn’t confirm that your last message was saved. Retry to check: a message is never saved twice." }
+  };
+
+  function setSaveState(state) {
+    if (!spaceSave || !spaceSaveText || !Object.prototype.hasOwnProperty.call(SAVE_STATES, state)) return;
+    spaceSave.setAttribute("data-state", state);
+    spaceSaveText.textContent = SAVE_STATES[state].text;
+    spaceSave.title = SAVE_STATES[state].title;
+  }
+
+  // A 200 that carries both stored rows of the exchange, each with the server's id: confirmed as saved.
+  function exchangeStored(data) {
+    var user = data && data.user_message;
+    var reply = data && data.assistant_message;
+    return !!user && !!reply && SPACE_ID_RE.test(user.id) && SPACE_ID_RE.test(reply.id);
+  }
+
+  /* A refusal the server names (a fixed error code) is decided before anything is written, so nothing was
+     saved. The one exception is 404: a database failure during the save itself is also answered that way,
+     and then the page cannot know. */
+  function refusedBeforeSaving(status, data) {
+    return status !== 404 && !!data && typeof data.error === "string";
+  }
 
   function newRequestId() {
     if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
@@ -2102,42 +2191,135 @@
     return count + " " + (count === 1 ? one : many);
   }
 
+  /* What the dialog is doing, for its layout: "list" (every Space), "space" (one Space's conversations),
+     "space-edit" (renaming the Space, its instructions, or confirming its deletion: the conversation list and
+     the new-conversation field step aside) and "conversations-edit" (renaming or deleting conversations). */
+  function setSpacesMode(mode) {
+    if (spacesPanel) spacesPanel.setAttribute("data-mode", mode);
+    holdSpacesHeight(false);
+  }
+
+  /* While a search narrows the list, the dialog keeps the height it had, so the search field does not move
+     under the customer's hands; the hold ends when the search is cleared or the view changes. */
+  function holdSpacesHeight(hold) {
+    if (!hold) spacesDialog.style.height = "";
+    else if (!spacesDialog.style.height) spacesDialog.style.height = spacesDialog.offsetHeight + "px";
+  }
+
+  /* Moving between the list of Spaces and one Space redraws the dialog, and the control that was focused
+     is gone or hidden: focus goes to the dialog's title (which names where the customer now is), never to
+     a text field, so a phone's keyboard does not open over the list. */
+  function focusSpacesTitle() {
+    if (spacesDialog.open && spacesTitle && typeof spacesTitle.focus === "function") spacesTitle.focus();
+  }
+
+  /* Every Space of the account, most recently active first (the server's order: a Space's updated_at moves
+     with each new conversation and saved exchange). A page holds 50 and an account at most 50 Spaces, so
+     the first page is all of them; any cursor the server still returns is followed, so the list, and the
+     search over it, is never a silent part of the whole. */
+  function loadSpaces(view, cursor, found, pages) {
+    return spacesRequest("GET", "/api/spaces?limit=" + SPACE_PAGE_MAX + (cursor ? "&cursor=" + cursor : ""))
+      .then(function (r) {
+        if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) return null;
+        r.data.spaces.forEach(function (space) {
+          if (!space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) return;
+          found.push({ id: space.id, name: space.name, conversation_count: space.conversation_count });
+        });
+        var next = r.data.next_cursor;
+        if (typeof next !== "string" || !CURSOR_RE.test(next)) return found;
+        if (pages + 1 >= SPACES_PAGES_MAX) {
+          view.partial = true;            // More than the page can show: no search over a part.
+          return found;
+        }
+        return loadSpaces(view, next, found, pages + 1);
+      });
+  }
+
+  function spacesQuery() {
+    return spacesSearch && !spacesSearch.hidden && spacesSearchInput ? spacesSearchInput.value.trim() : "";
+  }
+
+  // The loaded Spaces, filtered by the search (a case-insensitive match anywhere in the name). No request.
+  function renderSpaces(view) {
+    if (spacesView !== view || !view.spaces) return;
+    var query = spacesQuery();
+    var needle = query.toLowerCase();
+    holdSpacesHeight(!!needle);
+    clearSpacesList();
+    var shown = 0;
+    view.spaces.forEach(function (space) {
+      if (needle && space.name.toLowerCase().indexOf(needle) === -1) return;
+      shown += 1;
+      var item = addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
+        function () { showSpace({ id: space.id, name: space.name }); });
+      if (SPACE && SPACE.space.id === space.id) markOpen(item);
+    });
+    if (!view.spaces.length) setSpacesStatus(COPY_SPACES_EMPTY);
+    else if (!shown) setSpacesStatus("No Spaces match “" + query + "”. Clear the search to see all your Spaces.");
+    else setSpacesStatus("");
+  }
+
   function showSpacesList() {
     var view = spacesView = { kind: "spaces" };
     spacesTitle.textContent = "Spaces";
     spacesBack.hidden = true;
-    clearManage();
+    hideManage();
+    setSpacesMode("list");
+    if (spacesListHead) spacesListHead.hidden = true;
+    if (spacesNewHeading) spacesNewHeading.hidden = true;
+    if (spacesSearch) spacesSearch.hidden = true;
     spacesNewLabel.textContent = "Name a new Space";
     spacesNewName.placeholder = "Name a new Space";
     spacesNewName.maxLength = SPACE_NAME_MAX;
     spacesNewSubmit.textContent = "Create";
-    spacesHint.hidden = false;
+    // The introduction or the search, whichever this account needs, is shown once its Spaces are known
+    // (never one and then the other).
+    spacesHint.hidden = true;
     clearSpacesList();
+    focusSpacesTitle();
     setSpacesStatus("Loading…");
-    return spacesRequest("GET", "/api/spaces?limit=" + SPACE_PAGE_MAX).then(function (r) {
+    return loadSpaces(view, null, [], 0).then(function (found) {
       if (spacesView !== view) return;
-      if (r.status !== 200 || !r.data || !Array.isArray(r.data.spaces)) {
+      if (!found) {
+        spacesHint.hidden = false;
         setSpacesStatus(COPY_SPACES_FAILED);
         return;
       }
-      var shown = 0;
-      r.data.spaces.forEach(function (space) {
-        if (!space || !SPACE_ID_RE.test(space.id) || !validName(space.name, SPACE_NAME_MAX)) return;
-        shown += 1;
-        var item = addSpacesItem(space.name, countLabel(space.conversation_count, "conversation", "conversations"),
-          function () { showSpace({ id: space.id, name: space.name }); });
-        if (SPACE && SPACE.space.id === space.id) markOpen(item);
-      });
-      setSpacesStatus(shown ? "" : COPY_SPACES_EMPTY);
+      view.spaces = found;
+      if (spacesSearch) spacesSearch.hidden = !!view.partial || found.length < SPACES_SEARCH_FROM;
+      // With a search to explain itself, the introduction steps aside and the list starts higher.
+      spacesHint.hidden = !!spacesSearch && !spacesSearch.hidden;
+      renderSpaces(view);
     }, function () {
-      if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
+      if (spacesView !== view) return;
+      spacesHint.hidden = false;
+      setSpacesStatus(COPY_SPACES_FAILED);
     });
+  }
+
+  // One page of the open Space's conversations, added to the view; the cursor for the next, if any.
+  function readConversations(view, r) {
+    if (r.status !== 200 || !r.data || !Array.isArray(r.data.conversations)) return false;
+    if (!view.conversations) view.conversations = [];
+    r.data.conversations.forEach(function (c) {
+      if (!c || !SPACE_ID_RE.test(c.id)) return;
+      if (view.conversations.some(function (known) { return known.id === c.id; })) return;
+      view.conversations.push({ id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null,
+                                message_count: c.message_count });
+    });
+    var next = r.data.next_cursor;
+    view.nextCursor = typeof next === "string" && CURSOR_RE.test(next) ? next : null;
+    return true;
   }
 
   function showSpace(space) {
     var view = spacesView = { kind: "space", space: space };
     spacesTitle.textContent = space.name;
     spacesBack.hidden = false;
+    if (spacesSearch) spacesSearch.hidden = true;
+    if (spacesListHead) spacesListHead.hidden = false;
+    if (spacesNewHeading) spacesNewHeading.hidden = false;
+    if (spacesEditToggle) spacesEditToggle.hidden = true;        // Until there is a conversation to edit.
     spacesNewLabel.textContent = "New conversation title (optional)";
     spacesNewName.placeholder = "Conversation title (optional)";   // Fits a 360 px phone in full.
     spacesNewName.maxLength = SPACE_TITLE_MAX;
@@ -2146,23 +2328,45 @@
     spacesNewName.value = "";
     clearSpacesList();
     manageBar(view);
+    focusSpacesTitle();
     setSpacesStatus("Loading…");
     return spacesRequest("GET", spaceUrl(space.id, "/conversations?limit=" + SPACE_PAGE_MAX)).then(function (r) {
       if (spacesView !== view) return;
-      if (r.status !== 200 || !r.data || !Array.isArray(r.data.conversations)) {
+      if (!readConversations(view, r)) {
         setSpacesStatus(COPY_SPACES_FAILED);
         return;
       }
-      view.conversations = [];
-      r.data.conversations.forEach(function (c) {
-        if (!c || !SPACE_ID_RE.test(c.id)) return;
-        view.conversations.push({ id: c.id, title: validName(c.title, SPACE_TITLE_MAX) ? c.title : null,
-                                  message_count: c.message_count });
-      });
       renderConversations(view);
     }, function () {
       if (spacesView === view) setSpacesStatus(COPY_SPACES_FAILED);
     });
+  }
+
+  /* A Space can hold more conversations than one page (50). The rest are never silently left out: the list
+     ends with Show more conversations while the server has more. */
+  function loadMoreConversations(view, button) {
+    if (spacesView !== view || !view.nextCursor) return;
+    button.disabled = true;
+    spacesRequest("GET", spaceUrl(view.space.id, "/conversations?limit=" + SPACE_PAGE_MAX + "&cursor=" + view.nextCursor))
+      .then(function (r) {
+        if (spacesView !== view) return;
+        var before = view.conversations.length;
+        if (!readConversations(view, r)) {
+          button.disabled = false;
+          setSpacesStatus(COPY_SPACES_FAILED);
+          return;
+        }
+        renderConversations(view);
+        // Focus follows to the first conversation just added (the button it was on is gone).
+        var items = spacesList.querySelectorAll(".spaces-item, .spaces-edit-row button");
+        var target = spacesList.children[before];
+        target = target ? target.querySelector("button") : items[items.length - 1];
+        if (target) target.focus();
+      }, function () {
+        if (spacesView !== view) return;
+        button.disabled = false;
+        setSpacesStatus(COPY_SPACES_FAILED);
+      });
   }
 
   /* Managing the open Space (in the dialog's Space view): rename it, set its instructions, delete it.
@@ -2171,7 +2375,7 @@
   var SPACE_INSTRUCTIONS_MAX = 8000;
   var COPY_SPACE_SAVE_FAILED = "Kalillac couldn't save that. Please try again.";
   var COPY_SPACE_CHANGED = "This Space was changed somewhere else. Open it again to see the latest.";
-  var spacesManage = null;
+  var spacesManage = document.getElementById("spaces-manage");
 
   function spacesButton(label, className, onClick) {
     var button = document.createElement("button");
@@ -2185,29 +2389,34 @@
   function clearManage() {
     if (!spacesManage) return;
     while (spacesManage.firstChild) spacesManage.removeChild(spacesManage.firstChild);
-    spacesManage.hidden = true;
   }
 
-  function manageBar(view) {
-    if (!spacesManage) {
-      spacesManage = document.createElement("div");
-      spacesManage.className = "spaces-manage";
-      spacesManage.id = "spaces-manage";
-      spacesList.parentNode.insertBefore(spacesManage, spacesList);
-    }
+  function hideManage() {
     clearManage();
-    spacesManage.hidden = false;
+    if (spacesManageGroup) spacesManageGroup.hidden = true;
+  }
+
+  /* The Space view's three parts, each under its own quiet label: Manage this Space (rename, instructions,
+     delete), Conversations (with Edit conversations beside the label) and Start a conversation. */
+  function manageBar(view) {
+    clearManage();
+    if (spacesManageGroup) spacesManageGroup.hidden = false;
+    setSpacesMode(view.editing ? "conversations-edit" : "space");
+    if (spacesEditToggle) spacesEditToggle.textContent = view.editing ? "Done" : "Edit conversations";
     spacesManage.appendChild(spacesButton("Rename", "spaces-manage-btn", function () { editSpace(view, "name"); }));
     spacesManage.appendChild(spacesButton("Instructions", "spaces-manage-btn",
       function () { editSpace(view, "instructions"); }));
     spacesManage.appendChild(spacesButton("Delete", "spaces-manage-btn spaces-danger",
       function () { confirmDeleteSpace(view); }));
-    spacesManage.appendChild(spacesButton(view.editing ? "Done" : "Edit conversations", "spaces-manage-btn",
-      function () {
-        view.editing = !view.editing;
-        manageBar(view);
-        renderConversations(view);
-      }));
+  }
+
+  function toggleConversationEditing() {
+    var view = spacesView;
+    if (!view || view.kind !== "space" || !view.conversations) return;
+    view.editing = !view.editing;
+    manageBar(view);
+    renderConversations(view);
+    if (spacesEditToggle) spacesEditToggle.focus();
   }
 
   /* The open Space's conversations: opened by a click, or, while editing, renamed or deleted in place.
@@ -2235,6 +2444,17 @@
         function () { confirmDeleteConversation(view, c, item); }));
       spacesList.appendChild(item);
     });
+    if (view.nextCursor) {
+      var more = document.createElement("li");
+      more.className = "spaces-more-row";
+      var moreButton = spacesButton("Show more conversations", "spaces-earlier", function () {
+        loadMoreConversations(view, moreButton);
+      });
+      more.appendChild(moreButton);
+      spacesList.appendChild(more);
+    }
+    // Nothing to edit in an empty Space; while editing, Done stays even after the last one is deleted.
+    if (spacesEditToggle) spacesEditToggle.hidden = !view.conversations.length && !view.editing;
     setSpacesStatus(view.conversations.length ? "" : COPY_CONVERSATIONS_EMPTY);
   }
 
@@ -2353,7 +2573,7 @@
       if (!s) { setSpacesStatus(COPY_SPACES_FAILED); return; }
       setSpacesStatus("");
       clearManage();
-      spacesManage.hidden = false;
+      setSpacesMode("space-edit");        // One thing at a time: the conversation controls step aside.
       var form = document.createElement("form");
       form.className = "spaces-edit";
       var label = document.createElement("label");
@@ -2429,7 +2649,7 @@
 
   function confirmDeleteSpace(view) {
     clearManage();
-    spacesManage.hidden = false;
+    setSpacesMode("space-edit");
     var note = document.createElement("p");
     note.className = "spaces-confirm";
     note.textContent = "Delete this Space and all its conversations? This can’t be undone.";
@@ -2535,10 +2755,50 @@
 
   function openSpacesDialog(space) {
     if (inFlight) return;
+    if (spacesSearchInput) spacesSearchInput.value = "";     // Each opening starts with every Space listed.
     if (typeof spacesDialog.showModal === "function") spacesDialog.showModal();
     else spacesDialog.setAttribute("open", "");
     if (space && space.id) showSpace(space);
     else showSpacesList();
+  }
+
+  /* The search field: typing filters the list at once (no request). Escape clears a search before it closes
+     the dialog; Enter opens the first match; the Down arrow moves into the list. */
+  function onSpacesSearchKey(event) {
+    var view = spacesView;
+    if (!view || view.kind !== "spaces") return;
+    if (event.key === "Escape" && spacesSearchInput.value) {
+      event.preventDefault();
+      event.stopPropagation();
+      spacesSearchInput.value = "";
+      renderSpaces(view);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      var first = spacesQuery() ? spacesList.querySelector(".spaces-item") : null;
+      if (first) first.click();
+    } else if (event.key === "ArrowDown") {
+      var item = spacesList.querySelector(".spaces-item");
+      if (item) {
+        event.preventDefault();
+        item.focus();
+      }
+    }
+  }
+
+  // Up and Down (and Home, End) move through a list of Spaces or conversations; Tab still works as ever.
+  function onSpacesListKey(event) {
+    if (!event.target || !event.target.classList || !event.target.classList.contains("spaces-item")) return;
+    var items = Array.prototype.slice.call(spacesList.querySelectorAll(".spaces-item"));
+    var at = items.indexOf(event.target);
+    var to = event.key === "ArrowDown" ? at + 1 : event.key === "ArrowUp" ? at - 1 :
+             event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : null;
+    if (to === null) return;
+    event.preventDefault();
+    if (to < 0) {
+      if (spacesSearch && !spacesSearch.hidden) spacesSearchInput.focus();
+      return;
+    }
+    if (to < items.length) items[to].focus();
   }
 
   /* A new conversation in the open Space, in one step (the Space bar's New conversation). It has no
@@ -2788,6 +3048,8 @@
     showAttachStatus("");
 
     renderSaved(messages);
+    // What is on screen came from the server: saved. An empty conversation has nothing to save yet.
+    setSaveState(TURNS.length ? "saved" : "auto");
     showEarlierControl();
     closeSpacesDialog();
     syncAccountLinks();
@@ -2804,6 +3066,7 @@
     spaceBarName.textContent = "";
     spaceBarTitle.textContent = "";
     spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
+    setSaveState("auto");
     if (sessionStatus) sessionStatus.hidden = false;
     if (eraseBtn) eraseBtn.hidden = false;
     if (modePicker && restore.picker !== null) modePicker.hidden = restore.picker;
@@ -2822,6 +3085,7 @@
     var spaceBody = { message: exchange.text, client_request_id: exchange.requestId };
     if (exchange.mode) spaceBody.reasoning_mode = exchange.mode;
     setBusy(true);
+    setSaveState("working");
     clearActions(exchange.shell);
     setThinking(exchange.shell);
     controller = new AbortController();
@@ -2839,6 +3103,7 @@
           if (stale()) return;
           var data = parseJson(body);
           if (!res.ok) {
+            setSaveState(refusedBeforeSaving(res.status, data) ? "unsaved" : "unknown");
             failExchange(exchange, outcomeForResponse(res.status, data));
             return;
           }
@@ -2852,19 +3117,28 @@
             spaceBarLabel.title = spaceBarName.textContent + spaceBarTitle.textContent;
           }
           if ((data && typeof data.error === "string") || !reply.trim()) {
+            setSaveState("unknown");
             failExchange(exchange, OUTCOME_INCOMPLETE);
             return;
           }
           completeExchange(exchange, reply, null, null, []);
+          // Saved only as the server confirmed it: both stored rows came back, and the answer is on screen.
+          setSaveState(exchangeStored(data) && failedExchange !== exchange ? "saved" : "unknown");
         }, function (err) {
-          if (!stale()) failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
+          if (stale()) return;
+          setSaveState("unknown");
+          failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_INCOMPLETE);
         });
       }, function (err) {
         // Stopping does not stop the server from saving; a retry with the same key shows what it saved.
-        if (!stale()) failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
+        if (stale()) return;
+        setSaveState("unknown");
+        failExchange(exchange, isAbort(err) ? OUTCOME_STOPPED : OUTCOME_UNREACHABLE);
       })
       .then(null, function () {
-        if (!stale()) failExchange(exchange, OUTCOME_INCOMPLETE);
+        if (stale()) return;
+        setSaveState("unknown");
+        failExchange(exchange, OUTCOME_INCOMPLETE);
       })
       .then(function () {
         if (exchange.epoch !== conversationEpoch) return;
@@ -2878,6 +3152,15 @@
       spacesDialog && spaceBar) {
     spacesNew.addEventListener("submit", createInSpaces);
     spacesBack.addEventListener("click", function () { showSpacesList(); });
+    if (spacesSearchInput) {
+      spacesSearchInput.maxLength = SPACE_NAME_MAX;
+      spacesSearchInput.addEventListener("input", function () {
+        if (spacesView && spacesView.kind === "spaces") renderSpaces(spacesView);
+      });
+      spacesSearchInput.addEventListener("keydown", onSpacesSearchKey);
+    }
+    spacesList.addEventListener("keydown", onSpacesListKey);
+    if (spacesEditToggle) spacesEditToggle.addEventListener("click", toggleConversationEditing);
     spacesClose.addEventListener("click", closeSpacesDialog);
     spacesDialog.addEventListener("close", function () {
       // The close event arrives after the dialog closed; when it was opened again meanwhile, this late

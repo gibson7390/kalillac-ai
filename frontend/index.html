@@ -9,7 +9,7 @@
   <meta name="robots" content="noindex, follow">
   <title>Kalillac AI</title>
   <link rel="stylesheet" href="vendor/katex/katex.min.css?v=0.18.4">
-  <link rel="stylesheet" href="app.css?v=20261117-spaces5">
+  <link rel="stylesheet" href="app.css?v=20261121-spaces6">
 </head>
 <body>
   <!-- The chat workspace at /app/: reached directly, or from the homepage's
@@ -44,10 +44,12 @@
       </div>
     </header>
 
-    <!-- Shown only while a conversation from a Space is open: it is saved to the account. -->
+    <!-- Shown only while a conversation from a Space is open: where it is (the Space and the conversation)
+         and its save status, which app.js sets only from what the server has confirmed. -->
     <div class="space-bar" id="space-bar" hidden>
       <div class="space-bar-inner">
-        <span class="space-bar-label"><svg class="space-bar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/><path d="M8 13h8"/><path d="M8 16h5"/></svg>Saved to your account in <strong id="space-bar-name"></strong><span class="space-bar-title" id="space-bar-title"></span></span>
+        <span class="space-bar-label"><svg class="space-bar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/><path d="M8 13h8"/><path d="M8 16h5"/></svg><span class="sr-only">Space: </span><strong id="space-bar-name"></strong><span class="space-bar-title" id="space-bar-title"></span></span>
+        <span class="space-save" id="space-save" role="status" aria-live="polite" data-state="auto"><svg class="space-save-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path class="space-save-check" d="M5 12.5l4.5 4.5L19 7.5"/><circle class="space-save-dot" cx="12" cy="12" r="4"/><path class="space-save-alert" d="M12 7v6M12 16.5v.5"/></svg><span id="space-save-text">Saves automatically</span></span>
         <span class="space-bar-actions">
           <button type="button" class="space-leave space-bar-action" id="space-conversations" aria-haspopup="dialog">Conversations</button>
           <button type="button" class="space-leave space-bar-action" id="space-new">New conversation</button>
@@ -212,19 +214,68 @@
   <!-- Spaces: pick or create a Space and a conversation. Names come from the account's own data and
        are only ever set as text. -->
   <dialog class="spaces-dialog" id="spaces-dialog" aria-labelledby="spaces-dialog-title">
-    <div class="spaces-dialog-panel">
-      <h2 class="spaces-dialog-title" id="spaces-dialog-title">Spaces</h2>
-      <p class="spaces-dialog-hint" id="spaces-dialog-hint">A Space groups related conversations and can have its own instructions. Its conversations are saved to your account; opening one replaces the temporary conversation on this screen.</p>
-      <p class="spaces-status" id="spaces-status" role="status" aria-live="polite"></p>
-      <ul class="spaces-list" id="spaces-list"></ul>
-      <form class="spaces-new" id="spaces-new" autocomplete="off">
-        <label class="sr-only" for="spaces-new-name" id="spaces-new-label">Name a new Space</label>
-        <input type="text" id="spaces-new-name" placeholder="Name a new Space">
-        <button type="submit" class="spaces-new-submit spaces-primary" id="spaces-new-submit">Create</button>
-      </form>
-      <div class="spaces-dialog-actions">
-        <button type="button" class="spaces-secondary" id="spaces-back" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg>All Spaces</button>
-        <button type="button" class="spaces-secondary spaces-close" id="spaces-close">Close</button>
+    <div class="spaces-dialog-panel" id="spaces-dialog-panel">
+      <!-- Always in view: the title, the search (once there are enough Spaces to need one) and the status. -->
+      <div class="spaces-dialog-head">
+        <h2 class="spaces-dialog-title" id="spaces-dialog-title" tabindex="-1" autofocus>Spaces</h2>
+        <p class="spaces-dialog-hint" id="spaces-dialog-hint">A Space groups related conversations and can have its own instructions. Its conversations are saved to your account automatically; opening one replaces the temporary conversation on this screen.</p>
+        <div class="spaces-search" id="spaces-search" hidden>
+          <label class="sr-only" for="spaces-search-input">Search Spaces</label>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>
+          <input type="search" id="spaces-search-input" placeholder="Search Spaces…" autocomplete="off" spellcheck="false" enterkeyhint="search" aria-controls="spaces-list">
+        </div>
+        <p class="spaces-status" id="spaces-status" role="status" aria-live="polite"></p>
+      </div>
+      <!-- The only part that scrolls: managing the open Space, then the list. -->
+      <div class="spaces-dialog-body" id="spaces-dialog-body">
+        <div class="spaces-group" id="spaces-manage-group" hidden>
+          <h3 class="spaces-group-label" id="spaces-manage-label">Manage this Space</h3>
+          <div class="spaces-manage" id="spaces-manage"></div>
+        </div>
+        <div class="spaces-group-head" id="spaces-list-head" hidden>
+          <h3 class="spaces-group-label" id="spaces-list-label">Conversations</h3>
+          <button type="button" class="spaces-manage-btn spaces-quiet" id="spaces-edit-toggle">Edit conversations</button>
+        </div>
+        <ul class="spaces-list" id="spaces-list"></ul>
+      </div>
+      <!-- Always in view: creating a Space or starting a conversation, and the way out. -->
+      <div class="spaces-dialog-foot">
+        <h3 class="spaces-group-label" id="spaces-new-heading" hidden>Start a conversation</h3>
+        <form class="spaces-new" id="spaces-new" autocomplete="off">
+          <label class="sr-only" for="spaces-new-name" id="spaces-new-label">Name a new Space</label>
+          <input type="text" id="spaces-new-name" placeholder="Name a new Space">
+          <button type="submit" class="spaces-new-submit spaces-primary" id="spaces-new-submit">Create</button>
+        </form>
+        <div class="spaces-dialog-actions">
+          <button type="button" class="spaces-secondary" id="spaces-back" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 6l-6 6 6 6"/></svg>All Spaces</button>
+          <button type="button" class="spaces-secondary spaces-close" id="spaces-close">Close</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+  <!-- What the reasoning modes are (opened by Learn more, beside the note that a mode is part of Premium).
+       Fixed copy: it describes effort and speed only, and promises no result. -->
+  <dialog class="modes-dialog" id="modes-dialog" aria-labelledby="modes-dialog-title">
+    <div class="modes-dialog-panel">
+      <h2 class="modes-dialog-title" id="modes-dialog-title">Understanding reasoning modes</h2>
+      <dl class="modes-list">
+        <div class="modes-row">
+          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 8h5"/><path d="M3 12h7"/><path d="M4 16h5"/><path d="M14 6l6 6-6 6"/></svg>Quick</dt>
+          <dd>Prioritizes speed for straightforward questions and everyday tasks.</dd>
+        </div>
+        <div class="modes-row">
+          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12h4"/><path d="M17 12h4"/><path d="M12 7l5 5-5 5-5-5z"/></svg>Balanced</dt>
+          <dd>Provides a practical balance between response speed and reasoning effort.</dd>
+        </div>
+        <div class="modes-row">
+          <dt><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3l8 4-8 4-8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg>Deep <span class="modes-tag">Premium</span></dt>
+          <dd>Uses additional reasoning effort for demanding tasks involving multiple steps, complex programming, mathematical reasoning, and detailed analysis.</dd>
+        </div>
+      </dl>
+      <p class="modes-dialog-note" id="modes-dialog-note">Deep reasoning is available with Kalillac Premium. Choosing a mode never changes your plan: your message always uses the mode shown as selected.</p>
+      <div class="modes-dialog-actions">
+        <a class="modes-explore" id="modes-explore" href="/account?show=billing" target="_blank" rel="noopener" hidden>Explore Kalillac Premium</a>
+        <button type="button" class="modes-close" id="modes-close" autofocus>Close</button>
       </div>
     </div>
   </dialog>
@@ -234,6 +285,6 @@
   <script src="vendor/katex/katex.min.js?v=0.18.4"></script>
   <script src="vendor/katex/contrib/auto-render.min.js?v=0.18.4"></script>
   <script src="vendor/highlight/highlight.min.js?v=11.12.0"></script>
-  <script src="app.js?v=20261117-spaces5"></script>
+  <script src="app.js?v=20261121-spaces6"></script>
 </body>
 </html>

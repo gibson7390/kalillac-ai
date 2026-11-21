@@ -42,11 +42,12 @@
             };
             window.addEventListener("message", onMessage);
             frame.setAttribute("allow", "clipboard-write");
-            // A phone-sized viewport for the scenario that measures layout.
-            if (/_360x640$/.test(name)) {
+            // A phone-sized (or other named) viewport for the scenario that measures layout.
+            var size = /_(\d{3,4})x(\d{3,4})$/.exec(name);
+            if (size) {
               frame.style.border = "0";
-              frame.style.width = "360px";
-              frame.style.height = "640px";
+              frame.style.width = size[1] + "px";
+              frame.style.height = size[2] + "px";
             }
             frame.src = "/app/?scenario=" + encodeURIComponent(name);
             document.body.appendChild(frame);
@@ -91,6 +92,9 @@
   // Reasoning scenarios: the page is marked as a reasoning-modes deployment before app.js runs.
   if (scenarioName.indexOf("reasoning_") === 0 || scenarioName === "spaces_with_modes") {
     document.documentElement.setAttribute("data-kalillac-reasoning", "on");
+  }
+  if (scenarioName === "reasoning_learn_more_accounts") {
+    document.documentElement.setAttribute("data-kalillac-accounts", "on");
   }
 
   // Accounts scenarios: the page is marked as an accounts deployment before app.js runs.
@@ -257,7 +261,7 @@
   // GET /api/chat/reasoning-modes (a reasoning deployment's one question on load) is answered here, outside
   // the scripted queue, and recorded on its own: every mode by default, Quick and Balanced for a Free account.
   var modeRequests = [];
-  var MODES_ANSWER = scenarioName === "reasoning_free_account"
+  var MODES_ANSWER = scenarioName === "reasoning_free_account" || scenarioName.indexOf("reasoning_learn_more") === 0
     ? { status: 200, json: { modes: ["quick", "balanced"], default: "balanced" } }
     : { status: 200, json: { modes: ["quick", "balanced", "deep"], default: "balanced" } };
 
@@ -663,6 +667,10 @@
         back: !!$("spaces-back") && !$("spaces-back").hidden,
         barShown: !!bar && !bar.hidden,
         barText: bar ? bar.textContent.replace(/\s+/g, " ").trim() : null,
+        save: $("space-save") ? [$("space-save").getAttribute("data-state"), text($("space-save-text")),
+                                 $("space-save").getAttribute("role"), !!$("space-save").title] : null,
+        searchShown: !!$("spaces-search") && !$("spaces-search").hidden,
+        mode: $("spaces-dialog-panel").getAttribute("data-mode"),
         // What is on screen, not only the attribute: a display rule can override [hidden].
         sessionStatusShown: !!status && getComputedStyle(status).display !== "none",
         eraseShown: !!erase && getComputedStyle(erase).display !== "none",
@@ -707,7 +715,10 @@
         labels: picker ? Array.prototype.map.call(picker.querySelectorAll(".mode-option"), function (o) {
           return [text(o.querySelector(".mode-label")), !!o.querySelector("svg.mode-icon")];
         }) : null,
-        note: $("mode-note") && !$("mode-note").hidden ? text($("mode-note")) : null
+        note: $("mode-note") && !$("mode-note").hidden ? text($("mode-note")) : null,
+        learn: $("mode-learn") && !$("mode-note").hidden
+          ? [$("mode-learn").tagName, $("mode-learn").type, text($("mode-learn")), $("mode-learn").getAttribute("aria-haspopup")]
+          : null
       });
     },
     clickMode: function (mode) {
@@ -1621,6 +1632,62 @@
     a.snap("sent");
   };
 
+  // Learn more, beside the Premium note: a modal dialog with fixed copy; Escape and Close both close it and
+  // return focus to Learn more; choosing nothing changes the selected mode. With accounts on it also links
+  // to the plan, in a new tab.
+  function modesDialogState(label) {
+    var dialog = $("modes-dialog");
+    var modal = false;
+    try { modal = dialog.open && dialog.matches(":modal"); } catch (e) { modal = null; }
+    var explore = $("modes-explore");
+    var rect = dialog.getBoundingClientRect();
+    steps.push({
+      label: label, open: dialog.open, modal: modal,
+      labelledBy: dialog.getAttribute("aria-labelledby"), title: text($("modes-dialog-title")),
+      terms: Array.prototype.map.call(dialog.querySelectorAll("dt"), function (e) { return text(e); }),
+      descriptions: Array.prototype.map.call(dialog.querySelectorAll("dd"), function (e) { return text(e); }),
+      note: text($("modes-dialog-note")),
+      explore: explore && !explore.hidden && explore.offsetParent !== null
+        ? [text(explore), explore.getAttribute("href"), explore.getAttribute("target"), explore.getAttribute("rel")] : null,
+      focused: document.activeElement ? document.activeElement.id : null,
+      checked: Array.prototype.map.call($("mode-picker").querySelectorAll('[aria-checked="true"]'),
+                                        function (o) { return o.getAttribute("data-mode"); }),
+      inView: !dialog.open || (rect.top >= -0.5 && rect.bottom <= window.innerHeight + 0.5 &&
+                               rect.left >= -0.5 && rect.right <= window.innerWidth + 0.5),
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+      small: Array.prototype.filter.call(dialog.querySelectorAll("a, button"), function (e) {
+        return e.offsetParent !== null && e.getBoundingClientRect().height < 44;
+      }).map(text),
+      requestCount: requests.length
+    });
+  }
+  async function learnMore(a) {
+    await a.wait(60);
+    await a.clickMode("deep");
+    a.modes("deep-clicked");
+    modesDialogState("before");
+    $("mode-learn").focus();
+    $("mode-learn").click();
+    await a.wait(40);
+    modesDialogState("opened");
+    // Escape, as the browser delivers it to a modal dialog (a cancel event, then it closes).
+    var dialog = $("modes-dialog");
+    if (dialog.dispatchEvent(new Event("cancel", { cancelable: true }))) dialog.close();
+    await a.wait(40);
+    modesDialogState("escaped");
+    $("mode-learn").click();
+    await a.wait(40);
+    $("modes-close").click();
+    await a.wait(40);
+    modesDialogState("closed");
+    a.respondWith(ok("Answer.", "s-1"));
+    await a.send("question");
+    a.snap("sent");
+  }
+  SCENARIOS.reasoning_learn_more = learnMore;
+  SCENARIOS.reasoning_learn_more_accounts = learnMore;
+  SCENARIOS.reasoning_learn_more_360x640 = learnMore;
+
   // A chat reply of session_ended forgets the ended session id.
   SCENARIOS.session_ended_reply = async function (a) {
     a.respondWith(ok("Answer.", "s-1"), { status: 409, json: { error: "session_ended" } }, ok("Fresh.", "s-2"));
@@ -1834,8 +1901,21 @@
     var style = getComputedStyle(input);
     var ctx = document.createElement("canvas").getContext("2d");
     ctx.font = style.font;
-    var room = input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    // A field that is not shown (the new-conversation field steps aside while the Space is edited) has no
+    // placeholder to fit; newShown says which it is.
+    var newShown = input.offsetParent !== null;
+    var room = newShown ? input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) : Infinity;
+    var toggle = $("spaces-edit-toggle");
+    var shown = function (id) { return !!$(id) && $(id).offsetParent !== null; };
+    var dialog = $("spaces-dialog").getBoundingClientRect();
     steps.push({ label: label, buttons: buttons, field: field ? field.value : null,
+                 mode: $("spaces-dialog-panel").getAttribute("data-mode"), newShown: newShown,
+                 toggle: toggle && toggle.offsetParent !== null ? text(toggle) : null,
+                 groups: ["spaces-manage-label", "spaces-list-label", "spaces-new-heading"].filter(shown)
+                   .map(function (id) { return text($(id)); }),
+                 listShown: shown("spaces-list") || shown("spaces-list-head"),
+                 closeInView: $("spaces-close").getBoundingClientRect().bottom <= window.innerHeight + 0.5,
+                 dialogInView: dialog.top >= -0.5 && dialog.bottom <= window.innerHeight + 0.5,
                  title: text($("spaces-dialog-title")), status: text($("spaces-status")),
                  tone: $("spaces-status").getAttribute("data-tone"),
                  barName: text($("space-bar-name")), barShown: !$("space-bar").hidden, requestCount: requests.length,
@@ -1854,8 +1934,8 @@
   }
   async function clickManage(name) {
     var button = await until(function () {
-      return Array.prototype.filter.call(document.querySelectorAll("#spaces-manage button"),
-                                         function (b) { return text(b) === name && !b.disabled; })[0];
+      return Array.prototype.filter.call(document.querySelectorAll("#spaces-manage button, #spaces-list-head button"),
+                                         function (b) { return text(b) === name && !b.disabled && b.offsetParent !== null; })[0];
     }, "manage " + name);
     button.click();
     return wait(80);
@@ -1945,7 +2025,9 @@
     await a.clickSpaces();
     await a.clickSpacesItem(0);
     await clickManage("Edit conversations");
-    steps.push({ label: "editing", rows: Array.prototype.map.call(
+    steps.push({ label: "editing", mode: $("spaces-dialog-panel").getAttribute("data-mode"),
+                 toggle: text($("spaces-edit-toggle")), newShown: $("spaces-new-name").offsetParent !== null,
+                 rows: Array.prototype.map.call(
       document.querySelectorAll("#spaces-list .spaces-edit-row .spaces-item-name"), function (r) { return text(r); }) });
     a.respondWith({ status: 200, json: { conversation: { id: CONV_A, title: "Plan", version: 2 }, messages: [],
                                          next_before_seq: null } },
@@ -2054,6 +2136,243 @@
     a.spaces("loaded");
     a.respondWith(ok("Answer.", "s-1"));
     await a.send("question");
+    a.snap("idle");
+  };
+
+  // The save status follows only what the server confirmed: saved rows on opening, "Generating…" while a
+  // send is in flight, "Saved" for a 200 carrying both stored rows, "not saved" for a named refusal, and
+  // "not confirmed" for anything the page cannot know (stopped, lost, a 404, a 200 without stored rows).
+  SCENARIOS.spaces_save_status = async function (a) {
+    await a.wait(60);
+    openResearchPlan(a);
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await a.clickSpacesItem(0);
+    a.spaces("opened");
+    a.respondWith({ defer: "first" });
+    await a.send("First");
+    a.spaces("generating");
+    await a.settle("first", savedExchange("Saved one."));
+    await a.wait(60);
+    a.spaces("saved");
+    a.respondWith({ status: 429, json: { error: "account_daily_limit_reached" } });
+    await a.send("Second");
+    await a.wait(60);
+    a.spaces("refused");
+    a.respondWith({ hang: true });
+    await a.send("Third");
+    await a.stop();
+    await a.wait(60);
+    a.spaces("stopped");
+    a.respondWith(savedExchange("Saved three."));
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("retried");
+    a.respondWith({ reject: "RAW-SECRET network" });
+    await a.send("Fourth");
+    await a.wait(60);
+    a.spaces("lost");
+    a.respondWith({ status: 404, json: { error: "not_found" } });
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("not-found");
+    a.respondWith({ status: 200, json: { assistant_message: { content: "An answer with no stored rows." },
+                                         conversation: { id: CONV_A } } });
+    await a.clickAction("Retry");
+    await a.wait(60);
+    a.spaces("no-rows");
+    a.respondWith({ status: 503, json: { error: "model_provider_unavailable", detail: SECRET } });
+    await a.send("Fifth");
+    await a.wait(60);
+    a.spaces("provider-failed");
+    a.snap("provider-failed-page");
+    // A new, empty conversation has nothing to save yet; leaving resets the bar.
+    a.respondWith({ status: 201, json: { conversation: { id: CONV_B, title: "New conversation" } } });
+    $("space-new").click();
+    await a.wait(80);
+    a.spaces("new-empty");
+    await a.leaveSpace();
+    a.spaces("left");
+  };
+
+  function manySpaces(count, cursor) {
+    var names = ["Research", "Recipes", "Work stuff", "Calculus", "Travel plans", "research notes", "Garden",
+                 "Budget 2026", "Reading list", "Python scripts"];
+    var items = [];
+    for (var i = 0; i < count; i++) {
+      var id = (i + 16).toString(16);
+      items.push({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa" + id, conversation_count: i,
+                   name: i < names.length ? names[i] : "Space " + (i + 1), updated_at: AT });
+    }
+    return { status: 200, json: { spaces: items, next_cursor: cursor || null } };
+  }
+  function searchState(label) {
+    var input = $("spaces-search-input");
+    steps.push({
+      label: label, searchShown: !$("spaces-search").hidden, value: input.value,
+      placeholder: input.placeholder, type: input.type, labelled: !!document.querySelector('label[for="spaces-search-input"]'),
+      hintShown: !$("spaces-dialog-hint").hidden, status: text($("spaces-status")),
+      tone: $("spaces-status").getAttribute("data-tone"),
+      items: Array.prototype.map.call(document.querySelectorAll("#spaces-list .spaces-item .spaces-item-name"), text),
+      title: text($("spaces-dialog-title")), dialogOpen: $("spaces-dialog").open,
+      height: Math.round($("spaces-dialog").getBoundingClientRect().height),
+      focused: document.activeElement ? (document.activeElement.id || text(document.activeElement)) : null,
+      requestCount: requests.length
+    });
+  }
+  async function typeSearch(value) {
+    var input = $("spaces-search-input");
+    input.focus();
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    return wait(20);
+  }
+  function key(target, name) {
+    return target.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
+  }
+
+  // Search Spaces: every Space of the account is loaded (a second page, if the server has one, is followed),
+  // and typing filters them on the page: case-insensitive, no request, a helpful empty state, and the
+  // keyboard (Escape clears first, Down moves into the list, Enter opens the first match).
+  SCENARIOS.spaces_search_1280x800 = async function (a) {
+    await a.wait(60);
+    var first = manySpaces(6, "cursor-PAGE_2");
+    var second = { status: 200, json: { spaces: [
+      { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1", name: "Older research", conversation_count: 3, updated_at: AT },
+      { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", name: "<b>Markup</b>", conversation_count: 0, updated_at: AT }],
+      next_cursor: null } };
+    a.respondWith(first, second);
+    await a.clickSpaces();
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 8; }, "all spaces");
+    searchState("listed");
+    await typeSearch("RESEARCH");
+    searchState("typed");
+    await typeSearch("  rk  ");
+    searchState("trimmed");
+    await typeSearch("zebra");
+    searchState("no-match");
+    var escaped = key($("spaces-search-input"), "Escape");
+    await a.wait(20);
+    searchState("escape-clears");
+    steps.push({ label: "escape-default", prevented: !escaped });
+    await typeSearch("calc");
+    key($("spaces-search-input"), "ArrowDown");
+    await a.wait(20);
+    searchState("arrow-down");
+    key(document.activeElement, "ArrowUp");
+    await a.wait(20);
+    searchState("arrow-up");
+    a.respondWith(conversationsList([]));
+    key($("spaces-search-input"), "Enter");
+    await until(function () { return text($("spaces-dialog-title")) === "Calculus"; }, "opened by Enter");
+    searchState("enter-opens");
+    // Back: every Space again from the server, with the search still applied and still shown.
+    a.respondWith(manySpaces(6));
+    await a.spacesBack();
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length > 0; }, "list again");
+    searchState("back");
+    // A new opening starts with every Space listed.
+    $("spaces-close").click();
+    await a.wait(40);
+    a.respondWith(manySpaces(4));
+    await a.clickSpaces();
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 4; }, "four spaces");
+    searchState("few");
+    a.snap("idle");
+  };
+
+  // Many Spaces: the dialog stays inside the window, only its list scrolls, and creating, All Spaces and
+  // Close stay in view; the arrow keys move through the list.
+  function longList(label) {
+    var dialog = $("spaces-dialog");
+    var body = $("spaces-dialog-body");
+    var rect = dialog.getBoundingClientRect();
+    var inView = function (el) {
+      var r = el.getBoundingClientRect();
+      return el.offsetParent !== null && r.top >= rect.top - 0.5 && r.bottom <= rect.bottom + 0.5 &&
+             r.bottom <= window.innerHeight + 0.5 && r.top >= -0.5;
+    };
+    var scrollers = Array.prototype.filter.call(dialog.querySelectorAll("*"), function (el) {
+      return el.scrollHeight > el.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(el).overflowY);
+    }).map(function (el) { return el.id || el.className; });
+    steps.push({
+      label: label, viewport: [window.innerWidth, window.innerHeight],
+      items: document.querySelectorAll("#spaces-list .spaces-item").length,
+      dialogInView: rect.top >= -0.5 && rect.bottom <= window.innerHeight + 0.5,
+      dialogScrolls: dialog.scrollHeight > dialog.clientHeight + 1,
+      bodyScrolls: body.scrollHeight > body.clientHeight + 1, scrollers: scrollers,
+      newInView: inView($("spaces-new-name")) && inView($("spaces-new-submit")),
+      closeInView: inView($("spaces-close")), searchInView: inView($("spaces-search-input")),
+      titleInView: inView($("spaces-dialog-title")),
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+      bodyOverflowX: body.scrollWidth - body.clientWidth,
+      small: Array.prototype.filter.call(
+        document.querySelectorAll("dialog[open] button, dialog[open] input, dialog[open] textarea"),
+        function (e) { return e.offsetParent !== null && e.getBoundingClientRect().height < 44; }
+      ).map(function (e) { return text(e) || e.id; }).filter(function (v, i, all) { return all.indexOf(v) === i; }),
+      focused: document.activeElement ? (document.activeElement.id || text(document.activeElement.querySelector(".spaces-item-name") || document.activeElement)) : null
+    });
+  }
+  SCENARIOS.spaces_long_list_360x640 = async function (a) {
+    await a.wait(60);
+    a.respondWith(manySpaces(30));
+    await a.clickSpaces();
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 30; }, "thirty spaces");
+    longList("listed");
+    var items = document.querySelectorAll("#spaces-list .spaces-item");
+    items[0].focus();
+    key(items[0], "ArrowDown");
+    await a.wait(20);
+    longList("arrow-down");
+    key(document.activeElement, "End");
+    await a.wait(20);
+    longList("end");
+    key(document.activeElement, "Home");
+    key(document.activeElement, "ArrowUp");
+    await a.wait(20);
+    longList("up-to-search");
+    // One Space with many conversations: the same holds, with its three parts labelled.
+    var many = [];
+    for (var i = 0; i < 40; i++) {
+      many.push({ id: "cccccccc-cccc-4ccc-8ccc-cccccccccc" + (i + 16).toString(16), title: "Conversation " + (i + 1),
+                  message_count: 2, last_message_at: AT, updated_at: AT });
+    }
+    a.respondWith(conversationsList(many));
+    await a.clickSpacesItem(0);
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 40; }, "forty conversations");
+    longList("space");
+    manage("space-parts");
+    a.snap("idle");
+  };
+  SCENARIOS.spaces_long_list_1280x800 = SCENARIOS.spaces_long_list_360x640;
+
+  // A Space with more conversations than one page: Show more conversations reads the next page with the
+  // server's cursor and adds it; nothing is left out silently, and nothing is listed twice.
+  SCENARIOS.spaces_more_conversations = async function (a) {
+    await a.wait(60);
+    a.respondWith(
+      spacesList([{ id: SPACE_A, name: "Research", conversation_count: 3, updated_at: AT }]),
+      { status: 200, json: { conversations: [
+        { id: CONV_A, title: "Plan", message_count: 2, last_message_at: AT, updated_at: AT },
+        { id: CONV_B, title: "Notes", message_count: 4, last_message_at: AT, updated_at: AT }],
+        next_cursor: "cursor-NEXT_1" } });
+    await a.clickSpaces();
+    await a.clickSpacesItem(0);
+    await until(function () { return document.querySelector(".spaces-more-row button"); }, "show more");
+    var state = function (label) {
+      steps.push({ label: label,
+        items: Array.prototype.map.call(document.querySelectorAll("#spaces-list .spaces-item"), text),
+        more: Array.prototype.map.call(document.querySelectorAll(".spaces-more-row button"), text),
+        status: text($("spaces-status")), focused: text(document.activeElement), requestCount: requests.length });
+    };
+    state("first-page");
+    a.respondWith({ status: 200, json: { conversations: [
+      { id: CONV_B, title: "Notes", message_count: 4, last_message_at: AT, updated_at: AT },
+      { id: "66666666-6666-4666-8666-666666666666", title: "Oldest", message_count: 6, last_message_at: AT,
+        updated_at: AT }], next_cursor: null } });
+    document.querySelector(".spaces-more-row button").click();
+    await until(function () { return document.querySelectorAll("#spaces-list .spaces-item").length === 3; }, "second page");
+    state("second-page");
     a.snap("idle");
   };
 
